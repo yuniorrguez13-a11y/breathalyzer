@@ -1,0 +1,16 @@
+name: checks
+on: [push, pull_request]
+jobs:
+  checks:
+    # The tools target Savage Wind's Windows build first (hard links, junctions, PE files), so the tests run on
+    # Windows. Linux (the AppImage) is a follow-up.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: No game files in the repo
+        run: python tools/check_clean.py
+      - name: Tests
+        run: python -m unittest discover -s tests -v

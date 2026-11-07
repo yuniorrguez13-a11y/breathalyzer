@@ -1,0 +1,12 @@
+{
+ "id": "botw-mod-loader.perf-shadows",
+ "name": "Performance: shorter shadows",
+ "about": "The far end of the sun-shadow cascades (the game: 3000 m), changed in place inside Pack/Bootup_Graphics.pack > System/KSys/U-King.Nin_NX_NVN.release.ssarc > gsys.bgmsconf, object Main. The cascade count stays 3.",
+ "pack": "Pack/Bootup_Graphics.pack",
+ "inner": "System/KSys/U-King.Nin_NX_NVN.release.ssarc",
+ "edits": {
+  "shadow_range": [
+   {"file": "gsys.bgmsconf", "object": "Main", "param": "depth_shadow_far_0", "type": "f32"}
+  ]
+ }
+}

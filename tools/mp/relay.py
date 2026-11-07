@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""Relay for the multiplayer proof of concept: passes each player's position to the others in the same room.
+
+    python tools/mp/relay.py                       listen on 0.0.0.0:7788
+    python tools/mp/relay.py --port 9000 --room-cap 4
+
+JSON lines over TCP (see tools/mp/__init__.py). A state is passed on with its known fields only (mp.clean_state:
+t x y z yaw stamina place, and the optional speed, anim, attack, weapon, shield and bow; a bad optional field is
+dropped on its own). Nothing is saved; Ctrl+C stops it and tells every client.
+Limits per client: 10 s to say hello, 30 messages a second (more are dropped; much more gets the client cut off), 4 KB per line,
+8 players per room. Names and rooms are checked. There are no passwords: anyone who can reach the port can join.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+import time
+from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from mp import (DEFAULT_RELAY_PORT, MAX_LINE, PROTOCOL_VERSION, clean_state, decode, encode, finite,  # noqa: E402
+                safe_console, valid_name, valid_room)
+
+DEFAULT_RATE = 30          # messages per second per client
+DEFAULT_ROOM_CAP = 8
+DEFAULT_MAX_CLIENTS = 64
+FLOOD_FACTOR = 5           # cut a client off after this many seconds' worth of dropped messages (decays at the rate)
+MAX_BUFFER = 256 * 1024    # bytes waiting to go to one client before it counts as too slow
+
+
+class _Conn:
+    __slots__ = ("id", "name", "room", "bot", "writer", "peer", "tokens", "stamp", "flood", "warned",
+                 "state", "state_at", "closing", "joined", "hello_by")
+
+    def __init__(self, writer, rate, now, hello_by=float("inf")):
+        self.writer = writer
+        self.peer = writer.get_extra_info("peername")
+        self.id = 0
+        self.name = self.room = None
+        self.bot = False
+        self.tokens = float(rate)
+        self.stamp = now
+        self.flood = 0.0
+        self.warned = -1e9
+        self.state = None
+        self.state_at = 0.0
+        self.closing = False
+        self.joined = False
+        self.hello_by = hello_by   # (event loop time) the hello must have arrived by then
+
+
+class Relay:
+    def __init__(self, host: str = "0.0.0.0", port: int = DEFAULT_RELAY_PORT, *, rate: float = DEFAULT_RATE,
+                 max_line: int = MAX_LINE, room_cap: int = DEFAULT_ROOM_CAP, max_clients: int = DEFAULT_MAX_CLIENTS,
+                 hello_timeout: float = 10.0, idle_timeout: float = 30.0, clock=time.monotonic, log=print):
+        self.host, self.port = host, port
+        self.rate = float(rate)
+        self.max_line = max_line
+        self.room_cap = room_cap
+        self.max_clients = max_clients
+        self.hello_timeout = hello_timeout
+        self.idle_timeout = idle_timeout
+        self.clock = clock
+        self.log = log
+        self.rooms: dict[str, dict[int, _Conn]] = {}
+        self._conns: set[_Conn] = set()
+        self._next_id = 1
+        self._server = None
+        self._done: asyncio.Event | None = None
+        self._closed = False
+
+    # -- life cycle --
+
+    async def start(self) -> tuple[str, int]:
+        """Start listening. Returns the address actually used (port 0 picks a free port)."""
+        self._server = await asyncio.start_server(self._handle, self.host, self.port)
+        addr = self._server.sockets[0].getsockname()
+        self.port = addr[1]
+        return addr[0], addr[1]
+
+    async def serve_forever(self) -> None:
+        """Serve until close() or cancellation (Ctrl+C), then close.
+
+        (Not asyncio's Server.serve_forever: on cancel it waits for every client to hang up before anything else runs.)
+        """
+        if self._server is None:
+            await self.start()
+        self._done = asyncio.Event()
+        try:
+            if not self._closed:
+                await self._done.wait()
+        finally:
+            await self.close()
+
+    async def close(self, reason: str = "relay stopped") -> None:
+        """Stop listening, say bye to every client and close their connections."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._done is not None:
+            self._done.set()
+        if self._server is not None:
+            self._server.close()
+        for conn in list(self._conns):
+            self._send(conn, {"type": "bye", "reason": reason})
+            self._kick(conn)
+        if self._server is not None:
+            try:
+                await asyncio.wait_for(self._server.wait_closed(), 2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                for conn in list(self._conns):   # (still not gone: drop them hard)
+                    if conn.writer.transport is not None:
+                        conn.writer.transport.abort()
+
+    def _say(self, text: str) -> None:
+        """Log one line. Never raises: a console that can't show a name must not drop that player."""
+        try:
+            self.log(text)
+        except Exception:
+            pass
+
+    def player_count(self, room: str | None = None) -> int:
+        if room is not None:
+            return len(self.rooms.get(room, {}))
+        return sum(len(r) for r in self.rooms.values())
+
+    # -- sending --
+
+    def _send(self, conn: _Conn, msg: dict) -> None:
+        if conn.closing:
+            return
+        transport = conn.writer.transport
+        if transport is None or transport.is_closing():
+            return
+        if transport.get_write_buffer_size() > MAX_BUFFER:
+            self._say(f"{conn.name or conn.peer} is too slow; disconnecting")
+            self._kick(conn)
+            return
+        conn.writer.write(encode(msg))
+
+    def _fail(self, conn: _Conn, error: str) -> None:
+        """Send an error and close the connection."""
+        self._send(conn, {"type": "error", "error": error})
+        self._kick(conn)
+
+    def _kick(self, conn: _Conn) -> None:
+        conn.closing = True
+        try:
+            conn.writer.close()   # (what is buffered still goes out)
+        except (OSError, RuntimeError):
+            pass
+
+    def _broadcast(self, conn: _Conn, msg: dict) -> None:
+        for other in list(self.rooms.get(conn.room, {}).values()):
+            if other is not conn:
+                self._send(other, msg)
+
+    # -- limits --
+
+    def _allow(self, conn: _Conn) -> bool:
+        """Token bucket: `rate` messages a second, bursts up to `rate`. False: drop this message."""
+        now = self.clock()
+        elapsed = max(0.0, now - conn.stamp)
+        conn.stamp = now
+        conn.tokens = min(self.rate, conn.tokens + elapsed * self.rate)
+        conn.flood = max(0.0, conn.flood - elapsed * self.rate)
+        if conn.tokens >= 1.0:
+            conn.tokens -= 1.0
+            return True
+        conn.flood += 1.0
+        if conn.flood > FLOOD_FACTOR * self.rate:
+            self._say(f"{conn.name or conn.peer} sent far too many messages; disconnecting")
+            self._fail(conn, "too many messages; disconnected")
+        elif now - conn.warned >= 1.0:
+            conn.warned = now
+            self._send(conn, {"type": "error", "error": f"too many messages (max {self.rate:g} a second); some were dropped"})
+        return False
+
+    async def _lines(self, reader: asyncio.StreamReader, conn: _Conn):
+        """Yield complete lines. A line over the size limit is skipped (with an error) up to its newline."""
+        buf = bytearray()
+        skipping = False
+        loop = asyncio.get_running_loop()
+        while not conn.closing:
+            if conn.joined:
+                timeout = self.idle_timeout
+            else:   # (a deadline, not an idle time: sending a byte now and then doesn't keep a silent client)
+                timeout = conn.hello_by - loop.time()
+                if timeout <= 0:
+                    self._fail(conn, "no hello received")
+                    return
+            try:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout)
+            except asyncio.TimeoutError:
+                self._fail(conn, "timed out" if conn.joined else "no hello received")
+                return
+            if not chunk:
+                return
+            buf += chunk
+            while True:
+                i = buf.find(b"\n")
+                if i < 0:
+                    if len(buf) > self.max_line:
+                        if not skipping:
+                            self._too_long(conn)
+                        skipping = True
+                        buf.clear()
+                    break
+                line = bytes(buf[:i])
+                del buf[:i + 1]
+                if skipping:
+                    skipping = False
+                    continue
+                if len(line) > self.max_line:
+                    self._too_long(conn)
+                    continue
+                yield line.rstrip(b"\r")
+
+    def _too_long(self, conn: _Conn) -> None:
+        if self._allow(conn):
+            self._send(conn, {"type": "error", "error": f"line too long (max {self.max_line} bytes); dropped"})
+
+    # -- one client --
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        conn = _Conn(writer, self.rate, self.clock(), asyncio.get_running_loop().time() + self.hello_timeout)
+        if self._closed or len(self._conns) >= self.max_clients:
+            self._fail(conn, "relay full" if not self._closed else "relay stopped")
+            return
+        self._conns.add(conn)
+        lines = self._lines(reader, conn)
+        try:
+            async for line in lines:
+                if conn.closing:
+                    break
+                if not self._allow(conn):
+                    continue
+                msg = decode(line)
+                if msg is None:
+                    if not conn.joined:
+                        self._fail(conn, "expected a JSON hello")
+                        return
+                    self._send(conn, {"type": "error", "error": "not a JSON message"})
+                    continue
+                if not conn.joined:
+                    self._hello(conn, msg)
+                else:
+                    self._message(conn, msg)
+        except (ConnectionError, OSError):
+            pass
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:   # (a bug must cost one connection, not print a traceback for every client)
+            self._say(f"Dropped {conn.name or conn.peer} after an error: {type(e).__name__}: {str(e)[:120]}")
+        finally:
+            await lines.aclose()
+            self._leave(conn)
+            self._conns.discard(conn)
+            self._kick(conn)
+
+    def _hello(self, conn: _Conn, msg: dict) -> None:
+        if msg.get("type") != "hello":
+            self._fail(conn, "say hello first")
+            return
+        if msg.get("version") != PROTOCOL_VERSION:
+            self._fail(conn, f"version mismatch: this relay speaks version {PROTOCOL_VERSION}")
+            return
+        name = valid_name(msg.get("name"))
+        if name is None:
+            self._fail(conn, "bad name (1-20 letters, digits, space, _ . ' -)")
+            return
+        room = valid_room(msg.get("room", "default"))
+        if room is None:
+            self._fail(conn, "bad room (1-32 of A-Z a-z 0-9 _ -)")
+            return
+        members = self.rooms.get(room, {})
+        if len(members) >= self.room_cap:
+            self._fail(conn, f"room {room} is full ({self.room_cap} players)")
+            return
+        self.rooms[room] = members
+        conn.id = self._next_id
+        self._next_id += 1
+        conn.name, conn.room, conn.bot, conn.joined = name, room, bool(msg.get("bot")), True
+        now = self.clock()
+        peers = []
+        for other in members.values():
+            p = {"id": other.id, "name": other.name, "bot": other.bot}
+            if other.state is not None:
+                p["state"] = dict(other.state, age=round(max(0.0, now - other.state_at), 3))
+            peers.append(p)
+        members[conn.id] = conn
+        self._send(conn, {"type": "welcome", "id": conn.id, "name": name, "room": room,
+                          "version": PROTOCOL_VERSION, "room_cap": self.room_cap, "peers": peers})
+        self._broadcast(conn, {"type": "join", "id": conn.id, "name": name, "bot": conn.bot})
+        self._say(f"{name} joined room {room} ({len(members)} player{'s' if len(members) != 1 else ''})")
+
+    def _message(self, conn: _Conn, msg: dict) -> None:
+        kind = msg["type"]
+        if kind == "state":
+            state = clean_state(msg)
+            if state is None:
+                self._send(conn, {"type": "error", "error": "bad state (needs finite t, x, y, z)"})
+                return
+            conn.state, conn.state_at = state, self.clock()
+            self._broadcast(conn, dict(state, type="state", id=conn.id, name=conn.name))
+        elif kind == "ping":
+            t = msg.get("t")
+            self._send(conn, {"type": "pong", "t": t if finite(t) is not None else None})   # (NaN can't be sent)
+        elif kind == "bye":
+            self._kick(conn)
+        else:
+            self._send(conn, {"type": "error", "error": f"unknown message type {kind[:20]!r}"})
+
+    def _leave(self, conn: _Conn) -> None:
+        if not conn.joined:
+            return
+        conn.joined = False
+        members = self.rooms.get(conn.room)
+        if members is None or members.get(conn.id) is not conn:
+            return
+        del members[conn.id]
+        for other in list(members.values()):
+            self._send(other, {"type": "leave", "id": conn.id, "name": conn.name})
+        if not members:
+            del self.rooms[conn.room]
+        self._say(f"{conn.name} left room {conn.room} ({len(members)} left)")
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Relay for the multiplayer proof of concept (positions only).")
+    ap.add_argument("--host", default="0.0.0.0", help="address to listen on (default 0.0.0.0: every network)")
+    ap.add_argument("--port", type=int, default=DEFAULT_RELAY_PORT, help=f"TCP port (default {DEFAULT_RELAY_PORT})")
+    ap.add_argument("--room-cap", type=int, default=DEFAULT_ROOM_CAP, help="players per room (default 8)")
+    ap.add_argument("--rate", type=float, default=DEFAULT_RATE, help="messages per second per client (default 30)")
+    ap.add_argument("--max-clients", type=int, default=DEFAULT_MAX_CLIENTS, help="connections in all (default 64)")
+    args = ap.parse_args(argv)
+    safe_console()
+    if not 0 < args.port < 65536 or args.room_cap < 1 or args.rate <= 0 or args.max_clients < 1:
+        ap.error("port, room cap, rate and max clients must be positive (port below 65536)")
+
+    async def run():
+        relay = Relay(args.host, args.port, rate=args.rate, room_cap=args.room_cap, max_clients=args.max_clients)
+        try:
+            host, port = await relay.start()
+        except OSError as e:
+            print(f"Can't listen on {args.host}:{args.port}: {e.strerror or e}")
+            return 1
+        print(f"Relay listening on {host}:{port}. Ctrl+C stops it.")
+        try:
+            await relay.serve_forever()
+        finally:
+            await relay.close()
+            print("Relay stopped.")
+        return 0
+
+    try:
+        return asyncio.run(run())
+    except KeyboardInterrupt:   # (Ctrl+C: run() already closed the relay)
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,21 @@
+{
+ "id": "botw-mod-loader.perf-effects",
+ "name": "Performance: effects off",
+ "about": "Values changed in place inside Pack/Bootup.pack > Env/env.sgenvb (AAMP files): the open world's (Master_Field: master_field, common) and the shrines' (Master_Cdungeon: d_frequentuse). Not changed: postfx/no_projectionshadow.bgsdw (ambient occlusion) and the indoor set I_FrequenUse's postfx/i_frequentuse.baglblm (bloom), so wherever the game uses those, the effect stays on; the UI, icon and viewer files stay too. Shipping Pack/Bootup.pack makes Savage Wind 0.4.1-alpha.4 skip its HUD button letters and its voice size-table fix (docs/performance.md).",
+ "pack": "Pack/Bootup.pack",
+ "inner": "Env/env.sgenvb",
+ "edits": {
+  "ssao": [
+   {"file": "postfx/common.bgsdw", "object": "ssao_parameter", "param": "is_enable", "type": "bool"},
+   {"file": "postfx/d_frequentuse.bgsdw", "object": "ssao_parameter", "param": "is_enable", "type": "bool"}
+  ],
+  "bloom": [
+   {"file": "postfx/master_field.baglblm", "object": "bloom", "param": "enable", "type": "bool"},
+   {"file": "postfx/d_frequentuse.baglblm", "object": "bloom", "param": "enable", "type": "bool"}
+  ],
+  "dof": [
+   {"file": "postfx/master_field.bagldof", "object": "dof", "param": "enable", "type": "bool"},
+   {"file": "postfx/d_frequentuse.bagldof", "object": "dof", "param": "enable", "type": "bool"}
+  ]
+ }
+}

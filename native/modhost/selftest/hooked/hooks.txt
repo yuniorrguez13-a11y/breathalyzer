@@ -1,0 +1,5 @@
+# Self-test only: the made-up functions of this folder that get hook slots (f_7000001010 and f_7000001020 don't).
+0x7000001000
+0x7000002020
+0x7000002030
+0x7000cc7410

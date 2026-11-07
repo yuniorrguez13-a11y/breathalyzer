@@ -1,0 +1,15 @@
+# perf_shadows: a shorter sun-shadow range for more fps (docs/performance.md).
+# This folder is a recipe, not a mod you add as it is: it holds no game files. tools/quality.py builds the mod from
+# your own game's Pack/Bootup_Graphics.pack (gsys.bgmsconf, see recipe.json) and adds it to your mod library with
+# this mod.toml:
+#   python tools/quality.py set low            (or: python tools/quality.py toggle shadow_range 1000)
+
+[mod]
+id = "botw-mod-loader.perf-shadows"
+name = "Performance: shorter shadows"
+version = "1.0.0"
+authors = ["botw-mod-loader"]
+description = "Sun shadows reach only as far as tools/quality.py picks (built from your game files)."
+
+[data]
+romfs = "romfs"

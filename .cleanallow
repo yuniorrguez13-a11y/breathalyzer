@@ -1,0 +1,10 @@
+# Files we made ourselves that tools/check_clean.py mistakes for game files: one path per line, from the repo root.
+# Every path here skips all of check_clean's checks, so keep the list short and say why each one is safe.
+
+# Made-up functions in the exact shape of Savage Wind's generator output (that is the point: build_native.py selftest
+# runs gen_hooks.py on them and builds a fake game library to test modhost's hooks without the game). Not game code:
+# seven functions with invented addresses and bodies (main_000.c and main_001.c say so in a comment; main_table.c is
+# just their address table).
+native/modhost/selftest/hooked/main_000.c
+native/modhost/selftest/hooked/main_001.c
+native/modhost/selftest/hooked/main_table.c

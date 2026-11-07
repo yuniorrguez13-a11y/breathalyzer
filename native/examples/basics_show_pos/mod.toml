@@ -1,0 +1,16 @@
+# basics_show_pos: the command `where` says where Link is (docs/game-basics.md).
+# Build it: python tools/build_native.py build   (it goes to build\native\basics-mods\basics_show_pos.dll)
+# Then copy that DLL into <data root>\mods\native\, or start the game with SWMOD_DIR=<repo>\build\native\basics-mods,
+# or load it into the running game with the control command: modload <full path to the DLL>.
+
+[mod]
+id = "botw-mod-loader.basics-show-pos"
+name = "Show Position (example)"
+version = "1.0.0"
+authors = ["giruka"]
+description = "Adds the command where, which says where Link is (x, y, z)."
+game_versions = ["1.9.0"]   # it reads the game by its 1.9.0 addresses (native/modhost/botw.h)
+loader_api = 1
+
+[code]
+windows = "basics_show_pos.dll"

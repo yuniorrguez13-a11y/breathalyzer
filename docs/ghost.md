@@ -1,0 +1,561 @@
+# Ghost: another player as an actor in your game (experiment)
+
+The ghost mod ([`native/examples/ghost/ghost.c`](../native/examples/ghost/ghost.c)) is a native mod for BotW 1.9.0
+that spawns an actor in your game, moves it every frame and animates it. With the multiplayer client's `--ghost`
+option it stands where the nearest other player is, so you see them in the world and not only on the radar.
+
+It is not a second Link: the default actor is `Dm_Npc_Sheiker_Searcher_M_001`, the cutscene copy of a Sheikah man
+(a person-sized Hylian body, no AI). It stands, walks or runs by the other player's speed (`Wait`, `Walk`, `Run`:
+the game's own animations); since 0.4.0 that speed comes from the other player's own client. If it fails 5 times in a
+row before it has ever spawned, the mod uses `Dm_Kibako_Contain_01` (the cutscene copy of a wooden crate) instead. It
+glides from one network position to the next at the frame rate and faces the way the other player walks. Tested in
+the real game on 2026-11-07; see [What was tested](#what-was-tested) and [Stand-ins](#stand-ins-which-actors-work).
+
+**Two PCs over Wi-Fi (2026-11-07):** the ghost stayed in sync with little delay, but it mostly showed the standing
+pose while the other player ran. Fixed in 0.4.0 by sending the speed (see [Animation](#animation)). The fix passed
+simulated Wi-Fi tests; it is not yet re-tested in the game.
+
+**New in 0.5.0, all opt-in** (nothing changes unless you ask for it; 0.5.1 fixes a review's findings). **Checked in
+the game on one PC on 2026-11-07** (tenth round in [What was tested](#what-was-tested): 14 PASS, 1 SKIP). Not yet
+tried between two PCs, and attacks with a real weapon are not checked (the test save has no weapon):
+
+- **Animation sync** (`client.py --ghost-sync` on both PCs): each client reads its own Link's animation with the new
+  `ghost self` and sends it; the ghost plays that name when its actor has it. Attacks too. See
+  [Animation sync](#animation-sync-050-opt-in).
+- **Link body** (`client.py --ghost-link`): a small actor pack, built on your PC from your own game files, that gives
+  the ghost Link's body and his animations. It works: Link's face and body (bald, in underwear) standing, walking,
+  running and swinging next to you. See [Link body](#link-body-050-opt-in).
+- **Held items**: the weapon, shield and bow names are sent and logged. They are not drawn on the ghost yet.
+- The check, with one game and the bot: `python tools\mp\ghost_ingame_check.py --link --spot -1033.6 252.3 1809.3 132`
+  (see [In-game check](#in-game-check)).
+
+## Run it
+
+You need the vanilla game code (`extracted\swgame.dll`): the mod needs no hook slots, so no rebuild.
+In PowerShell, from the repo folder:
+
+```
+python tools\build_native.py build        # builds build\native\modhost.dll and build\native\ghost-mods\ghost.dll
+$env:SAVAGEWIND_GAME_LIB = "$PWD\build\native\modhost.dll"
+$env:SWMOD_DIR = "$PWD\build\native\ghost-mods"
+$env:SAVAGEWIND_CONTROL = '7777'
+Remove-Item Env:SWMOD_REAL_GAME_LIB -ErrorAction SilentlyContinue
+& "$HOME\Documents\SavageWind\Savage Wind\savagewind.exe" --play
+```
+
+`savagewind.log` should show `[mod] ghost: ready (frame job 0x7001129af8 wrapped)` and
+`[modhost] mod ghost.dll: ok, commands: ghost`. Load a save, then use the commands below (over the control socket,
+or in the in-game console, F12: `SAVAGEWIND_CONTROL` turns on developer mode, which the command needs).
+
+With another player (see [multiplayer](multiplayer.md)):
+
+```
+python tools\mp\client.py --relay 192.168.1.20 --name Ana --ghost
+```
+
+Alone, to try it: `python tools\mp\relay.py`, then the client with `--ghost`, then
+`python tools\mp\bot.py --radius 6 --speed 2`. The Sheikah man walks a 6 m circle around Link (`--speed 6`: he runs).
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `ghost` | The state: `idle`, `pending`, `live` or `far` (too far from Link to spawn: see [Distance](#distance)), `wanted` (false once it stopped trying), `dist_m` (how far from Link, measured flat, it should be; -1: can't tell), `far_m` and `near_m` (the distance rule), `fars` (times it went far), `quick_losses` (times in a row the game removed it within 10 s), `retry_in_s` (the next try, while it waits), the actor's address and position (`x y z yaw`, read back from the actor right after the mod moved it), what last happened (`last`), `tries` (in the current row), `live_s`, counters (`moves`: frames it was moved, `drops`, `targets`: `ghost pos` taken, `snaps`: jumps over 30 m), `interval_s` (smoothed time between targets), `behind_m` (from the shown pose to the latest target; 0 unless it moves by `ghost pos`), `physics` (the actor has rigid bodies), `pulled_back_m` (how far the game moved it between two frames: about 0 when it follows), the animation (`anim`: the mode; `anim_want`: what it asks for; `as`: what the actor plays, read back from the game; `as_ok`: the actor has animations; `speed_mps`: the speed the choice uses; `speed_from`: `sent` (the speed `ghost pos` gave) or `positions` (worked out by the mod); `takes_speed`: true (the mod takes `ghost pos ... speed`; the client looks for it); `as_calls`: play calls; `as_reasserts`: calls again because it played something else; `as_changes`: changes of the automatic choice), and the frame callback's ticks, rate (`ticks_per_s`: one tick a frame, so the frame rate) and threads |
+| `ghost spawn [actor] [dx dy dz]` | Spawn an actor `dx dy dz` metres from Link (default `Dm_Npc_Sheiker_Searcher_M_001`, falling back to the crate; 3 0 0). A ghost that is already there is removed first. Sent on the title screen, it waits until a save is loaded. |
+| `ghost spawn link [dx dy dz]` | (0.5.0) The Link body: the same actor name, never the crate. It looks like Link only with the [Link body](#link-body-050-opt-in) deployed. |
+| `ghost pos x y z [yaw [speed [anim]]]` | Move it there, smoothly (world coordinates; yaw in degrees, 0 faces +z, 90 faces +x; a jump over 30 m is not smoothed). `speed`: the other player's ground speed in m/s, for `Wait`/`Walk`/`Run` (0.4.0 and later; left out or negative: the mod works it out from the positions). `anim` (0.5.0): the other player's animation name (`-`: none), see [Animation sync](#animation-sync-050-opt-in) |
+| `ghost self` | (0.5.0, read only) Your own Link: `anim` (the name to send), `attack`, `attacks` (count), `body`, `lower`, `upper` and `gesture` (what plays in those slots) with weights, `weapon`, `shield`, `bow` (actor names, "" when none, "?" unreadable), `equip_ok`, `weapon_class`, `shape` (subs per animation slot, `2,2,1,3,1` expected), `found`, `active`. Each call keeps the reads going for 2 s; the first answer has `active` false |
+| `ghost follow dx dy dz` | Keep it at that offset from Link, turned like Link (a demo without a network) |
+| `ghost stop` | Stop moving it (it stays where it is) |
+| `ghost despawn` | Remove it |
+| `ghost anim auto` | The default: `Wait`, `Walk` or `Run` by its speed (see [Animation](#animation)) |
+| `ghost anim off` | Play nothing (the actor keeps what it plays; the Sheikah man stands in a T-pose until something plays) |
+| `ghost anim <name>` | Always play this animation set of the actor (`Wait`, `Walk`, `Run`, `RunGear2`, `Turn`...). A name the actor doesn't have changes nothing: the mod asks 3 more times, then `last` says so |
+| `ghost far <far_m> [near_m]` | The distance rule (default `60 50`; `near_m` left out: 10 m less). `ghost far 0` turns it off (for a test, or an actor the game keeps farther away) |
+
+The commands only leave a request; the mod acts on it in the next frame. A `ghost spawn` sent in the same batch as a
+`ghost pos` spawns the actor right at that position. Of a `spawn` and a `despawn` sent before that frame, the later
+one wins.
+
+## Client options
+
+| Option | What it does |
+|---|---|
+| `--ghost` | Show the nearest other player as the ghost |
+| `--ghost-peer NAME` | Show this player instead (implies `--ghost`) |
+| `--ghost-actor ACTOR` | Another actor name (implies `--ghost`), e.g. `Dm_Npc_Zelda_Sibyl` |
+| `--ghost-sync` | (0.5.0, checked in game on one PC) Also share animations and say what the other player holds. Use it on both PCs, each with ghost mod 0.5.0 (implies `--ghost`) |
+| `--ghost-link` | (0.5.0, checked in game on one PC) Show the other player with the [Link body](#link-body-050-opt-in) (implies `--ghost-sync`; not together with `--ghost-actor`) |
+
+The `ghost` reply of 0.5.0 also has `version`, `takes_anim` and `has_self` (the client looks for these), `remote`
+(the other player's animation name now), `remote_calls`, `remote_misses` and `remote_missing` (the names the actor
+turned out not to have), and `link_actor`.
+
+Every tick (20 a second) the client adds `ghost pos x y z yaw` with the other player's position to the batch it
+already sends the game (the same jitter-buffered position the radar shows), `ghost spawn` once at the start, and every
+2 s `ghost`, whose news it prints. The yaw is the direction that player moves in, from one position to the next on
+the ground (`Heading` in client.py): slower than 0.5 m/s (standing), or a teleport (a step over 30 m or faster than
+40 m/s), keeps the last one; before they have moved at all it is their camera direction. The jitter buffer doesn't
+blend across a teleport (two samples over 30 m apart, or faster than 40 m/s between them), so it reaches the mod as
+one `ghost pos` step, which the mod jumps when it is over 30 m. When that player leaves it sends `ghost despawn`
+until the game answers it (a lost batch or a reconnect sends it again), and when the client stops it sends it once
+more if the game may still have the ghost. If a `ghost` reply says `wanted` false (the mod stopped trying), it sends
+`ghost spawn` again after 10 s, then 20, 40, at most 60 s apart; back to 10 s once a ghost has stayed 10 s. If the
+game has no `ghost` command (no mod) it says so once and shows the radar only. `Ghost:` in the window's status says
+what it shows (`(far)` while the other player is too far away to show).
+
+The client also sends the other player's speed: `ghost pos x y z yaw speed`. Each client measures its own player's
+speed from its own positions and clock (the straight distance covered over the last 0.4 s) and sends it with every
+state (the `speed` field, see [multiplayer](multiplayer.md#how-it-works)). Network jitter can't change it. A frame
+hitch in the sender's own game (a screenshot, an autosave: one frame of 0.2-0.5 s) doesn't either (0.5.1): the game's
+clock may stop during it, so Link barely moves while the client's clock runs on, which read as a dip in speed (the
+ghost went Run, Walk, Run). Now a step over 0.15 s and over 3 usual steps starts the measurement again, and the last
+speed stays until 0.4 s is measured again. An older client sends no speed; then the receiving client works it out from that player's samples and the times they carry
+(the sender's clock, not the arrival times). The speed goes with the position the client shows (blended the same
+way). During a network stall the client holds the other player where it last saw them, with their last speed, so the
+ghost keeps running on the spot instead of standing; after 1 s with no news the speed is 0. The client sends the speed
+only to a mod that says it takes it (`takes_speed` in the `ghost` reply, asked at once on each game connection); an
+older mod gets `ghost pos x y z yaw` as before.
+
+## Animation
+
+With `ghost anim auto` (the default) the mod picks `Wait`, `Walk` or `Run` from the ghost's ground speed:
+
+| Now | Next |
+|---|---|
+| `Wait` | `Walk` from 0.4 m/s, `Run` from 3.2 m/s |
+| `Walk` | `Wait` below 0.3 m/s, `Run` from 3.2 m/s |
+| `Run` | `Walk` below 2.6 m/s, `Wait` below 0.3 m/s |
+
+- **No flicker**: the gaps between the thresholds (0.3/0.4 and 2.6/3.2 m/s) keep a speed near one from switching back
+  and forth, and a choice stays at least 0.25 s.
+- **The speed (0.4.0)** is the one `ghost pos` sent, smoothed a little (0.1 s), while the latest `ghost pos` sent one
+  and came less than 1 s ago (`speed_from` `sent`). The client sends the other player's own measured speed, so Wi-Fi
+  jitter can't change it.
+- **Without a sent speed** (an older client, or `ghost follow`), the mod works it out (`speed_from` `positions`): the
+  straight distance the ghost covered over the last 0.5 s, from where the mod shows it each frame, smoothed a little.
+  A position that comes late, after a network stall, still counts: it only moves the ghost later, and over half a
+  second the distance comes out right. During a stall the client repeats the last place it had; the mod times those
+  repeats from the first one (for up to 0.6 s), so the speed stays as it was and the catch-up after the stall is not
+  taken for a burst of speed. Repeats for longer mean the player stopped. A slower choice is taken only after it has
+  been wanted for 0.2 s (a frame hitch holds the ghost back a moment). So a stop shows about 1 s late on this path
+  (0.1-0.4 s with a sent speed).
+- **A jump is not a speed** (without a sent speed): a step of a `ghost pos` faster than 40 m/s (a short teleport), or
+  one after more than 1 s without a `ghost pos`, is not measured; the mod measures again once the ghost has glided
+  there. A step of up to 10 m right after the ghost moved (within 1 s) counts: that is a late position catching up
+  after a stall. A step over 20 m in one frame (a snap over 30 m) and a frame after more than 1 s without one (a load)
+  start the measurement again too.
+- **Before 0.4.0** the mod measured the speed over 0.25 s of `ghost pos` arrivals and threw away steps that looked
+  like jumps: after a 0.3 s gap, or faster than 40 m/s. Over real Wi-Fi the client's positions stop and catch up all
+  the time, so most steps were thrown away and the ghost stood (see [What was tested](#what-was-tested), seventh round).
+- **One call per change**: the mod calls the game's "play animation set by name" (`0x700151e42c`, with a stand-in for
+  the "action" that holds only the actor; morph frames from the actor's own animation list) only when its choice
+  changes, not every frame. 5 times a second it reads back what the actor plays (`0x70014a0040`) into `as`. If the
+  actor plays something else (its own AI changed it), it asks again, at most once a second (`as_reasserts`). A name
+  the actor never played gets 3 more tries, then `last` says so.
+- **Only the actor's own animations**: before each call the mod checks that the actor has an animation holder
+  (`+0x560`) that belongs to it (`holder+0xd8` = the actor) with at least one slot (`as_ok`). The crate has none, so
+  nothing is called for it.
+- **Thread**: the call runs in the mod's frame callback, on a game worker thread, not in the actor's own update. The
+  research flagged that as a risk (the call rebuilds the actor's animation tree at once) and planned a fallback
+  (call it from the actor's own AI update through `hle_override`). The fourth round's long runs made only about 50
+  play calls. So a stress test (fifth round) made 17,767 play calls: `Walk` and `Run` in turn, 10 a second, 10
+  minutes each with the Sheikah man standing, Zelda standing, and the Sheikah man following a moving Link. No crash,
+  no hang, no stalled frame callback. That is good evidence, not proof. The fallback is not built.
+- **Look**: the clips play at their own speed, so the feet slide a little when the speed doesn't match (a 2 m/s walk
+  and a 6 m/s run look right). Each new `Walk` starts with a walk-start step. No turn, jump, climb or riding pose.
+
+## Animation sync (0.5.0, opt-in)
+
+**Checked in the game on one PC** (tenth and eleventh rounds): `ghost self` reads Link (`Wait`, `Move` for walk,
+run and sprint, `Jump`, `Land`, `ClimbMove`...), his sword attack (`CutS1`, `attack` true) and the sword's name
+(`Weapon_Sword_001`, of the Weapon class); the bot's names reach the ghost and play on the Link body; on the Sheikah
+man the names he lacks are noted and shown by speed; the client sends its own `Wait`/`Move`. **Not checked yet:** the
+shield and bow names (the test save has none), the bow names `BowCharge`/`BowShoot` from a real bow, and two PCs.
+The rest below comes from reading the game's code and files (out\research\player-state-plan.md).
+
+- **Turn it on:** `client.py --ghost-sync` (or `--ghost-link`) on both PCs, each with ghost mod 0.5.0. Without it,
+  nothing changes: the client sends no new fields, and the mod gets no names.
+- **The sender** asks its own mod `ghost self` 20 times a second. The mod reads Link's animation in its frame tick:
+  the body slot (`Wait`, `Move`, `Jump`, `Fall`, `ClimbMove`, `CutS1`...), and the upper-body slot for the bow
+  (`BowCharge`, `BowShoot`). Plain memory reads, no game calls, only while a client asks. Every pointer is checked
+  first (Windows says whether the memory is there), so a wrong one gives an empty or `?` answer, not a crash.
+- **Attacks** are the names that start with `Cut`, plus `SwimAttack` and the bow. A short attack is reported for at
+  least 0.3 s, so a client asking 20 times a second always sees it.
+- The client sends the name as `anim` in its state (and `attack`, `weapon`, `shield`, `bow`). These are optional
+  fields: older clients ignore them, older relays drop them.
+- **The receiver** passes the name to its mod: `ghost pos x y z yaw speed anim`, only when the mod says
+  `takes_anim`. The mod then picks what to play:
+  - `Wait` and `Move`: by speed, as before (walking, running and sprinting are all `Move` on Link).
+  - A name the actor has: that name.
+  - An attack the actor lacks: `CutS1`, if it has that. Anything else it lacks: by speed.
+- **Which names the actor lacks is learned.** The play call switches at once when the actor has the name. If the
+  name doesn't play 0.1 s later, the mod asks once more (the game might show it a little late); if it still doesn't
+  play 0.1 s after that, the mod notes it (`remote_missing`) and doesn't ask for it again on that actor. A name that
+  plays clears its misses. The Sheikah man has only `Wait`, `Walk`, `Run`, `RunGear2`, `Turn` and `Move_End`, so he
+  shows every other name by speed (each one costs two calls, once per ghost). The
+  [Link body](#link-body-050-opt-in) has the names in its table.
+- **Room for every name (0.5.1).** The mod keeps up to 512 names (Link's own list has 399), and up to 512 noted
+  missing per actor. The last 32 name slots are only for `ghost anim`, so names from the network can never lock it
+  out. (0.5.0 kept 128 and 64: a sender whose Link played many names the body lacks filled the table, and the body
+  then never showed a new name, say a glide or an attack first seen late.)
+- **Attacks during a Wi-Fi stall (0.5.1).** A quick attack can happen while the network stalls: its samples then
+  arrive after the moment the client shows, and were skipped. Now the client shows such a skipped attack for 0.3 s
+  right after the stall (unless the player is already in another one).
+- **Two-handed swords and spears (0.5.1).** The player's Link plays the same names (`CutS1`...) whatever he holds. So
+  the receiving client sends `CutS1_Lsword`, `CutSF_Lsword`, `CutS1_Spear`, `CutS2_Spear` or `CutSF_Spear` (the Link
+  body's own swings) when the sender's `weapon` is a `Weapon_Lsword_...` or `Weapon_Spear_...`. An actor without
+  them shows the `CutS1` stand-in, or the speed rule.
+- **No flicker:** the shown name changes at most every 0.25 s, as before. A name older than 1 s (no `ghost pos`
+  since) is dropped. After 1 s with no news from the other player, the client drops their name too.
+- **Held items** (`weapon`, `shield`, `bow`: actor names like `Weapon_Sword_001`) are sent and the receiver logs
+  them ("Ghost: Ana has weapon ... (not drawn on the ghost yet)"). They are not drawn. Next work: attach the item's
+  actor to a bone of the ghost (Link's skeleton has `Weapon_R`, `Weapon_L` and `Weapon_Root`); no safe way to do
+  that was found yet.
+- **Not known yet:** whether a weapon is drawn or on Link's back; Link's real velocity (the speed still comes from
+  positions); which of Link's 5 animation slots the game really uses for what (the in-game check prints them).
+
+## Link body (0.5.0, opt-in)
+
+**Works in the game** (tenth round): Link's face and body, standing, walking, running, and every name tried (18 of 18:
+attacks, jump, glide, climb, swim, bow, squat...). The first build showed no animation: the game looks names up by
+a binary search, so the list must be sorted by name, like the game's own lists; the builder sorts it since then.
+Only two actors in the game use Link's model: the player and the pause-menu Link. Neither works as a ghost.
+So `tools\mp\ghost_link_pack.py` builds our own small actor pack on your PC, from your own game files:
+
+```
+python tools\mp\ghost_link_pack.py build          # writes out\ghost-link-mod (a RomFS mod folder)
+python tools\mp\ghost_link_pack.py check          # reads it back: names, clips, size
+```
+
+**Build it again** if you built it before the sort fix (`ghost_link_pack.py check` lists the names; `BowCharge` must
+come first, else the ghost plays no animation). `python
+tools\mp\ghost_ingame_check.py --link` builds it and deploys it to the check's own overlay (`out\ghost-check-overlay`),
+used only for that game run; it passed there. Before adding it to your mods, keep in mind: the pack replaces the default
+stand-in's actor, so while it is deployed every ghost is the Link body, plain `--ghost` too. If the pack crashes the
+game, every use of the ghost crashes it until you remove the pack (no crash in the tenth round). Deploy it like any
+RomFS mod (docs/romfs-mods.md) and use `client.py --ghost-link` (or `ghost spawn link`).
+
+- **Same name as the stand-in.** The pack replaces `Dm_Npc_Sheiker_Searcher_M_001`, which nothing in the game uses
+  (checked: events, maps, every pack; DLC not checked: the dump has none). So the ghost mod needs no other name, and
+  without the pack the Sheikah man is back.
+- **What is in it:** the Sheikah man's actor link (no AI) with no physics; Link's model list (the pause-menu
+  Link's, with the Sheikah man's animation slots; `--slots pause` keeps the pause-menu Link's own slots, the fallback
+  if Link stands in a T-pose); and our own animation list: Link's animation file and one small animation set per
+  name. About 19 KB unpacked; the game's size table allows 348 KB for this name, so no size table change.
+- **The names** (`python tools\mp\ghost_link_pack.py names`). The player's own (what `ghost self` reads, so the
+  receiver replays them as they are): `Wait`, `CutS1`-`CutS3`, `CutSF`, `CutDash`, `CutJumpSt`, `CutCharge`,
+  `BowCharge`, `BowShoot`, `GuardJust`, `Jump`, `Fall`, `Land`, `ParashawlGlide`, `ClimbWait`, `ClimbMove`,
+  `SwimWait`, `SwimMove`, `SwimDash`, `SquatWait`, `SquatMove`, `DamageS`, `Dead`, `WeaponEquipOn`. Our own (checked
+  against the player's list of 399 names: he has none of these): `Walk` and `Run` (the mod's speed rule; the player
+  has one `Move`), `RunGear2` (only for `ghost anim`), and the two-handed and spear swings `CutS1_Lsword`,
+  `CutSF_Lsword`, `CutS1_Spear`, `CutS2_Spear`, `CutSF_Spear`, which the receiving client picks by the sender's
+  weapon. (0.5.0 also had `Guard` and `Jump_Run`, which the player never plays: dropped.)
+- **What it looks like (seen in the game):** Link's face and body, but bald and in underwear (hair and clothes are
+  separate armor actors), holding nothing, no paraglider. Glide, climb and swim play on the ground where the ghost
+  stands. Screenshots `out\shots\ghost2_*.png`.
+- **Risks:** the new files in the pack have no size table entries (the game estimates small files; they loaded
+  fine); the bounding box is the Sheikah man's. Replacing an actor pack through the overlay works.
+- Keep the built folder to yourself (it is made from your game files). `out\` is never committed.
+
+## How it works
+
+- **A per-frame callback without a rebuild.** `0x7001129af8` is the run function of one of the game's per-frame calc
+  jobs ("Awereness+LOD+DL1"). It is only ever called through a vtable, so through Savage Wind's dispatcher, and
+  `hle_override` can replace it. The mod's wrapper calls the game's function, then `ghost_tick`. It saves the guest
+  registers before its own calls and puts them back after.
+- **Only in a world.** The title screen has a player actor too, but its position reads 0 0 0 (the rule Savage
+  Wind's `pos` uses for "No world loaded"). An actor spawned there crashed the game in the test, so the mod requests
+  nothing until Link has a position. Waiting there doesn't use up tries.
+- **Spawning** follows the pattern of the game's own code (out\research\actor-spawn-verify.md, read-only research on
+  the user's own 1.9.0 main): zero the handle, a parameter pack with `@M` (a 3x4 matrix at the spawn point),
+  the spawn request (`0x7001535b10`, async). Each frame while pending: if the handle's unit no longer points back
+  at our handle, forget it; when ready, check that the created proc is an Actor, set its matrix, take it (which wakes
+  it) and keep a link to it; when failed, release it.
+- **Moving**: each frame, after checking the link, "set position and rotation" (`0x70015223f0`) with the position
+  and a rotation about y. An actor with physics (`+0x578` set; the people's cutscene copies have it, the crate doesn't) puts its
+  matrix back from its rigid body every frame, so for those the mod also calls the physics transform
+  (`0x7001212820`, which moves every rigid body of the actor). Without it Zelda stayed where she was spawned while
+  `ghost` showed the new position (see [Stand-ins](#stand-ins-which-actors-work)). **Removing**: "remove at a safe
+  point later" (`0x7001514bac`).
+- **Smoothing**: the mod keeps the latest `ghost pos` target with its arrival time, and the time of the one before.
+  Each frame the shown pose moves in a straight line from where it was when the latest target arrived to that
+  target, over the time between targets (smoothed, clamped to 16-250 ms). So the 20 Hz targets become an even move
+  every frame instead of a 10 cm step every third frame. It reaches each target about when the next one comes (one
+  target, about 50 ms, behind). The yaw turns the short way round, over at least 0.1 s. A target more than 30 m from
+  the shown pose (a teleport) is jumped to. With no new target it stays at the last one (no guessing ahead).
+- **Gone without a despawn** (the link turns invalid, or the spawn heap or the player actor changes): the mod forgets
+  the ghost without touching it and spawns it again 2 s later. If the ghost was live less than 10 s, the next wait is
+  twice as long each time in a row (2, 4, 8, 16, 32, then 60 s; `quick_losses` counts them). So a ghost the game keeps
+  removing is not spawned every 2 s. A ghost that stays 10 s, a new `ghost spawn`, or going `far` starts it over.
+- **Distance**: each frame the mod works out how far from Link (measured flat, x and z) the ghost should be: the
+  `ghost pos` target, the `follow` offset, or the spawn offset. Over 60 m it removes the ghost (or its pending
+  request) itself and doesn't spawn it: state `far`. It keeps taking `ghost pos` targets. Once the latest one is within
+  50 m again, it spawns it there at once. The gap between 60 and 50 m keeps a player near the limit from making it
+  come and go. The game removes these actors at about 75 m (see [Distance](#distance)). A ghost left where it is
+  (`ghost stop`) is not checked; if the game removes it, it comes back next to Link.
+- **Failed requests** are tried again the same way, the first one too: a stage that is loading refuses requests or
+  fails creations for a few seconds (two failed in the reload test). An unknown actor name is refused the same way,
+  so it also takes the full row of tries before the mod stops. Only a created thing that is not an actor stops at once.
+- **The crate as fallback** is for a default that never works: when the default (the Sheikah man, no name given) has
+  not spawned yet in this game run and fails 5 times in a row, or creates something that is not an actor, the mod
+  asks for the crate instead (`last` says so). Once the default has spawned, its failures are a loading stage and
+  never switch to the crate. When the crate is lost (a stage change), the mod tries the default again first, since a
+  slow first load can also cause the fallback. A name you give is never replaced.
+- **At most 20 tries in a row** (about 40 s of failed requests; longer with the back-off above). Only a ghost that
+  stays 10 s ends the row: one the game removes sooner counts as a try. Then `wanted` turns false and the mod waits
+  for a new `ghost spawn` (the client sends one later). Going `far` is not a try.
+- **Threads**: the commands run on Savage Wind's frame thread and only write requests under a small lock (a
+  `ghost pos` also stamps its arrival time); all game calls happen in the tick, the animation calls too.
+
+## What was tested
+
+All in the real game (Savage Wind 0.4.1-alpha.4, BotW 1.9.0, vanilla `extracted\swgame.dll`, the test save on the
+Great Plateau). Screenshots in `out\shots\` (never committed).
+
+| Step | Result |
+|---|---|
+| Frame callback | 50-60 ticks a second in game (one per frame), about 2 a second on the title screen, on 3 different worker threads, never two at once (0 overlaps in every run). |
+| `guest_call` | The player info block's getter `0x7000cc6fd0` called from the tick returned the same pointer as the block's +0x60, 37 of 37 checks. |
+| `ghost spawn` | `Dm_Kibako_Contain_01` live 0.02 s after the request, 4 m in front of Link, visible (`ghost_step1_Dm_Kibako_Contain_01.png`); gone after `ghost despawn` (`..._despawned.png`). |
+| `ghost pos` | Moved 3 m right with yaw 45, then 3 m left and 2 m up (`ghost_step2_b_pos_right.png`, `ghost_step2_c_pos_left_up.png`); the yaw read back as 0, 90 and -45 after `pos ... 0/90/-45`. |
+| `ghost follow` | Stayed 3 m ahead of Link while he ran (`ghost_step2_d_follow_*.png`). |
+| Reload | After a teleport 86 m up, the game reloaded at the save point (Link fell); on the reload the link turned invalid ("the game removed the ghost"), two requests failed while the stage loaded, the third spawned it again (`ghost_step2b_after_reload.png`). The player pointer stayed the same across the reload, so the link check is what caught it. |
+| Multiplayer | `relay.py` + `client.py --no-ui --ghost` + `bot.py --radius 6 --speed 2`: the crate circled Link 6 m away, about 3 m between screenshots 1.3 s apart (`ghost_cli_0.png` to `ghost_cli_2.png`, and `ghost_step3_*.png` with the client run in-process). Stopping the client removed the ghost. |
+| Other actor | `ghost spawn FldObj_Bokoblin_Bone` went live in 0.08 s and moved, but wasn't visible in the screenshot. |
+| Title screen | Before the 0 0 0 check, `ghost spawn` on the title screen spawned the crate there and the game crashed at once (access violation in game code). With the check: the mod waited ("no world yet"), the crate went live 0.08 s after Continue with a single request, then `pos` and `follow` worked (`ghost_fix_pos.png`, `ghost_fix_follow.png`). |
+| Order | `ghost spawn` and `ghost despawn` in one batch: idle, `wanted` false, no new request. |
+
+Second round (smoothing, facing, a person as the stand-in), same save, about 01:00-01:35:
+
+| Step | Result |
+|---|---|
+| Zelda, before the physics transform | `ghost` reported each new position, but the screenshots showed her where she was spawned (`ghost2_static_rel*.png`, `ghost2_probe_Dm_Npc_Zelda_Sibyl_moved.png`). With the mod not moving her (`ghost stop`), her matrix was back at the spawn point (0.3 m higher) within a second, every time; "set matrix" (`0x700152261c`) instead of "set position and rotation" changed nothing; `Dm_Npc_Goron_Hero` did the same. Her `+0x578` (physics) is set, the crate's is 0. |
+| Zelda, with it | She stays where she is put and turns (`ghost2_probe8_phys_Dm_Npc_Zelda_Sibyl_moving.png`); after `ghost stop` her matrix stayed there (0.1 m lower: her body settles). |
+| Multiplayer | `relay.py` + `client.py --no-ui --ghost` + `bot.py --radius 6 --speed 2`: Zelda live 66 s, 0 drops, 0 snaps, 0 overlaps, 2385 moves, `pulled_back_m` 0.002-0.08. Screenshots 0.55 s apart show her walking around Link, from behind him out to his left, side-on, facing the way she walks (`ghost2_circle_0.png` to `ghost2_circle_2.png`). |
+| Facing | While she circled, her yaw was within 1.5° on average (3° at most) of her direction of travel, measured from her positions 0.2 s apart. |
+| Smoothing | The positions the mod set (`ghost` reads them back right after the move), during the circling: 129 reads in 3 s gave 129 different positions, steps of 4.7 ± 1.5 cm (a read about every 23 ms at 41 frames a second), while the targets were 12.4 cm apart; with the physics transform (31-48 frames a second) 84 of 95 reads differed (the rest fell in the same frame), steps 7.3 ± 5.0 cm. `interval_s` about 0.06 (targets came about 16 a second), `behind_m` 0.01-0.25. The smoothing functions also passed a C test compiled outside the repo (halfway point, even steps per frame, hold, the short way round, 30 m jump, clamp after a pause). |
+| Jump | `ghost pos` 40 m away: `snaps` 1, the actor there 0.1 s later. |
+| Next to Link | 1.5 m in front of Link, facing him: no Talk prompt (`ghost2_near_link.png`). Moved onto Link's spot (0.3 m off) for 3 s: Link was pushed 0.47 m (`ghost2_on_link.png`). |
+| Frame rate | Frames a second over 10 s with relay, client and bot running: no ghost 52, crate 53, Zelda 44-45. Without the client: no ghost 50, Zelda (standing) 41. |
+| Long run | No crash or hang with the physics transform in 4 runs (the longest 66 s of moves). |
+
+Third round (review fixes), about 01:55:
+
+| Step | Result |
+|---|---|
+| Teleport through the client | Before the fix the jitter buffer blended a 40 m teleport into pieces (24 + 16 m, 4 + 36 m...): in 47 of 50 clock phases one piece was 30 m or less (the mod glided it) and in 49 of 50 the ghost ended up facing the teleport. Now (unit test over 25 phases, teleports of 5 to 1000 m) it is one step and the facing stays the walking direction. In the game, the client's own `Session` and `Ghost` at 20 Hz, a peer walking +x then teleporting 40 m along +z: one 40 m step, `snaps` 1, Zelda at the target 0.5 s later, yaw 90 (the walking direction). |
+| `behind_m` | After a `ghost pos` target then `ghost follow 0 0 4`: 0 (it showed the distance to the old target before). |
+| Fallback | Checked with ghost.c compiled outside the repo (no game): after Zelda spawned once, 6 refusals in a row keep Zelda; before she ever spawned, 5 refusals switch to the crate and the next loss goes back to Zelda. |
+
+Fourth round (animation, ghost.c 0.3.0), about 04:00-05:30. `ghost` read back what the actor plays (`as`) the whole
+time. Screenshot strips (the ghost cut out of the frames, side by side) are `*_strip.png`.
+
+| Step | Result |
+|---|---|
+| Holder | Sheikah man with `ghost anim off`: holder found and its own (`as_ok` true), `as` empty, physics true, T-pose (`anim_t1_sheikah_probe.png`). |
+| `ghost anim Wait` | `as` Wait at once; arms down, standing (`anim_t2_wait_0.png`, `anim_t2_wait_side_0.png`). |
+| `ghost anim Walk`, not moved | `as` Walk; legs and arms in a different walking pose in each of 3 shots 0.3 s apart (`anim_t3_walk_strip.png`: first two frames Wait, then Walk). He walks in place: no drift over 5 s, so the clip doesn't move him. |
+| `ghost anim Nope` | `as` stays Walk, no crash; after 3 more tries `last` says the actor doesn't play it. `ghost anim bad-name` is refused. |
+| Auto, `ghost pos` circle, Sheikah | 15 s standing, 2 min at 2 m/s, 2 min at 6 m/s, 1 min standing: `as` Wait, then Walk, then Run, then Wait. 5 play calls in 5 minutes (one per change; Run to Wait passes Walk for 0.25 s while the speed falls). Measured speed 1.98 and 5.89 m/s on average. Clear poses: `anim_s2_walk_strip.png`, `anim_s2_run_strip.png` (a long stride, arms bent, a different leg forward in each frame), `anim_s2_wait_strip.png`. |
+| Auto, same circle, Zelda | 2 min walk, 2 min run, 1 min standing: the same changes, 4 calls, `as_reasserts` 0 (her AI never changed her animation in 5 minutes). Walk and run show in her arms and dress (`anim_z_walk_strip.png`, `anim_z_run_strip.png`); her legs are hidden by the dress. |
+| `ghost follow` | (First build, speed from each frame's step.) Link walking (stick at 45 %): Walk at 1.5 m/s; running: Run at 5 m/s (`anim_t5_walk_*.png`, `anim_t5_run_*.png`). Moving Link was not tried again: the run in this test ended off a cliff. |
+| Reload | Link ran off a cliff and died. The game removed the ghost; after Continue the new ghost (new actor and holder) got Wait again, with one call. |
+| Multiplayer | `relay.py` + `client.py --no-ui --ghost` (default actor) + `bot.py --replay` of a path that stands, walks at 2 m/s, runs at 6, walks at 2.5, stands, runs at 5 (5.5 minutes): `as` followed each phase, 10 calls in 5.5 minutes, 0 drops, 0 snaps. Screenshots `anim_net2_*.png`, strips `anim_net2_walk_strip.png`, `anim_net2_run_strip.png`. Before the late-target fix, screenshot hitches (the frame stops for about 0.3 s) made it switch Run, Walk, Run, Walk, Run within a second (and the first build, which measured each frame's step, showed Run for a moment at 2 m/s); with the fix, no extra switch. The animation choice also passed a C test compiled outside the repo (steady walk and run, 0.2-0.5 s hitches with a client that waits for answers, 8 to 45 frames a second, stop, jump, thresholds and the 0.25 s hold). |
+| Frame rate | `frames 20` in the same spot, 25 s each: no ghost 51-53, Sheikah standing 53.9, Sheikah walking 53.2, Zelda standing 49.9, Zelda walking 46.4. During the 5-minute runs about 47-50 on average (dips to 6-15 during screenshots). |
+| Long run | 4 game starts, about 45 minutes in all, no crash or hang, 0 overlaps; each closed with `exit`. Only about 50 play calls in all (one per change), so the fifth round stress-tested the call. |
+
+Fifth round (review fixes: play-call stress test, jump check), 2026-11-07, one game start of 44 minutes, 17,841
+play calls in all, no crash or hang, 0 overlaps, closed with `exit`. Screenshots `out\shots\fix_*.png`.
+
+| Step | Result |
+|---|---|
+| Stress, Sheikah man | `ghost anim Walk` and `ghost anim Run` in turn, 10 a second, 10 minutes, standing near Link: 5,922 play calls (one per command). Frame rate median 54 (lowest 36, during screenshots); the frame callback was running at every check (every 2 s); 0 drops. Walking pose in `fix_stress_sheikah_1.png`. |
+| Stress, Zelda | The same with `Dm_Npc_Zelda_Sibyl`: 5,922 play calls, frame rate median 53.5, 0 drops (`fix_stress_zelda_*.png`). |
+| Stress, following a moving Link | The same with the Sheikah man on `ghost follow 0 0 3`, while Link ran and walked back and forth with the stick (back to the start once a minute): 5,923 play calls, frame rate median 52, 0 drops (`fix_stress_follow_1.png`: running beside Link). |
+| Jump check | The fix in `anim_sample`: a step over 30 m, a step after more than 0.3 s without a position, or one faster than 40 m/s over at least the usual time between positions is a jump. Checked with ghost.c's own functions compiled outside the repo: a single 3-6 m step of a standing player, and a step of 3-60 m after a 1-5 s pause, now give no Walk or Run (before: Walk, or Walk and Run, for 0.5-0.8 s, 2-4 extra calls). A step under 40 m/s still counts (1.5 m in one 50 ms target: Walk and Run for 0.5 s). Steady speeds and frame hitches give the same changes as before. In the game: the ghost following Link through a 215 m teleport and back kept `Wait` with no play call. |
+| Despawn, respawn | `ghost despawn`: idle, gone (`fix_despawned.png`). `ghost spawn`: live after 0.19 s, `Wait` with one call, arms down (`fix_respawned.png`). |
+| Cycles | `ghost pos` on a 4 m circle, 2 minutes 10 s: stand, walk at 2 m/s, run at 6, stand, walk, run, stand. `as` went Wait, Walk, Run, Wait, Walk, Run, Wait: 8 calls for 6 changes (Run to Wait passes Walk for 0.25 s), no extra switch. Measured 1.9-2.0 and 5.8-5.9 m/s. Clear walk and run poses (`fix_cyc_p1v2_*.png`, `fix_cyc_p2v6_*.png`). |
+| Teleport, ghost left standing | The ghost at a `ghost pos` spot, Link teleported 215 m away into the forest below the plateau (-1227 187 1724). The game removed the ghost within a second; the mod spawned it at its spot again every 2 s and the game removed it each time (the distance limit below). Link teleported back: the ghost spawned and stayed, `Wait` (`fix_tp2_back_later.png`). |
+| Teleport, ghost following | With `ghost follow`, the ghost went along to the forest and back, stayed live, kept `Wait`, no play call (`fix_tp4_follow_far_look.png`, `fix_tp5_follow_back_look.png`). |
+| Teleport off the plateau | To -400 200 1300: the game reloaded and put Link back on the plateau. The ghost was removed and came back with `Wait`. |
+| Follow, auto | Link walked and ran with the stick: `Walk` at 0.5-2.2 m/s, `Run` at 3.5-6.2 m/s (Walk for a moment while he turned round), `Wait` after he stopped (`fix_follow_walk_out.png`, `fix_follow_run_out.png`). Then Link ran off the cliff east of the start and died, as in the fourth round; after Continue the ghost came back with `Wait` (`fix_after_continue.png`). |
+
+Sixth round (distance rule and back-off, ghost.c 0.3.1), 2026-11-07, about 06:10-06:30, two game starts, both
+closed with `exit`, 0 overlaps. Link stood still at the start of the plateau (-1030 252 1806); the ghost was put at
+a distance with `ghost pos`. Screenshots `out\shots\far_*.png`.
+
+| Step | Result |
+|---|---|
+| Where the game removes it (0.3.0) | Kept 6 s or more at 20, 40, 50, 60, 70, 72, 73 and 74 m. Removed within 0.5-0.8 s at 76, 77, 78, 80, 120, 160 and 200 m (each time, and again after each respawn). The same along +x, -x and -z, so it is the distance from Link, not from the camera. Zelda: kept at 73 m, removed at 77 m. Measured flat: 80 m and 300 m straight up were kept, and so was 80 m up and out (48 m flat). The crate was kept at 77 m (its limit is farther). |
+| Thresholds | Far over 60 m, near again under 50 m: 15 m below the 75 m limit, so a target can move some way between two checks. |
+| Near | `ghost spawn` 3 m from Link: live after 0.5 s, `Wait`, 1 play call (`far_near_wait.png`). A 2 m/s circle: `Walk` at 2.0 m/s, `Wait` again after it stopped (`far_walk_front_*.png`). |
+| Far, 215 m | `ghost pos` 215 m away: `far` within 0.02 s, the mod removed the ghost itself. Over 30 s with a new target every 0.5 s: 0 spawns, 0 requests, 0 drops; `target` kept the latest one (`far_215_far.png`). Before (fifth round): about 15 spawns in 30 s. |
+| Back near | `ghost pos` 3 m away: one spawn, live after 0.24 s, `Wait` with 1 play call; then 10 s with no more spawns or drops (`far_back_near_wait.png`). |
+| Edge | The target moved out from 40 to 70 m and back at 5 m/s: `far` at 60.1 m, spawned again at 50 m (1 spawn, 0 drops: the game never had to remove it). |
+| Back-off | `ghost far 0` (rule off), target 80 m away for 30 s: 3 spawns and 4 removals by the game; waits of 2, 4, 8, then 16 s (`quick_losses` 4). `ghost far 60 50` again: `far` at once. |
+| Teleport | The fifth round's case: the ghost 3 m from Link, Link teleported 216 m away (-1227 187 1724): `far` at once, then 30 s with 0 spawns, 0 requests, 0 drops (`far_tp_far.png`). Teleported back: one spawn after 0.02 s, `Wait`, 1 play call, then 10 s with no more (`far_tp_back.png`). |
+| Follow | `ghost follow 0 0 3` through the same teleport and back: stayed live, 0 spawns, 0 drops (as before). |
+| Pure functions | `far_next` and `backoff_delay` compiled outside the repo: out to 80 m and back in 1 m steps, far at 61 m and near at 49 m; hovering between 51 and 60 m never changes it; waits 2, 4, 8, 16, 32, 60, 60 s. |
+
+Seventh round (two PCs, then the speed fix, ghost.c 0.4.0), 2026-11-07:
+
+| Step | Result |
+|---|---|
+| Two PCs over home Wi-Fi (0.3.1) | Two laptops, each with its own game, one hosting the relay. The ghost's position stayed in sync with little delay. But while the other player ran, the ghost mostly showed the standing pose. Attacks and held items are not shown at all (nothing sends them). |
+| The fix | Each client measures its own speed and sends it (`speed` in the state); the receiving client passes it with `ghost pos ... speed`; the mod uses it for `Wait`/`Walk`/`Run`. Without it, the mod's own measurement now uses 0.5 s of shown positions and keeps late positions (see [Animation](#animation)). |
+| Simulated Wi-Fi (Python) | `tests/test_mp_wifi.py`: sender, relay cleaning, receiver and `ghost pos` on a made-up clock, with 0-150 ms random delays and 0.3-0.6 s stalls every 2-5 s (and, in one test, power-saving bursts every 0.1-0.3 s). Stand, walk at 2 m/s, run at 6.5, walk, stand, run, stand (50 s): every `ghost pos` after the first 1.5 s of each phase carries a speed within 0.25 m/s that picks the right animation (5 seeds, an older sender, bursts, a clean network). The real relay and bot on loopback with random delays and one 0.5 s stall: the speed came through the relay, and every `ghost pos` picked `Run` at 6 m/s. |
+| Simulated Wi-Fi (C) | ghost.c's own functions compiled outside the repo, fed with the same simulated `ghost pos` streams at 55 frames a second, 10 seeds of 50 s each. With the sent speed: the right animation in 100% of frames in every phase, 9 changes per run (one per change of speed, plus `Walk` for a moment from `Run` to `Wait`). Without it (the mod's own measurement): also 100%, 8-9 changes. The 0.3.1 code on the same streams: `Run` in 88-91% of running frames, 26-38 changes (flicker). With harsher power-saving bursts (0.2-0.4 s): sent speed 100%, own measurement at least 98% `Run` while running, 0.3.1 `Run` in 59% of running frames on average (51% at worst) and 63-85 changes. Frame hitches (0.2-0.5 s every 3-6 s) on top: sent speed 100%, own measurement at least 99.5% in every phase. A stop shows 0.1-0.4 s late with the sent speed, about 1 s late with the mod's own measurement (0.3-0.6 s before). A standing player's 3-6 m step, and a 3-25 m step after 1-5 s without `ghost pos`: no `Walk` or `Run`, as before. |
+| In the game | Not yet re-tested. |
+
+Apart from the title-screen crash above, the game never crashed or hung in these runs (10 game starts in the first
+round, 13 in the second, 1 in the third, 4 in the fourth, 1 in the fifth, 2 in the sixth, each closed with `exit`).
+
+Eighth round (0.5.0: animation sync, `ghost self`, Link body), 2026-11-07, without the game:
+
+| Step | Result |
+|---|---|
+| C check | ghost.c 0.5.0 compiled outside the repo with a fake game: 69 of 69 checks pass. Link body: every sent name shows within 0.4 s, `Move` goes by speed, `CutS4` (not in its list) shows `CutS1`. Sheikah man: only `Wait`/`Walk`/`Run`, 11 names it lacks noted after one call each. No names sent: exactly the old speed rule. A name that flips every 50 ms: 12 changes in 3 s, at least 0.25 s apart. `ghost self` on fake memory at the real guest addresses: names, the 0.3 s attack hold, combos, bow, items; bad, uncommitted, misaligned and foreign pointers give empty or `?`, never a crash. |
+| Speed regression | The 0.4.0 Wi-Fi scenarios (3 seeds) through 0.5.0: the same as 0.4.0 (right animation in 100 % of frames, 9 changes per run). |
+| Python | `tests\test_mp_sync.py`: protocol fields, the client's sync requests and fallbacks for older mods, the bot's `--anim`, the pack builder on made-up packs, AAMP. |
+| Link body | Built from the user's own files: 39 files, 18,688 bytes unpacked (allowed: 348,448). Our one-clip animation set has byte for byte the layout of the game's simplest one; the blend table's key names match the game's. |
+| In the game | Not run (the laptop was in use). |
+
+Ninth round (review fixes, ghost.c 0.5.1), 2026-11-07, without the game:
+
+| Step | Result |
+|---|---|
+| Name table | `tests\test_ghost_native.py` builds ghost.c with a made-up actor (`native\examples\ghost\selftest`). After 130 names the Link body lacks, the glide and `CutS3` still play (0.5.0: `Wait`, the table was full at 128); 600 names from the network stop at 480 and `ghost anim Turn` still works. |
+| Missing names | The Sheikah man, 80 names he lacks, 3 rounds: 160 play calls in all, 2 per name (0.5.0: 240, each name asked again every round, as only 64 were kept). |
+| Late names | A made-up game that shows a new name 0.15 s late: `CutS3` plays and is not noted missing (0.5.0: noted at once, `CutS1` too). A name the body lacks is noted after 2 calls. |
+| Sender hitch | The sender's game stalls 0.2-0.5 s every 3-6 s with its clock stopped, Link running at 6.5 m/s (`tests\test_mp_wifi.py`, and the mod's own code on the same stream): the sent speed stays at 6.49 m/s, `Run` in 100 % of running frames, no extra switch (0.5.0: down to 0.24 m/s, `Run` in 94-96 %, 6-10 extra switches in 28.5 s). A stop right at a hitch still shows within 1 s. |
+| Attacks in a stall | 0.3 s attacks every 1.2-2.2 s over the Wi-Fi model, 5 runs of 2 minutes: 344 of 344 reach the mod, with stalls and with power-saving bursts (0.5.0: 326 and 319). Only the hidden ones are added (0.3 s each); with jitter alone the shown names are exactly as before. |
+| In-game check | L2 now also plays `CutS1` (the Sheikah man has none), so it fails when the Link body didn't load. |
+
+Tenth round (first in-game run of 0.5.1: `ghost self`, sync, Link body), 2026-11-07, test save on the Great Plateau,
+3 game starts, each closed with `exit`, no crash or hang. The game was capped at 30 frames a second (its setting).
+Screenshots `out\shots\ghost2_*.png` (strips: `*_strip.png`) and `out\shots\ghostcheck\`.
+
+| Step | Result |
+|---|---|
+| First check run | 9 PASS, 5 FAIL, 1 SKIP. `ghost self` passed. The Link body spawned (live, `as_ok` true) but played nothing: `as` stayed empty for `Wait`, `Walk`, `CutS1`...; only `ClimbMove` played. S4 failed too: the save loads Link by a rock face, so he climbed it. |
+| Cause | Every animation list of the game's (the Sheikah man's, the pause-menu Link's, the player's 399 names) is sorted by name, and ours was not. A binary search over our unsorted list of 33 lands on `BowCharge`, then `ClimbMove`: exactly the one name that played. Fix: `ghost_link_pack.py` sorts the sets and the blend list by name. |
+| Second check run (sorted pack, `--spot` on open ground) | **14 PASS, 0 FAIL, 1 SKIP** (S6). Below. |
+| `ghost self` (S1-S5, S7) | Link found, slots `2,2,1,3,1`. Standing `Wait` (`DemoWait` for a moment right after a load). Walk, run, sprint: all `Move`, at 1.6, 5.5 and 7.9 m/s. X: `Jump`, `Land`. On a rock face: `ClimbMove`, `ClimbWait`, `WallDash`, `WallDashSt`, `WallOff`. After a fall: `Fall`, then `DeadRagdoll`. Weapon, shield, bow `""` with `equip_ok` true: the test save's inventory is empty (seen in the menu), so S6 (attack) is SKIP and the item names are not checked. |
+| Cost of `ghost self` (S8) | 28.7 -> 26.6 frames a second while asked 20 times a second (first run: 30.0 -> 30.0). Within the 3 limit; at the 30 cap a small cost hardly shows. |
+| Link body (L2-L4, by hand) | Every name played at once (`as` = the name): `Wait`, `Walk`, `Run`, `RunGear2`, `CutS1`, `CutSF`, `CutS1_Lsword`, `CutS1_Spear`, `Jump`, `Fall`, `ParashawlGlide`, `ClimbMove`, `SwimMove`, `SquatWait`, `BowCharge`, `GuardJust`, `DamageS`, `WeaponEquipOn`: 18 of 18, 20 play calls, no re-asserts. Looks like Link: his face and body, bald, in underwear, arms down standing (`ghost2_link_wait.png`). |
+| Next to Link (`ghost follow`, anim auto) | Link walked: the ghost `Walk` at 1.1-1.8 m/s, a different leg forward in each shot (`ghost2_walk_strip.png`); ran: `Run` at 3.5-6 m/s, long strides beside Link (`ghost2_run_strip.png`); sprinted: `Run` at 5-7.5 m/s (`ghost2_sprint_strip.png`). |
+| Attack replayed | `ghost anim CutS1` shot 0.05, 0.25, 0.45 and 0.65 s after: wind-up, a lunging swing across the body, follow-through, back (`ghost2_atk_CutS1_strip.png`; no sword: held items are not drawn). Other poses in `ghost2_poses_strip.png` (spin, two-hander, jump, glide, climb, swim, bow, squat). |
+| Bot replay (R1, R2) | The bot's `CutS1`, `CutS2`, `CutDash`, `Jump`, `ParashawlGlide`, `ClimbMove` all showed on the Link body as sent; the client sent its own `Wait` and `Move`. |
+| Cost of the Link body (L5) | 29.2 without, 29.7 with (walking in place: 30.0 and 30.0). None measurable at the cap. |
+| Sheikah man (no pack) | Not re-run in this round (another game ran on this PC for the next 30 minutes; done in the eleventh round). Last seen in the fourth and fifth rounds (`anim_s2_*_strip.png`, `fix_respawned.png`). The fallback for missing names did work in the first run (the unsorted body lacked them): each was noted once ("the actor has no CutS1 animation; showing another one for it") and the speed rule took over. |
+| Cliff | A 3 s sprint from the plateau spot toward yaw 132 ran off the edge (about 18 m): `Fall`, `DeadRagdoll`, Game Over; Continue reloaded and the ghost came back. So `--spot` starts 5 m farther back, and S4 runs 2.4 s. |
+
+Eleventh round (what the tenth left open: an attack, item names, the Sheikah man with 0.5.1), 2026-11-07, about
+14:35-14:50, same test save and spot, ghost.dll 0.5.1 rebuilt (comments only), 3 game starts, each closed with
+`exit`, no crash or hang. Another program's game ran on this PC from 13:42 to 14:35: the check waited. Results:
+`out\research\ghost-ingame-results-run11{a,b,c}.txt`, screenshots `out\shots\ghostcheck\ghostcheck_S6_*.png`.
+
+| Step | Result |
+|---|---|
+| **Last run** (`--link --spot ... --give-weapon`) | **16 PASS, 0 FAIL, 0 SKIP.** S1-S5, S7, L1-L5, R1, R2 as in the tenth round (walk 1.6, run 5.4, sprint 8.1 m/s), plus S6 and S9 below. |
+| A sword for the test save (`--give-weapon`) | The save has no weapon, so the check now has the ghost mod spawn `Weapon_Sword_001` 1.6 m in front of Link (no animation, not moved), walks him up to it and presses A. It lies in the grass with a "Take" prompt (`ghostcheck_S6_weapon_on_ground.png`); A takes it ("Traveler's Sword" window, `ghostcheck_S6_taken.png`). It worked in all 3 runs. |
+| Item name (S9) | Right after: `weapon` `Weapon_Sword_001`, `weapon_class` true; shield and bow `""` (none). 3 of 3 runs. |
+| Attack (S6) | The first weapon opens a "Use Weapon" window that eats the first Y. After A, then B, the third Y swung: `CutS1`, then `CutChargeWait`, `attack` true, attacks 0 -> 2 (`ghostcheck_S6_swing3.png`: the sword out to his right). Runs 2 and 3; in run 1 the check pressed Y only once, so S6 failed there (fixed: up to 4 tries, A or B between). |
+| The taken sword is the spawned actor | After the take the mod still had a valid link to the same actor (same address): the game keeps the world sword as Link's weapon. So the check never sends `ghost despawn` after it (that would remove Link's sword) and just closes the game. The client only spawns people; don't `ghost spawn` an item by hand and then take it. |
+| Sheikah man, 0.5.1 (no pack, run 2) | R1 PASS: the bot's 8 names reached the mod; the ghost showed only `Wait`/`Walk`/`Run`; `CutS1`, `CutS2`, `CutDash`, `Jump`, `ParashawlGlide`, `ClimbMove` were each noted once as missing ("the actor has no CutS2 animation; showing another one for it"). |
+| Cost of `ghost self` (S8) | Run 2 read 30.0 -> 25.2 with one 5 s pair (FAIL), run 1 29.9 -> 28.9. The PC was busy (another tool's search used much of the processor; 78 % load with no game running), so S8 now measures two pairs in turn and averages them: run 3 without 30.0 and 30.0, with 30.0 and 29.9. No cost shows at the 30 cap. |
+| Cost of the Link body (L5) | 30.0 -> 29.9 and 29.9 -> 29.9. |
+| Save | The game autosaved into the test save's slots 2 and 3 during the runs, both before the sword was taken (the next run started without it). A copy from before is in `out\test-save-backup-1425`. |
+
+## In-game check
+
+When you may start the game, one command runs the checks of both research plans with one game and the bot, and
+prints PASS, FAIL or SKIP for each (about 3 minutes; it starts and closes the game, with the test save in
+`out\test-save` when there is one):
+
+```
+python tools\build_native.py build
+python tools\mp\ghost_ingame_check.py --link --spot -1033.6 252.3 1809.3 132 --give-weapon
+```
+
+`--spot x y z yaw` first moves Link to open ground and turns the camera to `yaw`, so the walk, run and sprint have
+room (the test save loads Link by a rock face; without it S4 climbs the rock). The spot above is on the Great Plateau,
+about 22 m from the edge. The check never teleports Link while he climbs (it lets go with B first). `--give-weapon`
+(for a save without a weapon, like the test save): at the end the ghost mod spawns a Traveler's Sword in front of
+Link and he takes it, for the attack (S6) and the item name (S9); the game is then closed without `ghost despawn`.
+If the game saves after that, the save keeps the sword. Without `--link` it skips the Link body and checks the
+Sheikah man instead. `--no-launch` uses a game that is already running. Last run: **16 PASS, 0 FAIL, 0 SKIP**
+(eleventh round; the Sheikah man run: all PASS but S8, a busy PC, see there). Results also go to
+`out\research\ghost-ingame-results.txt`, screenshots to `out\shots\ghostcheck\`. Checks: Link found by `ghost self`,
+the animation slots' shape, `Wait` standing, `Move` walking, running and sprinting, a jump, an attack (needs a weapon:
+equipped, or `--give-weapon`; else SKIP), item names, the frame cost of `ghost self` (two pairs, averaged), the Link
+body (spawn, `Wait`, walk and run, attacks, jump, glide, climb, swim, frame cost), and a relay with the bot sending
+animation names (`bot.py --anim`).
+
+
+## Stand-ins: which actors work
+
+Picked from the names in `Actor\Pack` (names only): cutscene ("demo", `Dm_`) copies of people. Not all of them are
+without AI: Zelda's copy runs the full NPC AI (`AIProgramUser` `Npc`; it plays her `Wait`, which is why she stood
+with her arms down), while the Sheikah man's has none (`DemoDummy`, so he stood in a T-pose). An earlier version of
+this page said Zelda's copy had no AI: that was wrong (out\research\ghost-anim-plan.md). Each was spawned 4 m in
+front of Link, then left alone for 3 s. Screenshots `out\shots\ghost2_cand_<name>.png` and `ghost2_side_<name>.png`.
+
+| Actor | Result |
+|---|---|
+| `Dm_Npc_Sheiker_Searcher_M_001` | **The default.** A Sheikah man, Hylian body, Link's size; visible and stable. No AI, so nothing changes his animation; `Wait`, `Walk`, `Run` (and `RunGear2`, `Turn`); no cloth physics, no measurable frame cost. Has physics (moved with the physics transform). With `ghost anim off` he stands in a T-pose. |
+| `Dm_Npc_Zelda_Sibyl` | The default before 0.3.0. Zelda in her white dress, upright, arms down, Link's size; visible and stable, no Talk prompt. Has physics: moves only with the physics transform (now done). Runs the NPC AI, which plays her `Wait`; it never changed our animation in the test. Walks and runs too, but the dress hides her legs, and she costs 3-7 frames a second. |
+| `Dm_Npc_Hyrule_KingSoul` | The old king; visible, stable, large. |
+| `Dm_Npc_Rito_Hero`, `Dm_Npc_Zora_Hero`, `Dm_Npc_Gerdo_Hero`, `Dm_Npc_Goron_Hero` | The four champions; visible and stable (the Goron is very large). `Dm_Npc_Goron_Hero` didn't follow "set position and rotation" either (like Zelda before the physics transform); none of them was tried with it. |
+| `Dm_Npc_Goron_Hammer_C_000` | Live, nothing visible. |
+| `Dm_PlayerStole2` | A cloth lying on the ground. |
+| `PauseMenuPlayer` | The pause-menu Link: live for 5 s, nothing visible in the world. |
+| `Mannequin_001_Upper` | Live, nothing visible; goes back to the spawn point when not moved. |
+| `FldObj_KnightDoll_01`, `FldObj_KnightDollMini_01`, `TwnObj_GerudoDollBlue_A_01`, `FldObj_RuinStatueKnight_A_01` | Not people: a training dummy, a small doll (its physics pulls it down), a green toy, a huge statue (a wall in front of the camera). |
+| Not tried | `GameROMPlayer` (the player itself: never spawn it twice), `Npc_*` (AI and talk events), `WolfLink` (AI). |
+
+A "Check Sheikah Slate" tutorial popup, which the plateau shows after some minutes of play, covered the screenshots
+of `Mannequin_001_Upper` and the dolls. All spawned in 0.02-0.6 s. `--ghost-actor` (client) or
+`ghost spawn <name>` picks another one; `ghost` shows `physics` and `pulled_back_m` (well above 0 while it moves:
+the actor doesn't follow).
+
+## Limits
+
+- **Not Link** (by default). A Sheikah man who stands, walks or runs by his speed: no head turn, no jump, climb, swim,
+  glide or riding pose, no attacks, no held weapons or items. With `--ghost-sync` he still shows only those three
+  (he has nothing else); the [Link body](#link-body-050-opt-in) has the rest (works on one PC). Held items are never drawn
+  yet. The feet slide a little when the speed doesn't match the clip. The
+  fallback is a crate (no animation). The facing is the walking direction, so a player who walks backwards or
+  sideways is shown facing the way they move (the game's state exposes no facing).
+- **About 50 ms behind**: the smoothing reaches each position when the next one arrives, on top of the client's
+  0.1 s jitter buffer. Over Wi-Fi the position still stops for a moment during a stall and then catches up (the
+  animation now keeps running through it). A larger client `--delay` (say 0.2 s) gives the jitter buffer more slack,
+  so short delays no longer stop it (not measured).
+- **Walk/run over Wi-Fi: not re-tested in the game yet** (0.4.0). The simulation says it works; the two-PC test is
+  the real proof.
+- **0.5.x in the game:** checked on one PC with the bot (tenth round). Not checked yet: attacks and item names from a
+  real weapon (the test save has none; equip one and run the check), and two PCs over Wi-Fi.
+- **Cost**: the Sheikah man and the crate cost nothing measurable; Zelda costs 3-8 frames a second (44 instead of
+  52 in the second round, 46-50 instead of 51-53 in the fourth).
+- **1.9.0 only.** Every address is for the 1.9.0 `main`; the mod refuses other versions.
+- **Physics.** For an actor with physics (both people) the mod moves its rigid bodies from the frame job each frame.
+  The research flagged that as the main deadlock risk (the physics step may run on another core). Nothing went
+  wrong in the tests (about 25 minutes of moves in all), but it is not proven safe. The body also collides: Zelda
+  placed on Link's spot pushed him 0.47 m, so a player walking into the ghost may be nudged.
+- **Threading.** The tick runs on a worker job next to the game's Awareness/LOD jobs, not on the main game thread.
+  Moving the actor there can race with the actor's own update on another core (at worst one frame drawn at the old
+  place), and so can the animation switch (it rebuilds the actor's animation tree at once). Nothing went wrong in
+  17,767 play calls in the stress test (fifth round), but it is not proven safe either. If it ever crashes there,
+  the planned fix is to make the call from the actor's own update (out\research\ghost-anim-plan.md, plan B).
+- **Distance.** The game removes the ghost within a second once it is about 75 m from Link, measured flat (kept at
+  74 m, removed at 76 m; height doesn't count). So the mod shows nobody farther than 60 m: state `far`, and the ghost
+  comes back when the other player is within 50 m again. The limit was measured on the Great Plateau for the Sheikah
+  man and Zelda only; other places or actors may differ (the crate was kept at 77 m). If the game still removes the
+  ghost (the rule missed), the mod waits 2, 4, 8 ... up to 60 s between tries, and stops after 20 tries in a row; the
+  client asks again later.
+- **Shrines and other interiors** have their own coordinates: a player in a shrine shows up at meaningless overworld
+  coordinates.
+- **Going back to the title screen** wipes guest memory. The mod drops the ghost when it sees its link turn invalid;
+  pointers reused by chance after a full reload were not seen but are not ruled out.
+- One ghost per game. Install it with `modman` (it has a `mod.toml`) or use `SWMOD_DIR` as above.

@@ -1,0 +1,17 @@
+# hello: the smallest native mod. It adds the control command `hello`.
+# Install it with the mod manager (docs/mod-manager.md):
+#   python tools/build_native.py build
+#   python tools/modman.py add native/examples/hello
+# hello.dll isn't in this folder: for the examples in this repo, modman takes it from build\native, where
+# build_native.py puts it (docs/mod-format.md). Add the example again after you rebuild it.
+
+[mod]
+id = "botw-mod-loader.hello"
+name = "Hello (example)"
+version = "1.0.0"
+authors = ["giruka"]
+description = "Adds the control command hello, which answers {hello: world}."
+loader_api = 1          # works with any modhost; no game_versions: it doesn't touch game code
+
+[code]
+windows = "hello.dll"

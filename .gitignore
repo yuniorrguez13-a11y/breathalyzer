@@ -1,0 +1,42 @@
+# Game files and anything made from them: never commit (see NOTICE.md)
+extracted/
+extracted-*/
+generated/
+exefs/
+romfs/
+aoc*/
+*.nsp
+*.nsz
+*.xci
+*.nca
+*.nso
+*.wua
+*.wux
+*.wud
+*.rpx
+*.keys
+swgame.dll
+swgame.so
+save/
+save_[0-9]*/
+*.sav
+cache/
+# sw_rebuild --work-root: <root>/work holds the generated C and objects (<root>/cache is covered above)
+work/
+*.o
+*.obj
+# Savage Wind logs repeat the game's own log text
+*.log
+# Output our tools make from the player's own game (code maps, merged mods, patched modules)
+out/
+
+# Local clone of Savage Wind (its own repo)
+upstream/
+
+# Build output and tooling
+build/
+dist/
+__pycache__/
+*.pyc
+.venv/
+.vscode/

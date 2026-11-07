@@ -1,0 +1,17 @@
+# basics_inf_stamina: stamina never goes down (docs/game-basics.md). No game-code rebuild needed.
+# Build it: python tools/build_native.py build   (it goes to build\native\basics-mods\basics_inf_stamina.dll)
+# Then copy that DLL into <data root>\mods\native\, or start the game with SWMOD_DIR=<repo>\build\native\basics-mods.
+# It must load when the game starts: it runs code every frame (botw_on_frame), which a mod loaded later may not get.
+# Only one mod can run code every frame this way: don't use it together with the ghost example.
+
+[mod]
+id = "botw-mod-loader.basics-inf-stamina"
+name = "Infinite Stamina (example)"
+version = "1.0.0"
+authors = ["giruka"]
+description = "Keeps stamina from going down; infstamina off and on switch it."
+game_versions = ["1.9.0"]   # it reads and writes the game by its 1.9.0 addresses (native/modhost/botw.h)
+loader_api = 1
+
+[code]
+windows = "basics_inf_stamina.dll"

@@ -1,0 +1,20 @@
+# stamina_hook: infinite stamina through a hook on the stamina setter (docs/hooks.md).
+# Install it with the mod manager (docs/mod-manager.md):
+#   python tools/build_native.py build
+#   python tools/modman.py add native/examples/stamina_hook
+#   python tools/modman.py deploy        (rebuilds the game code with a hook slot: 10-20 minutes the first time)
+# stamina_hook.dll isn't in this folder: for the examples in this repo, modman takes it from build\native\hook-mods,
+# where build_native.py puts it (docs/mod-format.md). Add the example again after you rebuild it.
+
+[mod]
+id = "botw-mod-loader.stamina-hook"
+name = "Stamina Hook (example)"
+version = "1.0.0"
+authors = ["giruka"]
+description = "Keeps stamina from going down; `stamina_hook off` and `on` switch it."
+game_versions = ["1.9.0"]   # the hook address is for 1.9.0
+loader_api = 2              # hooks need mod API 2
+
+[code]
+windows = "stamina_hook.dll"
+hooks = ["0x7000cc7410"]    # the stamina setter, as in hooks.txt

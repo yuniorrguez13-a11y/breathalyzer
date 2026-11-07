@@ -1,0 +1,17 @@
+# basics_teleport_up: the command `up [metres]` moves Link straight up (docs/game-basics.md).
+# Build it: python tools/build_native.py build   (it goes to build\native\basics-mods\basics_teleport_up.dll)
+# Then copy that DLL into <data root>\mods\native\, or start the game with SWMOD_DIR=<repo>\build\native\basics-mods,
+# or load it into the running game with the control command: modload <full path to the DLL>.
+# The command needs developer mode (SAVAGEWIND_CONTROL=<port> or SAVAGEWIND_DEV=1).
+
+[mod]
+id = "botw-mod-loader.basics-teleport-up"
+name = "Teleport Up (example)"
+version = "1.0.0"
+authors = ["giruka"]
+description = "Adds the command up [metres], which moves Link straight up (default 10 m)."
+game_versions = ["1.9.0"]   # it moves Link by his 1.9.0 addresses (native/modhost/botw.h)
+loader_api = 1
+
+[code]
+windows = "basics_teleport_up.dll"
