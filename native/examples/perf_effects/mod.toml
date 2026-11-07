@@ -2,7 +2,7 @@
 # This folder is a recipe, not a mod you add as it is: it holds no game files. tools/quality.py builds the mod from
 # your own game's Pack/Bootup.pack (Env/env.sgenvb: the ambient occlusion, bloom and far depth-of-field switches,
 # see recipe.json) and adds it to your mod library with this mod.toml:
-#   python tools/quality.py set medium         (or: python tools/quality.py toggle ssao off)
+#   python tools/quality.py set low            (or: python tools/quality.py toggle ssao off)
 
 [mod]
 id = "botw-mod-loader.perf-effects"

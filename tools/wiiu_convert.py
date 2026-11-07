@@ -1177,8 +1177,13 @@ class Converter:
 # Wii U model mods go through tools/wiiu_model: X.sbfres models (and X_Animation files), X.Tex1 + X.Tex2 textures
 # (joined into one Switch X.Tex.sbfres), item icons. With the player's own Switch RomFS (--game; modman passes it) the
 # converter also uses the vanilla files, read only: materials are built on the vanilla ones, unchanged textures without
-# a Tex2 keep the vanilla mipmaps, TexInfo.txt gets the right count, packs holding converted models are filled with the
-# files the game's own pack has, and a size table (RSTB) is written with the converted files' entries raised.
+# a Tex2 keep the vanilla mipmaps, TexInfo.txt gets the right count, packs holding models are filled with the files the
+# game's own pack has, and a size table (RSTB) is written with the converted files' entries raised. A converted file
+# that holds the same values as the game's is written as the game's own bytes (no Yaz0 compressing: a whole Wii U
+# TitleBG.pack is mostly vanilla files). A model or texture that can't be converted never stays as Wii U bytes where
+# the Switch game loads it when the game has a file of that path: the game's file takes its place in a pack (a loose
+# one is left out); with none it is left out of the pack. A texture-only mod whose X.Tex has another texture count
+# than the vanilla model's TexInfo.txt gets the vanilla model written again with the new count, where it can.
 
 TEX_RE = re.compile(r"^(?P<base>.+)\.Tex(?P<n>[12])(?P<ext>\.s?bfres)$", re.I)
 MODEL_EXT_RE = re.compile(r"\.s?bfres$", re.I)
@@ -1187,6 +1192,12 @@ MODEL_KINDS = ("model", "texture", "animation")
 GAME_PACKS = ("Pack/TitleBG.pack",)                # vanilla models not loose in Model/ (Link, Armor_Default...)
 RSTB_PATH = "System/Resource/ResourceSizeTable.product.srsizetable"
 HEAD_BYTES = 0x10000                               # decompressed bytes read for a texture file's names
+
+
+def _model_ext(name: str) -> str:
+    """.sbfres or .bfres as the model file's name has it (.sbfres for a BFRES found by its content)."""
+    m = MODEL_EXT_RE.search(name)
+    return m.group(0) if m else ".sbfres"
 
 
 def _yaz0_head(data: bytes, limit: int) -> bytes:
@@ -1502,7 +1513,7 @@ class ModelJob:
     def _vanilla_tex(self, rel: str, pack: str | None) -> tuple[str, list[str]]:
         """(name, texture names) of your game's X.Tex for the model at rel (X, or X for an X-NN piece)."""
         name = rel.rsplit("/", 1)[-1]
-        stem, ext = MODEL_EXT_RE.sub("", name), MODEL_EXT_RE.search(name).group(0)
+        stem, ext = MODEL_EXT_RE.sub("", name), _model_ext(name)
         bases = [stem] + ([SPLIT_RE.match(stem).group("base")] if SPLIT_RE.match(stem) else [])
         for base in bases:
             names = self.game.tex_names(_renamed(rel, f"{base}.Tex{ext}"), pack)
@@ -1606,6 +1617,7 @@ class ModelJob:
         game = self._same_textures(path, out, ts, vanilla, tex_rel, pack)
         if game is not None:
             detail += "; " + SAME_NOTE
+            notes = []     # (the game's own file ships: notes on reading the Wii U data don't apply)
         else:
             self.outputs.append(ModelOutput(root, tex_rel, "texture", len(out)))
         fix = self._texinfo_fix(root, rel, container, m, len(ts.textures), notes)
@@ -1685,6 +1697,8 @@ class ModelJob:
         game = self._same_textures(path, out, ts, vanilla, rel, pack)
         if game is None:
             self.outputs.append(ModelOutput(root, rel, "texture", len(out)))
+        else:
+            notes = []
         return Result(out if game is None else game, CONVERTED, "texture",
                       f"{len(ts.textures)} texture(s)" + (f"; {SAME_NOTE}" if game else ""), warnings=notes,
                       yaz0_align=0, game_bytes=game)
@@ -1722,8 +1736,9 @@ class ModelJob:
                 notes.append("TexInfo.txt not written: the mod has no X.Tex1 for this model" + (
                     " and your game has no model of this name" if self.game else
                     "; with your game files (--game) it gets the count of the game's X.Tex"))
+        checked: list[str] = []     # (about the X.Tex the game loads: kept when the game's model file ships)
         if self.game is not None and kind == "model":
-            self._check_textures(res, path, rel, pack, donor, notes)
+            self._check_textures(res, path, rel, pack, donor, checked)
         vanilla = None
         game = None
         if donor is not None:
@@ -1744,6 +1759,7 @@ class ModelJob:
                         pass
         if game is not None:
             self.same.append(path)
+            notes = []     # (the game's own file ships: notes on converting the Wii U data don't apply)
         else:
             self.outputs.append(ModelOutput(root, rel, kind, len(out), wm_convert.size_count(res), vanilla))
         bits = [f"{info['models']} model(s)" if info["models"] else "",
@@ -1758,6 +1774,7 @@ class ModelJob:
         if self.game is not None and info["alone_materials"] and kind == "model":
             notes.append(f"{info['alone_materials']} material(s) are not in your game's model of this name and were "
                          f"converted field by field (Wii U and Switch names may differ: check them in game)")
+        notes += checked
         self.stats["models" if kind == "model" else "animation files"] += 1
         return Result(out if game is None else game, CONVERTED, kind, ", ".join(b for b in bits if b),
                       warnings=notes, yaz0_align=0, game_bytes=game)
@@ -1770,7 +1787,7 @@ class ModelJob:
         say)."""
         root = self.where(path)[0]
         name = rel.rsplit("/", 1)[-1]
-        stem, ext = MODEL_EXT_RE.sub("", name), MODEL_EXT_RE.search(name).group(0)
+        stem, ext = MODEL_EXT_RE.sub("", name), _model_ext(name)
         base = SPLIT_RE.match(stem).group("base") if SPLIT_RE.match(stem) else stem
         d = rel.rpartition("/")[0]
         known: set[str] = set()
@@ -2725,24 +2742,30 @@ def _verify_titlebg(game: GameFiles, say=print) -> dict:
     makes each one (X.Tex as X.Tex1 + X.Tex2), stored as Yaz0 with literal bytes only (made at once; a real mod's
     Yaz0 takes longer to decompress), and the pack goes through the mod converter with your game files. Each file
     must come out as your game's: its own bytes, or the same values. Both steps are timed; run it at low priority."""
-    row: dict = {"group": "whole Pack/TitleBG.pack: its models, animations and textures as Wii U files", "path": TITLEBG,
-                 "problems": []}
+    row: dict = {"group": "whole Pack/TitleBG.pack: its models, animations and textures as Wii U files",
+                 "path": TITLEBG, "problems": []}
     probs = row["problems"]
     idx = game.pack_index(TITLEBG) or {}
     names = [n for n in idx if MODEL_EXT_RE.search(n)]
     t0 = time.time()
     files, wiiu_bytes = [], 0
+    row["not_made"] = []     # files our Wii U writer can't make in full: the pack gets your file, nothing compared
     for n in names:
         dec = _plain(game.pack_entry(TITLEBG, n))
         m = re.match(r"^(?P<base>.+)\.Tex(?P<ext>\.s?bfres)$", n)
+        notes: list[str] = []
         try:
             if m:
                 pair = wiiu_bfres.write_textures(nx_bfres.read_textures(dec))
                 made = [(f"{m.group('base')}.Tex{k}{m.group('ext')}", d) for k, d in zip((1, 2), pair)]
             else:
-                made = [(n, wiiu_models.write(nx_model.read(dec), keep_render_infos=False))]
+                made = [(n, wiiu_models.write(nx_model.read(dec), keep_render_infos=False, notes=notes))]
         except (ModelError, FormatError, struct.error, ValueError) as e:
-            probs.append(f"{n}: our Wii U writer refused it ({e})")
+            row["not_made"].append(f"{n}: {e}")
+            continue
+        lost = [x for x in notes if "left out of the Wii U file" in x and not x.startswith("TexInfo.txt")]
+        if lost:
+            row["not_made"].append(f"{n}: {lost[0]}")
             continue
         for wn, wd in made:
             if wd is not None:
@@ -2769,10 +2792,15 @@ def _verify_titlebg(game: GameFiles, say=print) -> dict:
     got = {n.name: sw[s.data_offset + n.start:s.data_offset + n.end] for n in s.nodes}
     if set(got) != set(idx):
         probs.append(f"pack names differ from the game's: {sorted(set(got) ^ set(idx))[:4]}")
+    skipped = {x.split(":", 1)[0] for x in row["not_made"]}
     for n in names:
         if n not in got:
             continue
         van = game.pack_entry(TITLEBG, n)
+        if n in skipped:
+            if got[n] != van:
+                probs.append(f"{n}: not in the Wii U pack, but not your game's file either")
+            continue
         if got[n] == van:
             row["vanilla_bytes"] += 1
             continue
@@ -2906,6 +2934,9 @@ def verify_text(r: dict) -> str:
                             f"{round(x['wiiu_mb'], 1)} MB), {x['vanilla_bytes']} written as your game's own bytes, "
                             f"{x['value_equal']} equal value by value; Wii U pack built in {x['build_seconds']} s, "
                             f"converted in {x['convert_seconds']} s")
+                if x.get("not_made"):
+                    bits.append(f"{len(x['not_made'])} not made by our Wii U writer (filled from your pack): "
+                                + "; ".join(x["not_made"][:3]))
             if x.get("a_hint_default"):
                 bits.append(f"A swizzle field by role differs for {len(x['a_hint_default'])} "
                             f"({', '.join(x['a_hint_default'][:2])})")

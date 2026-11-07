@@ -144,10 +144,13 @@ files, or its `content` folder on its own. The library keeps only the Switch cop
   outside the mod folder, names starting with `-`, links and password-protected packages are refused before anything
   is written. `tar.exe` can't read names beyond plain ASCII reliably: such a package asks for 7-Zip.
 - BCML packages hold only the files a mod changes inside each pack: `add` fills the packs back from your game's
-  files, applies the actor parameter changes (`deepmerge.aamp`) and makes a size table (RSTB) for the mod when its
-  sizes change the game's.
-- Logs it can't merge (animation lists, game data, texts, maps...) are printed as `needs attention:` and repeated by
-  `deploy`: the game's own data is used for those parts.
+  files, merges its logs (actor parameters, animation lists, game and save data, actor info, texts, drops, shops,
+  maps, quests...) into the game's files and makes a size table (RSTB) for the mod when its sizes change the game's.
+  It prints a `logs merged:` line.
+- What it can't merge (BCML 2 logs, damaged logs, parts of a log the game has no place for) is printed as
+  `needs attention:` and repeated by `deploy`: the game's own data is used for those parts. Two packages that ship
+  the same pack (`Bootup.pack`, `TitleBG.pack`...) aren't merged with each other yet: the later one's wins, and
+  `deploy` says what the earlier one loses.
 - `list` shows the package's version. To change the options, `remove` it and add it again.
 
 ## UKMM packages

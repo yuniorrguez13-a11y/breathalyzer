@@ -287,6 +287,24 @@ class InspectTests(unittest.TestCase):
                 self.assertIn("install it in UKMM or BCML (Switch mode)", findings[0].detail)
                 self.assertEqual(mi.overall(findings), "works after merging in UKMM (Switch mode)")
 
+    def test_bnp_logs(self):
+        """Every BCML 3 log is merged (works); a BCML 2 log (savedata.sarc, deepmerge.yml, texts_*) isn't: partial
+        (made-up mods)."""
+        info = {"info.json": json.dumps({"name": "x", "platform": "switch"}), "logs/packs.json": "{}"}
+        bcml3 = {f"logs/{n}": "x" for n in ("gamedata.yml", "texts.json", "map.yml", "shop.aamp", "actorinfo.yml")}
+
+        def bnp_finding(files):
+            with tempfile.TemporaryDirectory() as d:
+                return next(f for f in mi.inspect(mi.open_source(make(Path(d), files))) if f.kind == "BCML mod (BNP)")
+        found = bnp_finding({**info, **bcml3, "options/o/logs/quests.yml": "x"})
+        self.assertEqual(found.verdict, mi.WORKS)
+        self.assertIn("texts, drops, shops, maps", found.detail)
+        for old in ("logs/savedata.sarc", "options/o/logs/deepmerge.yml", "logs/texts_USen.sarc"):
+            with self.subTest(old):
+                found = bnp_finding({**info, old: "x"})
+                self.assertEqual(found.verdict, mi.PARTIAL)
+                self.assertIn(old.rsplit("/", 1)[-1].lower(), found.detail)
+
     def test_unknown(self):
         _, overall = self.run_on({"readme.txt": "hi"})
         self.assertIn("doesn't look like", overall)

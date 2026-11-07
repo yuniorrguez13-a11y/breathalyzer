@@ -38,7 +38,7 @@ proven on your own Switch files but not yet tried with a real Wii U model mod or
 
 | Tool | What it does | Docs |
 |---|---|---|
-| `tools/modman.py` | The mod manager: add, order, deploy and start mods (uses the tools below) | [mod-manager](docs/mod-manager.md) |
+| `tools/modman.py` | The mod manager: add, order, deploy and start mods (uses the tools below), and mod sets you switch between (`profile`) | [mod-manager](docs/mod-manager.md), [profiles](docs/profiles.md) |
 | `tools/modman_gui.py` | A large-print window for the mod manager (big text, every button works with the keyboard) | [mod-manager](docs/mod-manager.md#window) |
 | `tools/quality.py` | Quality presets Low, Medium, High and Original: more fps on a weak PC (grass, draw distance, shadows, effects) | [performance](docs/performance.md) |
 | `tools/wiiu_convert.py` | Converts a Wii U mod to a Switch mod on your PC: texts, maps, actor data, models and textures (audio not yet). `modman add` uses it | [wiiu-mods](docs/wiiu-mods.md), [wiiu-models](docs/wiiu-models.md) |
@@ -53,6 +53,14 @@ proven on your own Switch files but not yet tried with a real Wii U model mod or
 | `tools/codemap.py` | Names functions in your own `main` from its C++ type info (output stays on your PC) | [code-map](docs/code-map.md) |
 | `tools/control.py` | Small client for Savage Wind's control port (used by the tools above) | |
 | `tools/check_clean.py` | Makes sure no game files are in the repo | [NOTICE](NOTICE.md) |
+
+Being built (Mods page v2; each part is off until its tool is there):
+
+| Tool | What it will do | Docs |
+|---|---|---|
+| `tools/mod_settings.py` | Settings pages for mods (on/off, sliders, choices, keys, buttons, sub-pages) in the game and in Mod Manager | [mod-settings](docs/mod-settings.md) |
+| `tools/font.py` | Fixes the symbols the menu font lacks, an easy-to-read font, and font mods | [fonts](docs/fonts.md) |
+| `tools/mod_pictures.py`, `tools/layout_patch.py` | Mod pictures in Mod Manager and (opt-in) on the Mods page | [mod-pictures](docs/mod-pictures.md) |
 
 ```
 python -m unittest discover -s tests                # run the tests (made-up data only)
@@ -70,8 +78,8 @@ the path); a listed path skips every check.
 | Folder | What's in it |
 |---|---|
 | `docs/` | Plan, mod compatibility, how-tos for each tool, and the [game addresses](docs/addresses.md) the mods and tools use (1.9.0) |
-| `native/` | The native mod host, its mod API header (`swmod.h`), the [game basics](docs/game-basics.md) header (`botw.h`) and the example mods (hello, stamina_hook, ghost, basics_show_pos, basics_inf_stamina, basics_teleport_up), and the recipes `tools/quality.py` builds its performance mods from (perf_effects, perf_shadows) |
-| `tools/` | Python tools (standard library only) |
+| `native/` | The native mod host, its mod API header (`swmod.h`), the [game basics](docs/game-basics.md) header (`botw.h`) and the example mods (hello, stamina_hook, ghost, basics_show_pos, basics_inf_stamina, basics_teleport_up, settings_demo), and the recipes `tools/quality.py` builds its performance mods from (perf_effects, perf_shadows) |
+| `tools/` | Python tools (standard library only; Pillow, when installed, adds JPG and WEBP pictures and font mods) |
 | `tests/` | Tests built from dummy files |
 | `out/`, `build/` | What the tools make on your PC (ignored by git; never commit) |
 | `upstream/` | Local clone of Savage Wind's `test` branch. Ignored by git; not part of this repo |

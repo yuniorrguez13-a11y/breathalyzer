@@ -21,6 +21,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -64,7 +65,11 @@ class Target:
         return out / self.subdir / self.filename if self.subdir else out / self.filename
 
 
-HOST = Target("modhost", (HOST_SRC / "modhost.c",), runtime=True, export="swgame_tables")
+# modhost's sources. settings.c (mod settings, API 3: docs/mod-settings.md) is built in once it is there, so this
+# list never names a file that is missing.
+SETTINGS_SRC = HOST_SRC / "settings.c"
+HOST_SOURCES = (HOST_SRC / "modhost.c", *((SETTINGS_SRC,) if SETTINGS_SRC.is_file() else ()))
+HOST = Target("modhost", HOST_SOURCES, runtime=True, export="swgame_tables")
 EXAMPLES = (
     Target("hello", (NATIVE / "examples" / "hello" / "hello.c",), runtime=False, subdir="mods", export="swmod_init"),
 )
@@ -84,6 +89,12 @@ GHOST_EXAMPLES = (
 BASICS_EXAMPLES = tuple(
     Target(n, (NATIVE / "examples" / n / f"{n}.c",), runtime=False, subdir="basics-mods", export="swmod_init")
     for n in ("basics_show_pos", "basics_inf_stamina", "basics_teleport_up"))
+# The settings example (docs/mod-settings.md): a mod with every kind of setting, built into its own folder and not
+# copied by `install` (modman add native/examples/settings_demo takes it from there). Built once its source is there.
+_SETTINGS_DEMO = NATIVE / "examples" / "settings_demo" / "settings_demo.c"
+SETTINGS_EXAMPLES = tuple(
+    Target("settings_demo", (_SETTINGS_DEMO,), runtime=False, subdir="settings-mods", export="swmod_init")
+    for _ in range(1 if _SETTINGS_DEMO.is_file() else 0))
 _ST = HOST_SRC / "selftest"
 SELFTEST = (
     Target("fake_runtime", (_ST / "fake_runtime.c",), runtime=False, out_name=RUNTIME_DLL, subdir="selftest"),
@@ -114,7 +125,7 @@ SELFTEST_HOT = (
 # The race run: the self-test's own build of modhost (it can pause a game thread between hook_entry's has_hot check
 # and the gate), a mod loaded at game start that plays a game thread (race_probe), and two mods for modload that
 # break the rules (hot_misuse.c: an hle_override from a hook, as a tail call and while modunload waits).
-HOST_TEST = Target("modhost_test", (HOST_SRC / "modhost.c",), runtime=True, out_name="modhost_test.dll",
+HOST_TEST = Target("modhost_test", HOST_SOURCES, runtime=True, out_name="modhost_test.dll",
                    subdir="selftest", defines=("MODHOST_SELFTEST_PAUSE",), export="swgame_tables")
 SELFTEST_RACE = (
     Target("race_probe", (_ST / "race_probe.c",), runtime=False, subdir="selftest/race-start", export="swmod_init"),
@@ -585,7 +596,16 @@ for line in sys.argv[3:]:
 print(json.dumps(out))
 """
 
-API_VERSION = 2  # swmod.h SWMOD_API_VERSION (the host the selftest builds)
+def _api_version() -> int:
+    """swmod.h's SWMOD_API_VERSION: the mod API of the modhost this builds (and modman's highest loader_api)."""
+    try:
+        m = re.search(r"^#define SWMOD_API_VERSION (\d+)", (HOST_SRC / "swmod.h").read_text(encoding="utf-8"), re.M)
+    except OSError:
+        m = None
+    return int(m.group(1)) if m else 2
+
+
+API_VERSION = _api_version()  # swmod.h SWMOD_API_VERSION (the host the selftest builds)
 SELFTEST_LINES = ("mods", "hello", "probe", "probe fail", "#overrides", "#guest_calls", "#commands")
 FAKE_BUILTINS = ["help", "ping"]  # the fake savagewind.exe's own commands (fake_runtime.c)
 HOST_COMMANDS = ["mods", "modload", "modunload", "modreload"]  # the commands modhost adds (modhost.c swgame_tables)
@@ -1104,7 +1124,7 @@ def main(argv: list[str] | None = None) -> int:
         tc = find_toolchain(install)
         if a.action == "selftest":
             return selftest(tc, a.out)
-        targets = (HOST, *EXAMPLES, *HOOK_EXAMPLES, *GHOST_EXAMPLES, *BASICS_EXAMPLES)
+        targets = (HOST, *EXAMPLES, *HOOK_EXAMPLES, *GHOST_EXAMPLES, *BASICS_EXAMPLES, *SETTINGS_EXAMPLES)
         built = build(tc, a.out, targets)
         check_exports(zip(built, targets))
         print(f"Built {len(built)} file(s) in {a.out}")
@@ -1117,6 +1137,9 @@ def main(argv: list[str] | None = None) -> int:
               " installed: see docs/ghost.md)")
         print(f"({', '.join(t.filename for t in BASICS_EXAMPLES)} in {a.out / 'basics-mods'} are examples for"
               " 1.9.0 and aren't installed: see docs/game-basics.md)")
+        if SETTINGS_EXAMPLES:
+            print(f"({', '.join(t.filename for t in SETTINGS_EXAMPLES)} in {a.out / 'settings-mods'} isn't installed:"
+                  " add it with modman, see docs/mod-settings.md)")
         return 0
     except (BuildError, InstallError, PeError, OSError) as e:
         print(f"Error: {e}")

@@ -40,6 +40,7 @@ VERDICTS = {
 ORDER = [WORKS, CONVERT, PARTIAL, MERGE, LATER, RETARGET, REWRITE]
 USABLE = {WORKS, CONVERT}  # (MERGE isn't: modman and romfs_mods refuse the package itself, and take UKMM's output)
 BNP_ADD = "tools/modman.py add installs it (tools/bnp.py)"
+BCML2_LOGS = ("savedata.sarc", "deepmerge.yml")   # BCML 2's logs (and texts_*), which nothing here merges
 UKMM_ADD = ("tools/modman.py add builds it from your game files (tools/ukmm.py): its options, packs, plain files, "
             "the actor parameter files it can merge and a size table. Physics, animation sequences, texts, actor "
             "info, game data, maps and the other kinds UKMM keeps as its own data aren't merged yet: they are left "
@@ -249,12 +250,21 @@ def _bnp(src: Source, low: list[str]) -> Finding | None:
     wiiu = "wii" in platform
     if any(p.startswith("logs/") for p in low):
         # a packed BNP: its packs hold only what the mod changes. modman add installs a Switch one (tools/bnp.py:
-        # options, packs filled from the game, deepmerge, size table); a Wii U one is refused (romfs_mods and
-        # wiiu_convert refuse both)
+        # options, packs filled from the game, every BCML 3 log merged, size table); a Wii U one is refused
+        # (romfs_mods and wiiu_convert refuse both)
         if not wiiu:
+            old = sorted({n for p in low if "/logs/" in f"/{p}" and ((n := p.rsplit("/", 1)[-1]) in BCML2_LOGS
+                                                                      or n.startswith("texts_"))})
+            if old:
+                return Finding("BCML mod (BNP)", "switch", PARTIAL,
+                               f"BCML 2 package: {BNP_ADD}, but its {', '.join(old)} log(s) are BCML 2's and aren't "
+                               "merged (BCML 3 refuses such packages too): the parts of the mod that need them may "
+                               "not work")
             return Finding("BCML mod (BNP)", "switch", WORKS,
-                           f"BCML package: {BNP_ADD}: its options, its packs filled from your game, its actor "
-                           "parameter changes and a size table. Logs it can't merge are named (see docs/bnp.md)")
+                           f"BCML package: {BNP_ADD}: its options, its packs filled from your game, its logs merged "
+                           "(actor parameters, animation lists, game data, save data, actor info, texts, drops, "
+                           "shops, maps, quests) and a size table. Several packages' packs aren't merged with each "
+                           "other yet (see docs/bnp.md)")
         return Finding("BCML mod (BNP)", "wiiu", MERGE,
                        "Wii U BCML package, whose packs only hold the changes: install it in UKMM or BCML (Switch "
                        "mode), then use the merged output folder")

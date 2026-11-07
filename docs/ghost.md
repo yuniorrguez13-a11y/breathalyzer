@@ -25,7 +25,9 @@ tried between two PCs, and attacks with a real weapon are not checked (the test 
 - **Link body** (`client.py --ghost-link`): a small actor pack, built on your PC from your own game files, that gives
   the ghost Link's body and his animations. It works: Link's face and body (bald, in underwear) standing, walking,
   running and swinging next to you. See [Link body](#link-body-050-opt-in).
-- **Held items**: the weapon, shield and bow names are sent and logged. They are not drawn on the ghost yet.
+- **Held items** (0.6.0, `client.py --ghost-items`): the Link-body ghost holds the other player's weapon, shield and
+  bow, in its hands or on its back, and Link can't take them. **Checked in the game on one PC** (2026-11-07, ghost
+  items round). See [Held items](#held-items-060-opt-in).
 - The check, with one game and the bot: `python tools\mp\ghost_ingame_check.py --link --spot -1033.6 252.3 1809.3 132`
   (see [In-game check](#in-game-check)).
 
@@ -72,6 +74,10 @@ Alone, to try it: `python tools\mp\relay.py`, then the client with `--ghost`, th
 | `ghost anim off` | Play nothing (the actor keeps what it plays; the Sheikah man stands in a T-pose until something plays) |
 | `ghost anim <name>` | Always play this animation set of the actor (`Wait`, `Walk`, `Run`, `RunGear2`, `Turn`...). A name the actor doesn't have changes nothing: the mod asks 3 more times, then `last` says so |
 | `ghost far <far_m> [near_m]` | The distance rule (default `60 50`; `near_m` left out: 10 m less). `ghost far 0` turns it off (for a test, or an actor the game keeps farther away) |
+| `ghost items <weapon\|-> <shield\|-> <bow\|-> [mask]` | (0.6.0) What the ghost holds: item actor names, `-` for none. `mask` (0-7, default 4): which go on its back (bit 0 weapon, 1 shield, 2 bow). See [Held items](#held-items-060-opt-in) |
+| `ghost items off` | (0.6.0) Hold nothing (the items are deleted) |
+| `ghost items back on\|off` | (0.6.0) Back placement on (default) or off: off, everything is in the hands |
+| `ghost give <actor> [dx dy dz]` | (0.6.0, for tests) Spawn an actor near Link (default 1.5 m in front of him, 0.8 m up) for him to take. It never touches the ghost or its items |
 
 The commands only leave a request; the mod acts on it in the next frame. A `ghost spawn` sent in the same batch as a
 `ghost pos` spawns the actor right at that position. Of a `spawn` and a `despawn` sent before that frame, the later
@@ -86,6 +92,7 @@ one wins.
 | `--ghost-actor ACTOR` | Another actor name (implies `--ghost`), e.g. `Dm_Npc_Zelda_Sibyl` |
 | `--ghost-sync` | (0.5.0, checked in game on one PC) Also share animations and say what the other player holds. Use it on both PCs, each with ghost mod 0.5.0 (implies `--ghost`) |
 | `--ghost-link` | (0.5.0, checked in game on one PC) Show the other player with the [Link body](#link-body-050-opt-in) (implies `--ghost-sync`; not together with `--ghost-actor`) |
+| `--ghost-items` | (0.6.0, checked in game on one PC) The ghost also holds what the other player holds. Needs `--ghost-link` (only the Link body has the hand bones) and ghost mod 0.6.0 on your PC (implies `--ghost-sync`) |
 
 The `ghost` reply of 0.5.0 also has `version`, `takes_anim` and `has_self` (the client looks for these), `remote`
 (the other player's animation name now), `remote_calls`, `remote_misses` and `remote_missing` (the names the actor
@@ -257,6 +264,60 @@ RomFS mod (docs/romfs-mods.md) and use `client.py --ghost-link` (or `ghost spawn
 - **Risks:** the new files in the pack have no size table entries (the game estimates small files; they loaded
   fine); the bounding box is the Sheikah man's. Replacing an actor pack through the overlay works.
 - Keep the built folder to yourself (it is made from your game files). `out\` is never committed.
+
+## Held items (0.6.0, opt-in)
+
+**Works in the game on one PC** (2026-11-07, ghost items round, with `ghost items` from the check and through a relay
+and the bot): the Link-body ghost holds a sword, two-hander or spear in its right hand, a shield and a bow in its left
+hand, or any of them on its back; it switches when the other player switches, holds nothing when they hold nothing,
+and Link can't take them. Not yet tried between two PCs.
+
+```
+python tools\build_native.py build                       # ghost.dll 0.6.0
+python tools\mp\client.py --relay 192.168.1.20 --name Ana --ghost-link --ghost-items
+```
+
+Use it on both PCs (each sends what its own Link holds; ghost mod 0.6.0 on each). Without `--ghost-items` nothing
+changes. An older client on the other PC still works: its weapon, shield and bow show, with the bow on its back.
+
+- **How.** For each of the other player's items the mod spawns that item (a real item actor, by its name, next to the
+  ghost's hand), checks it is of the Weapon class, then calls the item's own "grab" with the ghost as the holder. From
+  then on the game itself keeps the item on the ghost's hand bone (`Weapon_R` for the weapon, `Weapon_L` for the
+  shield and the bow), every frame, and turns the item's pick-up off. The grab is refused for the item's first frame
+  or two (its AI hasn't run yet), so the mod asks each frame for up to 1 s. In the game: all three held 0.3-0.4 s
+  after the request.
+- **Switching** deletes the old item and spawns the new one; **dropping** deletes it. An item is never "let go"
+  (a let-go item falls and can be picked up). If the game ever lets one go anyway, the mod deletes it at once and asks
+  for it again (at most 3 tries per name).
+- **On the back.** The client sends which items are on the sender's back (`on_back`, read from Link's own equipment:
+  `ghost self`). The mod then moves the item to a bone follow of its own on the ghost's `Pod_A` bone, with the item's
+  own "on the back" offsets from the game data (the ones the game uses for Link). In the game: each item sat exactly at
+  its offset from `Pod_A`. `ghost items back off` keeps everything in the hands.
+- **Can't take them.** Link walked up to the ghost and pressed A five times, unarmed and armed: no prompt, his own
+  items stayed his, the ghost's stayed the same actors, still held.
+- **Cleanup.** The items go before the ghost does (`ghost despawn`, the distance rule, a new spawn) and when the game
+  removed the ghost; after a reload (stage change) they are forgotten, as the ghost is. Deleted items are watched until
+  they are gone (`items.stray`: still there 1 s later; 0 in every check).
+- **Which body.** Only the Link body has the hand bones; on the Sheikah man the mod finds none and spawns no item
+  (`items.bones` says `missing`).
+- **Cost.** About 0.8 frames a second for three items in the check (27.3 -> 26.5, inside the budget of 1).
+
+`ghost` reply fields (0.6.0): `has_items` (the client looks for it), `items.on`, `items.back`, `items.mask`,
+`items.bones` (`ok`, `ok, no Pod_A`, `missing ...`, `looking`, `no model`), `items.stray`, `items.us` (median
+microseconds of the items' part of a frame; `items.us_avg`, `items.us_max`), `items.calls` and `items.queries` (game
+calls and memory queries a frame), `tick_us` (the whole frame's tick), counters `items.requests`, `items.held`,
+`items.deleted`, `items.lost`, and per slot (0 weapon, 1 shield, 2 bow) `items.N.name`, `state` (`none`, `wait`,
+`pending`, `grab`, `held`, `failed`), `actor`, `place` (`hand`, `back`), `dist_m` (from the item to its bone),
+`hold_m` (the length of its "on the back" offset), `tries`, `item_state` (255 held), `holder_ok`, `why`; and
+`give.state`, `give.name`, `give.actor`. `ghost self` (0.6.0) adds `weapon_back`, `shield_back`, `bow_back` and
+`on_back`.
+
+**Not done:** special items (the Master Sword, torches, boomerangs, elemental weapons) were not tried; a sheath or
+quiver is not drawn; the ghost's own pose doesn't change for a shield or a bow (it plays the other player's
+animation, as before). **Armor is not built:** it would work the same way (an armor actor bound to the ghost copies its
+pose by bone name), but almost every head piece and most upper pieces have cloth physics, estimated at 1-4 frames a
+second, and some of the game's code paths would meet a missing pointer that is not checked yet
+(out/research/ghost-items-plan.md, "Armor").
 
 ## How it works
 
@@ -468,6 +529,22 @@ Eleventh round (what the tenth left open: an attack, item names, the Sheikah man
 | Cost of the Link body (L5) | 30.0 -> 29.9 and 29.9 -> 29.9. |
 | Save | The game autosaved into the test save's slots 2 and 3 during the runs, both before the sword was taken (the next run started without it). A copy from before is in `out\test-save-backup-1425`. |
 
+Twelfth round (held items, ghost.c 0.6.0), 2026-11-07, about 16:00-17:30, same test save and spot, the Link body,
+`ghost_ingame_check.py --items --give-weapon --lib out\ghost-items-lib` (a scratch library). Each game start closed
+with `exit`, no crash or hang, no bad line in the log. Results: `out\research\ghost-items-results.txt` (and
+`-run2.txt`), logs `out\research\ghost-items-run{2,3}.log`, screenshots `out\shots\ghostitems_*.png` (run 2:
+`out\shots\ghostitems-run2\`). Run 1 never reached the game (a relative `--lib` path; fixed).
+
+| Step | Result |
+|---|---|
+| In the hands (H1) | Sword, shield and bow held 0.39 s after `ghost items`, item state 255, holder the ghost; 0.000 m from the hand bones in all 30 samples (standing, walking a circle, swinging `CutS1`). The pictures show the wooden shield on the ghost's left arm and the sword in its right hand (`ghostitems-run2\ghostitems_H9_after_reload.png`). |
+| Switch, clear (H2, H3) | Sword -> two-hander -> spear -> sword: each held 0.27-0.39 s after the change, then 10 switches 0.3 s apart: the right sword at the end, nothing left over (`stray` 0). Clearing the shield kept the same sword and bow actors; gone in 0.04 s. |
+| Back (H4) | All three on `Pod_A` at exactly their own offsets' length (off by 0.000 m), seen from behind on the ghost's back; in the hands again on mask 0; 10 toggles, no stray. |
+| Can't take (H5) | Link 0.4 m from the ghost, A five times, unarmed and later armed: no prompt, his items unchanged, the ghost's the same actors, still held. |
+| Network (H10) | Relay, `bot.py --items` (3 steps), the client with `--ghost-items`: each step held in its place 0.0-0.3 s after its names reached the mod. |
+| Give, sender (H12, H13) | `ghost give` put a sword, a shield and a bow in front of Link; he took each (A); `ghost self` named all three (this also closes the gap of the eleventh round: shield and bow names read right). Out (Y, ZL, ZR) each read "not on the back", after a sprint "on the back". |
+| Run 2 fails, fixed | H6-H8: the items were deleted (`items.deleted` went up, `stray` 0), but the slot status still said "held" once the ghost was gone: fixed (the status is cleared with them). H9: a teleport to -400 200 1300 put Link on a cliff, no reload: now Link falls from 90 m, Game Over, Continue. H11: 27.3 -> 26.5 frames a second (inside the budget), but `items.us` read 3,895 (an average that a slow frame or a thread switch spoils): now the median of 64 frames, with the game calls and memory queries a frame, and the memory check keeps 32 regions instead of 8. |
+
 ## In-game check
 
 When you may start the game, one command runs the checks of both research plans with one game and the bot, and
@@ -492,6 +569,24 @@ the animation slots' shape, `Wait` standing, `Move` walking, running and sprinti
 equipped, or `--give-weapon`; else SKIP), item names, the frame cost of `ghost self` (two pairs, averaged), the Link
 body (spawn, `Wait`, walk and run, attacks, jump, glide, climb, swim, frame cost), and a relay with the bot sending
 animation names (`bot.py --anim`).
+
+The held items (0.6.0) have their own run, H1-H14 (`tools\mp\ghost_items_check.py`; it builds and deploys the Link
+body too, about 8 minutes):
+
+```
+python tools\mp\ghost_ingame_check.py --items --spot -1033.6 252.3 1809.3 132 --give-weapon --lib out\ghost-items-lib
+```
+
+`--lib` is a scratch mod library: `ghost.dll` goes to `out\ghost-items-lib\mods` and the Link body to
+`out\ghost-items-lib\overlay`, never to your own library. The mod plays the other player with `ghost items`; H10 goes
+through a relay, the bot (`--items`) and the client (`--ghost-items`). Checks: H1 all three held in the hands while
+the ghost stands, walks and swings; H2 switching (then 10 switches 0.3 s apart); H3 clearing; H4 on the back and
+back again (10 toggles); H5 Link can't take them (unarmed, and armed after H12); H6 despawn, H7 the distance rule,
+H8 the game removing the ghost, H9 a reload (Link falls from 90 m, Game Over, Continue): nothing left behind and the
+items come back; H10 the network; H11 the frame cost; H12 `ghost give`: Link takes a sword, a shield and a bow (this
+changes the test save if the game saves); H13 the sender's "on the back" bytes; H14 no bad line in the log, and the
+game closed with `exit`. Results go to `out\research\ghost-items-results.txt`, screenshots to
+`out\shots\ghostitems_*.png`.
 
 
 ## Stand-ins: which actors work
@@ -524,8 +619,8 @@ the actor doesn't follow).
 
 - **Not Link** (by default). A Sheikah man who stands, walks or runs by his speed: no head turn, no jump, climb, swim,
   glide or riding pose, no attacks, no held weapons or items. With `--ghost-sync` he still shows only those three
-  (he has nothing else); the [Link body](#link-body-050-opt-in) has the rest (works on one PC). Held items are never drawn
-  yet. The feet slide a little when the speed doesn't match the clip. The
+  (he has nothing else); the [Link body](#link-body-050-opt-in) has the rest (works on one PC). Held items (0.6.0,
+  `--ghost-items`) only on the Link body; no armor. The feet slide a little when the speed doesn't match the clip. The
   fallback is a crate (no animation). The facing is the walking direction, so a player who walks backwards or
   sideways is shown facing the way they move (the game's state exposes no facing).
 - **About 50 ms behind**: the smoothing reaches each position when the next one arrives, on top of the client's

@@ -15,6 +15,10 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+import aamp  # noqa: E402
+import bcml_data as bd  # noqa: E402
+import bcml_maps as bm  # noqa: E402
+import bcml_texts as bt  # noqa: E402
 import bnp  # noqa: E402
 import modman as mm  # noqa: E402
 import romfs_mods as rm  # noqa: E402
@@ -890,6 +894,406 @@ class Archive(Base):
                 self.assertRaises(bnp.BnpError) as cm:
             bnp.list_archive(str(out))
         self.assertIn("holds a link (j)", str(cm.exception))
+
+
+# ---------------------------------------------------------------- the data logs (bcml_data, bcml_maps, bcml_texts)
+
+ARMOR = "ActorType/ArmorUpper.msbt"
+SAVE_HEAD = {"IsCommon": False, "IsCommonAtSameAccount": False, "IsSaveSecureCode": True, "file_name": "game_data.sav"}
+SAVE_INFO = [{"directory_num": 8, "is_build_machine": True, "revision": 18224}]
+DROP_PATH = "Actor/Pack/Enemy_T.sbactorpack//Actor/DropTable/T.bdrop"
+SHOP_PATH = "Actor/Pack/Npc_T.sbactorpack//Actor/ShopData/T.bshop"
+
+
+def byml(v, compress: bool = True) -> bytes:
+    raw = bd.byml_dump(v)
+    return yaz0(raw) if compress else raw
+
+
+def signed(h: int) -> int:
+    return h - (1 << 32) if h >= 1 << 31 else h
+
+
+def flag(name: str, init=0) -> dict:
+    return {"DataName": name, "DeleteRev": -1, "HashValue": signed(crc(name)), "InitValue": init,
+            "IsEventAssociated": False, "IsOneTrigger": False, "IsProgramReadable": True, "IsProgramWritable": True,
+            "IsSave": True, "MaxValue": True, "MinValue": False, "ResetType": 0}
+
+
+def flag_yaml(name: str, init: int = 1) -> str:
+    return "{" + ", ".join(f"{k}: {str(v).lower() if isinstance(v, bool) else v}"
+                           for k, v in flag(name, init).items()) + "}"
+
+
+def save_format(name: str, entries: list) -> bytes:
+    return byml({"file_list": [{**SAVE_HEAD, "file_name": name}, entries], "save_info": SAVE_INFO}, False)
+
+
+def map_obj(h: int, name: str = "Obj_A") -> dict:
+    return {"HashId": bm.U32(h), "SRTHash": 0, "Translate": [0.0, 1.5, -2.0], "UnitConfigName": name}
+
+
+def quest(name: str) -> dict:
+    return {"Name": name, "Location": "Field", "NotPostNote": False, "Orderer": "Someone", "Type": 0,
+            "StepDependencyFlags": [], "Steps": [{"StepName": f"{name}_0"}]}
+
+
+def msbt(labels: dict) -> bytes:
+    return bt.msbt_build(bt.Msbt(max(1, len(labels)), list(labels), 0, [],
+                                 [t.encode("utf-16-le") + b"\0\0" for t in labels.values()]))
+
+
+def msbt_texts(arc: bytes) -> dict:
+    m = bt.msbt_read(dict(wc.sarc_files(wc.yaz0_decompress(arc)[0]))[ARMOR])
+    return {lb: t[:-2].decode("utf-16-le") for lb, t in zip(m.labels, m.texts)}
+
+
+def bdrop(tables: dict) -> bytes:
+    """{table: {item: probability}}, each table dropping once."""
+    root = aamp.PList()
+    head = aamp.PObject()
+    head.set("TableNum", aamp.INT, len(tables))
+    root.objects[crc("Header")] = head
+    for i, (t, items) in enumerate(tables.items(), 1):
+        head.set(f"Table{i:02}", aamp.STRING64, t)
+        o = aamp.PObject()
+        for (_, key), v in zip(bt.DROP_KEYS, (1, 1, 0, 0)):
+            o.set(key, aamp.INT, v)
+        o.set("ColumnNum", aamp.INT, len(items))
+        for j, (n, p) in enumerate(items.items(), 1):
+            o.set(f"ItemName{j:02}", aamp.STRING64, n)
+            o.set(f"ItemProbability{j:02}", aamp.F32, p)
+        root.objects[crc(t)] = o
+    return aamp.dump(root)
+
+
+def bshop(items: list) -> bytes:
+    """One table, Normal: [(name, num, price, look flag, amount)]."""
+    root = aamp.PList()
+    head = aamp.PObject()
+    head.set("TableNum", aamp.INT, 1)
+    head.set("Table01", aamp.STRING64, "Normal")
+    root.objects[crc("Header")] = head
+    o = aamp.PObject()
+    o.set("ColumnNum", aamp.INT, len(items))
+    for j, it in enumerate(items, 1):
+        o.set(f"ItemSort{j:03}", aamp.INT, j - 1)
+        for (k, ty), v in zip(bt.SHOP_KEYS, it):
+            o.set(f"{k}{j:03}", ty, v)
+    root.objects[crc("Normal")] = o
+    return aamp.dump(root)
+
+
+def shop_rows(data: bytes) -> list:
+    return [tuple(it[k].value for k, _ in bt.SHOP_KEYS) for it in bt._read_shop(data)[0][0][1].values()]
+
+
+def shop_log() -> bytes:
+    """Item_A removed from Normal, Item_B's count changed."""
+    def item(**params) -> aamp.PObject:
+        o = aamp.PObject()
+        for k, v in params.items():
+            o.set(k, dict(bt.SHOP_KEYS)[k], v)
+        return o
+    diff = aamp.PList()
+    for key, items in (("Removals", {"Item_A": item()}), ("Additions", {"Item_B": item(ItemNum=9)})):
+        diff.lists[crc(key)] = aamp.PList(lists={crc("Normal"): aamp.PList(
+            objects={crc(n): o for n, o in items.items()})})
+    root = aamp.PList()
+    names = aamp.PObject()
+    names.set("File0", aamp.STRING_REF, f"{R}/{SHOP_PATH}")
+    root.objects[crc("Filenames")] = names
+    root.lists[crc(f"{R}/{SHOP_PATH}")] = diff
+    return aamp.dump(root)
+
+
+def data_game() -> tuple[dict, dict]:
+    """A made-up game's files for every kind of data log (RomFS path -> bytes), and size table entries for them."""
+    gamedata = sarc({"/bool_data_0.bgdata": byml({"bool_data": [flag("FlagA")]}, False),
+                     "/s32_data_0.bgdata": byml({"s32_data": [flag("CountB", 3)]}, False)})
+    savedata = sarc({"/saveformat_0.bgsvdata": save_format("game_data.sav", [{"DataName": "FlagA",
+                                                                              "HashValue": signed(crc("FlagA"))}]),
+                     "/saveformat_1.bgsvdata": save_format("caption.sav", [{"DataName": "C", "HashValue": 1}]),
+                     "/saveformat_2.bgsvdata": save_format("option.sav", [{"DataName": "O", "HashValue": 2}])})
+    events = bd.byml_dump({"Ev<A>": {"mode": "Seamless"}})
+    static_unit = bm.byml_dump({"LocationPosX": 0.0, "LocationPosZ": 0.0, "LocationSize": 1000.0,
+                                "Objs": [map_obj(5), map_obj(9)], "Rails": []})
+    dynamic_unit = bm.byml_dump({"Objs": [map_obj(2)], "Rails": []})
+    quests = bm.byml_dump([quest("Q1"), quest("Q2")])
+    main_static = bm.byml_dump({"StartPos": [{"Map": "A-1", "PosName": "P",
+                                              "Translate": {"X": 1.2, "Y": -3.5, "Z": 0.0}}]})
+    enemy = sarc({"Actor/DropTable/T.bdrop": bdrop({"Normal": {"Item_A": 30.0}, "Rare": {"Item_R": 100.0}}),
+                  "Actor/ActorLink/Enemy_T.bxml": "game link"})
+    npc = sarc({"Actor/ShopData/T.bshop": bshop([("Item_A", 1, 0, False, 0), ("Item_B", 2, 5, True, 1)])})
+    msg = {lang: sarc({ARMOR: msbt({"A_Name": name})}) for lang, name in (("USen", "Tunic"), ("EUde", "Rock"))}
+    files = {
+        "Actor/ActorInfo.product.sbyml": byml({"Actors": [{"name": "Hero", "instSize": 100}],
+                                               "Hashes": [bd.U32(crc("Hero")) if crc("Hero") >> 31 else crc("Hero")]}),
+        "Pack/Bootup.pack": sarc({
+            "GameData/gamedata.ssarc": yaz0(gamedata), "GameData/savedataformat.ssarc": yaz0(savedata),
+            "Event/EventInfo.product.sbyml": yaz0(events),
+            "Ecosystem/StatusEffectList.sbyml": byml([{"AttackUp": [{"special": False}, {"values": [{"val": 1.0}]}]}]),
+            "Ecosystem/AreaData.sbyml": byml([{"AreaNumber": 0, "Area": "A"},
+                                              {"AreaNumber": 1, "Area": "X", "Animal": [{"name": "W", "num": 2.0}]}]),
+            "Actor/ResidentActors.byml": byml([{"name": "A", "only_res": False}, {"name": "B", "only_res": True}],
+                                              False),
+            "Map/MainField/Static.smubin": yaz0(main_static),
+            "Map/CDungeon/Static.smubin": byml({"StartPos": [{"Map": "D1", "PosName": "Entrance_1",
+                                                              "Translate": {"X": 0.0, "Y": 0.0, "Z": 0.0}}]}),
+            "Other/Untouched.txt": "game untouched"}),
+        "Pack/TitleBG.pack": sarc({"Map/MainField/A-1/A-1_Static.smubin": yaz0(static_unit),
+                                   "Quest/QuestProduct.sbquestpack": yaz0(quests),
+                                   "Actor/Pack/Npc_T.sbactorpack": yaz0(npc)}),
+        "Map/MainField/A-1/A-1_Dynamic.smubin": yaz0(dynamic_unit),
+        "Actor/Pack/Enemy_T.sbactorpack": yaz0(enemy),
+        **{f"Pack/Bootup_{lang}.pack": sarc({f"Message/Msg_{lang}.product.ssarc": yaz0(m)}) for lang, m in msg.items()},
+    }
+    sizes = {"GameData/gamedata.sarc": bnp.round32(len(gamedata)) + 512,
+             "GameData/savedataformat.sarc": bnp.round32(len(savedata)) + 512,
+             "Event/EventInfo.product.byml": bnp.round32(len(events)) + 432,
+             "Map/MainField/A-1/A-1_Static.mubin": bnp.round32(len(static_unit)) + 448,
+             "Map/MainField/A-1/A-1_Dynamic.mubin": bnp.round32(len(dynamic_unit)) + 448,
+             "Quest/QuestProduct.bquestpack": bnp.round32(len(quests)) + 448,
+             "Map/MainField/Static.mubin": 4 * len(main_static),
+             "Message/Msg_USen.product.sarc": bnp.round32(len(msg["USen"])) + 512,
+             "Actor/DropTable/T.bdrop": 3000,
+             "Actor/Pack/Enemy_T.bactorpack": bnp.round32(len(enemy)) + 512,
+             "Actor/Pack/Npc_T.bactorpack": bnp.round32(len(npc)) + 512}
+    return files, sizes
+
+
+def data_package() -> dict:
+    """A made-up BCML 3 package with every kind of data log (the base's, and an option's gamedata and texts), the
+    event change BCML keeps in its shrunk Bootup.pack, a BCML 2 log and a damaged option log."""
+    info = {"name": "Every Log", "version": "1", "platform": "switch",
+            "options": {"multi": [{"name": "Extra", "folder": "Extra", "default": True}]}}
+    texts = {"USen": {"ActorType/ArmorUpper.msyt": {"B_Name": {"contents": [{"text": "Hood"}]}}}}
+    opt_texts = {"USen": {"ActorType/ArmorUpper.msyt": {"A_Name": {"contents": [{"text": "Cape"}]}}}}
+    counts = {"repeat_num_min": 1, "repeat_num_max": 1, "approach_type": 0, "occurrence_speed_type": 0}
+    drops = {f"{R}/{DROP_PATH}": {"Normal": {**counts, "repeat_num_max": 2,
+                                             "items": {"Item_A": "UNDERRIDE_CONST", "Item_New": 70.0}},
+                                  "Rare": {**counts, "items": {"Item_R": 100.0}}}}
+    events = byml({"Ev<A>": {"is_timeline": False, "mode": "Changed"}})
+    return {
+        "info.json": json.dumps(info),
+        f"{R}/Pack/Bootup.pack": sarc({"Event/EventInfo.product.sbyml": events}),
+        f"{R}/Model/New.txt": "mod new",
+        "logs/actorinfo.yml": f'"{crc("Hero")}":\n  instSize: 200\n"{crc("New_Actor")}": {{name: New_Actor, '
+                              "instSize: 50}\n",
+        "logs/gamedata.yml": f"bool_data:\n  add:\n    FlagNew: {flag_yaml('FlagNew')}\n  del: []\n"
+                             "s32_data: {add: {}, del: [CountB]}\n",
+        "options/Extra/logs/gamedata.yml": f"bool_data:\n  add:\n    FlagOpt: {flag_yaml('FlagOpt')}\n  del: []\n",
+        "logs/savedata.yml": f"add:\n- {{DataName: FlagNew, HashValue: {signed(crc('FlagNew'))}}}\ndel: []\n",
+        "logs/eventinfo.yml": "Ev<A>: {is_timeline: false, mode: Changed}\n",
+        "logs/effects.yml": "AttackUp:\n- {special: false}\n- values:\n  - {val: 1.5}\n",
+        "logs/areadata.yml": '"1":\n  Animal:\n  - {name: Z, num: 1.0}\n',
+        "logs/residents.yml": "B: {name: B, only_res: true, remove: true}\nC: {name: C, only_res: false}\n",
+        "logs/mainstatic.yml": "StartPos:\n  10010Q: {Map: B, PosName: Q, Translate: {X: 10.0, Y: 0.0, Z: 10.0}}\n",
+        "logs/dstatic.yml": "D1___Entrance_1:\n  Translate: {X: 5.0, Y: 0.0, Z: 0.0}\n",
+        "logs/map.yml": ("A-1_Static:\n  Objs:\n    add:\n    - {HashId: !u 0x7, SRTHash: 0, Translate: [1.0, 2.0, "
+                         "3.0], UnitConfigName: Added}\nA-1_Dynamic:\n  Objs:\n    del: [!u 0x2]\n"),
+        "logs/quests.yml": ("add:\n- {Location: Field, Name: Q3, NotPostNote: false, Orderer: Someone, "
+                            "StepDependencyFlags: [], Steps: [{StepName: Q3_0}], Type: 0, prev_quest: Q1}\n"
+                            "mod: {}\ndel: []\n"),
+        "options/Extra/logs/quests.yml": "- not a quest log\n",
+        "logs/drops.json": json.dumps(drops),
+        "logs/shop.aamp": shop_log(),
+        "logs/texts.json": json.dumps(texts),
+        "options/Extra/logs/texts.json": json.dumps(opt_texts),
+        "logs/savedata.sarc": sarc({"/saveformat_0.bgsvdata": b"old"}),
+    }
+
+
+class DataLogs(Base):
+    """Every kind of BCML 3 data log merged by install (tools/bcml_data.py, bcml_maps.py, bcml_texts.py), end to end:
+    into the mod's copy of each file or the game's, back in its packs, with size table entries."""
+
+    def setUp(self):
+        super().setUp()
+        files, self.sizes = data_game()
+        write(self.game / "romfs", files)
+        table = bnp.Rstb((self.game / "romfs" / rm.RSTB).read_bytes())
+        table.crc.update({crc(k): v for k, v in self.sizes.items()})
+        (self.game / "romfs" / rm.RSTB).write_bytes(table.to_bytes())
+        self.vanilla = files
+
+    def install(self, files: dict, stage: str = "stage"):
+        src = write(self.tmp / f"pkg-{stage}", files)
+        res, out = quiet(bnp.install, str(src), str(self.tmp / stage), str(self.game),
+                         info=bnp.peek(str(src), "folder"))
+        return res, self.tmp / stage, out
+
+    def test_every_kind_merges_into_its_file_and_packs(self):
+        res, stage, out = self.install(data_package())
+        self.assertEqual(sorted(res.logs_merged), sorted(set(bnp.LOG_NAMES) - {"rstb.json", "packs.json",
+                                                                                "deepmerge.aamp", "aslist.aamp"}))
+        # (each changed its file, but eventinfo.yml: BCML ships that change in the pack, so nothing is left to merge)
+        self.assertEqual([k for k, v in res.logs_merged.items() if not v], ["eventinfo.yml"])
+        self.assertIn("merging texts.json (texts)", out)
+        f = self.files_of(stage)
+        boot = dict(wc.sarc_files(f[f"{R}/Pack/Bootup.pack"]))
+        title = dict(wc.sarc_files(f[f"{R}/Pack/TitleBG.pack"]))
+        # actor info: a whole file, the changed key merged and the new actor added
+        info = bd.byml_load(f[f"{R}/Actor/ActorInfo.product.sbyml"])
+        self.assertEqual({a["name"]: a["instSize"] for a in info["Actors"]}, {"Hero": 200, "New_Actor": 50})
+        # game data: the base's and the option's flags in the game's file, the deleted one gone
+        gd = {n: bd.byml_load(d) for n, d in wc.sarc_files(wc.yaz0_decompress(boot["GameData/gamedata.ssarc"])[0])}
+        self.assertEqual([e["DataName"] for e in gd["/bool_data_0.bgdata"]["bool_data"]],
+                         ["FlagA", "FlagNew", "FlagOpt"])
+        self.assertEqual(gd["/s32_data_0.bgdata"], {"s32_data": []})
+        sd = dict(wc.sarc_files(wc.yaz0_decompress(boot["GameData/savedataformat.ssarc"])[0]))
+        self.assertEqual(sorted(e["DataName"] for e in bd.byml_load(sd["/saveformat_0.bgsvdata"])["file_list"][1]),
+                         ["FlagA", "FlagNew"])
+        self.assertEqual(bd.byml_load(boot["Event/EventInfo.product.sbyml"]),
+                         {"Ev<A>": {"is_timeline": False, "mode": "Changed"}})
+        self.assertEqual(bd.byml_load(boot["Ecosystem/StatusEffectList.sbyml"])[0]["AttackUp"][1],
+                         {"values": [{"val": 1.5}]})
+        self.assertEqual(bd.byml_load(boot["Ecosystem/AreaData.sbyml"])[1]["Animal"], [{"name": "Z", "num": 1.0}])
+        self.assertEqual([r["name"] for r in bd.byml_load(boot["Actor/ResidentActors.byml"])], ["A", "C"])
+        self.assertEqual([e["PosName"] for e in bm.byml_load(boot["Map/MainField/Static.smubin"])["StartPos"]],
+                         ["P", "Q"])
+        self.assertEqual(bm.byml_load(boot["Map/CDungeon/Static.smubin"])["StartPos"][0]["Translate"]["X"], 5.0)
+        # the rest of Bootup.pack comes from the game (BCML shipped only the event file)
+        self.assertEqual(boot["Other/Untouched.txt"], b"game untouched")
+        # maps and quests: the static unit and the quest list in TitleBG.pack (copied from the game), the dynamic unit
+        # a whole file
+        static = bm.byml_load(title["Map/MainField/A-1/A-1_Static.smubin"])
+        self.assertEqual([int(o["HashId"]) for o in static["Objs"]], [5, 7, 9])
+        self.assertEqual(bm.byml_load(f[f"{R}/Map/MainField/A-1/A-1_Dynamic.smubin"])["Objs"], [])
+        self.assertEqual([q["Name"] for q in bm.byml_load(title["Quest/QuestProduct.sbquestpack"])], ["Q1", "Q3", "Q2"])
+        # drops and shops: inside their actor packs (a loose one and one in TitleBG.pack), the packs' other files kept
+        enemy = dict(wc.sarc_files(wc.yaz0_decompress(f[f"{R}/Actor/Pack/Enemy_T.sbactorpack"])[0]))
+        self.assertEqual(bt._read_drop(enemy["Actor/DropTable/T.bdrop"])[0]["Normal"]["items"],
+                         {"Item_A": 30.0, "Item_New": 70.0})
+        self.assertEqual(enemy["Actor/ActorLink/Enemy_T.bxml"], b"game link")
+        npc = dict(wc.sarc_files(wc.yaz0_decompress(title["Actor/Pack/Npc_T.sbactorpack"])[0]))
+        self.assertEqual(shop_rows(npc["Actor/ShopData/T.bshop"]), [("Item_B", 9, 5, True, 1)])
+        # texts: every language the game has; English gets the base's new text and the option's change, German the
+        # new text only (BCML would copy the English change over its own)
+        usen = dict(wc.sarc_files(f[f"{R}/Pack/Bootup_USen.pack"]))["Message/Msg_USen.product.ssarc"]
+        eude = dict(wc.sarc_files(f[f"{R}/Pack/Bootup_EUde.pack"]))["Message/Msg_EUde.product.ssarc"]
+        self.assertEqual(msbt_texts(usen), {"A_Name": "Cape", "B_Name": "Hood"})
+        self.assertEqual(msbt_texts(eude), {"A_Name": "Rock", "B_Name": "Hood"})
+        # sizes: never below the game's; each grown file's entry above it, map units exact, the packs around a merged
+        # file too
+        table = bnp.Rstb(f[f"{R}/{rm.RSTB}"])
+        for name in self.sizes:
+            self.assertGreaterEqual(table.get(name), self.sizes[name], name)
+        for name in ("GameData/savedataformat.sarc", "Message/Msg_USen.product.sarc", "Quest/QuestProduct.bquestpack",
+                     "Actor/DropTable/T.bdrop", "Actor/Pack/Enemy_T.bactorpack", "Map/MainField/A-1/A-1_Static.mubin"):
+            self.assertGreater(table.get(name), self.sizes[name], name)
+        static_raw = wc.yaz0_decompress(title["Map/MainField/A-1/A-1_Static.smubin"])[0]
+        self.assertEqual(table.get("Map/MainField/A-1/A-1_Static.mubin"), bnp.round32(len(static_raw)) + 448)
+        self.assertGreaterEqual(table.get("Actor/Pack/Enemy_T.bactorpack"),
+                                len(wc.yaz0_decompress(f[f"{R}/Actor/Pack/Enemy_T.sbactorpack"])[0]))
+        self.assertEqual(table.get("Map/MainField/A-1/A-1_Dynamic.mubin"),
+                         self.sizes["Map/MainField/A-1/A-1_Dynamic.mubin"])   # (smaller: the game's entry stays)
+        # what isn't merged is named: the BCML 2 log, the damaged option log, the language without its own texts
+        text = " | ".join(res.not_merged)
+        self.assertIn("logs/savedata.sarc (save data, a BCML 2 log", text)
+        self.assertIn("options/Extra/logs/quests.yml (quests)", text)
+        self.assertIn("EUde", text)
+        self.assertEqual(len(res.not_merged), 3, res.not_merged)
+        self.assertIn("logs merged: actorinfo.yml (1 file), gamedata.yml (1 file)", "\n".join(res.summary()))
+        # the library copy knows the packs and whole files the logs wrote (deploy names what a later mod replaces)
+        meta = json.loads(f[".bnp/bnp.json"])
+        self.assertEqual(meta["generated"], ["Actor/ActorInfo.product.sbyml", "Map/MainField/A-1/A-1_Dynamic.smubin"])
+        for pack in ("Pack/Bootup.pack", "Pack/TitleBG.pack", "Pack/Bootup_EUde.pack",
+                     "Actor/Pack/Enemy_T.sbactorpack"):
+            self.assertIn(pack, meta["packs"])
+        self.assertEqual(meta["logs_merged"]["shop.aamp"], [f"Pack/TitleBG.pack//{SHOP_PATH}"])
+
+    def test_logs_that_change_nothing_leave_the_game_files_out(self):
+        """Logs repeating the game's data: no file is copied from the game into the mod, no size table."""
+        info = json.dumps({"name": "Same", "version": "1", "platform": "switch"})
+        res, stage, _ = self.install({"info.json": info, f"{R}/Model/New.txt": "x",
+                                      "logs/eventinfo.yml": "Ev<A>: {mode: Seamless}\n",
+                                      "logs/map.yml": "A-1_Static: {Objs: {add: [], mod: {}, del: []}}\n",
+                                      "logs/texts.json": json.dumps({"USen": {"ActorType/ArmorUpper.msyt": {
+                                          "A_Name": {"contents": [{"text": "Tunic"}]}}}})})
+        self.assertEqual(res.logs_merged, {"eventinfo.yml": [], "map.yml": [], "texts.json": []})
+        self.assertEqual({k for k in self.files_of(stage) if not k.startswith(".bnp/")}, {f"{R}/Model/New.txt"})
+        self.assertIn("eventinfo.yml (no change)", "\n".join(res.summary()))
+
+    def test_a_merged_file_whose_pack_nobody_has_is_named(self):
+        info = json.dumps({"name": "Lost", "version": "1", "platform": "switch"})
+        drops = {f"{R}/Actor/Pack/Nobody.sbactorpack//Actor/DropTable/N.bdrop": {"T": {
+            "repeat_num_min": 1, "repeat_num_max": 1, "approach_type": 0, "occurrence_speed_type": 0,
+            "items": {"I": 1.0}}}}
+        res, _, _ = self.install({"info.json": info, "logs/drops.json": json.dumps(drops)})
+        self.assertEqual(res.logs_merged, {"drops.json": []})
+        self.assertTrue(any("Nobody.sbactorpack//Actor/DropTable/N.bdrop not merged (neither the mod nor the game "
+                            "has its pack)" in x for x in res.not_merged), res.not_merged)
+
+    def test_deploy_names_merged_logs_a_later_package_replaces(self):
+        info = {"version": "1", "platform": "switch"}
+        one = {"info.json": json.dumps({**info, "name": "One"}),
+               "logs/gamedata.yml": f"bool_data:\n  add:\n    FlagOne: {flag_yaml('FlagOne')}\n"}
+        two = {"info.json": json.dumps({**info, "name": "Two"}),
+               "logs/eventinfo.yml": "Ev<B>: {mode: Two}\n",
+               "logs/actorinfo.yml": f'"{crc("Two_Actor")}": {{name: Two_Actor, instSize: 5}}\n'}
+        _, a, _ = self.install(one, "one")
+        _, b, _ = self.install(two, "two")
+        hook = bnp.deploy_hook([("One", str(a)), ("Two", str(b))], str(self.game))
+        self.assertEqual(hook.attention, ["One: Two replaces 1 of its pack(s) (Pack/Bootup.pack), so One's changes in "
+                                          "them are lost, its merged gamedata.yml too (packs aren't merged between "
+                                          "mods)"])
+        hook = bnp.deploy_hook([("Two", str(b)), ("One", str(a))], str(self.game))
+        self.assertIn("Two: One replaces 1 of its pack(s) (Pack/Bootup.pack), so Two's changes in them are lost, its "
+                      "merged eventinfo.yml too", hook.attention[0])
+
+    def test_deploy_can_merge_packages_that_share_packs(self):
+        """deploy_hook(files=True): the packs two packages ship merged as BCML merges mods (each one's own files over
+        the game's, then every package's parameter changes and data logs again, in order), with sizes; nothing named
+        as lost. (modman doesn't pass these files to the overlay yet.)"""
+        info = {"version": "1", "platform": "switch"}
+        hero = f"{R}/Actor/Pack/Hero.sbactorpack//Actor/Physics/Hero.bphysics"
+        one = {"info.json": json.dumps({**info, "name": "One"}),
+               f"{R}/Pack/Bootup.pack": sarc({"Other/Untouched.txt": "one's own"}),
+               "logs/gamedata.yml": f"bool_data:\n  add:\n    FlagOne: {flag_yaml('FlagOne')}\n",
+               "logs/map.yml": "A-1_Static:\n  Objs:\n    add:\n    - {HashId: !u 0x7, UnitConfigName: One}\n",
+               "logs/shop.aamp": shop_log(),
+               "logs/deepmerge.aamp": deepmerge_log(hero, plist({"Rigid": {"Mass": f32(9.5)}}))}
+        two = {"info.json": json.dumps({**info, "name": "Two"}),
+               "logs/gamedata.yml": f"bool_data:\n  add:\n    FlagTwo: {flag_yaml('FlagTwo')}\n",
+               "logs/eventinfo.yml": "Ev<B>: {mode: Two}\n",
+               "logs/quests.yml": ("add:\n- {Location: Field, Name: Q3, NotPostNote: false, Orderer: Someone, "
+                                   "StepDependencyFlags: [], Steps: [{StepName: Q3_0}], Type: 0, prev_quest: Q1}\n"),
+               "logs/deepmerge.aamp": deepmerge_log(hero, plist({"Rigid": {"Extra": i32(7)}}))}
+        _, a, _ = self.install(one, "one")
+        _, b, _ = self.install(two, "two")
+        mods = [("One", str(a)), ("Two", str(b))]
+        hook = bnp.deploy_hook(mods, str(self.game), files=True)
+        self.assertEqual(sorted(hook.files), ["Actor/Pack/Hero.sbactorpack", "Pack/Bootup.pack", "Pack/TitleBG.pack"])
+        self.assertEqual(hook.attention, [])
+        self.assertIn("Pack/Bootup.pack: merged from One, Two", " | ".join(hook.notes))
+        boot = dict(wc.sarc_files(hook.files["Pack/Bootup.pack"]))
+        gd = bd.byml_load(dict(wc.sarc_files(wc.yaz0_decompress(boot["GameData/gamedata.ssarc"])[0]))[
+            "/bool_data_0.bgdata"])
+        self.assertEqual([e["DataName"] for e in gd["bool_data"]], ["FlagA", "FlagOne", "FlagTwo"])
+        self.assertEqual(bd.byml_load(boot["Event/EventInfo.product.sbyml"])["Ev<B>"], {"mode": "Two"})
+        self.assertEqual(boot["Other/Untouched.txt"], b"one's own")          # (One's own file, Two had the game's)
+        title = dict(wc.sarc_files(hook.files["Pack/TitleBG.pack"]))
+        self.assertEqual([int(o["HashId"]) for o in bm.byml_load(title["Map/MainField/A-1/A-1_Static.smubin"])["Objs"]],
+                         [5, 7, 9])
+        self.assertEqual([q["Name"] for q in bm.byml_load(title["Quest/QuestProduct.sbquestpack"])], ["Q1", "Q3", "Q2"])
+        npc = dict(wc.sarc_files(wc.yaz0_decompress(title["Actor/Pack/Npc_T.sbactorpack"])[0]))
+        self.assertEqual(shop_rows(npc["Actor/ShopData/T.bshop"]), [("Item_B", 9, 5, True, 1)])
+        pack = dict(wc.sarc_files(wc.yaz0_decompress(hook.files["Actor/Pack/Hero.sbactorpack"])[0]))
+        rigid = bnp.aamp_read(pack["Actor/Physics/Hero.bphysics"]).root.objs[crc("Rigid")].params
+        self.assertEqual((rigid[crc("Mass")], rigid[crc("Count")], rigid[crc("Extra")]), (f32(9.5), i32(2), i32(7)))
+        # the size table holds the merged files, never below either package's sizes
+        table = bnp.Rstb(hook.rstb.data)
+        one_t, two_t = (bnp.Rstb((p / R / rm.RSTB).read_bytes()) for p in (a, b))
+        for name in ("GameData/gamedata.sarc", "Actor/Pack/Hero.bactorpack", "Actor/Physics/Hero.bphysics"):
+            self.assertGreaterEqual(table.get(name), max(one_t.get(name), two_t.get(name)), name)
+        game_gd = dict(wc.sarc_files(self.vanilla["Pack/Bootup.pack"]))["GameData/gamedata.ssarc"]
+        need = bnp.needed_size(self.sizes["GameData/gamedata.sarc"], len(wc.yaz0_decompress(game_gd)[0]),
+                               len(wc.yaz0_decompress(boot["GameData/gamedata.ssarc"])[0]), True)
+        self.assertEqual(table.get("GameData/gamedata.sarc"), need)    # (both flags: more than either package's)
+        self.assertGreater(need, max(one_t.get("GameData/gamedata.sarc"), two_t.get("GameData/gamedata.sarc")))
+        # without files=True (what modman asks today) the same mods are named as losing their changes
+        self.assertTrue(bnp.deploy_hook(mods, str(self.game)).attention)
 
 
 # ---------------------------------------------------------------- modman

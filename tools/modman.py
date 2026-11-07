@@ -12,6 +12,7 @@
     python tools/modman.py run [--port N] [--no-cheats]
     python tools/modman.py status
     python tools/modman.py doctor
+    python tools/modman.py profile [list | new <name> | use <name> | remove <name>]    (mod sets: docs/profiles.md)
 
 Every command takes --library <folder> (or the SWMOD_LIBRARY variable). The mod library defaults to a
 "modloader" folder next to the Savage Wind folder, so removing or reinstalling Savage Wind keeps your mods.
@@ -52,6 +53,7 @@ import argparse
 import datetime
 import filecmp
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -106,8 +108,26 @@ KINDS = ("romfs", "dlc-romfs", "exefs-patch", "cheats", "native")
 KIND_NAMES = {"romfs": "RomFS files", "dlc-romfs": "DLC RomFS files", "exefs-patch": "ExeFS patches",
               "cheats": "cheats", "native": "native code mod"}
 # Variables a mod setup may leave in a window; `run` clears them and sets only the ones the deploy needs.
+# (SWMOD_LIBRARY too: modhost finds the library in deploy\native\settings.txt, never in a window's leftover one.)
 MOD_ENV = ("SAVAGEWIND_ROMFS_OVERLAY", "SAVAGEWIND_NO_HUD_LETTERS", "SAVAGEWIND_GAME_LIB", "SAVAGEWIND_CONTROL",
-           "SWMOD_REAL_GAME_LIB", "SWMOD_DIR")
+           "SWMOD_REAL_GAME_LIB", "SWMOD_DIR", ENV_LIBRARY)
+# Library files of the Mods page v2 parts (docs/mod-format.md, docs/profiles.md)
+SETTINGS_DIR = "settings"      # <library>\settings\<id>.json: the values the player changed
+PICTURES_DIR = "pictures"      # <library>\pictures\<id>\ (and _title\, _mods-page\): the player's choices, the cache
+PROFILES_DIR = "profiles"      # <library>\profiles\<file>.json: named mod sets
+HISTORY = "history.jsonl"      # deploy\history.jsonl: one JSON object a line (deploy, start, result)
+HISTORY_KEEP = 300             # lines kept once it grows past twice that
+DEFAULT_PROFILE = "Default"
+TITLE_PICK, MODS_PAGE_PICK = "_title", "_mods-page"   # (not mod ids: those start with a letter or digit)
+PICTURE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+FONT_EXTS = (".ttf", ".otf")
+FONT_FOR = ("menu",)           # later: "all"
+FONT_LANGUAGES = ("US", "EU", "JP")   # later: KR, CN, TW, TH
+MENU_SYMBOLS = set("{}#$%@^`|~")      # the game's menu font has none of these (until font.py fix-symbols is on)
+# The Mods page v2 parts live in their own tools, imported only when used (`feature`): a tool that isn't there, or
+# doesn't load, turns its part off. Called in this order: docs/mod-format.md, "What deploy does with them".
+FEATURES = ("mod_settings", "font", "menu_bg", "mod_pictures")
+GENERATED_OWNER = {"font": "generated:fonts", "menu_bg": "generated:title", "mod_pictures": "generated:pictures"}
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 RESERVED_RE = re.compile(r"^(con|prn|aux|nul|com[0-9]|lpt[0-9])$")
 CHEAT_RE = re.compile(r"(^|/)cheats/([0-9a-f]{16})\.txt$", re.I)  # (any case: Windows and the SD card ignore it)
@@ -116,7 +136,7 @@ AOC_RE = re.compile(r"aoc\d+", re.I)
 MAX_NATIVE = 64   # modhost loads at most this many DLLs from its mods folder (native/modhost/modhost.c MAX_MODS)
 BAD_CHARS = set('<>:"|?*\\') | {chr(i) for i in range(32)}
 # Folders deploy\ holds: modman's own, and the overlay romfs_mods owns (it keeps its own marker file).
-OWN_TOP = ("root", "native", "cheats", "vanilla-lib", ".work")
+OWN_TOP = ("root", "native", "cheats", "vanilla-lib", ".work", "pictures", "fonts")
 ROMFS_FINDINGS = {"Switch RomFS files", "Wii U game data", "BCML mod (BNP)", "UKMM package"}
 # mod_inspect findings scan_mod looks at itself (and says why when it can't use them)
 HANDLED_FINDINGS = ROMFS_FINDINGS | {"ExeFS patch", "Atmosphere cheats"}
@@ -134,8 +154,11 @@ MANIFEST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 VERSION_RE = re.compile(r"^(\d{1,9}(?:\.\d{1,9}){0,3})(?:[-+][0-9A-Za-z.-]+)?$")
 GAME_VERSION_RE = re.compile(r"^\d{1,9}\.\d{1,9}\.\d{1,9}$")
 REQ_RE = re.compile(r"^(>=|==)\s*(\d{1,9}(?:\.\d{1,9}){0,3})$")
-MANIFEST_KEYS = {"mod": {"id", "name", "version", "authors", "description", "game_versions", "loader_api"},
-                 "code": {"windows", "linux", "hooks"}, "data": {"romfs", "dlc_romfs"}, "dependencies": None}
+MANIFEST_KEYS = {"mod": {"id", "name", "version", "authors", "description", "game_versions", "loader_api",
+                         "icon", "background", "title_picture", "url", "update_url"},
+                 "code": {"windows", "linux", "hooks"}, "data": {"romfs", "dlc_romfs"}, "dependencies": None,
+                 "font": {"file", "for", "languages", "license"},
+                 "settings": None, "pages": None}   # ([[settings]] and [[pages]]: tools/mod_settings.py checks them)
 # A mod converted from Wii U when it was added: config.json's "wiiu" entry holds these counts (of its game files)
 WIIU_KEYS = ("files", "converted", "partly", "wiiu_data", "left_out", "attention")
 
@@ -417,10 +440,13 @@ def looks_like_install(path: str | None) -> bool:
 
 
 class Library:
-    def __init__(self, root: str, install: str | None = None, mods: list[dict] | None = None):
+    def __init__(self, root: str, install: str | None = None, mods: list[dict] | None = None,
+                 profile: str = DEFAULT_PROFILE, extra: dict | None = None):
         self.root = os.path.abspath(root)
         self.install = install
         self.mods: list[dict] = mods or []
+        self.profile = profile          # the active profile (docs/profiles.md); its mod set is self.mods
+        self.extra: dict = extra or {}  # config.json keys this modman doesn't know: kept as they are
 
     @property
     def config_path(self) -> str:
@@ -471,11 +497,17 @@ class Library:
                     m["wiiu"] = {k: w[k] for k in WIIU_KEYS if type(w.get(k)) is int and w[k] >= 0}
                 else:
                     del m["wiiu"]
-        return cls(root, install, mods)
+        profile = data.get("profile")
+        profile = profile.strip() if isinstance(profile, str) and profile_name_ok(profile.strip()) else DEFAULT_PROFILE
+        extra = {k: v for k, v in data.items() if k not in ("tool", "format", "install", "mods", "profile")}
+        return cls(root, install, mods, profile, extra)
 
     def save(self) -> None:
         os.makedirs(self.root, exist_ok=True)
-        write_json(self.config_path, {"tool": TOOL_ID, "format": FORMAT, "install": self.install, "mods": self.mods})
+        data = {**self.extra, "tool": TOOL_ID, "format": FORMAT, "install": self.install, "mods": self.mods}
+        if self.profile != DEFAULT_PROFILE:  # (a library that never used profiles keeps its config.json as it was)
+            data["profile"] = self.profile
+        write_json(self.config_path, data)
 
     def find(self, ref: str) -> tuple[int, dict]:
         ref = ref.strip()
@@ -516,6 +548,78 @@ def open_library(args, *, create: bool = False) -> Library:
     lib.save()
     say(f"Made a mod library in {root} for Savage Wind in {install}.")
     return lib
+
+
+# ---------------------------------------------------------------- Mods page v2 parts (each in its own tool)
+
+_FEATURE_CACHE: dict[str, object] = {}
+FEATURE_ERRORS: dict[str, str] = {}   # module -> why it didn't load (a module that isn't there isn't listed)
+
+
+def feature(module: str, func: str | None = None):
+    """A Mods page v2 tool (tools/<module>.py), or with `func` that function of it; None when the tool isn't there,
+    doesn't load or lacks the function: that part is then off. Only tools/ is searched."""
+    if module not in _FEATURE_CACHE:
+        mod = None
+        if os.path.isfile(os.path.join(TOOLS, module + ".py")):
+            try:
+                mod = importlib.import_module(module)
+            except Exception as e:  # (a tool another job is still writing must not stop modman)
+                FEATURE_ERRORS[module] = f"{type(e).__name__}: {e}"
+        _FEATURE_CACHE[module] = mod
+    mod = _FEATURE_CACHE[module]
+    if mod is None or func is None:
+        return mod
+    f = getattr(mod, func, None)
+    return f if callable(f) else None
+
+
+def _feature_call(module: str, func: str, *args, problems: list[str] | None = None, what: str = ""):
+    """Call tools/<module>.py's func; None when it isn't there. An error in it turns that part off for this call:
+    it goes into `problems` (when given) as one line, and None is returned."""
+    f = feature(module, func)
+    if f is None:
+        return None
+    try:
+        return f(*args)
+    except Exception as e:  # (one part failing must not stop add or deploy)
+        if problems is not None:
+            problems.append(f"{what or module}: off this time ({type(e).__name__}: {e})")
+        return None
+
+
+def settings_file(lib: "Library", mod_id: str) -> str:
+    return os.path.join(lib.root, SETTINGS_DIR, f"{mod_id}.json")
+
+
+def read_setting_values(lib: "Library", mod_id: str) -> dict:
+    """The setting values the player changed for a mod (<library>\\settings\\<id>.json; {} when there are none).
+    Only values unlike the default are kept there (docs/mod-settings.md)."""
+    try:
+        data = read_json(settings_file(lib, mod_id))
+    except ModmanError:
+        return {}
+    vals = (data or {}).get("values")
+    return dict(vals) if isinstance(vals, dict) and (data or {}).get("mod") == mod_id else {}
+
+
+def write_setting_values(lib: "Library", mod_id: str, values: dict) -> None:
+    """Write a mod's changed setting values: a temp file, then a rename (modhost reads it any time)."""
+    if not good_id(mod_id) and not manifest_id_ok(mod_id):
+        raise ModmanError(f"'{mod_id}' isn't a mod id")
+    os.makedirs(os.path.join(lib.root, SETTINGS_DIR), exist_ok=True)
+    write_json(settings_file(lib, mod_id), {"format": 1, "mod": mod_id, "values": dict(values)})
+
+
+def picture_choice(lib: "Library", key: str) -> str | None:
+    """The picture the player chose (<library>\\pictures\\<key>\\chosen.<png/jpg/jpeg/webp>): key is a mod id,
+    "_title" (the title screen) or "_mods-page" (behind the Mods page). None when there is none."""
+    folder = os.path.join(lib.root, PICTURES_DIR, key)
+    for ext in PICTURE_EXTS:
+        p = os.path.join(folder, "chosen" + ext)
+        if os.path.isfile(p):
+            return p
+    return None
 
 
 # ---------------------------------------------------------------- what a mod holds
@@ -602,6 +706,15 @@ class Manifest:
     dlc_romfs: str | None = None
     dependencies: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    # Mods page v2 (docs/mod-format.md). Paths like dll: "/"-separated, relative to mod.toml's folder.
+    icon: str | None = None                  # [mod] icon: the mod's picture
+    background: str | None = None            # [mod] background: behind the Mods page while the mod is selected
+    title_picture: str | None = None         # [mod] title_picture: the title-screen picture (tools/menu_bg.py)
+    url: str | None = None                   # [mod] url: https only; shown in Mod Manager, never in game
+    update_url: str | None = None            # [mod] update_url: kept for the update check (later)
+    font: dict | None = None                 # [font]: {"file", "for", "languages", "license"} (checked here)
+    settings: list[dict] = field(default_factory=list)   # [[settings]] as written (tools/mod_settings.py checks)
+    pages: list[dict] = field(default_factory=list)      # [[pages]] as written
 
     def rel(self, path: str) -> str:
         """A path mod.toml names, relative to the mod's root folder."""
@@ -780,11 +893,71 @@ def parse_manifest(text: str, base_rel: str = "") -> tuple[Manifest | None, list
                         '(any version)')
         else:
             dependencies[dep] = req.strip() or "*"
+
+    # Mods page v2: pictures, link, font, settings pages (docs/mod-format.md)
+    pics: dict[str, str | None] = {}
+    for key, example in (("icon", "icon.png"), ("background", "bg.png"), ("title_picture", "title.png")):
+        p = path_of(mod, "mod", key, example)
+        if p is not None and not p.lower().endswith(PICTURE_EXTS):
+            errs.append(f'mod.toml: [mod] {key} = "{clip(p)}" must be a .png picture (.jpg or .webp work with '
+                        "Pillow installed)")
+            p = None
+        pics[key] = p
+    links: dict[str, str | None] = {}
+    for key in ("url", "update_url"):
+        u = text_of(mod, "mod", key, example="https://example.org/my-mod")
+        if u is not None and (not u.lower().startswith("https://") or len(u) > 300 or len(u) <= len("https://")
+                              or any(c.isspace() for c in u)):
+            errs.append(f'mod.toml: [mod] {key} must be a web address that starts with https://, like {key} = '
+                        '"https://example.org/my-mod" (at most 300 characters)')
+            u = None
+        links[key] = u
+    font = None
+    if "font" in data:
+        ft = table("font")
+        f_file = path_of(ft, "font", "file", "fonts/MyFont.ttf")
+        if "file" not in ft:
+            errs.append('mod.toml: [font] needs file, the font in the mod, like file = "fonts/MyFont.ttf"')
+        elif f_file is not None and not f_file.lower().endswith(FONT_EXTS):
+            errs.append(f'mod.toml: [font] file = "{clip(f_file)}" must be a .ttf or .otf font')
+            f_file = None
+        f_for = ft.get("for", "menu")
+        if f_for not in FONT_FOR:
+            errs.append(f"mod.toml: [font] for = {clip(repr(f_for))}: write \"menu\" (the menus and the game's "
+                        "texts; other kinds come later)")
+        langs = ft.get("languages", list(FONT_LANGUAGES))
+        if not isinstance(langs, list) or not langs or any(x not in FONT_LANGUAGES for x in langs) \
+                or len(set(langs)) != len(langs):
+            errs.append(f"mod.toml: [font] languages must be a list of {', '.join(FONT_LANGUAGES)} (each once), like "
+                        'languages = ["US", "EU"]')
+            langs = list(FONT_LANGUAGES)
+        lic = text_of(ft, "font", "license", example="OFL-1.1")
+        font = {"file": f_file, "for": f_for, "languages": list(langs), "license": lic}
+    lists: dict[str, list[dict]] = {}
+    for key in ("settings", "pages"):
+        v = data.get(key, [])
+        if not isinstance(v, list) or not all(isinstance(x, dict) for x in v):
+            errs.append(f"mod.toml: {key} must be written [[{key}]], one such table each")
+            v = []
+        lists[key] = v
     if errs:
         return None, errs
+    # (the game's menu font lacks these symbols until font.py fix-symbols is on: warn, don't refuse)
+    shown = [("[mod] name", name), ("[mod] description", description)]
+    for key in ("settings", "pages"):
+        for k, t in enumerate(lists[key], 1):
+            shown += [(f"[[{key}]] {k} {f}", t.get(f)) for f in ("label", "description") if isinstance(t.get(f), str)]
+    for where, text in shown:
+        bad = sorted(MENU_SYMBOLS & set(text or ""))
+        if bad:
+            notes.append(f"mod.toml: {where} has {' '.join(bad)}, which the game's menus can't show yet (Mod "
+                         "Manager can)")
     return Manifest(id=mod_id, name=name, version=version, base_rel=base_rel, authors=list(authors),
                     description=description, game_versions=games, loader_api=api, dll=dll, hooks=sorted(hooks),
-                    romfs=romfs, dlc_romfs=dlc_romfs, dependencies=dependencies, notes=notes), []
+                    romfs=romfs, dlc_romfs=dlc_romfs, dependencies=dependencies, notes=notes,
+                    icon=pics["icon"], background=pics["background"], title_picture=pics["title_picture"],
+                    url=links["url"], update_url=links["update_url"], font=font, settings=lists["settings"],
+                    pages=lists["pages"]), []
 
 
 def _manifest_files(files: list[str]) -> list[str]:
@@ -926,6 +1099,37 @@ def manifest_file_problems(man: Manifest, root: str, s: ModScan, real: list, rom
         if key not in used:
             out.append(f'[data] {key} = "{folder}" holds no RomFS files modman can use')
     return out
+
+
+def manifest_v2_problems(man: Manifest, root: str) -> tuple[list[str], list[str]]:
+    """(problems, notes) of a mod.toml's Mods page v2 keys against the mod's files: the pictures and the font it
+    names must be there, and the tools of those parts check the rest (tools/mod_settings.py the [[settings]] and
+    [[pages]], tools/font.py the [font], tools/mod_pictures.py the pictures: each one's check(manifest, folder)).
+    A part whose tool isn't there isn't checked, and a note says so when the mod uses it."""
+    problems: list[str] = []
+    notes: list[str] = []
+    named = [(f"[mod] {k}", getattr(man, k)) for k in ("icon", "background", "title_picture")]
+    named.append(("[font] file", (man.font or {}).get("file")))
+    for key, rel in named:
+        if rel and not os.path.isfile(os.path.join(root, *man.rel(rel).split("/"))):
+            problems.append(f'{key} = "{rel}": no such file in the mod')
+    uses = {"mod_settings": bool(man.settings or man.pages), "font": man.font is not None,
+            "mod_pictures": bool(man.icon or man.background)}
+    what = {"mod_settings": "settings pages", "font": "font", "mod_pictures": "pictures"}
+    for module, used in uses.items():
+        if not used:
+            continue
+        if feature(module, "check") is None:
+            notes.append(f"its {what[module]} aren't used: this botw-mod-loader has no tools/{module}.py yet"
+                         if module != "font" else "its font isn't used: this botw-mod-loader has no tools/font.py yet")
+            continue
+        # (a check that fails itself is a note, never a refusal: that part is just off)
+        res = _feature_call(module, "check", man, root, problems=notes, what=f"checking its {what[module]}")
+        if res:
+            p, n = res
+            problems += list(p)
+            notes += list(n)
+    return problems, notes
 
 
 def scan_mod(root: str, game: GameInfo, name: str) -> ModScan:
@@ -1070,8 +1274,10 @@ def scan_mod(root: str, game: GameInfo, name: str) -> ModScan:
 
     # mod.toml: its files and the game must match what it says (add and deploy refuse the mod otherwise)
     if s.manifest:
+        v2_problems, v2_notes = manifest_v2_problems(s.manifest, root)
+        s.notes += v2_notes
         s.manifest_errors = (manifest_file_problems(s.manifest, root, s, real, romfs_error, [p for p, _ in helpers])
-                             + manifest_game_problems(s.manifest, game))
+                             + manifest_game_problems(s.manifest, game) + v2_problems)
         if s.manifest_errors:
             s.manifest = None
         elif s.manifest.hooks:
@@ -1734,7 +1940,18 @@ def add_mod(lib: Library, src: str, name: str | None = None, *, convert: bool = 
         entry["problems"] = scan.problems
     lib.mods.append(entry)
     lib.save()
+    notes += add_hooks(lib, entry, os.path.join(lib.mods_dir, mod_id), man)
     return entry, scan, notes
+
+
+def add_hooks(lib: Library, entry: dict, folder: str, man: Manifest | None) -> list[str]:
+    """After a mod is in the library: each Mods page v2 tool's on_add(lib, entry, folder, manifest) runs (the
+    pictures cache, say), in FEATURES order. Returns their notes. A tool that fails never undoes the add."""
+    notes: list[str] = []
+    for module in FEATURES:
+        res = _feature_call(module, "on_add", lib, entry, folder, man, problems=notes)
+        notes += [str(n) for n in (res or [])]
+    return notes
 
 
 def remove_mod(lib: Library, ref: str) -> dict:
@@ -1949,17 +2166,53 @@ def inputs_hash(lib: Library) -> str:
     for p in (os.path.join(install, EXE), os.path.join(ex, "exefs", "main"), os.path.join(ex, LIB),
               os.path.join(ex, LIB + ".id")):
         h.update(json.dumps(_stat_key(p)).encode())
+    rels: dict[str, list[str]] = {}
     for m in enabled:
         root = os.path.join(lib.mods_dir, m["id"])
         h.update(f"\0{m['id']}\0".encode())
         try:
             for path, rel, size in walk_files(root):
                 h.update(json.dumps([rel, *_stat_key(path)]).encode())
+                rels.setdefault(m["id"], []).append(rel)
         except OSError:
             h.update(b"missing")
     if any("native" in m.get("kinds", []) for m in enabled):
         h.update(json.dumps(_stat_key(os.path.join(MODHOST_DIR, "modhost.dll"))).encode())
+    values = deploy_setting_values(lib, rels)  # (only when a mod has applies = "deploy" settings: else as before)
+    if values:
+        h.update(json.dumps({"deploy_settings": values}, sort_keys=True).encode())
     return h.hexdigest()
+
+
+def settings_mods(lib: Library, rels: dict[str, list[str]] | None = None, *, enabled_only: bool = True
+                  ) -> list[tuple[dict, str, Manifest]]:
+    """(config entry, library folder, mod.toml) of each enabled mod (with enabled_only=False: each library mod;
+    entry["enabled"] says which are on) whose mod.toml has [[settings]], in library order."""
+    out = []
+    for m in (lib.enabled() if enabled_only else lib.mods):
+        root = os.path.join(lib.mods_dir, m["id"])
+        files = (rels or {}).get(m["id"])
+        if files is not None and not _manifest_files(files):
+            continue
+        if not os.path.isdir(root):
+            continue
+        man = read_manifest(root, files)[0]
+        if man and man.settings:
+            out.append((m, root, man))
+    return out
+
+
+def deploy_setting_values(lib: Library, rels: dict[str, list[str]] | None = None) -> dict:
+    """The values of the enabled mods' `applies = "deploy"` settings that deploy uses ({mod id: {key: value}}), from
+    tools/mod_settings.py's deploy_values(lib, mods). {} without that tool or such settings."""
+    f = feature("mod_settings", "deploy_values")
+    if f is None:
+        return {}
+    mods = settings_mods(lib, rels)
+    if not mods:
+        return {}
+    res = _feature_call("mod_settings", "deploy_values", lib, mods)
+    return {k: dict(v) for k, v in (res or {}).items() if isinstance(v, dict) and v}
 
 
 def _with_hooks(key: str, hooks) -> str:
@@ -2052,7 +2305,7 @@ class DeployDir:
             raise ModmanError(f"{self.path} isn't a plain folder: move it away, then deploy again.")
         old = read_json(self.marker)
         if old is None:
-            if os.listdir(self.path):
+            if [n for n in os.listdir(self.path) if n != HISTORY]:  # (history.jsonl stays across deploys)
                 raise ModmanError(f"{self.path} isn't empty and modman didn't make it. Move what is in it, then "
                                   "deploy again.")
             return
@@ -2159,6 +2412,49 @@ def unshare_read_only(folder: str, tmp: str) -> int:
     return n
 
 
+def history_path(lib: Library) -> str:
+    return os.path.join(lib.deploy_dir, HISTORY)
+
+
+def history_append(lib: Library, record: dict) -> None:
+    """Add one record to deploy\\history.jsonl (docs/profiles.md, "History"): {"type": "deploy" | "start" |
+    "result", "time": ..., ...}, one JSON object a line. The file isn't in deploy's marker, so deploys keep it; past
+    2 x HISTORY_KEEP lines only the newest HISTORY_KEEP stay."""
+    path = history_path(lib)
+    os.makedirs(lib.deploy_dir, exist_ok=True)
+    line = json.dumps({"time": _now(), **record}, ensure_ascii=False, separators=(",", ":"))
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write(line + "\n")
+    try:
+        if os.path.getsize(path) > 4096 * HISTORY_KEEP:  # (cheap test first: read it only when it may be long)
+            with open(path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            if len(lines) > 2 * HISTORY_KEEP:
+                tmp = f"{path}.tmp-{os.getpid()}"
+                with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                    f.write("\n".join(lines[-HISTORY_KEEP:]) + "\n")
+                os.replace(tmp, path)
+    except OSError:
+        pass  # (trimming can wait for the next record)
+
+
+def read_history(lib: Library) -> list[dict]:
+    """deploy\\history.jsonl's records, oldest first. Lines that aren't JSON objects are skipped."""
+    out = []
+    try:
+        with open(history_path(lib), encoding="utf-8") as f:
+            for ln in f:
+                try:
+                    rec = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and isinstance(rec.get("type"), str):
+                    out.append(rec)
+    except OSError:
+        return []
+    return out
+
+
 def _drop_overlay(path: str) -> None:
     """Remove an overlay folder romfs_mods made (it refuses one holding anything else)."""
     if not os.path.lexists(path):
@@ -2260,8 +2556,11 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False) -> 
 
     # --- what each part will be (reads only) ---
     romfs_paths = [root for _, root, s in scans if s.romfs]
-    if romfs_paths and not os.path.isdir(os.path.join(extracted, "romfs")):
+    # (each mod's chosen option folders, right after its own RomFS files: tools/mod_settings.py option_romfs)
+    sources = romfs_sources(scans, option_layers(lib, scans, attention))
+    if sources and not os.path.isdir(os.path.join(extracted, "romfs")):
         raise ModmanError("Savage Wind's game files aren't set up (no extracted\\romfs). Set them up in Savage Wind.")
+    deploy_values = deploy_setting_values(lib)
 
     patch_files = [p for _, _, s in scans for p in s.patches]
     rep = None
@@ -2354,11 +2653,13 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False) -> 
         attention += hook.attention
         notes += hook.notes
         rstb = hook.rstb
+    if sources:
         try:  # (romfs_mods' plan against the game: what its real deploy would refuse, it refuses here)
             gindex = rm.GameIndex.scan(extracted)
-            pre = rm.deploy(romfs_paths, overlay, gindex, dry_run=True, rstb=rstb)
+            pre = rm.deploy(sources, overlay, gindex, dry_run=True, rstb=rstb)
         except (rm.DeployError, zipfile.BadZipFile) as e:
             raise ModmanError(f"RomFS overlay: {e}") from None
+    makers = [m for m in GENERATED_OWNER if feature(m, "deploy_files")]  # (fonts, title picture, pictures)
     if rep:
         bad = []
         for mod, ps in rep.targets.items():
@@ -2391,9 +2692,12 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False) -> 
             rebuild = "reuse" if kept else "pending" if no_rebuild else "build"
             if rebuild != "pending":
                 game_lib = out_lib
+        if makers:
+            notes.append("Not made in a dry run: " + ", ".join(GENERATED_OWNER[m].split(":")[1] for m in makers)
+                         + " (deploy makes them).")
         launch = _launch(lib, h, exe, pre, rep, root_dir, game_lib, rebuild if code_patches else "none", native, d,
                          merged, game, attention, notes, patch_files, hooks=hooks,
-                         hook_rebuild=rebuild, hooks_file=d.abs(HOOKS_FILE))
+                         hook_rebuild=rebuild, hooks_file=d.abs(HOOKS_FILE), settings=deploy_values)
         launch["dry_run"] = True
         return launch
 
@@ -2402,13 +2706,25 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False) -> 
         unshare_read_only(folder, os.path.join(d.path, ".modman-unshare.tmp"))
     d.clear(keep={LIB, LIB + ".id"})
     man = None
+    p = None
     try:
-        if romfs_paths:
-            man = rm.deploy(romfs_paths, overlay, gindex, rstb=rstb)
+        if sources or makers:  # (the plan, then the files made at deploy over it: fonts, title picture, pictures)
+            if gindex is None and os.path.isdir(os.path.join(extracted, "romfs")):
+                gindex = rm.GameIndex.scan(extracted)
+            p = rm.plan(sources, gindex, rstb)
+            for rel, data in run_makers(lib, p, scans, makers, attention, notes):
+                with open(d.add_file(rel), "wb") as f:
+                    f.write(data)
+        if p is not None and p.winners:
+            man = rm.deploy(sources, overlay, gindex, rstb=rstb, plan_=p)
         else:
             _drop_overlay(overlay)
     except (rm.DeployError, zipfile.BadZipFile) as e:
         raise ModmanError(f"RomFS overlay: {e}") from None
+    finally:
+        for m in (p.mods if p is not None else ()):
+            if m.zip:
+                m.zip.close()
 
     game_lib = None
     rebuild = "none"
@@ -2507,19 +2823,121 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False) -> 
         with open(d.add_file(f"cheats/{game.main_bid16}.txt"), "w", encoding="utf-8", newline="\n") as f:
             f.write(merged.text)
 
+    if native:  # (the settings pages: tools/mod_settings.py settings_txt, read by modhost at game start)
+        smods = settings_mods(lib, enabled_only=False) if feature("mod_settings", "settings_txt") else []
+        txt = _feature_call("mod_settings", "settings_txt", lib, smods, problems=attention,
+                            what="Mod settings") if smods else None
+        if txt:
+            with open(d.add_file("native/settings.txt"), "w", encoding="utf-8", newline="\n") as f:
+                f.write(txt)
+
     launch = _launch(lib, h, exe, man, rep, root_dir, game_lib, rebuild if code_patches else "none", native, d,
                      merged, game, attention, notes, patch_files, hooks=hooks, hook_rebuild=rebuild,
-                     hooks_file=hooks_file)
+                     hooks_file=hooks_file, settings=deploy_values)
     write_json(d.add_file(LAUNCH), launch)
     d.save(complete=True)
+    history_append(lib, {"type": "deploy", "hash": h, "profile": lib.profile,
+                         "mods": [{"id": m["id"], "name": m["name"], "enabled": bool(m.get("enabled")),
+                                   "kinds": m.get("kinds", []),
+                                   **({"version": m["version"]} if m.get("version") else {})} for m in lib.mods],
+                         "settings": deploy_values})
     launch["previous"] = old_launch
     return launch
 
 
+def option_layers(lib: Library, scans: list[tuple[dict, str, ModScan]], attention: list[str]
+                  ) -> list[tuple[str, str, bool]]:
+    """The option folders the enabled mods' `applies = "deploy"` settings chose, as (mod id, folder, dlc), from
+    tools/mod_settings.py's option_romfs(lib, mods). A folder outside its mod's library folder is left out."""
+    mods = [(m, root, s.manifest) for m, root, s in scans if s.manifest and s.manifest.settings]
+    if not mods or feature("mod_settings", "option_romfs") is None:
+        return []
+    roots = {m["id"]: root for m, root, _ in mods}
+    out = []
+    for item in _feature_call("mod_settings", "option_romfs", lib, mods, problems=attention,
+                              what="Mod settings option folders") or []:
+        mod_id, folder, dlc = item
+        root = roots.get(mod_id)
+        if not root or not _inside(folder, root) or not os.path.isdir(folder) or _is_link(folder):
+            attention.append(f"{mod_id}: option folder {folder} isn't a folder inside the mod: left out")
+            continue
+        out.append((mod_id, os.path.abspath(folder), bool(dlc)))
+    return out
+
+
+def romfs_sources(scans: list[tuple[dict, str, ModScan]], layers: list[tuple[str, str, bool]]) -> list:
+    """What romfs_mods deploys, in order: each mod's own RomFS folder, then its option folders (rm.Layer)."""
+    out: list = []
+    for m, root, s in scans:
+        if s.romfs:
+            out.append(root)
+        out += [rm.Layer(folder, os.path.basename(root), dlc) for mod_id, folder, dlc in layers if mod_id == m["id"]]
+    return out
+
+
+def title_picture_choice(lib: Library, scans: list[tuple[dict, str, ModScan]]) -> str | None:
+    """The title-screen picture: the player's choice (<library>\\pictures\\_title\\chosen.*), else the last enabled
+    mod's [mod] title_picture. None: the game's own."""
+    chosen = picture_choice(lib, TITLE_PICK)
+    if chosen:
+        return chosen
+    for m, root, s in reversed(scans):
+        if s.manifest and s.manifest.title_picture:
+            return os.path.join(root, *s.manifest.rel(s.manifest.title_picture).split("/"))
+    return None
+
+
+DEPLOY_FILE_TOPS = ("pictures", "fonts")   # where a maker's files for deploy\ may go (deploy\pictures\atlas.json)
+
+
+def run_makers(lib: Library, plan: "rm.Plan", scans: list[tuple[dict, str, ModScan]], makers: list[str],
+               attention: list[str], notes: list[str]) -> list[tuple[str, bytes]]:
+    """Run each maker's deploy_files over the plan, in order: tools/font.py (lib, plan), tools/menu_bg.py (lib, plan,
+    title picture) and tools/mod_pictures.py (lib, plan) last, so it builds on the final winning files. Each returns
+    a list of (RomFS path, bytes, size-table entry or None), which go into the overlay as "generated:<what>" files
+    (romfs_mods.add_generated), ("deploy/<pictures or fonts>/...", bytes, None) for a file in deploy\\, and strings,
+    which are notes. A maker that fails is off for this deploy (one line under Needs attention). Returns the deploy\\
+    files as (path in deploy\\, bytes)."""
+    out: list[tuple[str, bytes]] = []
+    for module in makers:
+        owner = GENERATED_OWNER[module]
+        what = owner.split(":")[1].capitalize()
+        args = (lib, plan, title_picture_choice(lib, scans)) if module == "menu_bg" else (lib, plan)
+        res = _feature_call(module, "deploy_files", *args, problems=attention, what=what)
+        files = []
+        for item in res or []:
+            if isinstance(item, str):
+                notes.append(f"{what}: {item}")
+                continue
+            try:
+                path, data, size = item
+            except (TypeError, ValueError):
+                attention.append(f"{what}: gave something that isn't (path, bytes, size): left out")
+                continue
+            rel = str(path).replace("\\", "/")
+            if rel.startswith("deploy/"):
+                rel = rel[len("deploy/"):]
+                if not _safe_rel(rel) or rel.split("/")[0] not in DEPLOY_FILE_TOPS or len(rel.split("/")) < 2 \
+                        or not isinstance(data, (bytes, bytearray)):
+                    attention.append(f"{what}: deploy\\{rel} isn't a place in deploy\\pictures or deploy\\fonts: "
+                                     "left out")
+                    continue
+                out.append((rel, bytes(data)))
+            else:
+                files.append((path, data, size))
+        if files:
+            try:
+                rm.add_generated(plan, files, owner)
+            except ValueError as e:
+                attention.append(f"{what}: off this time ({e})")
+    return out
+
+
 def _launch(lib, h, exe, man, rep, root_dir, game_lib, rebuild, native, d, merged, game, attention, notes,
-            patch_files, *, hooks=None, hook_rebuild="none", hooks_file=None) -> dict:
+            patch_files, *, hooks=None, hook_rebuild="none", hooks_file=None, settings=None) -> dict:
     """launch.json: the exact command line and environment for `run`, and what is deployed. `rebuild` is the state
-    of the game code for the code patches, `hook_rebuild` for the hooks (the same library holds both)."""
+    of the game code for the code patches, `hook_rebuild` for the hooks (the same library holds both). `settings`:
+    the `applies = "deploy"` setting values used ({mod id: {key: value}})."""
     install = lib.install
     env: dict[str, str] = {}
     argv = [exe]
@@ -2527,8 +2945,12 @@ def _launch(lib, h, exe, man, rep, root_dir, game_lib, rebuild, native, d, merge
     if man:
         env.update(man["env"])
         g = man.get("game_check") or {}
-        parts["overlay"] = {"path": man["overlay"], "files": len(man["files"]), "mods": len(man["mods"]),
+        made = man.get("generated") or {}
+        parts["overlay"] = {"path": man["overlay"], "files": len(man["files"]),
+                            "mods": len([m for m in man["mods"] if not m["name"].startswith(rm.GENERATED)]),
                             "replaced": g.get("replaced"), "new": g.get("new")}
+        if made:  # (files made at deploy: fonts, the title picture, pictures)
+            parts["overlay"]["generated"] = {k: len(v) for k, v in made.items()}
         attention += man["warnings"]
         conflicts = man["conflicts"]
         if conflicts:
@@ -2579,7 +3001,9 @@ def _launch(lib, h, exe, man, rep, root_dir, game_lib, rebuild, native, d, merge
             "mods": [{"id": m["id"], "name": m["name"], "kinds": m.get("kinds", []),
                       **({"version": m["version"]} if m.get("version") else {})} for m in lib.enabled()],
             "parts": parts, "cheats": cheats, "attention": list(dict.fromkeys(attention)),
-            "notes": list(dict.fromkeys(notes))}
+            "notes": list(dict.fromkeys(notes)),
+            **({"settings": settings} if settings else {}),
+            **({"profile": lib.profile} if lib.profile != DEFAULT_PROFILE else {})}
 
 
 def describe_parts(launch: dict) -> list[str]:
@@ -2761,6 +3185,12 @@ def run(lib: Library, *, port: int | None = None, no_cheats: bool = False) -> in
     env = game_env(dict(os.environ), launch, want_port)
     flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)  # (Ctrl+C here stops the cheats, not the game)
     game = subprocess.Popen(launch["argv"], cwd=cwd, env=env, creationflags=flags)
+    pid = getattr(game, "pid", None)
+    try:  # (the crash check and "what changed" read it: docs/profiles.md, "History")
+        history_append(lib, {"type": "start", "hash": launch.get("hash") if isinstance(launch.get("hash"), str)
+                             else None, "profile": lib.profile, "pid": pid if isinstance(pid, int) else None})
+    except OSError:
+        pass
     what = describe_parts(launch)
     mods = len(launch.get("mods", []))
     say(f"Started Savage Wind (pid {game.pid}) " + (f"with {mods} mod(s)." if mods else "without mods.")
@@ -2799,6 +3229,171 @@ def run(lib: Library, *, port: int | None = None, no_cheats: bool = False) -> in
         return 0
     finally:
         stop(helper)
+
+
+# ---------------------------------------------------------------- profiles: named mod sets (docs/profiles.md)
+
+PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,39}$")
+
+
+def profile_name_ok(name) -> bool:
+    """A profile name: 1-40 letters, digits, spaces, ".", "-" and "_", starting with a letter or digit."""
+    return isinstance(name, str) and bool(PROFILE_NAME_RE.fullmatch(name)) and not name.endswith((" ", "."))
+
+
+def profile_file(lib: Library, name: str) -> str:
+    """<library>\\profiles\\<name in lowercase, "-" for the rest>.json"""
+    stem = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "profile"
+    if RESERVED_RE.match(stem.split(".")[0]):
+        stem = "profile-" + stem
+    return os.path.join(lib.root, PROFILES_DIR, stem + ".json")
+
+
+def read_profile(lib: Library, name: str) -> dict | None:
+    """A profile's file, checked; None when there is none."""
+    path = profile_file(lib, name)
+    data = read_json(path)
+    if data is None:
+        return None
+    if data.get("tool") != TOOL_ID or data.get("kind") != "profile" or not isinstance(data.get("mods"), list) \
+            or not profile_name_ok(data.get("name")):
+        raise ModmanError(f"{path} isn't a mod set modman wrote")
+    return data
+
+
+def profile_names(lib: Library) -> list[str]:
+    """The profiles' names: Default first (it is there even before it has a file), then the others by name."""
+    names = set()
+    folder = os.path.join(lib.root, PROFILES_DIR)
+    if os.path.isdir(folder):
+        for n in sorted(os.listdir(folder)):
+            if n.lower().endswith(".json"):
+                try:
+                    data = read_json(os.path.join(folder, n))
+                except ModmanError:
+                    continue
+                if data and data.get("kind") == "profile" and profile_name_ok(data.get("name")) \
+                        and os.path.normcase(profile_file(lib, data["name"])) == os.path.normcase(os.path.join(folder, n)):
+                    names.add(data["name"])
+    names.add(lib.profile)
+    others = sorted((n for n in names if n.lower() != DEFAULT_PROFILE.lower()), key=str.lower)
+    return [DEFAULT_PROFILE, *others]
+
+
+def find_profile(lib: Library, name: str) -> str:
+    want = (name or "").strip()
+    hit = next((n for n in profile_names(lib) if n.lower() == want.lower()), None)
+    if hit is None:
+        raise ModmanError(f"No mod set '{want}'. These are there: {', '.join(profile_names(lib))}.")
+    return hit
+
+
+def profile_snapshot(lib: Library, name: str) -> dict:
+    """The library's mod set as a profile: the mods in order, on or off, the options chosen for .bnp and UKMM
+    packages, and the setting values the player changed (settings\\<id>.json)."""
+    options = {}
+    for m in lib.mods:
+        pkg = m.get("bnp") or m.get("ukmm")
+        if isinstance(pkg, dict) and isinstance(pkg.get("options"), list):
+            options[m["id"]] = [str(o) for o in pkg["options"]]
+    settings = {m["id"]: v for m in lib.mods if (v := read_setting_values(lib, m["id"]))}
+    return {"tool": TOOL_ID, "format": 1, "kind": "profile", "name": name, "saved": _now(),
+            "mods": [{"id": m["id"], "enabled": bool(m.get("enabled"))} for m in lib.mods],
+            "options": options, "settings": settings}
+
+
+def save_profile(lib: Library, name: str) -> str:
+    """Write the library's mod set as profile `name`. Returns the file."""
+    if not profile_name_ok(name):
+        raise ModmanError(f"'{name}' can't be a mod set name: use up to 40 letters, digits, spaces, '.', '-' and '_'.")
+    path = profile_file(lib, name)
+    old = read_json(path) if os.path.isfile(path) else None
+    if old and isinstance(old.get("name"), str) and old["name"].lower() != name.lower():
+        raise ModmanError(f"'{name}' would share a file with the mod set '{old['name']}': pick another name.")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    write_json(path, profile_snapshot(lib, name))
+    return path
+
+
+def apply_profile(lib: Library, data: dict) -> list[str]:
+    """Make the library's mod set the profile's: order, on/off and setting values. Mods added since the profile was
+    saved go last, turned off; mods it names that the library no longer has are skipped. Returns notes."""
+    notes: list[str] = []
+    rows = [x for x in data.get("mods", []) if isinstance(x, dict) and isinstance(x.get("id"), str)]
+    on = {x["id"]: bool(x.get("enabled")) for x in rows}
+    by_id = {m["id"]: m for m in lib.mods}
+    new = [by_id[x["id"]] for x in rows if x["id"] in by_id]
+    added = [m for m in lib.mods if m["id"] not in on]
+    for m in new:
+        m["enabled"] = on[m["id"]]
+    for m in added:
+        m["enabled"] = False
+    gone = [x["id"] for x in rows if x["id"] not in by_id]
+    if added:
+        notes.append(f"Off in this set (added after it was saved): {_some([m['name'] for m in added])}.")
+    if gone:
+        notes.append(f"Not in the library any more, so left out: {_some(gone)}.")
+    lib.mods = new + added
+    want = data.get("settings") if isinstance(data.get("settings"), dict) else {}
+    for m in lib.mods:
+        target = want.get(m["id"]) if isinstance(want.get(m["id"]), dict) else {}
+        if read_setting_values(lib, m["id"]) != target and (target or os.path.isfile(settings_file(lib, m["id"]))):
+            write_setting_values(lib, m["id"], target)
+    opts = data.get("options") if isinstance(data.get("options"), dict) else {}
+    for m in lib.mods:
+        pkg = m.get("bnp") or m.get("ukmm")
+        had = opts.get(m["id"])
+        if isinstance(pkg, dict) and isinstance(had, list) and sorted(map(str, had)) != sorted(map(str, pkg.get(
+                "options") or [])):
+            notes.append(f"{m['name']} was added with other options than this set had. To change them: remove it and "
+                         "add it again with --option.")
+    return notes
+
+
+def use_profile(lib: Library, name: str) -> list[str]:
+    """Switch to profile `name`: the current set is kept in its own profile first. Returns notes."""
+    if game_running():
+        raise ModmanError("Savage Wind is running. Close it, then switch the mod set.")
+    target = find_profile(lib, name)
+    if target == lib.profile:
+        return [f"'{target}' is the mod set in use already."]
+    data = read_profile(lib, target)
+    if data is None:
+        raise ModmanError(f"The mod set '{target}' has no file ({profile_file(lib, target)}).")
+    save_profile(lib, lib.profile)
+    notes = apply_profile(lib, data)
+    lib.profile = data["name"]
+    lib.save()
+    return notes
+
+
+def new_profile(lib: Library, name: str) -> str:
+    """Start a new profile from the current mod set and use it (the current one is kept as it is)."""
+    name = (name or "").strip()
+    if not profile_name_ok(name):
+        raise ModmanError(f"'{name}' can't be a mod set name: use up to 40 letters, digits, spaces, '.', '-' and '_'.")
+    if any(n.lower() == name.lower() for n in profile_names(lib)) or os.path.isfile(profile_file(lib, name)):
+        raise ModmanError(f"There is a mod set called '{name}' already (or one with the same file name).")
+    if game_running():
+        raise ModmanError("Savage Wind is running. Close it, then make the mod set.")
+    save_profile(lib, lib.profile)
+    path = save_profile(lib, name)
+    lib.profile = name
+    lib.save()
+    return path
+
+
+def remove_profile(lib: Library, name: str) -> str:
+    """Delete a profile's file (not Default's, not the one in use). Its mods stay in the library."""
+    target = find_profile(lib, name)
+    if target.lower() == DEFAULT_PROFILE.lower():
+        raise ModmanError("The Default mod set can't be removed.")
+    if target == lib.profile:
+        raise ModmanError(f"'{target}' is in use: switch to another mod set first.")
+    path = profile_file(lib, target)
+    if os.path.isfile(path):
+        os.remove(path)
+    return path
 
 
 # ---------------------------------------------------------------- commands
@@ -2904,6 +3499,8 @@ def cmd_status(args) -> int:
         say(f"No mod library in {root} yet. Run: python tools/modman.py init")
         return 0
     say(f"Library: {root} ({len(lib.mods)} mod(s), {len(lib.enabled())} on)")
+    if lib.profile != DEFAULT_PROFILE:
+        say(f"Mod set: {lib.profile}")
     say(f"Savage Wind: {lib.install or 'not set (run init)'}")
     wiiu = [m["id"] + (f" ({m['wiiu']['wiiu_data']} file(s) not converted)" if m["wiiu"].get("wiiu_data") else "")
             for m in lib.enabled() if isinstance(m.get("wiiu"), dict)]
@@ -2924,6 +3521,35 @@ def cmd_status(args) -> int:
     for a in launch.get("attention", []):
         say(f"  ! {a}")
     say("Start: python tools/modman.py run")
+    return 0
+
+
+def cmd_profile(args) -> int:
+    lib = open_library(args)
+    if args.action == "list":
+        names = profile_names(lib)
+        say(f"{len(names)} mod set(s); in use: {lib.profile}.")
+        for n in names:
+            say(f"  {'*' if n == lib.profile else ' '} {n}")
+        say("Switch: python tools/modman.py profile use <name>")
+        return 0
+    if not args.name:
+        raise ModmanError(f"Say which mod set: python tools/modman.py profile {args.action} <name>")
+    if args.action == "new":
+        new_profile(lib, args.name)
+        say(f"Made the mod set '{lib.profile}' from the mods as they are now, and it is in use. Changes you make now "
+            "go into it.")
+        return 0
+    if args.action == "use":
+        notes = use_profile(lib, args.name)
+        say(f"Mod set in use: {lib.profile}. {len(lib.enabled())} of {len(lib.mods)} mod(s) on.")
+        for n in notes:
+            say(f"  {n}")
+        say("Run deploy to use it.")
+        return 0
+    name = find_profile(lib, args.name)
+    remove_profile(lib, name)
+    say(f"Removed the mod set '{name}'. Its mods stay in the library.")
     return 0
 
 
@@ -3026,6 +3652,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--no-cheats", action="store_true", help="start without the cheats")
     sub.add_parser("status", parents=[common], help="what is deployed, and whether it is up to date")
     sub.add_parser("doctor", parents=[common], help="check that everything needed is there")
+    p = sub.add_parser("profile", parents=[common],
+                       help="mod sets you switch between: list, new <name>, use <name>, remove <name>")
+    p.add_argument("action", nargs="?", default="list", choices=("list", "new", "use", "remove"))
+    p.add_argument("name", nargs="?", help="the mod set's name (up to 40 letters, digits, spaces, '.', '-', '_')")
     return ap
 
 
@@ -3037,7 +3667,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     cmds = {"init": cmd_init, "add": cmd_add, "list": cmd_list, "enable": lambda a: cmd_enable(a, True),
             "disable": lambda a: cmd_enable(a, False), "move": cmd_move, "remove": cmd_remove,
-            "deploy": cmd_deploy, "run": cmd_run, "status": cmd_status, "doctor": cmd_doctor}
+            "deploy": cmd_deploy, "run": cmd_run, "status": cmd_status, "doctor": cmd_doctor,
+            "profile": cmd_profile}
     try:
         return cmds[args.cmd](args)
     except ModmanError as e:

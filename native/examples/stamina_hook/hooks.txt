@@ -1,3 +1,3 @@
 # The functions stamina_hook.dll hooks (BotW 1.9.0). Build the game code with them:
 #   python tools/sw_rebuild.py build --hooks native\examples\stamina_hook\hooks.txt --out out\rebuild-hooks
-0x7000cc7410   # stamina setter: x0 = PlayerInfo, s0 = new stamina (stored at +0xa4)
+0x7000cc7410   # stamina setter: x0 = player info block, s0 = new stamina (stored at +0xa4)

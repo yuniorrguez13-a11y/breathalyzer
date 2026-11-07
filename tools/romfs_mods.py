@@ -134,6 +134,43 @@ class Mod:
     skipped: list[tuple[str, str]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     zip: zipfile.ZipFile | None = None
+    layer_of: str = ""   # an option folder (Layer): the name of the mod it belongs to
+    owner: str = ""      # files made at deploy (add_generated): "generated:<what>", and path is ""
+
+
+@dataclass(frozen=True)
+class Layer:
+    """A mod's option folder (docs/mod-settings.md, `romfs` / `dlc_romfs` of a setting): a bare RomFS tree (Actor/,
+    Pack/, ... directly inside, no romfs/ or title-id folder), deployed right after the mod's own files, so it wins
+    over them and later mods win over it. `mod` is the mod's name in the plan (its folder name, the library id);
+    `dlc` puts its files into the DLC (aoc/0010/)."""
+    folder: str
+    mod: str
+    dlc: bool = False
+
+
+@dataclass
+class Winner:
+    """What the game gets for one overlay path (Plan.winner): a mod's file, a file made at deploy, or (mod None) the
+    game's own file."""
+    target: str
+    mod: str | None
+    entry: Entry | None
+    game_path: str | None = None
+    zip: zipfile.ZipFile | None = None
+
+    def read(self) -> bytes:
+        """The bytes the game would read for this path."""
+        e = self.entry
+        if e is None:
+            with open(self.game_path, "rb") as f:
+                return f.read()
+        if e.data is not None:
+            return e.data
+        if e.src:
+            with open(e.src, "rb") as f:
+                return f.read()
+        return self.zip.read(e.zname)
 
 
 @dataclass
@@ -210,6 +247,51 @@ class Plan:
     game: GameIndex | None
     notes: list[str]
     rstb_merged: list[str] = field(default_factory=list)  # the mods whose size tables the RSTB merges
+    sources: list = field(default_factory=list)   # what plan() was given (paths and Layers), for add_layer
+    rstb: MergedRstb | None = None
+    generated: dict[str, dict] = field(default_factory=dict)  # overlay path -> {"owner", "built_on"} (add_generated)
+    warnings: list[str] = field(default_factory=list)       # from add_generated, shown with the deploy's
+
+    def winner(self, path: str) -> Winner | None:
+        """What the game reads for a RomFS path ("Font/Font_US.sbfarc"; "aoc/0010/..." for a DLC file): the file of
+        the mod that wins it, a file made at deploy, or the game's own file when no mod has it (needs the plan's
+        game). None when neither has it. Case doesn't matter."""
+        low = path.replace("\\", "/").strip("/").lower()
+        hit = next(((t, v) for t, v in self.winners.items() if t.lower() == low), None)
+        if hit:
+            t, (i, e) = hit
+            m = self.mods[i]
+            return Winner(t, m.name, e, zip=m.zip)
+        g = self.game
+        if g:
+            dlc = low.startswith(DLC_PREFIX)
+            files = g.dlc_files if dlc else g.files
+            found = files.get(low[len(DLC_PREFIX):] if dlc else low)
+            if found:
+                base = next((a for a in g.aoc if os.path.isfile(os.path.join(a, *found[0].split("/")))), None) \
+                    if dlc else g.romfs
+                if base:
+                    return Winner(DLC_PREFIX + found[0] if dlc else found[0], None, None,
+                                  os.path.join(base, *found[0].split("/")))
+        return None
+
+    def add_layer(self, mod: str, folder: str, dlc: bool = False) -> None:
+        """Put an option folder right after the mod named `mod` (its own files and its earlier layers), and plan
+        again. Add layers before add_generated. plan(..., [path, Layer(...), ...]) does several at once."""
+        if self.generated:
+            raise DeployError("add option folders before the files made at deploy")
+        src = list(self.sources)
+        at = max((k for k, s in enumerate(src)
+                  if (s.mod if isinstance(s, Layer) else os.path.basename(os.path.abspath(s))) == mod), default=None)
+        if at is None:
+            raise DeployError(f"{mod} isn't in this deploy, so its option folder {folder} can't follow it")
+        src.insert(at + 1, Layer(folder, mod, dlc))
+        for m in self.mods:
+            if m.zip:
+                m.zip.close()
+        new = plan(src, self.game, self.rstb)
+        for k in ("mods", "winners", "conflicts", "notes", "rstb_merged", "sources"):
+            setattr(self, k, getattr(new, k))
 
 
 # ---------------------------------------------------------------- mapping a mod's files to RomFS paths
@@ -471,23 +553,39 @@ def _same_file(a: Entry, b: Entry) -> bool:
     return a.crc is not None and a.crc == b.crc
 
 
-def plan(mod_paths: list[str], game: GameIndex | None = None, rstb: MergedRstb | None = None) -> Plan:
+def plan(mod_paths: list, game: GameIndex | None = None, rstb: MergedRstb | None = None) -> Plan:
+    """What a deploy would put where (reads only). `mod_paths` holds mod folders or .zip files, later ones winning,
+    and may hold Layers (a mod's option folders) right after their mod."""
     known_top = ROMFS_TOP | (game.top_dirs if game else set())
     mods: list[Mod] = []
     try:
-        return _plan(mods, mod_paths, game, known_top, rstb)
+        p = _plan(mods, mod_paths, game, known_top, rstb)
     except BaseException:
         for m in mods:
             if m.zip:
                 m.zip.close()
         raise
+    p.sources, p.rstb = list(mod_paths), rstb
+    return p
 
 
-def _plan(mods: list[Mod], mod_paths: list[str], game: GameIndex | None, known_top: set[str],
+def load_layer(layer: Layer, known_top: set[str] = ROMFS_TOP) -> Mod:
+    """An option folder as a mod of its own, named "<mod> option <folder>"."""
+    if not os.path.isdir(layer.folder):
+        raise DeployError(f"{layer.mod}: its option folder {layer.folder} is missing")
+    mod = load_mod(layer.folder, known_top)
+    mod.name, mod.layer_of = f"{layer.mod} option {os.path.basename(os.path.abspath(layer.folder))}", layer.mod
+    if layer.dlc:
+        for e in mod.entries:
+            e.dlc = True
+    return mod
+
+
+def _plan(mods: list[Mod], mod_paths: list, game: GameIndex | None, known_top: set[str],
           rstb: MergedRstb | None = None) -> Plan:
     seen: set[str] = set()
     for path in mod_paths:
-        mod = load_mod(path, known_top)
+        mod = load_layer(path, known_top) if isinstance(path, Layer) else load_mod(path, known_top)
         base, k = mod.name, 2
         while mod.name.lower() in seen:
             mod.name, k = f"{base} ({k})", k + 1
@@ -533,8 +631,10 @@ def _plan(mods: list[Mod], mod_paths: list[str], game: GameIndex | None, known_t
         e = Entry(member="(merged size table)", rel=_canon(RSTB, False, case, game.files if game else {}),
                   size=len(rstb.data), data=rstb.data)
         claims[key] = [(lst[-1][0] if lst else len(mods) - 1, e)]
+    # (an option folder replacing its own mod's file is the option at work, not a clash between mods)
     conflicts = [{"path": lst[-1][1].target, "mods": [mods[i].name for i, _ in lst], "winner": mods[lst[-1][0]].name}
-                 for _, lst in sorted(claims.items()) if len(lst) > 1]
+                 for _, lst in sorted(claims.items())
+                 if len({mods[i].layer_of or mods[i].name for i, _ in lst}) > 1]
 
     # Savage Wind's movie player opens <overlay>/<path inside the DLC> for a DLC movie (movie.c), not aoc/0010/
     notes: list[str] = []
@@ -552,6 +652,49 @@ def _plan(mods: list[Mod], mod_paths: list[str], game: GameIndex | None, known_t
 
     winners = {lst[-1][1].target: lst[-1] for _, lst in sorted(claims.items())}
     return Plan(mods, winners, conflicts, game, notes, list(rstb.mods) if rstb is not None and mods else [])
+
+
+GENERATED = "generated:"   # the owner of files made at deploy: generated:pictures, generated:fonts, generated:title
+
+
+def add_generated(p: Plan, files: list, owner: str) -> list[str]:
+    """Files made at deploy (tools/font.py, tools/menu_bg.py, tools/mod_pictures.py) as overlay files that win over
+    every mod's. `files`: (RomFS path, bytes, size-table entry or None) tuples; the entry is the size the file needs in
+    the RSTB (None: it fits the entry already there). `owner` is "generated:<what>", listed as the file's mod in
+    .mod-deploy.json, with "built_on": the mod whose file it was made from. Returns the paths taken.
+
+    Size-table entries aren't merged yet (docs/mod-pictures.md, rule S2): a file that needs one is left out, with a
+    warning, so the game never reads a file bigger than its entry."""
+    if not owner.startswith(GENERATED) or len(owner) == len(GENERATED):
+        raise ValueError(f"owner must be '{GENERATED}<what>', not {owner!r}")
+    idx = next((k for k, m in enumerate(p.mods) if m.owner == owner), None)
+    if idx is None:
+        p.mods.append(Mod(path="", name=owner, owner=owner))
+        idx = len(p.mods) - 1
+    case = dict(p.game.dirs) if p.game else {}
+    taken: list[str] = []
+    for item in files:
+        path, data, rstb = item
+        rel = str(path).replace("\\", "/").strip("/")
+        if not rel or "/" not in rel or any(_bad_name(x) for x in rel.split("/")) \
+                or rel.lower().startswith(("aoc/", DLC_PREFIX)) or not isinstance(data, (bytes, bytearray)):
+            raise ValueError(f"{owner}: {path!r} isn't a RomFS file path with bytes")
+        if rstb is not None:
+            p.warnings.append(f"{owner}: {rel} needs a bigger size-table (RSTB) entry, which this deploy can't add "
+                              "yet: left out.")
+            continue
+        old = next((t for t in p.winners if t.lower() == rel.lower()), None)
+        rel = old or _canon(rel, False, case, p.game.files if p.game else {})  # (spelled as the file it replaces)
+        built_on = p.mods[p.winners[old][0]].name if old else None
+        if old:
+            del p.winners[old]
+        e = Entry(member="(made at deploy)", rel=rel, size=len(data), data=bytes(data))
+        p.mods[idx].entries.append(e)
+        p.winners[rel] = (idx, e)
+        p.generated[rel] = {"owner": owner, "built_on": built_on}
+        taken.append(rel)
+    p.winners = dict(sorted(p.winners.items()))
+    return taken
 
 
 def _game_check(p: Plan) -> dict:
@@ -586,7 +729,11 @@ def manifest_for(p: Plan, out: str, *, complete: bool, dry_run: bool = False) ->
     won: Counter[int] = Counter()
     for target, (i, e) in p.winners.items():
         d = {"mod": p.mods[i].name, "from": e.member, "size": e.size, "how": e.how}
-        if e.data is not None:
+        if target in p.generated:  # (made at deploy: the owner is "generated:<what>")
+            d["generated"] = True
+            if p.generated[target].get("built_on"):
+                d["built_on"] = p.generated[target]["built_on"]
+        elif e.data is not None:
             d["merged_from"] = p.rstb_merged
         if e.dlc:
             d["dlc"] = True
@@ -604,7 +751,7 @@ def manifest_for(p: Plan, out: str, *, complete: bool, dry_run: bool = False) ->
     rstb_mods = [m.name for m in p.mods if any(not e.dlc and e.rel.lower() == RSTB.lower() for e in m.entries)]
     check = _game_check(p) if p.game else None
 
-    warnings: list[str] = []
+    warnings: list[str] = list(p.warnings)
     for m in p.mods:
         for member, reason in m.skipped:
             if reason == R_DLC_MARK:
@@ -614,7 +761,7 @@ def manifest_for(p: Plan, out: str, *, complete: bool, dry_run: bool = False) ->
         warnings.append(f"The RSTB is merged from the size tables of {', '.join(p.rstb_merged)}, so start Savage Wind "
                         f"with {ENV_NO_HUD}=1 (modman run does): 0.4.1-alpha.4 stops its own RSTB fixes when the "
                         "overlay has one (issue #505). Keep the voice language the same as the text language.")
-        others = [m.name for i, m in enumerate(p.mods) if won[i] and m.name not in p.rstb_merged]
+        others = [m.name for i, m in enumerate(p.mods) if won[i] and m.name not in p.rstb_merged and not m.owner]
         if others:
             warnings.append(f"The merged RSTB has no size changes from {', '.join(others)}; their files may need "
                             "entries in it. Merge the mods with UKMM (Switch mode) first.")
@@ -622,11 +769,11 @@ def manifest_for(p: Plan, out: str, *, complete: bool, dry_run: bool = False) ->
         warnings.append(f"{rstb_from} ships an RSTB, so start Savage Wind with {ENV_NO_HUD}=1 (the env command "
                         "adds it): 0.4.1-alpha.4 stops its own RSTB fixes when the overlay has one (issue #505). "
                         "Keep the voice language the same as the text language.")
-        others = [m.name for i, m in enumerate(p.mods) if won[i] and m.name != rstb_from]
+        others = [m.name for i, m in enumerate(p.mods) if won[i] and m.name != rstb_from and not m.owner]
         if others:
             warnings.append(f"The RSTB comes from {rstb_from} only; files from {', '.join(others)} may need entries "
                             "in it. Merge the mods with UKMM (Switch mode) first.")
-    elif files:
+    elif any(t not in p.generated for t in files):
         w = ("No mod ships an RSTB (ResourceSizeTable): new or bigger files may fail to load without entries "
              "in it. Merge the mods with UKMM (Switch mode) first and deploy its output.")
         if check and check["bigger_than_game"]:
@@ -657,6 +804,12 @@ def manifest_for(p: Plan, out: str, *, complete: bool, dry_run: bool = False) ->
            "conflicts": p.conflicts, "rstb": {"shipped": bool(rstb_from), "from": rstb_from, "mods": rstb_mods,
                                               **({"merged_from": p.rstb_merged} if p.rstb_merged else {})},
            "game_check": check, "warnings": warnings, "notes": notes}
+    if p.generated:  # (files made at deploy, by owner: "generated:pictures" -> its paths)
+        gen: dict[str, list[str]] = {}
+        for t, g in p.generated.items():
+            if t in files:
+                gen.setdefault(g["owner"], []).append(t)
+        man["generated"] = gen
     man["env"] = env_for(out, man)
     if dry_run:
         man["dry_run"] = True
@@ -1013,17 +1166,22 @@ def _deploy_staged(p: Plan, out: str, old: dict) -> dict:
     return man
 
 
-def deploy(mod_paths: list[str], out: str, game_romfs: str | GameIndex | None = None, *,
-           copy: bool = False, dry_run: bool = False, rstb: MergedRstb | None = None) -> dict:
+def deploy(mod_paths: list, out: str, game_romfs: str | GameIndex | None = None, *,
+           copy: bool = False, dry_run: bool = False, rstb: MergedRstb | None = None,
+           plan_: Plan | None = None) -> dict:
     """Fill the overlay folder `out` from the mods (later mods win) and return the manifest. `rstb`: a size table
-    merged from the mods' own (tools/bnp.py), deployed in the place of theirs."""
+    merged from the mods' own (tools/bnp.py), deployed in the place of theirs. `plan_`: a plan made already (with
+    option folders and files made at deploy added); then mod_paths, game_romfs and rstb are not used."""
     out = os.path.abspath(out)
     if os.path.dirname(out) == out:
         raise DeployError(f"{out} is a drive root: pick a folder on it")
-    game = game_romfs if isinstance(game_romfs, GameIndex) or game_romfs is None else GameIndex.scan(game_romfs)
-    p = plan(mod_paths, game, rstb)
+    if plan_ is not None:
+        p, game = plan_, plan_.game
+    else:
+        game = game_romfs if isinstance(game_romfs, GameIndex) or game_romfs is None else GameIndex.scan(game_romfs)
+        p = plan(mod_paths, game, rstb)
     try:
-        for src in [m.path for m in p.mods] + ([game.romfs, *game.aoc] if game else []):
+        for src in [m.path for m in p.mods if not m.owner] + ([game.romfs, *game.aoc] if game else []):
             if _inside(src, out) or _inside(out, src):
                 raise DeployError(f"The overlay folder and {src} overlap: use a separate folder for the overlay.")
         old = _owned(out)

@@ -24,7 +24,8 @@ python tools/wiiu_convert.py convert "D:\mods\Armor Mod" --out "D:\mods\Armor Mo
   an uncompressed Switch BFRES gets the 0x1000 its header asks for.
 - Converted files are Yaz0-compressed again with alignment field 0, as every Switch file is.
 - A file that can't be converted stays Wii U data and is listed with the reason (a variant we don't convert, or
-  damaged data). Nothing is guessed: unknown formats and layouts are refused.
+  damaged data). Nothing is guessed: unknown formats and layouts are refused. With your game files, a model or
+  texture file that can't be converted never stays as Wii U bytes where the Switch game loads it (see below).
 - Warnings (a dropped part, a texture without mipmaps, a material without a vanilla twin...) go under "Needs
   attention" in the report. `modman add` says how many there are, and `deploy` lists the mods that have them under
   "Needs attention".
@@ -34,26 +35,50 @@ python tools/wiiu_convert.py convert "D:\mods\Armor Mod" --out "D:\mods\Armor Mo
 The converter reads your own Switch files (read only) and uses them where the Wii U file alone can't say enough:
 
 - Materials: each material is built on your vanilla material of the same name (from the model file of the same
-  name: loose in `Model/`, in the same pack, or in `Pack/TitleBG.pack`). The mod's values go on top: the texture of
-  each sampler, shader params of the same name and size, shader options, render infos, user data and the attribute
-  assigns. The 16 `gsys_*` render-state infos come from the mod only when its RenderState differs from the vanilla
-  one (the mod changed blending or culling). Samplers only the mod has are added. Mod fields your vanilla material
-  lacks are dropped and listed. A material your game doesn't have is converted field by field, with a warning.
+  name: loose in `Model/`, in the same pack, or in `Pack/TitleBG.pack`). The mod's values go on top: shader params
+  of the same name and size, shader options, render infos, user data and the attribute assigns. The 16 `gsys_*`
+  render-state infos come from the mod only when its RenderState differs from the vanilla one (the mod changed
+  blending or culling). Mod fields your vanilla material lacks are dropped and listed. A material your game doesn't
+  have is converted field by field, with a warning.
+- Samplers are the mod's, in the mod's order, each with the mod's texture. A sampler your material also has keeps
+  your values when the mod's are the same as a Wii U file can hold them (wrap, filter, anisotropy, border, compare,
+  LOD in 1/64 steps); otherwise the mod's values are used (it changed wrap or filter). A sampler your material has
+  and the mod's lacks is left out, with a warning (if that part looks wrong in game, the Wii U and Switch materials
+  may differ there).
 - Textures without a Tex2: a texture whose main image is unchanged from your game's keeps your game's mipmaps. Any
   other gets one mip level, with a warning (it may look grainy at a distance).
 - The BNTX swizzle field comes from your texture of the same name (without it: Alb 0, Nrm 2, others 3).
-- `TexInfo.txt` (the texture count of the `X.Tex` the game loads): from the mod's own `X.Tex1`, else from your
-  vanilla model. Without either, none is written and a warning says so.
-- A material texture that is in no `X.Tex` the game loads (the model's own, or `Link.Tex` for armour) gets a warning:
-  that part would render without it.
-- A pack holding converted models (`TitleBG.pack`, say) gets the files your game's pack has and the mod's lacks.
+- `TexInfo.txt` (the texture count of the `X.Tex` the game loads): from the mod's own `X.Tex1` when it converts;
+  when it can't be converted, your `X.Tex` ships instead, so its count is used; else your vanilla model's. Without
+  any, none is written and a warning says so.
+- A material texture that is in no `X.Tex` the game loads gets a warning: that part would render without it. The
+  `X.Tex` files checked are the model's own (`X`, or `X` for an `X-NN` piece) and `Link.Tex` (armour uses Link's skin
+  and hair). For each, that is the mod's when the mod ships one that converts (it replaces yours), else yours. Names
+  your vanilla model uses that none of your `X.Tex` files holds are not flagged: the game finds those elsewhere (2 of
+  25 models we checked do this, with terrain material textures).
+- A texture-only mod (an `X.Tex1`, no `X` model) whose texture count differs from your vanilla model's
+  `TexInfo.txt`: your model is written again with the new count (otherwise unchanged), loose or into the same pack,
+  where your game keeps it. When it can't be (the mod's `X.Tex` is loose and your model is in `TitleBG.pack`, say),
+  a warning says so.
+- A pack holding models or textures (`TitleBG.pack`, say) gets the files your game's pack has and the mod's lacks
+  (your `X.Tex` among them when the mod's Tex1/Tex2 can't be converted).
+- A converted file that holds the same values as your game's file of that path (a model, an animation file, an
+  `X.Tex`; a data file when it is byte for byte the same) is written as your game's own bytes, and nothing is
+  compressed again. A whole Wii U `TitleBG.pack` (a Linkle-style mod) is mostly such files. For an animation file
+  only the size of your file is read first (from its Yaz0 header); the whole file only when the sizes match.
+- A model or texture file that can't be converted: in a pack, your game's file of that name takes its place, or it
+  is left out of the pack when your game has none (Wii U bytes there would crash the game when it loads them). An
+  `X.Tex1` / `X.Tex2` is left out of the pack (the Switch never loads those names; the pack gets your `X.Tex`). A
+  loose one your game has is left out, so the game loads its own. Each is listed under "Needs attention": the mod's
+  change to that file is lost. A loose one your game doesn't have stays Wii U data, as before.
 - Size table: your game's RSTB is written with the entries of the converted files raised. `X.Tex`: its size + 8208
   (exact on 23/23 of your files). Models: your vanilla entry when the new file is no bigger and has no more parts;
   else the new size plus 1.5 x the vanilla overhead, scaled by how much the model grew (a guess: no formula is known).
   A new model your game has no entry for gets none, with a note: if it crashes on load, merge with UKMM.
 
 Without `--game`: materials field by field, one mip level for textures without a Tex2, `TexInfo.txt` only from the
-mod's own `X.Tex1`, no pack filling and no size table. The report says so.
+mod's own `X.Tex1` (when it converts), no pack filling, no size table, and files that can't be converted stay Wii U
+data. The report says so.
 
 ## Animations
 
@@ -74,16 +99,28 @@ On your own Switch files, read only, at low priority while you played (2026-11-0
 - The mod converter (`wiiu_convert.py verify --groups models --count 8`): 8 of 8 samples pass. Each sample went
   from your Switch file to our Wii U writer (materials with a RenderState and without the 16 render infos, as on Wii
   U), then through `wiiu_convert.py` back to the Switch, and was compared value by value.
-  - 4 models with their `X.Tex1` + `X.Tex2` (7 materials, 14 textures). Without your game files: every model value
-    equal, `TexInfo.txt` from the Tex1, every texture's blocks equal at every mip. 2 textures get another swizzle
-    field from the role rule (no vanilla twin to copy it from). With your game files and the Tex1 only: every
-    material equal, and every texture keeps your game's mipmaps, so the blocks are equal again.
+  - 4 models with their `X.Tex1` + `X.Tex2` (7 materials, 14 textures). A, without your game files: every model
+    value equal, `TexInfo.txt` from the Tex1, every texture's blocks equal at every mip. 2 textures get another
+    swizzle field from the role rule (no vanilla twin to copy it from).
+  - B, with your game files and the Tex1 only, where the mod changes one float shader param and one texture's main
+    image: in all 4, exactly those two come out different (that texture with 1 mip and a warning) and every other
+    value is equal, the other textures with your game's mipmaps. So the vanilla materials and mipmaps don't hide a
+    mod's change. B can't show that a real Wii U texture's main image is block for block your Switch one (open
+    point 9 below).
   - The size table rules on them: no entry needed raising (each `X.Tex` at size + 8208 is within your game's entry).
   - 1 animation file (36 skeletal, 23 material animations): every value equal.
   - 2 item icons: byte-identical.
   - Link in `Pack/TitleBG.pack`: the pack was rebuilt with `Link.Tex.sbfres` in place of `Link.Tex1`/`Link.Tex2`,
-    both files equal value by value and 0x1000-aligned, and the 408 other files filled from your game's pack (410
-    names, the same as your game's).
+    both files equal value by value, and the 408 other files filled from your game's pack (410 names, the same as
+    your game's).
+- The whole `Pack/TitleBG.pack` as a Linkle-style Wii U mod ships it (`verify --groups titlebg`): its 80 model,
+  animation and texture files went through our Wii U writer (106 Wii U files, 44.7 MB) into one Wii U pack, then
+  through the mod converter with your game files. 78 came out as your game's own bytes (nothing compressed again),
+  and the pack has your game's 410 names. Our Wii U writer can't make 2 of them (`Animal_Frog`: a constant texture
+  pattern; `Terrain.Tex`: a texture array), so those came from your pack. Nothing went under "Needs attention".
+  Time at low priority while you played: 84-103 s to convert in two runs, plus 59-79 s to build the Wii U pack. A
+  real mod's Yaz0 takes longer to decompress than the literal-only Yaz0 the check uses. Before, each file was
+  compressed again in pure Python (about 5 s per MB: some 15-20 minutes for this pack).
 - Animations through our Wii U writer and back (`wiiu_model`): all 33 skeletal and 45 material animations of the 10
   sampled files that have them come back equal (FSKA, FSHU for `*_fsp`/`*_fcl`/`*_fts`, FTXP for `*_ftp`), and the
   Wii U files pass their self-check.
@@ -150,6 +187,9 @@ Textures:
 6. The mip check stays above 0.5 on real Wii U textures.
 7. The Switch swizzle field our converted textures get works in game.
 8. Where Link's `Tex2` lives on Wii U (in `TitleBG.pack` or loose): the pairing handles both.
+9. A real Wii U texture's main image is block for block the Switch one. If not, every texture of a mod that ships a
+   Tex1 without its Tex2 gets 1 mip (in a whole `TitleBG.pack`, every texture in it, unless Link's Tex2 is there too),
+   and such files are no longer written as your game's own bytes.
 
 Size table: the model rule is a guess until a converted model is tried in game.
 
@@ -166,8 +206,9 @@ Size table: the model rule is a guess until a converted model is tried in game.
   `custom`, `logic`, `never`) are written with a warning, because their names are not confirmed.
 - GX2 sampler words become nn::gfx sampler values. GX2 clamp modes 4, 5 and 7 have no Switch twin: the nearest is
   used, with a warning. "No mip filter" becomes "point". A depth compare sampler gets the nn::gfx comparison bit
-  (0x80), and anisotropy above 1:1 is kept as max anisotropy without the anisotropic bit. Both get a warning, because
-  every sampler in your files is filter 0x29 with anisotropy 1.
+  (0x80), and anisotropy above 1:1 is kept as max anisotropy without the anisotropic bit. Both get a warning: no
+  sampler in your files compares, and the only anisotropic ones (3 in `Terrain`) are filter 0x6a, with the bit. A
+  material built on your vanilla one keeps your sampler (and loses the warning) when the values match.
 - TexSrtEx params (a TexSrt plus a 4-byte run-time pointer) become TexSrt, as on the Switch. The pointer is dropped,
   later params move down 4 bytes, and a warning says so.
 - User data uses one numbering on both consoles, BfresLibrary's: 0 int, 1 float, 2 string, 3 wide string, 4 bytes.
@@ -199,6 +240,7 @@ Size table: the model rule is a guess until a converted model is tried in game.
     python tools/wiiu_model verify-models --dec DIR [--romfs ROMFS] [--extra N] [--samples DIR] --out R.txt
                                           [--json R.json]
     python tools/wiiu_convert.py verify "<Savage Wind>\extracted\romfs" --out out\wiiu-roundtrip --groups models
+    python tools/wiiu_convert.py verify "<Savage Wind>\extracted\romfs" --out out\wiiu-roundtrip --groups titlebg
 
 Inputs may be Yaz0-compressed. Game files and samples are only read. `verify-models --samples` parses, checks and
 converts every Wii U model it finds under that folder (loose, or inside SARC packs). The report prints the decoded

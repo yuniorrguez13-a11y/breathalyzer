@@ -7,7 +7,7 @@ A .bnp is a 7-Zip archive holding info.json (name, version, options), the mod's 
 (01007EF00011E000/romfs, 01007EF00011F001/romfs for the DLC), logs/ (what BCML merges itself: rstb.json, packs.json,
 deepmerge.aamp, aslist.aamp, gamedata/savedata/texts/map logs...) and options/<folder>/ with the same layout.
 BCML removes from the packs every file the mod doesn't change, and keeps some changes only as logs, so its files
-can't be used as they are. Installing one here:
+can't be used as they are. Installing one here (each step in install()):
 
 1. lists the archive (7-Zip's 7z.exe, else Windows' own tar.exe), refuses any name that would land outside the
    folder (.., absolute paths, drive letters, reserved names), a name starting with '-' (a tool could read it as an
@@ -18,13 +18,20 @@ can't be used as they are. Installing one here:
    own files win, nested packs too (BCML's pack merge for one mod);
 4. applies logs/deepmerge.aamp (actor parameter changes) to the game's parameter files, then logs/aslist.aamp
    (animation lists, .baslist: new animation archives, sequences and blend rules, matched by name) to the game's lists;
+   then the data logs, each kind of the base and the options combined and merged by its module into the mod's copy of
+   the game file (else the game's), back in its packs (merge_logs): tools/bcml_data.py (actorinfo, gamedata,
+   savedata, eventinfo, effects, areadata, residents), bcml_maps.py (map, mainstatic, dstatic, quests) and
+   bcml_texts.py (texts.json in every language the game has, drops.json, shop.aamp);
 5. writes a size table (RSTB) for the mod when that changes the game's: the game's own, with the sizes from
    logs/rstb.json and sizes for the files it rebuilt (never smaller than the game's; a size of 0 removes the entry, as
    BCML means it);
-6. names every log it can't merge (gamedata, texts, maps...): modman shows them as "Needs attention".
+6. names every log it can't merge (BCML 2's, unknown or damaged ones, parts a merger leaves out): modman shows them as
+   "Needs attention".
 
 The library copy keeps .bnp/ next to the mod's files (info.json, the logs, bnp.json, rstb.json): `deploy` merges
 the size table changes of several enabled mods into one table (the larger size wins) instead of using the last one.
+Packs and the files the logs made are not merged between mods yet: the later mod's copy wins, and deploy names what
+an earlier package loses (deploy_hook).
 Nothing here runs anything from the package, and no name from it is read as an option (names starting with '-' are
 refused, the others come after "--"); the game's files are only read.
 """
@@ -63,13 +70,19 @@ ADDING = ".adding-"                   # modman's stage folders (and this module'
 STALE_AFTER = 3600                    # seconds untouched before such a folder counts as left by an add cut short
 # Packs (SARC archives) by extension, without the "s" a Yaz0-compressed copy adds
 PACK_EXTS = {"pack", "sarc", "bactorpack", "beventpack", "blarc", "bgenvb", "stera", "stats", "bfarc"}
+# BCML 3's logs, all merged: the first four here, the others by tools/bcml_data.py, bcml_texts.py and bcml_maps.py
+# (see log_mergers)
 LOG_NAMES = {
-    "gamedata.yml": "game data flags", "savedata.yml": "save data flags", "actorinfo.yml": "actor info",
-    "map.yml": "map changes", "drops.json": "drop tables", "shops.json": "shop data", "eventinfo.yml": "event info",
-    "effects.yml": "status effects", "areadata.yml": "area data", "mainstatic.yml": "main field static actors",
-    "quests.yml": "quests", "residents.yml": "residents", "aslist.aamp": "animation lists",
-    "savedata.sarc": "save data", "deepmerge.yml": "actor parameter changes",
+    "rstb.json": "sizes", "packs.json": "pack list", "deepmerge.aamp": "actor parameter changes",
+    "aslist.aamp": "animation lists",
+    "actorinfo.yml": "actor info", "gamedata.yml": "game data flags", "savedata.yml": "save data flags",
+    "eventinfo.yml": "event info", "effects.yml": "status effects", "areadata.yml": "area data",
+    "residents.yml": "resident actors", "texts.json": "texts", "drops.json": "drop tables", "shop.aamp": "shop data",
+    "map.yml": "map changes", "mainstatic.yml": "main field static actors", "dstatic.yml": "shrine entrances",
+    "quests.yml": "quests",
 }
+# BCML 2's logs (BCML 3 refuses such packages too): named, not merged
+OLD_LOGS = {"savedata.sarc": "save data", "deepmerge.yml": "actor parameter changes"}
 
 
 class BnpError(Exception):
@@ -1299,17 +1312,22 @@ class Result:
     notes: list[str] = field(default_factory=list)
     not_merged: list[str] = field(default_factory=list)
     packs: list[str] = field(default_factory=list)
+    logs_merged: dict[str, list[str]] = field(default_factory=dict)   # log -> the game files it changed (targets)
+    generated: list[str] = field(default_factory=list)   # whole files the logs made (ActorInfo, map units...)
 
     def summary(self) -> list[str]:
         """Lines for modman add: what was installed, then what wasn't merged."""
         i = self.info
         opts = ", ".join(o.name for o in self.chosen) or "none"
         n = f"{self.rstb_entries} entr{'y' if self.rstb_entries == 1 else 'ies'}"
+        logs = [f"{k} ({len(v)} file{'' if len(v) == 1 else 's'})" if v else f"{k} (no change)"
+                for k, v in self.logs_merged.items()]
         out = [f"BCML package {i.name or '?'}" + (f" {i.version}" if i.version else "") + f": options {opts}"
                + (f" (of {len(i.options)})" if i.options else ""),
                f"{self.files} file(s); {self.packs_filled} pack(s) filled with {self.files_added} file(s) from your "
                f"game; {self.deepmerged} parameter file(s) merged (deepmerge.aamp)"
                + (f", {self.aslisted} animation list(s) (aslist.aamp)" if self.aslisted else ""),
+               *([f"logs merged: {', '.join(logs)}"] if logs else []),
                f"size table: {n}, {self.rstb_changed} changed from the game's" if self.rstb_changed else
                f"size table: {n}, none of them bigger than the game's, so the game's is used" if self.rstb_ok else
                f"size table: {n}, not made (see below)" if self.rstb_entries else
@@ -1413,8 +1431,14 @@ def _some(items: list[str], n: int = 3) -> str:
     return ", ".join(items[:n]) + (f" and {len(items) - n} more" if len(items) > n else "")
 
 
+def _target_top(target: str) -> str:
+    """The file in the RomFS a log merger's target is in ("Pack/Bootup.pack" for "Pack/Bootup.pack//GameData/...")."""
+    return target.split("//", 1)[0]
+
+
 def _unmerged_log(where: str, name: str, data: bytes) -> str:
-    what = LOG_NAMES.get(name) or ("texts" if name.startswith("texts") else None)
+    old = OLD_LOGS.get(name) or ("texts" if name.startswith("texts_") else None)
+    what = f"{old}, a BCML 2 log, which BCML 3 refuses too" if old else LOG_NAMES.get(name)
     files = ""
     if name.endswith(".aamp"):
         try:
@@ -1426,6 +1450,132 @@ def _unmerged_log(where: str, name: str, data: bytes) -> str:
     label = f"{where}{name}" + (f" ({what})" if what else " (a BCML log this loader doesn't know)")
     return (f"{label}{files} not merged: the game's own are used, so the parts of the mod that need them may not "
             "work (merging them needs BCML or UKMM)")
+
+
+def log_mergers() -> dict:
+    """Log name -> the module that merges it (bcml_data, bcml_texts or bcml_maps: read_log, combine, apply). Imported
+    here, when needed: they import this module."""
+    import bcml_data
+    import bcml_maps
+    import bcml_texts
+    return {name: mod for mod in (bcml_data, bcml_maps, bcml_texts) for name in mod.LOGS}
+
+
+def _log_error(where: str, name: str, e: Exception) -> str:
+    """A log a merger can't read, for "needs attention" (the merger's message starts with the log's name)."""
+    msg = str(e).strip()
+    if msg.lower().startswith(name):
+        msg = msg[len(name):].lstrip(" :")
+    msg = msg.rstrip(".")
+    return f"{where}{name} ({LOG_NAMES.get(name, 'a BCML log')}) {msg}; not merged, the game's are used"
+
+
+class Targets:
+    """The mod's files by RomFS target ("Pack/Bootup.pack//GameData/gamedata.ssarc", "//" inside packs), for the log
+    mergers. read() gives the mod's copy of one (its own file, or a file of a pack the install filled), or None; put()
+    sets one: in its pack (the mod's, else copied from the game, kept in `blobs` to be written), every pack on the way
+    sized as deepmerge's are, or as a whole file (`loose`, written at the end)."""
+
+    def __init__(self, stage: str, game: str, blobs: dict, game_blobs: dict, sizes: Sizes):
+        self.stage, self.game, self.blobs, self.game_blobs, self.sizes = stage, game, blobs, game_blobs, sizes
+        self.files_now = {r.lower(): r for r in _walk(stage)}
+        self.opened: dict[str, Blob] = {}      # rel -> a pack of the mod read but not changed (yet)
+        self.loose: dict[str, bytes] = {}      # rel -> a whole file's new bytes
+
+    def rel(self, top: str) -> str:
+        rel = f"{BASE_TID}/romfs/{top}"
+        return self.files_now.get(rel.lower(), rel)
+
+    def _game_top(self, rel: str) -> Blob | None:
+        g = self.game_blobs.get(rel)
+        if g is None:
+            gpath = _game_file(self.game, rel)
+            if gpath:
+                g = self.game_blobs[rel] = Blob(_read(gpath))
+        return g
+
+    def _top(self, rel: str, from_game: bool) -> Blob | None:
+        blob = self.blobs.get(rel) or self.opened.get(rel)
+        if blob is None:
+            own = os.path.join(self.stage, *rel.split("/"))
+            if os.path.isfile(own):
+                blob = Blob(_read(own))
+            elif from_game and self._game_top(rel) is not None:
+                blob = Blob(self._game_top(rel).orig)   # (a pack the mod changes only through its logs)
+            else:
+                return None
+            self.opened[rel] = blob
+        return blob
+
+    def read(self, target: str) -> bytes | None:
+        parts = target.split("//")
+        rel = self.rel(parts[0])
+        if len(parts) == 1:
+            if rel in self.loose:
+                return self.loose[rel]
+            own = os.path.join(self.stage, *rel.split("/"))
+            return _read(own) if os.path.isfile(own) else None
+        top = self._top(rel, False)
+        return get_inside(top, parts[1:]) if top is not None else None
+
+    def put(self, target: str, data: bytes) -> str | None:
+        """Set a target's bytes in the mod. Returns why it can't be, or None."""
+        parts = target.split("//")
+        rel = self.rel(parts[0])
+        if len(parts) == 1:
+            self.loose[rel] = data
+            return None
+        top = self._top(rel, True)
+        if top is None:
+            return "neither the mod nor the game has its pack"
+        tparts = rel.split("/")
+        why = put_inside(top, self._game_top(rel), canon("/".join(tparts[2:]), top.orig, tparts[0].upper() == DLC_TID),
+                         parts[1:], data, self.sizes)
+        if why is None:
+            self.blobs[rel] = top
+            self.opened.pop(rel, None)
+        return why
+
+
+def put_inside(top: Blob, gtop: Blob | None, top_name: str, inner: list[str], data: bytes, sizes: Sizes) -> str | None:
+    """Set the file at `inner` (its path through the packs inside `top`, a pack) to data; every pack on the way gets a
+    size (the game's copy of it, gtop and inside: its entry plus what it grew). Returns why it can't be, or None."""
+    chain = [(top_name, top, gtop)]
+    blob, gblob = top, gtop
+    for name in inner[:-1]:
+        if not blob.is_sarc():
+            return f"{chain[-1][0]} isn't a pack"
+        blob = blob.child(name)
+        if blob is None:
+            return f"no {name} in its pack"
+        gblob = gblob.child(name) if gblob is not None and gblob.is_sarc() else None
+        chain.append((canon(name, blob.orig), blob, gblob))
+    if not blob.is_sarc():
+        return f"{chain[-1][0]} isn't a pack"
+    blob.set(inner[-1], data)
+    for size_name, pack, gpack in chain:
+        if gpack is not None and gpack.is_sarc():
+            sizes.add(size_name, len(gpack.raw), pack, True)
+    return None
+
+
+def get_inside(top: Blob, inner: list[str]) -> bytes | None:
+    """The file at `inner` (its path through the packs inside `top`) as it is now, or None. A file rebuilt here is
+    settled (data()), its packs kept marked as changed."""
+    blob, chain = top, []
+    for name in inner:
+        if blob is None or not blob.is_sarc():
+            return None
+        chain.append(blob)
+        blob = blob.child(name)
+    if blob is None:
+        return None
+    if blob.dirty():
+        data = blob.data()
+        for pack in chain:
+            pack.changed = True   # (data() settled the change in the file itself: its packs still hold it)
+        return data
+    return blob.orig
 
 
 class Sizes:
@@ -1490,10 +1640,13 @@ def install(src_root: str, stage: str, game: str, *, info: Info, picks: list[str
     if merged_packs:
         res.notes.append(f"{merged_packs} pack(s) of the options merged with the base package's")
 
-    # 2. the logs: sizes, packs and parameter changes are merged below; the others are named
+    # 2. the logs: sizes, packs and parameter changes are merged below, the data logs by their mergers (log_mergers);
+    # what nothing merges is named
     rstb_tables: list[dict] = []
     diffs: list[tuple[str, Pio]] = []
     aslists: list[tuple[str, Pio]] = []
+    mergers = log_mergers()
+    data_logs: dict[str, list] = {}      # log name -> its parsed logs: the base's, then each option's
     for layer in layers:
         where = f"{layer.label}/logs/" if layer.label else "logs/"
         for name, path in sorted(layer.logs.items()):
@@ -1508,6 +1661,14 @@ def install(src_root: str, stage: str, game: str, *, info: Info, picks: list[str
                 except (wc.FormatError, struct.error) as e:
                     res.not_merged.append(f"{where}{name} ({LOG_NAMES.get(name, 'actor parameter changes')}) can't "
                                           f"be read ({e}): not merged, the game's are used")
+            elif name in mergers:
+                m = mergers[name]
+                try:
+                    log = m.read_log(name, data, where) if m.__name__ == "bcml_texts" else m.read_log(name, data)
+                except (m.LogError, ValueError, TypeError, RecursionError) as e:
+                    res.not_merged.append(_log_error(where, name, e))
+                    continue
+                data_logs.setdefault(name, []).append(log)
             else:
                 res.not_merged.append(_unmerged_log(where, name, data))
 
@@ -1571,18 +1732,27 @@ def install(src_root: str, stage: str, game: str, *, info: Info, picks: list[str
                                   f"{'y' if len(nameless) == 1 else 'ies'} without a name not merged "
                                   f"({_some(nameless, 2)}): BCML always names them, so the log may be damaged; "
                                   "the rest of it is merged")
-    # (the mod's packs: its own and the ones only deepmerge.aamp changes, which it gets from the game)
+
+    # 4b. the data logs (game data, save data, actor info, texts, drops, shops, maps, quests...): each kind's logs of
+    # the base and the options combined, merged into the mod's copy of its file (else the game's), put back in its
+    # packs
+    targets = Targets(stage, game, blobs, game_blobs, sizes)
+    log_sizes = merge_logs({n: [logs] for n, logs in data_logs.items()}, game, targets, res, say)
+    # (the mod's packs: its own and the ones only its logs change, which it gets from the game)
     res.packs = sorted({_target(r).lower(): _target(r) for r in [*candidates, *blobs]}.values(), key=str.lower)
+    res.generated = sorted(_target(r) for r in targets.loose)
 
     # 5. write what changed
-    if blobs:
-        say(f"  writing {len(blobs)} rebuilt file(s)...")
+    if blobs or targets.loose:
+        say(f"  writing {len(blobs) + len(targets.loose)} rebuilt file(s)...")
     for rel, blob in sorted(blobs.items()):
         _write_new(os.path.join(stage, *rel.split("/")), blob.data())
+    for rel, data in sorted(targets.loose.items()):
+        _write_new(os.path.join(stage, *rel.split("/")), data)
 
     # 6. the size table: the mod's sizes and the rebuilt files', never below the game's (0: no entry)
     entries = merge_entries(rstb_tables)
-    for name, need in sizes.final().items():
+    for name, need in [*sizes.final().items(), *log_sizes.items()]:
         if entries.get(name) != 0:
             entries[name] = max(need, entries.get(name, 0))
     res.rstb_entries = len(entries)
@@ -1615,25 +1785,71 @@ def install(src_root: str, stage: str, game: str, *, info: Info, picks: list[str
         "tool": TOOL_ID, "name": info.name, "version": info.version, "options": [o.name for o in chosen],
         "option_folders": [o.folder for o in chosen], "packs": res.packs, "packs_filled": res.packs_filled,
         "files_added_from_game": res.files_added, "deepmerged": res.deepmerged, "aslist_merged": res.aslisted,
-        "rstb_entries": res.rstb_entries,
+        "logs_merged": res.logs_merged, "generated": res.generated, "rstb_entries": res.rstb_entries,
         "not_merged": res.not_merged, "notes": res.notes})
     return res
 
 
+# The data logs in the order they are merged (texts last: 16 languages, the slowest)
+MERGE_ORDER = ("actorinfo.yml", "gamedata.yml", "savedata.yml", "eventinfo.yml", "effects.yml", "areadata.yml",
+               "residents.yml", "mainstatic.yml", "dstatic.yml", "map.yml", "quests.yml", "drops.json", "shop.aamp",
+               "texts.json")
+MERGE_ERRORS = (wc.FormatError, ValueError, TypeError, KeyError, IndexError, struct.error, RecursionError, OSError,
+                BnpError)
+
+
+def merge_logs(logs: dict[str, list], game: str, targets: Targets, res: Result, say=print) -> dict[str, int]:
+    """Merge each kind of data log into `targets`: logs maps a log name to one item per package (lower priority
+    first), each the list of its parsed logs (the base's, then each chosen option's); its module combines them and
+    merges the result into the mod's copy of the game file (`targets.read`, else the game's), and each file that
+    changes goes back into its packs (`targets.put`). res.logs_merged gets what changed, res.not_merged what was left
+    out. Returns size table entries for the merged files (never below the game's)."""
+    mergers = log_mergers()
+    sizes: dict[str, int] = {}
+    for name in sorted(logs, key=lambda n: (MERGE_ORDER.index(n) if n in MERGE_ORDER else len(MERGE_ORDER), n)):
+        m = mergers[name]
+        what = f"{name} ({LOG_NAMES.get(name, 'a BCML log')})"
+        say(f"  merging {what}...")
+        try:
+            out = m.apply(name, m.combine(name, logs[name]), game, read=targets.read)
+        except (m.LogError, *MERGE_ERRORS) as e:
+            res.not_merged.append(f"{what} not merged ({type(e).__name__}: {e}): the game's are used")
+            continue
+        done = res.logs_merged.setdefault(name, [])
+        for target, data in sorted(out["files"].items()):
+            try:
+                why = targets.put(target, data)
+            except MERGE_ERRORS as e:
+                why = f"{type(e).__name__}: {e}"
+            if why:
+                res.not_merged.append(f"{what}: {target} not merged ({why})")
+            else:
+                done.append(target)
+        for k, v in out["sizes"].items():
+            sizes[k] = max(v, sizes.get(k, 0))
+        res.not_merged += out["notes"]
+    return sizes
+
+
 def _apply_deepmerge(pio: Pio, stage: str, game: str, blobs: dict[str, Blob], game_blobs: dict[str, Blob],
-                     sizes: Sizes, aslist: bool = False) -> tuple[int, list[tuple[str, str]], list[str]]:
+                     sizes: Sizes, aslist: bool = False, only: set[str] | None = None,
+                     files_now: dict[str, str] | None = None) -> tuple[int, list[tuple[str, str]], list[str]]:
     """Apply one deepmerge.aamp (or, with aslist, an aslist.aamp): each listed parameter file inside a pack gets the
     changes (the pack is the mod's, already filled, or the game's when the mod has none). A deepmerge.aamp makes a
     file the pack lacks from the changes alone; an aslist.aamp names it, leaves a list its changes don't change as
-    it is (and a pack only it would change out of the mod), and names its entries without a name. Returns (files
-    merged, [(file, why not)], ["file: entry without a name"])."""
+    it is (and a pack only it would change out of the mod), and names its entries without a name. only: the packs
+    (their Switch-layout paths, lowercase) to change, the others' files skipped; files_now: the stage's files
+    (lowercase -> as spelled), else read from it. Returns (files merged, [(file, why not)], ["file: entry without a
+    name"])."""
     log = "aslist.aamp" if aslist else "deepmerge.aamp"
-    files_now = {r.lower(): r for r in _walk(stage)}
+    files_now = {r.lower(): r for r in _walk(stage)} if files_now is None else files_now
     done, failed, nameless = 0, [], []
     for path in file_table(pio):
         parts = path.replace("\\", "/").split("//")
         short = parts[-1]
         diff = pio.root.lists.get(zlib.crc32(path.encode()))
+        if only is not None and parts[0].lower() not in only:
+            continue
         try:
             if diff is None:
                 raise wc.FormatError("no changes for it in the log")
@@ -1735,7 +1951,7 @@ def add(src: str, kind: str, stage: str, game: str, info: Info, *, picks: list[s
         else:
             unzip(src, work)
             _writable(_walk(work).values())
-        say("Installing it as a Switch mod (options, packs filled from your game, size table)...")
+        say("Installing it as a Switch mod (options, packs filled from your game, logs merged, size table)...")
         res = install(os.path.join(work, *sub), stage, game, info=info, picks=picks, no_defaults=no_defaults,
                       move=True, say=say)
         return res
@@ -1772,17 +1988,235 @@ class DeployHook:
     rstb: rm.MergedRstb | None = None
     attention: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    files: dict[str, bytes] = field(default_factory=dict)   # overlay path -> merged bytes (deploy_hook(files=True))
 
 
-def deploy_hook(mods: list[tuple[str, str]], extracted: str) -> DeployHook:
+@dataclass
+class PackMerge:
+    files: dict[str, bytes] = field(default_factory=dict)   # overlay path -> the merged file
+    sizes: dict[str, int] = field(default_factory=dict)     # size table entries the merged files need
+    merged_from: dict[str, list[str]] = field(default_factory=dict)   # overlay path -> the mods merged into it
+    attention: list[str] = field(default_factory=list)
+
+
+def package_logs(root: str, info: dict, mergers: dict | None = None) -> tuple[dict[str, list], list, list, list[str]]:
+    """The logs a library copy keeps (.bnp/logs, then each chosen option's, in the package's order), read again:
+    (data logs by name: [each layer's parsed log], [deepmerge.aamp Pio of each layer], [aslist.aamp ones], [what
+    can't be read])."""
+    mergers = log_mergers() if mergers is None else mergers
+    folders = [""] + [f"options/{f}" for f in info.get("option_folders", []) if isinstance(f, str)]
+    data: dict[str, list] = {}
+    deep: list[tuple[str, Pio]] = []
+    asl: list[tuple[str, Pio]] = []
+    bad: list[str] = []
+    for label in folders:
+        where = f"{label}/logs/" if label else "logs/"
+        folder = os.path.join(root, META, *(label.split("/") if label else []), "logs")
+        if not os.path.isdir(folder):
+            continue
+        for rel, path in sorted(_walk(folder).items()):
+            name = rel.lower()
+            try:
+                raw = _read(path)
+                if name in ("deepmerge.aamp", "aslist.aamp"):
+                    (deep if name == "deepmerge.aamp" else asl).append((where + name, aamp_read(raw)))
+                elif name in mergers:
+                    m = mergers[name]
+                    log = m.read_log(name, raw, where) if m.__name__ == "bcml_texts" else m.read_log(name, raw)
+                    data.setdefault(name, []).append(log)
+            except Exception as e:  # noqa: BLE001 (any merger's LogError, a damaged file: named, the rest merged)
+                bad.append(f"{where}{name}: {e}")
+    return data, deep, asl, bad
+
+
+def _inner(blob: Blob | None, path: str) -> bytes | None:
+    return get_inside(blob, path.split("//")) if blob is not None else None
+
+
+def _overlay(dst: Blob, src: Blob, game: Blob, path: str, mark, sizes: Sizes) -> None:
+    """Put into dst (a pack, the game's copy and earlier mods' files) every file of src (a mod's copy) that differs
+    from the game's: BCML's pack merge between mods, the later mod's file winning; packs inside packs merged the same
+    way. mark(path inside the top pack) is called for each file set."""
+    dfiles, gfiles = dst.open(), game.open()
+    for name, (content, align) in src.open().items():
+        data = content.data() if isinstance(content, Blob) else content
+        g = gfiles.get(name)
+        gdata = None if g is None else (g[0].data() if isinstance(g[0], Blob) else g[0])
+        if data == gdata:
+            continue
+        sub = f"{path}//{name}" if path else name
+        if gdata is not None and name in dfiles and is_packish(name):
+            sb, db, gb = src.child(name), dst.child(name), game.child(name)
+            if sb.is_sarc() and db.is_sarc() and gb.is_sarc():
+                _overlay(db, sb, gb, sub, mark, sizes)
+                sizes.add(canon(name, gb.orig), len(gb.raw), db, True)
+                continue
+        dst.set(name, data, align)
+        mark(sub)
+
+
+def merge_packages(mods: list[tuple[str, str, dict | None, dict]], extracted: str) -> PackMerge:
+    """The files two or more enabled mods ship that a BCML package installed here also has (a pack, or a whole file
+    its data logs made), merged the way BCML merges several mods: the game's copy, then each mod's own files over it
+    in order (the files that differ from the game's; packs inside packs the same way); then every package's
+    deepmerge.aamp and aslist.aamp, then its data logs, applied again in order to the game's copy of each file they
+    change (or to the copy of a mod that isn't a package, so its own change stays). mods: (name, library folder,
+    bnp.json or None, {overlay path (lowercase): romfs_mods Entry}), lowest priority first. Reads only."""
+    out = PackMerge()
+    pkgs = [k for k, m in enumerate(mods) if m[2]]
+    if not pkgs:
+        return out
+    owned: dict[int, set[str]] = {}
+    done_by: dict[int, dict[str, set[str]]] = {}     # package -> log -> the targets it merged
+    for k in pkgs:
+        info = mods[k][2]
+        owned[k] = {p.lower() for p in [*info.get("packs", []), *(info.get("generated") or [])] if isinstance(p, str)}
+        lm = info.get("logs_merged")
+        done_by[k] = {n: {t for t in v if isinstance(t, str)} for n, v in (lm.items() if isinstance(lm, dict) else [])
+                      if isinstance(v, list)}
+    claims: dict[str, list[int]] = {}
+    for k, m in enumerate(mods):
+        for t in m[3]:
+            claims.setdefault(t, []).append(k)
+    contested = {t: ks for t, ks in claims.items()
+                 if len(ks) > 1 and not t.startswith(rm.DLC_PREFIX.lower()) and any(t in owned.get(k, ()) for k in ks)}
+    if not contested:
+        return out
+    romfs = os.path.join(extracted, "romfs")
+    sizes = Sizes(load_game_rstb(extracted))
+    merged: dict[str, Blob] = {}          # overlay path (lowercase) -> the merged pack
+    games: dict[str, Blob] = {}
+    whole: dict[str, int] = {}            # a whole file (lowercase) -> the mod whose copy wins today
+    provider: dict[tuple[str, str], int] = {}   # (pack, path inside it) -> the mod whose file is in the merged pack
+    spelled: dict[str, str] = {}
+    size_name: dict[str, str] = {}
+    for t, ks in sorted(contested.items()):
+        last = mods[ks[-1]][3][t]
+        spelled[t] = last.target
+        names = [mods[k][0] for k in ks]
+        if not is_packish(t):
+            whole[t] = ks[-1]
+            continue
+        gpath = os.path.join(romfs, *last.rel.split("/"))
+        try:
+            game = Blob(_read(gpath)) if os.path.isfile(gpath) else None
+            if game is None or not game.is_sarc():
+                continue   # (a pack the game lacks: the later mod's wins, as deploy_hook names)
+            dst = Blob(game.orig)
+            for k in ks:
+                src = Blob(_read(mods[k][3][t].src))
+                if not src.is_sarc():
+                    raise wc.FormatError(f"{mods[k][0]}'s copy isn't a pack")
+                _overlay(dst, src, game, "", lambda sub, k=k, t=t: provider.__setitem__((t, sub), k), sizes)
+        except (wc.FormatError, struct.error, IndexError, OSError) as e:
+            out.attention.append(f"{last.target} can't be merged from {', '.join(names)} ({e}): {names[-1]}'s copy "
+                                 "is used")
+            continue
+        merged[t], games[t] = dst, game
+        size_name[t] = canon(last.rel, game.orig)
+        sizes.add(size_name[t], len(game.raw), dst, True)
+        out.merged_from[last.target] = names
+    if not merged and not whole:
+        return out
+
+    logs = {}
+    for k in pkgs:
+        logs[k] = package_logs(mods[k][1], mods[k][2])
+        out.attention += [f"{mods[k][0]}: {x}; not merged with the other mods" for x in logs[k][3]]
+
+    # parameter changes: the files they change in a merged pack go back to the game's copy (when a package put them
+    # there), then every package's changes are applied in order
+    switch = {f"{BASE_TID}/romfs/{mods[contested[t][-1]][3][t].rel}".lower(): t for t in merged}
+    for k in pkgs:
+        for _, pio in logs[k][1] + logs[k][2]:
+            for path in file_table(pio):
+                parts = path.replace("\\", "/").split("//")
+                t = switch.get(parts[0].lower())
+                inner = "//".join(parts[1:])
+                if t is None or provider.get((t, inner)) not in pkgs:
+                    continue
+                g = _inner(games[t], inner)
+                if g is not None:
+                    put_inside(merged[t], games[t], size_name[t], parts[1:], g, sizes)
+                provider.pop((t, inner), None)
+    blobs = {f"{BASE_TID}/romfs/{mods[contested[t][-1]][3][t].rel}": merged[t] for t in merged}
+    files_now = {r.lower(): r for r in blobs}
+    game_blobs = {r: games[t] for r, t in zip(blobs, merged)}
+    for k in pkgs:
+        for aslist, items in ((False, logs[k][1]), (True, logs[k][2])):
+            for where, pio in items:
+                _, failed, _ = _apply_deepmerge(pio, "", extracted, blobs, game_blobs, sizes, aslist=aslist,
+                                                only=set(files_now), files_now=files_now)
+                if failed:
+                    out.attention.append(f"{mods[k][0]}: {where}: {len(failed)} file(s) not merged with the other "
+                                         f"mods ({_some([f'{p}: {why}' for p, why in failed], 2)})")
+
+    # data logs: each kind that changed a merged file (or whose file is in one: BCML ships some changes in the pack
+    # and keeps the log, so the log changed nothing at install), every package's logs of it in order
+    mergers = log_mergers()
+    fixed = {n: _target_top(t).lower() for n, t in fixed_targets(mergers).items()}
+    kinds = sorted({n for k in pkgs for n in logs[k][0]
+                    if fixed.get(n) in merged or fixed.get(n) in whole
+                    or any(_target_top(x).lower() in merged or _target_top(x).lower() in whole
+                           for x in done_by[k].get(n, ()))},
+                   key=lambda n: (MERGE_ORDER.index(n) if n in MERGE_ORDER else len(MERGE_ORDER), n))
+    for name in kinds:
+        m = mergers[name]
+
+        def read(target: str, name=name) -> bytes | None:
+            parts = target.split("//")
+            t = parts[0].lower()
+            if t in merged:
+                inner = "//".join(parts[1:])
+                k = provider.get((t, inner))
+                if k is None or (k in pkgs and target in done_by[k].get(name, ())):
+                    return None    # (the game's copy: every package's changes are applied again)
+                return _inner(merged[t], inner)
+            if t in whole:
+                k = whole[t]
+                if k in pkgs and target in done_by[k].get(name, ()):
+                    return None
+                return _read(mods[k][3][t].src)
+            return None
+
+        try:
+            res = m.apply(name, m.combine(name, [logs[k][0][name] for k in pkgs if name in logs[k][0]]), extracted,
+                          read=read)
+        except (m.LogError, *MERGE_ERRORS) as e:
+            out.attention.append(f"{name} ({LOG_NAMES.get(name, 'a BCML log')}) can't be merged between the mods "
+                                 f"({type(e).__name__}: {e}): the later mod's files are used")
+            continue
+        for target, data in sorted(res["files"].items()):
+            parts = target.split("//")
+            t = parts[0].lower()
+            if t in whole and len(parts) == 1:
+                out.files[spelled[t]] = data
+                out.merged_from[spelled[t]] = [mods[k][0] for k in contested[t]]
+            elif t in merged:
+                why = put_inside(merged[t], games[t], size_name[t], parts[1:], data, sizes)
+                if why:
+                    out.attention.append(f"{name}: {target} not merged between the mods ({why})")
+        for k, v in res["sizes"].items():
+            out.sizes[k] = max(v, out.sizes.get(k, 0))
+    for t, blob in merged.items():
+        out.files[spelled[t]] = blob.data()
+    for k, v in sizes.final().items():
+        out.sizes[k] = max(v, out.sizes.get(k, 0))
+    return out
+
+
+def deploy_hook(mods: list[tuple[str, str]], extracted: str, files: bool = False) -> DeployHook:
     """What modman deploy adds for the enabled RomFS mods ((name, library folder), lowest priority first): one size
     table merging every mod's size changes when two or more change it (a BCML package's from its rstb.json, another
     mod's by comparing the table it ships with the game's), and a line for each BCML package whose packs a later mod
-    replaces (packs aren't merged between mods). Reads only."""
+    replaces. files: also merge those packs (merge_packages) into hook.files (overlay path -> bytes, to deploy in
+    place of every mod's copy), their sizes in the table; modman and romfs_mods don't take them yet, so modman calls
+    this without. Reads only."""
     hook = DeployHook()
     # (name, a BCML package's entries or None, the size table a mod that isn't one ships or None, whether it ships one)
     pending: list[tuple[str, dict | None, str | None, bool]] = []
     seen: list[tuple[str, dict | None, set[str]]] = []
+    loaded: list[tuple[str, str, dict | None, dict]] = []
     for name, root in mods:
         try:
             mod = rm.load_mod(root)
@@ -1790,6 +2224,7 @@ def deploy_hook(mods: list[tuple[str, str]], extracted: str) -> DeployHook:
             continue
         info = stored(root)
         seen.append((name, info, {e.target.lower() for e in mod.entries}))
+        loaded.append((name, root, info, {e.target.lower(): e for e in mod.entries}))
         own = os.path.join(root, META, "rstb.json")
         ship = next((e for e in mod.entries if not e.dlc and e.rel.lower() == rm.RSTB.lower()), None)
         if info is not None and os.path.isfile(own):
@@ -1802,15 +2237,37 @@ def deploy_hook(mods: list[tuple[str, str]], extracted: str) -> DeployHook:
                 pending.append((name, entries, None, ship is not None))
         elif ship is not None:
             pending.append((name, None, ship.src, True))
+    pm = PackMerge()
+    if files:
+        pm = merge_packages(loaded, extracted)
+        hook.files = pm.files
+        hook.attention += pm.attention
+        for path in sorted(pm.files, key=str.lower):
+            hook.notes.append(f"{path}: merged from {', '.join(pm.merged_from.get(path, []))} (their own files, "
+                              "then their logs again, in order)")
+    done = {p.lower() for p in pm.files}
     for k, (name, info, _) in enumerate(seen):
         if not info:
             continue
-        packs = {p.lower(): p for p in info.get("packs", []) if isinstance(p, str)}
+        mine = [p for p in [*info.get("packs", []), *(info.get("generated") or [])] if isinstance(p, str)]
+        packs = {p.lower(): p for p in mine if p.lower() not in done}
+        logs_in: dict[str, set[str]] = {}    # a file of the mod (lowercase) -> the logs merged into it
+        merged = info.get("logs_merged")
+        for log, done in (merged.items() if isinstance(merged, dict) else []):
+            for t in done if isinstance(done, list) else []:
+                if isinstance(t, str):
+                    logs_in.setdefault(_target_top(t).lower(), set()).add(log)
         for later, _, theirs in seen[k + 1:]:
             lost = sorted(packs[p] for p in packs if p in theirs)
             if lost:
-                hook.attention.append(f"{name}: {later} replaces {len(lost)} of its pack(s) ({_some(lost, 3)}), so "
-                                      f"{name}'s changes in them are lost (packs aren't merged between mods)")
+                kinds = sorted({x for p in packs if p in theirs for x in logs_in.get(p, ())})
+                what = "pack(s)" if all(is_packish(p) for p in lost) else "file(s)"
+                hook.attention.append(f"{name}: {later} replaces {len(lost)} of its {what} ({_some(lost, 3)}), so "
+                                      f"{name}'s changes in them are lost"
+                                      + (f", its merged {', '.join(kinds)} too" if kinds else "")
+                                      + " (packs aren't merged between mods)")
+    if pm.sizes:
+        pending.append(("", pm.sizes, None, False))   # (the merged files' own sizes, one more table)
     if len(pending) < 2:
         return hook
     try:
@@ -1840,12 +2297,13 @@ def deploy_hook(mods: list[tuple[str, str]], extracted: str) -> DeployHook:
                 changes.append((name, entries))
     if len(changes) < 2:
         return hook
-    merged = merge_entries([c for _, c in changes])
-    game.apply(merged)
-    names = [n for n, _ in changes]
+    sizes = merge_entries([c for _, c in changes])
+    game.apply(sizes)
+    names = [n for n, _ in changes if n]
     hook.rstb = rm.MergedRstb(game.to_bytes(), names)
-    hook.notes.append(f"Size table (RSTB): the changes of {', '.join(names)} merged into one ({len(merged)} "
-                      "entries; the larger size of each file wins)")
+    hook.notes.append(f"Size table (RSTB): the changes of {', '.join(names)}"
+                      + (" and the merged files' sizes" if len(names) < len(changes) else "")
+                      + f" merged into one ({len(sizes)} entries; the larger size of each file wins)")
     return hook
 
 

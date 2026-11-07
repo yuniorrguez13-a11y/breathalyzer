@@ -32,8 +32,11 @@ kinds (BYML, texts, game data, actor info, maps) aren't merged here yet.
   drop tables, life conditions, chemistry, bone control, attention clients, ragdoll files, animation info, actor
   info (so new actors get no `ActorInfo` entry), game and save data flags, texts (`Bootup_XXxx.pack` is left out),
   maps, events, quests, tips, area data, status effects, cooking data, fonts, UI layouts and other BYML files.
-  UKMM stores these in its own data model; reading each kind back is its own piece of work. Animation sequences also
-  need UKMM's list of animation resource type names, which is game-derived and not in this repo.
+  UKMM stores these in its own data model; reading each kind back is its own piece of work. The merges themselves
+  exist now for BCML packages (game data, save data, actor info, events, area data, status effects, residents,
+  texts, drops, shops, maps, quests: `tools/bcml_data.py`, `bcml_texts.py`, `bcml_maps.py`); what UKMM packages
+  still need is a reader that turns UKMM's own data for each of these kinds into their input. Animation sequences
+  also need UKMM's list of animation resource type names, which is game-derived and not in this repo.
 - **Refused:** Wii U packages (Savage Wind is the Switch game, and their models and textures are Wii U formats):
   install them in UKMM (Wii U mode), deploy there, and add UKMM's output folder (modman converts what it can from
   Wii U). A `meta.yml` with no platform or one UKMM doesn't write. A damaged package (a zstd frame cut short, a pack

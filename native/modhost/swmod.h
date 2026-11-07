@@ -16,7 +16,8 @@
 // Versions: SWMOD_API_VERSION goes up by one each time fields are added, and fields are only ever added at the end.
 // A host with api_version N has every field of versions 1..N. A mod that needs version N checks SWMOD_API_OK(api, N);
 // a mod built with a newer header can still run on an older host and test single newer fields with SWMOD_HAS.
-// Version 2 added hooks (api->hook, api->can_hook): see docs/hooks.md.
+// Version 2 added hooks (api->hook, api->can_hook): see docs/hooks.md. Version 3 added settings (api->setting_*,
+// api->settings_ui): see docs/mod-settings.md.
 //
 // C++ mods: this header declares swmod_init as extern "C", so it is exported unmangled. (The zig that ships with
 // Savage Wind can't compile C++ that includes <stddef.h>: use C, or another compiler for C++.)
@@ -30,7 +31,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#define SWMOD_API_VERSION 2
+#define SWMOD_API_VERSION 3
 #define SWMOD_INIT_NAME "swmod_init"
 #ifdef __cplusplus
 #define SWMOD_EXPORT extern "C" __declspec(dllexport)
@@ -132,6 +133,81 @@ typedef struct {         // the same layout as Savage Wind's ControlCmd
     unsigned flags;      // SWMOD_CMD_PLAYER or 0
 } SwModCommand;
 
+// ---- settings (version 3, docs/mod-settings.md). A mod lists its settings in mod.toml ([[settings]]); modman
+// compiles them into deploy\native\settings.txt, and modhost keeps their values in <library>\settings\<mod id>.json.
+#define SWMOD_SET_OK 0
+#define SWMOD_SET_NO_SETTING 1   // no such setting (not in the mod's mod.toml, or no settings.txt was deployed)
+#define SWMOD_SET_BAD_VALUE 2    // not one of its values (a slider value between two steps is rounded to a step: OK)
+#define SWMOD_SET_LOCKED 3       // settings_ui only: its enable_if is false now (setting_set, the mod's own, isn't)
+#define SWMOD_SET_READ_ONLY 4    // settings_ui only: a text (edited on the PC) or a button (use press)
+
+#define SWMOD_SETTING_TOGGLE 0   // ON/OFF: value 0 or 1
+#define SWMOD_SETTING_SLIDER 1   // a number from min to max in steps: value = the step's index (min = 0)
+#define SWMOD_SETTING_CHOICE 2   // one of its choices: value = the choice's index (mod.toml order)
+#define SWMOD_SETTING_KEY 3      // a keyboard key: value = its Windows virtual-key code (0: none)
+#define SWMOD_SETTING_TEXT 4     // a line of text (changed in Mod Manager on the PC, read-only in the game)
+#define SWMOD_SETTING_BUTTON 5   // a button: value = how often it was pressed since the game started
+
+#define SWMOD_APPLIES_LIVE 0     // the mod is told at once (its watchers run)
+#define SWMOD_APPLIES_RESTART 1  // at the next game start: until then the getters return the value it started with
+#define SWMOD_APPLIES_DEPLOY 2   // picks RomFS files, at the next deploy (Play): the getters return the deployed value
+
+struct SwModApi;
+// A watcher (setting_watch): key is the setting that changed, or NULL when several did (a choice's `sets`, a reset).
+typedef void (*SwModSettingFn)(const struct SwModApi *self, const char *key, void *user);
+
+// One setting, as settings_ui()->info fills it. Strings stay valid while the game runs.
+typedef struct {
+    uint32_t size;          // sizeof(SwModSettingInfo) in the host (fields are only added at the end)
+    int type;               // SWMOD_SETTING_*
+    int applies;            // SWMOD_APPLIES_*
+    int values;             // how many values the row steps through: toggle 2, slider its steps, choice its choices;
+                            // key, text and button 0
+    const char *key;        // its mod.toml key
+    const char *label;      // the row's title (at most 28 characters)
+    const char *desc;       // the description line (at most 80 characters)
+    const char *page;       // its [[pages]] key, "" on the mod's first page
+    const char *unit;       // slider: the unit after the number (" percent"); button: the button's text; else ""
+    double min, max, step;  // slider: value of step i = min + i * step
+    int max_length;         // text: at most this many characters
+    int default_index;      // the default (as get_index counts)
+} SwModSettingInfo;
+
+// For a settings screen (the Mod menu's "Mod settings and info" pages): every library mod that has settings, with
+// m = 0..mods()-1 and s = 0..count(m)-1. Call it on the game's thread (the Options screen); the getters work on any.
+// It has its own size: test a field newer than your header's with SWMOD_UI_HAS(ui, field).
+typedef struct SwModSettingsUi {
+    uint32_t size;                                 // sizeof(SwModSettingsUi) in the host
+    uint32_t (*serial)(void);                      // goes up on every change of any value: redraw when it moved
+    int (*mods)(void);                             // the mods with settings, in the library's order
+    const char *(*mod_id)(int m);                  // its [mod] id ("giruka.better-sprint")
+    const char *(*mod_lib_id)(int m);              // its id in the library (menu.txt's "mod" lines use it)
+    const char *(*mod_name)(int m);
+    bool (*mod_on)(int m);                         // on in this deploy (else its settings wait until it is on)
+    int (*count)(int m);                           // its settings
+    int (*page_count)(int m);                      // its [[pages]] (each one is a button on the mod's first page)
+    // page p's key, label and description (any pointer may be NULL); false: no such page
+    bool (*page_info)(int m, int p, const char **key, const char **label, const char **desc);
+    // Set out->size = sizeof *out first: the host fills only the fields that fit, and sets size to what it filled.
+    bool (*info)(int m, int s, SwModSettingInfo *out);   // false: no such setting
+    int (*find)(int m, const char *key);           // the index of the setting with this key, -1: none
+    int (*get_index)(int m, int s);                // the value now, as SWMOD_SETTING_* counts it (-1: no setting)
+    // The text of value `index` (-1: of the value now): a choice's label, "120 percent", "F6" ("None"), the text,
+    // the button's text, "ON"/"OFF". Returns its full length (-1: no setting); buf always ends in 0.
+    int (*value_text)(int m, int s, int index, char *buf, size_t cap);
+    int (*set_index)(int m, int s, int index);     // SWMOD_SET_*: a choice also sets its `sets`; live: watchers run
+    int (*set_key)(int m, int s, const char *name);  // a key setting from key capture: "F6", "" = none; SWMOD_SET_*
+    bool (*shown)(int m, int s);                   // its show_if now (true without one)
+    bool (*enabled)(int m, int s);                 // its enable_if now (true without one)
+    // Why it is locked, in words for the description line ("Locked: needs Sprint mode Custom."); "" when enabled.
+    int (*lock_text)(int m, int s, char *buf, size_t cap);
+    bool (*waiting)(int m, int s);                 // changed, and it applies at the next start or deploy
+    int (*press)(int m, int s);                    // a button: counts the press, watchers run; SWMOD_SET_*
+    int (*reset)(int m);                           // every setting of mod m back to its default (live: watchers run)
+} SwModSettingsUi;
+#define SWMOD_UI_HAS(ui, field) \
+    ((ui) && offsetof(SwModSettingsUi, field) + sizeof(((const SwModSettingsUi *)0)->field) <= (size_t)(ui)->size)
+
 typedef struct SwModApi {
     uint32_t api_version;      // the host's SWMOD_API_VERSION
     uint32_t size;             // sizeof(SwModApi) in the host
@@ -183,6 +259,32 @@ typedef struct SwModApi {
     int (*hook)(uint64_t guest_addr, SwModHookBefore before, SwModHookAfter after, SwModHookReplace replace);
     // True when the game code has a hook slot for guest_addr.
     bool (*can_hook)(uint64_t guest_addr);
+
+    // ---- version 3: settings (docs/mod-settings.md). Check SWMOD_API_OK(api, 3) or SWMOD_HAS(api, setting_int)
+    // first; on an older host use your defaults. The getters work on any thread, at any time, without a lock.
+    // The [mod] id of the mod.toml this DLL came with (from deploy\native\settings.txt), or NULL: no settings.
+    const char *mod_id;
+    // The value of setting `key` of this mod, or def when there is none: toggle 0/1, slider its value (rounded; use
+    // setting_num for steps below 1), choice its index, key the Windows virtual-key code (0: none), button how often
+    // it was pressed. For `restart` and `deploy` settings: the value the game started with.
+    int64_t (*setting_int)(const struct SwModApi *self, const char *key, int64_t def);
+    // The same as a number: slider its value (0.1 steps stay 0.1 steps), the others as setting_int.
+    double (*setting_num)(const struct SwModApi *self, const char *key, double def);
+    // The value as text: choice its value ("fast", not the label), key its name ("F6", "" none), text the text,
+    // toggle "true"/"false", slider the number. Returns the full length (buf gets as much as fits, ending in 0),
+    // or -1 when there is no such setting (buf gets "").
+    int (*setting_str)(const struct SwModApi *self, const char *key, char *buf, size_t cap);
+    // Call fn after a `live` setting of this mod changed in the Mod menu or with modset, or a button was pressed. It
+    // runs on the thread that changed it: the game's thread inside the Options screen (or the frame thread for a
+    // console command). Keep it short: set a flag and do the work in your hook or command. From swmod_init only; at
+    // most 8 per mod. Returns SWMOD_SET_OK, or SWMOD_SET_NO_SETTING when called later or with too many.
+    int (*setting_watch)(const struct SwModApi *self, SwModSettingFn fn, void *user);
+    // Change a setting of this mod yourself (a counter, a preset worked out in code): checked like the Mod menu's
+    // change (but not refused when locked), saved, and shown on its page at once. Your watchers are not called for
+    // it. value is text as setting_str gives it ("fast", "120", "true", "F6"). Returns SWMOD_SET_*.
+    int (*setting_set)(const struct SwModApi *self, const char *key, const char *value);
+    // The table a settings screen uses (the Mod menu): every mod's settings. NULL when no settings.txt was deployed.
+    const SwModSettingsUi *(*settings_ui)(void);
 } SwModApi;
 
 typedef int (*SwModInitFn)(const SwModApi *api);

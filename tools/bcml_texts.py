@@ -1306,9 +1306,11 @@ def read_log(name: str, data: bytes, where: str = "") -> Log:
     raise LogError(f"{where}{name} isn't a log this merger knows.")
 
 
-def combine(name: str, logs: list[Log]) -> Log:
-    """Several logs of one kind as one, in order: a package's base, its chosen options, then the next package."""
+def combine(name: str, logs: list) -> Log:
+    """Several logs of one kind as one, in order: a package's base, its chosen options, then the next package. A list
+    inside `logs` is one package's logs (base, options), as the other BCML log modules take them."""
     n = name.lower()
+    logs = [x for item in logs for x in (item if isinstance(item, (list, tuple)) else [item])]
     notes = [x for log in logs for x in log.notes]
     if n == "texts.json":
         return Log(n, _texts_values(logs), notes)        # (each log picks its own language per game language)
@@ -1333,7 +1335,7 @@ def _result() -> dict:
     return {"files": {}, "sizes": {}, "notes": []}
 
 
-def _apply_texts(log: Log, game: str) -> dict:
+def _apply_texts(log: Log, game: str, read=None) -> dict:
     res = _result()
     res["notes"] += log.notes
     logs = [v for v in _texts_values([log]) if v]
@@ -1361,8 +1363,11 @@ def _apply_texts(log: Log, game: str) -> dict:
             entry = pack.open().get(inner)
             if entry is None:
                 raise TextError(f"its pack has no {inner}")
-            old = entry[0]
+            vanilla = entry[0]
+            own = read(f"Pack/Bootup_{lang}.pack//{inner}") if read else None
+            old = vanilla if own is None else own
             new, notes = merge_texts(old, lang, logs, stats)
+            stats["old_len"] = ukmm.unpacked_size(vanilla)    # (sizes count from the game's copy)
         except (TextError, wc.FormatError, struct.error, IndexError, OSError) as e:
             res["notes"].append(f"texts.json: the {lang} texts can't be merged ({e}); that language keeps the "
                                 "game's texts")
@@ -1391,7 +1396,7 @@ def _apply_texts(log: Log, game: str) -> dict:
     return res
 
 
-def _apply_aamp(log: Log, game: str, kind: str) -> dict:
+def _apply_aamp(log: Log, game: str, kind: str, read=None) -> dict:
     res = _result()
     res["notes"] += log.notes
     if not log.value:
@@ -1403,7 +1408,9 @@ def _apply_aamp(log: Log, game: str, kind: str) -> dict:
     for path, diff in log.value.items():
         parts = path.split("//")
         try:
-            old, target = g.nested(parts)
+            vanilla, target = g.nested(parts)
+            own = read(target) if read else None
+            old = vanilla if own is None else own
             plain = old
             if old is not None and old[:4] == b"Yaz0":
                 plain = wc.yaz0_decompress(old)[0]
@@ -1416,21 +1423,23 @@ def _apply_aamp(log: Log, game: str, kind: str) -> dict:
             continue
         out = ukmm.yaz0(new, struct.unpack_from(">I", old, 8)[0]) if old is not None and old[:4] == b"Yaz0" else new
         res["files"][target] = out
-        res["sizes"].update(g.size(parts[-1], old, len(plain) if plain is not None else 0, len(new)))
+        res["sizes"].update(g.size(parts[-1], vanilla, ukmm.unpacked_size(vanilla) if vanilla is not None else 0,
+                                   len(new)))
     if failed:
         res["notes"].append(f"{kind}: {len(failed)} {what} file(s) not merged, the game's are used "
                             f"({_some(failed, 2)})")
     return res
 
 
-def apply(name: str, log: Log, game: str) -> dict:
+def apply(name: str, log: Log, game: str, read=None) -> dict:
     """A combined Log applied to the game's files (game: Savage Wind's extracted folder, only read):
     {"files": {target: bytes}, "sizes": {size table name: size}, "notes": [what was left out]}. A target is a RomFS
     path with "//" inside packs; bytes are final (Yaz0 when the game's file is). The packs around a target are the
-    integrator's to rebuild and size."""
+    integrator's to rebuild and size. read: an optional function target -> bytes or None giving the copy to merge
+    into instead of the game's (the mod's own); sizes still count from the game's copy."""
     n = name.lower()
     if n == "texts.json":
-        return _apply_texts(log, game)
+        return _apply_texts(log, game, read)
     if n in ("drops.json", "shop.aamp"):
-        return _apply_aamp(log, game, n)
+        return _apply_aamp(log, game, n, read)
     raise LogError(f"{name} isn't a log this merger knows.")

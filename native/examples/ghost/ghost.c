@@ -49,6 +49,13 @@
 //   (self_*), no game calls; only while a client asks (SELF_KEEP_S).
 // - `ghost spawn link`: the Link body (LINK_ACTOR). It looks like Link only with the Link body pack deployed
 //   (tools/mp/ghost_link_pack.py, docs/ghost.md); without it, it is the Sheikah man.
+// 0.6.0 (opt-in: nothing changes until a `ghost items`; out/research/ghost-items-plan.md, docs/ghost.md "Held items"):
+// - `ghost items w s b [mask]`: the ghost holds real item actors (weapon, shield, bow) through the item's own grab call
+//   with the ghost as its holder; the game keeps each on its hand bone and turns its pick-up off. A change deletes the
+//   old item (never lets it go); mask: which go on the back (our own bone follow on Pod_A). Items go before the ghost
+//   does. Only on a body with the hand bones (the Link body). See "held items" below.
+// - `ghost self` also says which of Link's items are on his back (`on_back`); `ghost give` spawns an item for Link
+//   to take (tests).
 //
 // Commands (developer mode, SAVAGEWIND_CONTROL=<port>):
 //   ghost                                state (ticks, threads, the actor, its position, its animation)
@@ -65,6 +72,9 @@
 //   ghost anim auto|off|<AS name>        animation: Wait/Walk/Run by speed (the default), none, or always that one
 //   ghost far <far_m> [near_m]           the distance rule (default 60 50; ghost far 0: off)
 //   ghost self                           your own Link: animation, attack, weapon, shield, bow (read only)
+//   ghost items <w|-> <s|-> <b|-> [mask]  what the ghost holds (mask 0-7: bit 0 weapon, 1 shield, 2 bow on the back;
+//                                        default 4); ghost items off; ghost items back on|off
+//   ghost give <actor> [dx dy dz]        spawn an actor near Link for him to take (tests; never the ghost's items)
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -337,12 +347,15 @@ static void restore_regs(struct Cpu *c, const SavedRegs *s) {
     memcpy(r->v, s->v, sizeof s->v);
 }
 
+static int64_t g_ncalls, g_nqueries;  // game calls made and memory queries (VirtualQuery) done, for the cost
+
 // Call a guest function with up to 7 integer arguments; returns x0.
 static uint64_t gcall(struct Cpu *c, uint64_t fn, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                       uint64_t a5, uint64_t a6) {
     SwModRegs *r = SWMOD_REGS(c);
     r->x[0] = a0, r->x[1] = a1, r->x[2] = a2, r->x[3] = a3, r->x[4] = a4, r->x[5] = a5, r->x[6] = a6;
     api->guest_call(c, fn);
+    g_ncalls++;
     return r->x[0];
 }
 #define P(v) ((uint64_t)(uintptr_t)(v))
@@ -656,7 +669,7 @@ static double backoff_delay(int quick) {
 // item's actor, whose name is the char* at +0x10. No game calls: every address is checked with mem_ok before it is read, so a
 // wrong or stale pointer gives an empty or "?" answer, never a crash.
 
-#define MEM_CACHE 8
+#define MEM_CACHE 32  // (0.6.0: 32, not 8: the items read more regions a frame, and a miss is a VirtualQuery)
 typedef struct {
     uint64_t lo, hi;
     double until;
@@ -671,6 +684,7 @@ static int mem_ok(uint64_t a, uint64_t n, double t) {
     for (int i = 0; i < MEM_CACHE; i++)
         if (a >= g_mem_cache[i].lo && a + n <= g_mem_cache[i].hi && t < g_mem_cache[i].until) return 1;
     MemInfo mi;
+    g_nqueries++;
     if (VirtualQuery((const void *)(uintptr_t)a, &mi, sizeof mi) != sizeof mi) return 0;
     // MEM_COMMIT; readable (PAGE_READONLY, READWRITE, WRITECOPY and their EXECUTE_ forms), not NOACCESS or GUARD
     if (mi.state != 0x1000 || (mi.protect & 0x101) || !(mi.protect & 0xee)) return 0;
@@ -974,7 +988,10 @@ typedef struct {
     ItemStatus slot[3];
     int stray;                     // deleted items still there TRASH_STRAY_S after the delete
     int64_t requests, held, deleted, lost;  // item requests; items settled in the hand; deleted; lost while held
-    double us, us_max;             // the items' part of the tick: average and most microseconds
+    double us, us_avg, us_max;     // the items' part of a tick in microseconds: the median, the average and the most
+                                   // over the last TIME_KEEP ticks it worked (wall clock: a thread switch counts)
+    double calls, queries;         // ... game calls and memory queries a tick (average)
+    double tick_us;                // the whole tick (ghost and items), median over the last TIME_KEEP ticks
     int give_state;                // GV_*
     char give_name[64];
     uint64_t give_actor;
@@ -1279,6 +1296,30 @@ static void tick_pending(struct Cpu *c, double t) {
 // Cleanup: items are deleted before the ghost (despawn, the far rule, a new spawn) and when the game removed the
 // ghost; on a stage change they are forgotten without a call, as the ghost is. Every pointer is checked before use.
 
+// Tick times: the last TIME_KEEP, for a median (one slow tick, a thread switch, doesn't count) and the most.
+#define TIME_KEEP 64
+typedef struct {
+    double v[TIME_KEEP];
+    int n, next;
+} Times;
+static void times_add(Times *tm, double us) {
+    tm->v[tm->next] = us;
+    tm->next = (tm->next + 1) % TIME_KEEP;
+    if (tm->n < TIME_KEEP) tm->n++;
+}
+static double times_median(const Times *tm, double *most) {
+    double s[TIME_KEEP];
+    int n = tm->n;
+    memcpy(s, tm->v, sizeof s);
+    for (int i = 1; i < n; i++)  // (insertion sort: 64 numbers)
+        for (int j = i; j > 0 && s[j - 1] > s[j]; j--) {
+            double x = s[j];
+            s[j] = s[j - 1], s[j - 1] = x;
+        }
+    if (most) *most = n ? s[n - 1] : 0;
+    return n ? s[n / 2] : 0;
+}
+
 typedef struct {
     const char *name;   // the interned name this slot shows or asks for (NULL: none)
     int state;          // IS_*
@@ -1303,7 +1344,8 @@ static int t_bones_done;                  // the bone lookup is over for this gh
 static double t_bones_next, t_bones_until;
 static uint8_t t_follow_built[ITEM_SLOTS][2];
 static double t_trash_t[TRASH_MAX];       // when each watched item was deleted (0: free)
-static double t_items_us_avg;
+static double t_items_us_avg, t_items_calls, t_items_queries;
+static Times t_items_times, t_tick_times;
 static int t_give_seq, t_give_state;
 static double t_give_since;
 static double t_now;                      // this tick's time (for remove_ghost)
@@ -1716,6 +1758,13 @@ static void item_grab_tick(struct Cpu *c, int i, uint64_t ghost, double t) {
     }
 }
 
+// Slot i has nothing now: say so in the status (its name stays).
+static void item_status_empty(int i) {
+    ItemStatus *o = &t_status.items.slot[i];
+    o->state = t_items[i].state;
+    o->actor = 0, o->place[0] = 0, o->dist = -1.0f, o->item_state = -1, o->holder_ok = 0;
+}
+
 // Forget every item without a call (a stage change took them along, as the ghost).
 static void items_forget(void) {
     for (int i = 0; i < ITEM_SLOTS; i++) {
@@ -1723,7 +1772,7 @@ static void items_forget(void) {
         t_items[i].name = NULL;
         memset(&g_item_handle[i], 0, sizeof g_item_handle[i]);
         item_zero_link(i);
-        t_status.items.slot[i].actor = 0;
+        item_status_empty(i);
     }
     memset(g_trash, 0, sizeof g_trash);
     memset(t_trash_t, 0, sizeof t_trash_t);
@@ -1735,6 +1784,7 @@ static void items_drop(struct Cpu *c, double t) {
     for (int i = 0; i < ITEM_SLOTS; i++) {
         item_remove(c, i, t);
         t_items[i].name = NULL;  // (asked for again, with fresh tries, once there is a ghost)
+        item_status_empty(i);
     }
     t_items_ghost = 0;
 }
@@ -1756,7 +1806,7 @@ static void items_tick(struct Cpu *c, uint64_t ghost, const Requests *rq, double
             }
         return;
     }
-    int64_t q0, q1;
+    int64_t q0, q1, calls0 = g_ncalls, queries0 = g_nqueries;
     QueryPerformanceCounter(&q0);
     if (!ghost) {
         items_drop(c, t);  // (a safety: every way out of "live" removes them first)
@@ -1812,8 +1862,11 @@ static void items_tick(struct Cpu *c, uint64_t ghost, const Requests *rq, double
     QueryPerformanceCounter(&q1);
     double us = (double)(q1 - q0) * 1e6 / (double)g_qpf;
     t_items_us_avg = t_items_us_avg > 0 ? t_items_us_avg + (us - t_items_us_avg) * 0.05 : us;
-    st->us = t_items_us_avg;
-    if (us > st->us_max) st->us_max = us;
+    t_items_calls += ((double)(g_ncalls - calls0) - t_items_calls) * 0.05;
+    t_items_queries += ((double)(g_nqueries - queries0) - t_items_queries) * 0.05;
+    times_add(&t_items_times, us);
+    st->us = times_median(&t_items_times, &st->us_max);
+    st->us_avg = t_items_us_avg, st->calls = t_items_calls, st->queries = t_items_queries;
 }
 
 // `ghost give` (tests): spawn an actor near Link with a handle of its own, take it and forget it. Never the ghost or
@@ -2149,8 +2202,18 @@ static void far_check(struct Cpu *c, uint64_t pi, uint64_t player, float far_m, 
     }
 }
 
+static void ghost_tick_body(struct Cpu *c, double t);
+
 static void ghost_tick(struct Cpu *c) {
-    double t = now_s();
+    int64_t q0, q1;
+    QueryPerformanceCounter(&q0);
+    ghost_tick_body(c, now_s());
+    QueryPerformanceCounter(&q1);
+    times_add(&t_tick_times, (double)(q1 - q0) * 1e6 / (double)g_qpf);
+    t_status.items.tick_us = times_median(&t_tick_times, NULL);
+}
+
+static void ghost_tick_body(struct Cpu *c, double t) {
     t_now = t;
     t_status.ticks++;
     if (!t_status.first_t) t_status.first_t = t, t_win_start = t;
@@ -2347,7 +2410,11 @@ static void report(SwModReply *r) {
     api->reply_str(r, "items.bones", it->bones);
     api->reply_int(r, "items.stray", it->stray);
     api->reply_num(r, "items.us", it->us);
+    api->reply_num(r, "items.us_avg", it->us_avg);
     api->reply_num(r, "items.us_max", it->us_max);
+    api->reply_num(r, "items.calls", it->calls);
+    api->reply_num(r, "items.queries", it->queries);
+    api->reply_num(r, "tick_us", it->tick_us);
     api->reply_int(r, "items.requests", it->requests);
     api->reply_int(r, "items.held", it->held);
     api->reply_int(r, "items.deleted", it->deleted);

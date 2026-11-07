@@ -1,7 +1,7 @@
 // stamina_hook: infinite stamina through a hook (mod API 2, docs/hooks.md). Example mod for BotW 1.9.0.
 //
-// It hooks the game's stamina setter at 0x7000cc7410 (1.9.0): x0 = the PlayerInfo, s0 = the new stamina, which the
-// function stores at PlayerInfo + 0xa4. A before hook raises the new value to the current one whenever it is lower,
+// It hooks the game's stamina setter at 0x7000cc7410 (1.9.0): x0 = the player info block, s0 = the new stamina, which the
+// function stores at player info + 0xa4. A before hook raises the new value to the current one whenever it is lower,
 // so stamina can go up but never down.
 //
 // The game code needs a hook slot for that address: build it with the list next to this file,
@@ -16,7 +16,7 @@
 #include "swmod.h"
 
 #define STAMINA_SETTER 0x7000cc7410ull  // 1.9.0
-#define STAMINA_OFFSET 0xa4             // in PlayerInfo (float)
+#define STAMINA_OFFSET 0xa4             // in the player info block (float)
 
 static const SwModApi *api;
 static int64_t g_calls;  // the setter ran (on game threads: atomics)

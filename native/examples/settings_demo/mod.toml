@@ -1,0 +1,292 @@
+# settings_demo: a small native mod with one of every kind of mod setting (docs/mod-settings.md). It shows them in
+# the game's Mod menu (Options > Mods > Mod settings and info > Settings demo) and in Mod Manager.
+# Install it with the mod manager (docs/mod-manager.md):
+#   python tools/build_native.py build
+#   python tools/modman.py add native/examples/settings_demo
+# settings_demo.dll isn't in this folder: for the examples in this repo, modman takes it from build\native, where
+# build_native.py puts it (docs/mod-format.md). Add the example again after you rebuild it.
+# The console command settings_demo shows what the DLL reads; modsettings and modset (docs/code-mods.md) work too.
+
+[mod]
+id = "botw-mod-loader.settings-demo"
+name = "Settings demo"
+version = "1.0.0"
+authors = ["giruka"]
+description = "Shows every kind of mod setting. Changes nothing in the game."
+loader_api = 3          # reads its settings through the mod API (version 3)
+
+[code]
+windows = "settings_demo.dll"
+
+[data]
+romfs = "romfs"         # one harmless text file; the option folder below adds a second one
+
+[[pages]]
+key = "advanced"
+label = "Advanced"
+description = "A key, a text, and rows that lock or hide."
+
+[[pages]]
+key = "many"
+label = "Many rows"
+description = "30 rows, to try scrolling with the keys and the mouse."
+
+# ---- the mod's first page
+
+[[settings]]
+key = "numbers"
+type = "toggle"
+label = "Show numbers"
+description = "An ON/OFF row. The DLL is told at once (live)."
+default = true
+applies = "live"
+
+[[settings]]
+key = "mode"
+type = "choice"
+label = "Sprint mode"
+description = "A choice. Fast also sets the speed below to 150."
+default = "classic"
+applies = "live"
+choices = [
+  { value = "classic", label = "Classic" },
+  { value = "fast", label = "Fast", sets = { speed = 150 } },
+  { value = "custom", label = "Custom" },
+]
+
+[[settings]]
+key = "speed"
+type = "slider"
+label = "Sprint speed"
+description = "A slider (16 steps). Shown only when Sprint mode is Custom."
+min = 50
+max = 200
+step = 10
+default = 100
+unit = " percent"
+applies = "live"
+show_if = "mode == 'custom'"
+
+[[settings]]
+key = "say_hello"
+type = "button"
+label = "Say hello"
+button = "Say it"
+description = "A button: the DLL writes a line into savagewind.log."
+
+[[settings]]
+key = "note_file"
+type = "toggle"
+label = "Extra note file"
+description = "Picks files at your next start: adds a second text file to the game folder."
+default = false
+applies = "deploy"
+romfs = "options/note"
+
+# ---- Advanced
+
+[[settings]]
+key = "drain"
+type = "slider"
+label = "Stamina use"
+description = "Locked while Sprint mode is Classic."
+min = 0.5
+max = 2.0
+step = 0.1
+default = 1.0
+unit = "x"
+applies = "live"
+page = "advanced"
+enable_if = "mode != 'classic'"
+
+[[settings]]
+key = "hotkey"
+type = "key"
+label = "Demo key"
+description = "A key: press A, then the key. Backspace clears it."
+default = "F6"
+applies = "live"
+page = "advanced"
+
+[[settings]]
+key = "greeting"
+type = "text"
+label = "Greeting"
+description = "A text. Change it in Mod Manager on your PC. Used at your next start."
+default = "Hello"
+max_length = 20
+applies = "restart"
+page = "advanced"
+
+[[settings]]
+key = "loud"
+type = "toggle"
+label = "Say it loudly"
+description = "Shown only while Show numbers is ON."
+default = false
+applies = "live"
+page = "advanced"
+show_if = "numbers"
+
+[[settings]]
+key = "with_menu"
+type = "toggle"
+label = "Only with the Mod menu"
+description = "Locked unless the Mod menu mod is on."
+default = false
+applies = "restart"
+page = "advanced"
+enable_if = "on('botw-mod-loader.modmenu')"
+
+# ---- Many rows (30 rows: the most a page holds)
+
+[[settings]]
+key = "row01"
+type = "toggle"
+label = "Row 1"
+page = "many"
+[[settings]]
+key = "row02"
+type = "toggle"
+label = "Row 2"
+page = "many"
+[[settings]]
+key = "row03"
+type = "toggle"
+label = "Row 3"
+page = "many"
+[[settings]]
+key = "row04"
+type = "toggle"
+label = "Row 4"
+page = "many"
+[[settings]]
+key = "row05"
+type = "toggle"
+label = "Row 5"
+page = "many"
+[[settings]]
+key = "row06"
+type = "toggle"
+label = "Row 6"
+page = "many"
+[[settings]]
+key = "row07"
+type = "toggle"
+label = "Row 7"
+page = "many"
+[[settings]]
+key = "row08"
+type = "toggle"
+label = "Row 8"
+page = "many"
+[[settings]]
+key = "row09"
+type = "toggle"
+label = "Row 9"
+page = "many"
+[[settings]]
+key = "row10"
+type = "toggle"
+label = "Row 10"
+page = "many"
+[[settings]]
+key = "row11"
+type = "toggle"
+label = "Row 11"
+page = "many"
+[[settings]]
+key = "row12"
+type = "toggle"
+label = "Row 12"
+page = "many"
+[[settings]]
+key = "row13"
+type = "toggle"
+label = "Row 13"
+page = "many"
+[[settings]]
+key = "row14"
+type = "toggle"
+label = "Row 14"
+page = "many"
+[[settings]]
+key = "row15"
+type = "toggle"
+label = "Row 15"
+page = "many"
+[[settings]]
+key = "row16"
+type = "toggle"
+label = "Row 16"
+page = "many"
+[[settings]]
+key = "row17"
+type = "toggle"
+label = "Row 17"
+page = "many"
+[[settings]]
+key = "row18"
+type = "toggle"
+label = "Row 18"
+page = "many"
+[[settings]]
+key = "row19"
+type = "toggle"
+label = "Row 19"
+page = "many"
+[[settings]]
+key = "row20"
+type = "toggle"
+label = "Row 20"
+page = "many"
+[[settings]]
+key = "row21"
+type = "toggle"
+label = "Row 21"
+page = "many"
+[[settings]]
+key = "row22"
+type = "toggle"
+label = "Row 22"
+page = "many"
+[[settings]]
+key = "row23"
+type = "toggle"
+label = "Row 23"
+page = "many"
+[[settings]]
+key = "row24"
+type = "toggle"
+label = "Row 24"
+page = "many"
+[[settings]]
+key = "row25"
+type = "toggle"
+label = "Row 25"
+page = "many"
+[[settings]]
+key = "row26"
+type = "toggle"
+label = "Row 26"
+page = "many"
+[[settings]]
+key = "row27"
+type = "toggle"
+label = "Row 27"
+page = "many"
+[[settings]]
+key = "row28"
+type = "toggle"
+label = "Row 28"
+page = "many"
+[[settings]]
+key = "row29"
+type = "toggle"
+label = "Row 29"
+page = "many"
+[[settings]]
+key = "row30"
+type = "toggle"
+label = "Row 30"
+page = "many"

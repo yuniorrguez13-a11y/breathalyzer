@@ -29,7 +29,10 @@ python tools/wiiu_convert.py convert "D:\mods\Armor Mod" --out "D:\mods\Armor Mo
 - `check` lists what converts and what doesn't, and writes nothing (`--json` for JSON).
 - `--game` (both commands) points at your game's RomFS, which is only read. Models then get your vanilla materials,
   `TexInfo.txt` and size table entries, textures without a Tex2 keep your game's mipmaps where unchanged, and packs
-  holding models get the files your game's pack has ([wiiu-models](wiiu-models.md)). `modman add` passes it.
+  holding models get the files your game's pack has. A converted file that holds your game's values is written as
+  your game's own bytes (no compressing again), and a model or texture that can't be converted gives way to your
+  game's file instead of staying Wii U data where the game loads it ([wiiu-models](wiiu-models.md)). `modman add`
+  passes it.
 - `convert` writes the Switch mod into a new (or empty) folder: `romfs/` for the game, `01007EF00011F001/romfs/`
   for the DLC, and `wiiu-convert-report.txt` (the same text `check` prints). When nothing in the mod can be
   converted, it writes nothing. `modman add` on that folder reads the report, so it gives the same warnings as
@@ -40,7 +43,8 @@ python tools/wiiu_convert.py convert "D:\mods\Armor Mod" --out "D:\mods\Armor Mo
 - Exit code: 0 everything converted, 1 some files stay Wii U data or were left out, 2 the mod can't be used: nothing
   in it can be converted (only audio, say, or only the RSTB, which is always left out), or the message says why.
 - Files converted with warnings (models and textures) are listed under "Needs attention" in the report: they were
-  converted, but check them in game.
+  converted, but check them in game. So are model and texture files that couldn't be converted and gave way to your
+  game's file (or were left out of a pack): the mod's change to them is lost.
 
 A mod is a folder or a `.zip` with `content/` (game files) and/or `aoc/0010/` (DLC files), also inside one wrapper
 folder or a Cemu graphic pack (`<pack>/rules.txt` + `<pack>/content/`). You can also pass the `content` folder
@@ -102,8 +106,10 @@ of the repo (`out\` is ignored). It takes about 7 minutes (26 at low priority wh
 how many actor packs and maps it samples
 (default 20). It also runs model groups (half of `--count` models with their textures, an animation file, two item
 icons, and Link inside `TitleBG.pack`), which go through the whole mod converter with and without your game files.
-`--groups models` runs only those (seconds); `--groups data` only the others. On 2026-11-07: 8 of 8 model samples
-passed ([wiiu-models](wiiu-models.md#what-is-checked)).
+`--groups models` runs only those (seconds); `--groups data` only the others. `--groups titlebg` converts every
+model and texture of your `TitleBG.pack` as one Wii U pack (about 3 minutes at low priority). On 2026-11-07: 8 of 8
+model samples passed, and the whole `TitleBG.pack` came back as your game's files
+([wiiu-models](wiiu-models.md#what-is-checked)).
 
 Run on 2026-11-07 on the user's own game (1.9.0): 63 files, **no failures**.
 

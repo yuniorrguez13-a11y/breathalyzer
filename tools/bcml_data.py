@@ -22,7 +22,8 @@ The merge rules are BCML's (read on GitHub for the formats and rules only; this 
 are safer: gamedata `del` lists are joined instead of the last one winning, the game's gamedata file layout is kept,
 and the save data revision is the game's (BCML hardcodes an older one). A log this can't read is refused whole, with
 a message; parts it can't apply are named in the notes ("needs attention"). Nothing here writes files: callers get
-bytes. The BYML reader/writer and the YAML reader below stand in for tools/byml.py until that exists.
+bytes. The BYML types, reader and writer and the reader for BCML's BYML text below are the one copy the BCML log
+modules share (tools/bcml_maps.py uses them too).
 """
 from __future__ import annotations
 
@@ -260,9 +261,10 @@ def byml_load(data: bytes):
     return node(root, data[root], 0)
 
 
-def byml_dump(root, version: int = 2) -> bytes:
+def byml_dump(root, version: int = 2, share: bool = True) -> bytes:
     """A little-endian (Switch) BYML document: key and string tables sorted, containers after them, every node at a
-    multiple of 4 (64-bit values at a multiple of 8). ValueError/TypeError for what BYML can't hold."""
+    multiple of 4 (64-bit values at a multiple of 8). share: equal containers are written once, as in most of the
+    game's files (its quest list shares none). ValueError/TypeError for what BYML can't hold."""
     if not isinstance(root, (dict, list)):
         raise TypeError("a BYML document's root is a dictionary or an array")
     keys: set[str] = set()
@@ -389,10 +391,12 @@ def byml_dump(root, version: int = 2) -> bytes:
         return t, repr(x)
 
     def write(v) -> int:
-        f = form(v)
+        f = form(v) if share else None
         if f in written:
             return written[f]
-        off = written[f] = len(out)
+        off = len(out)
+        if share:
+            written[f] = off
         later = []
         if len(v) >= 1 << 24:
             raise ValueError("too many values in one BYML container")
@@ -1491,10 +1495,12 @@ def game_file(game: str, target: str) -> bytes | None:
     return blob.orig if blob is not None else None
 
 
-def apply(name: str, diff, game: str) -> dict:
+def apply(name: str, diff, game: str, read=None) -> dict:
     """A combined diff (see combine) applied to the game's file from `game` (Savage Wind's extracted folder, only
     read): {"files": {target: bytes as stored}, "sizes": {size table name: size, only above the game's entry},
-    "notes": [what was left out]}. No file when nothing changes."""
+    "notes": [what was left out]}. No file when nothing changes. read: an optional function target -> bytes or None
+    giving the copy to merge into instead of the game's (the mod's own Bootup.pack file, say); sizes still count
+    from the game's copy."""
     name = name.lower()
     target, fn, sized = KINDS[name]
     what = f"{name} ({LOGS[name]})"
@@ -1507,13 +1513,16 @@ def apply(name: str, diff, game: str) -> dict:
     if data is None:
         done["notes"].append(f"{what} not merged: the game's {target} isn't in extracted\\romfs")
         return done
+    own = read(target) if read else None
+    base = data if own is None else own
     try:
-        new, notes = fn(data, check_log(name, diff))
+        new, notes = fn(base, check_log(name, diff))
     except LogError as e:
         done["notes"].append(f"{what} not merged: {e}")
         return done
     except _GAME_ERRORS as e:
-        done["notes"].append(f"{what} not merged: the game's {target} can't be merged ({e})")
+        whose = "the game's" if own is None else "the mod's"
+        done["notes"].append(f"{what} not merged: {whose} {target} can't be merged ({e})")
         return done
     done["notes"] += notes
     if new is None:

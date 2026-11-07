@@ -42,8 +42,9 @@ _ANISO_GX2 = {v: k for k, v in _ANISO.items()}
 _W0_MAPPED = 0x1FF | (3 << 9) | (3 << 12) | (3 << 17) | (7 << 19) | (3 << 22) | (7 << 26)
 _W2_DEFAULT = 0x80000000           # BfresLibrary's default word 2 (bit 31 set)
 _W2_COMPARE = 1 << 30
-# nn::gfx filter bits above min/mag/mip: anisotropic 0x40, comparison 0x80. Every sampler in the user's Switch files
-# is filter 0x29 (linear min/mag, point mip), anisotropy 1, compare 0.
+# nn::gfx filter bits above min/mag/mip: anisotropic 0x40, comparison 0x80. Nearly every sampler in the user's Switch
+# files is filter 0x29 (linear min/mag, point mip), anisotropy 1, compare 0; Terrain (Pack/TitleBG.pack) also has
+# 0x15, 0x19, and 0x6a (the anisotropic bit) with anisotropy 2.
 FILTER_ANISO, FILTER_COMPARE = 0x40, 0x80
 
 
@@ -106,7 +107,10 @@ def sampler_to_gx2(st: SamplerState, warnings: list | None = None, what: str = "
         if wrap not in _CLAMP_TO_GX2:
             raise Unsupported(f"{what}: wrap mode {wrap}")
         w0 |= _CLAMP_TO_GX2[wrap] << shift
-    if st.filter & ~(0x3F | FILTER_COMPARE):
+    # the anisotropic bit: GX2 says that with its anisotropy ratio (your Terrain model's anisotropic samplers are
+    # filter 0x6a with anisotropy 2)
+    aniso_bit = FILTER_ANISO if st.max_aniso > 1 else 0
+    if st.filter & ~(0x3F | FILTER_COMPARE | aniso_bit):
         raise Unsupported(f"{what}: nn::gfx filter {st.filter:#x} (anisotropic / minimum / maximum bits)")
     w2 = (w2 | _W2_COMPARE) if st.filter & FILTER_COMPARE else (w2 & ~_W2_COMPARE)
     mip, mag, mn = st.filter & 3, (st.filter >> 2) & 3, (st.filter >> 4) & 3
@@ -321,9 +325,9 @@ def sampler_notes(st: SamplerState, what: str = "sampler") -> list[str]:
     if st.filter & FILTER_COMPARE:
         out.append(f"{what}: depth compare sampler (function {st.compare}); the nn::gfx comparison filter bit is set, "
                    f"which no Switch file we checked has")
-    if st.max_aniso > 1:
+    if st.max_aniso > 1 and not st.filter & FILTER_ANISO:
         out.append(f"{what}: anisotropy {st.max_aniso}:1 is kept as max anisotropy without the nn::gfx anisotropic "
-                   f"filter bit; every Switch sampler we checked uses filter 0x29 and anisotropy 1")
+                   f"filter bit (the anisotropic samplers we checked, Terrain's, have it: filter 0x6a)")
     return out
 
 
@@ -498,6 +502,10 @@ def donor_overlay(model: Model, donor: Model, warnings: list) -> tuple[int, int]
             continue
         model.materials[i], changed, dropped = donor_material(mat, d)
         based += 1
+        for smp in model.materials[i].samplers:        # your sampler kept: the notes on the mod's values don't apply
+            if "wiiu.sampler_words" not in smp.state.extra:
+                prefix = f"material {mat.name!r} sampler {smp.name!r}: "
+                warnings[:] = [w for w in warnings if not w.startswith(prefix)]
         if dropped:
             warnings.append(f"model {model.name!r} material {mat.name!r}: not in your vanilla material, dropped: "
                             f"{', '.join(dropped[:6])}{'...' if len(dropped) > 6 else ''}")

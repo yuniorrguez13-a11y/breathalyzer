@@ -67,15 +67,35 @@ on its own is missing most of its files: the game would crash on it.
    A size of 0 in `rstb.json` is how BCML says it couldn't work one out: that entry is removed, as BCML does. When
    none of this changes the game's table, no table is written: a size table in the overlay makes Savage Wind
    0.4.1-alpha.4 stop its own size fixes (`SAVAGEWIND_NO_HUD_LETTERS`), so the mod doesn't ship one for nothing.
-6. **Everything else is named.** `gamedata.yml`, `savedata.yml`, texts, map changes, `actorinfo.yml` and any log
-   this loader doesn't know are not merged: the game's own data is used, so the parts of the mod that need them may
-   not work. `add` prints each one as `needs attention:` and `deploy` repeats it under
-   *Needs attention*. A DLC pack can't be filled when your game has no DLC set up: also listed.
+6. **The data logs** are merged next, each kind's base log and its chosen options' logs combined first (BCML's
+   rules, read from its source; where ours differ, it says so below), into the mod's own copy of the file when it
+   has one, else the game's. The file goes back into its packs (a pack the mod doesn't ship is copied from the game,
+   as for `deepmerge.aamp`), and every pack on the way gets a size like the ones above:
+
+   | Log | File | How |
+   |---|---|---|
+   | `actorinfo.yml` | `Actor/ActorInfo.product.sbyml` (a whole file) | New actors added, changed keys merged; sorted by hash. No size entry (the game's table has none) |
+   | `gamedata.yml` | `Bootup.pack` `GameData/gamedata.ssarc` | Flags added, replaced or deleted by name; the game's files kept, only changed ones rewritten |
+   | `savedata.yml` | `Bootup.pack` `GameData/savedataformat.ssarc` | Entries added or deleted by hash, sorted; the game's revision kept |
+   | `eventinfo.yml`, `effects.yml`, `areadata.yml`, `residents.yml` | `Bootup.pack` (`Event/`, `Ecosystem/`, `Actor/`) | Entries added or replaced (residents: `remove` drops one) |
+   | `mainstatic.yml`, `dstatic.yml` | `Bootup.pack` `Map/MainField/Static.smubin`, `Map/CDungeon/Static.smubin` | Start points, korok spots and the like added, changed or removed |
+   | `map.yml` | `TitleBG.pack` `Map/MainField/<unit>/<unit>_Static.smubin`, `Map/MainField/<unit>/<unit>_Dynamic.smubin` (a whole file) | Objects and rails added, changed or deleted by `HashId`, sorted. Statics go into `TitleBG.pack` (BCML writes them loose) |
+   | `quests.yml` | `TitleBG.pack` `Quest/QuestProduct.sbquestpack` | Quests added after the one they follow, changed or deleted |
+   | `drops.json`, `shop.aamp` | the `.bdrop` / `.bshop` in the actor's pack (in `TitleBG.pack` for title actors) | Drop tables as logged (`UNDERRIDE_CONST`: the game's value); shop items removed, then added or changed |
+   | `texts.json` | `Pack/Bootup_XXxx.pack` `Message/Msg_XXxx.product.ssarc`, every language your game has | Texts added or changed by label. A language the mod has no texts for gets its new texts, but keeps its own wording where the mod changed one (BCML copies the English over it) |
+
+   A log that is the same as the game's (or as the mod's own copy) changes nothing and adds no file. `add` prints a
+   `logs merged:` line with each log and how many files it changed.
+7. **Everything else is named.** BCML 2's logs (`savedata.sarc`, `deepmerge.yml`, `texts_*`: BCML 3 refuses such
+   packages too), logs this loader doesn't know, damaged logs, and the parts of a log a merger leaves out (a flag of a
+   type the game lacks, a texts language your game doesn't have...) are not merged: the game's own data is used, so
+   the parts of the mod that need them may not work. `add` prints each one as `needs attention:` and `deploy`
+   repeats it under *Needs attention*. A DLC pack can't be filled when your game has no DLC set up: also listed.
 
 The library copy (`modloader\mods\<id>`) is then a normal Switch mod plus `.bnp\` (never deployed: its name starts
 with a dot), which keeps `info.json`, the logs, `rstb.json` (the size changes: only the ones that change the game's
-table) and `bnp.json` (what was installed, its packs, and what wasn't merged). `list` shows the package's version.
-To change the options, `remove` the mod and add it again.
+table) and `bnp.json` (what was installed, its packs, the files each data log changed, and what wasn't merged).
+`list` shows the package's version. To change the options, `remove` the mod and add it again.
 
 ## Several mods
 
@@ -86,19 +106,37 @@ To change the options, `remove` the mod and add it again.
   name for the few the table lists by name), so a file one mod names and another's table holds is one file, and the
   result doesn't depend on the mods' order. A package whose sizes change nothing is left out. `deploy` says which mods
   it merged; when the game's own table is missing it says the tables can't be merged, and still checks every mod.
-- **Packs are not merged between mods.** When a later mod ships a pack a BCML package also has, the later one wins
-  as for any file, and *Needs attention* says that package's changes in it are lost. Merge such mods in UKMM
-  (Switch mode) and add its output instead.
+- **Packs are not merged between mods yet.** When a later mod ships a pack (or a file a data log made, such as
+  `ActorInfo`) that a BCML package also has, the later one wins as for any file, and *Needs attention* says that
+  package's changes in it are lost, naming the data logs merged into it (`its merged gamedata.yml too`). Nearly
+  every package with game data, texts or map logs ships `Bootup.pack`, `Bootup_XXxx.pack` or `TitleBG.pack`, so two
+  such packages clash there. Merge such mods in UKMM (Switch mode) and add its output instead, for now. (The merge
+  itself is built: `bnp.deploy_hook(..., files=True)` gives those files merged as BCML merges mods, each mod's own
+  files over the game's, then every package's logs again in order, with their sizes; `deploy` doesn't use it yet.)
 
 ## Limits
 
 - Wii U packages are refused (install them in UKMM, Switch mode, and add its output).
-- Game data, save data, texts, maps, actor info, drops, shops and other logs aren't merged (named, see above). A mod
-  that relies on them may only partly work.
+- BCML 2 logs (`savedata.sarc`, `deepmerge.yml`, `texts_*`) aren't merged (named, see above).
+- None of the data logs has been tried with a real package yet (the one real package here has none of them), nor
+  in the game: each was checked on the game's own files and on made-up logs only.
+- DLC: data logs for DLC files (DLC drop tables and shops, DLC maps) aren't merged; when your game has the DLC set
+  up, the map logs are named instead of merged.
+- Where the rules differ from BCML's, on purpose: game data deletes of several logs are joined (BCML keeps the
+  last list) and the game's game data files are kept as they are; the save data revision is the game's; an option's
+  logs merge in the package's order (BCML: no fixed order); quests: a change equal to the game's quest is no change
+  and the later one wins; a texts language without the mod's own texts keeps its wording (see above); drops, shops,
+  map additions and other entries a log can't place are named, not guessed.
+- Rebuilt game files are bigger than the game's: big ones (game data, the language archives) are stored Yaz0, not
+  compressed again, as compressing in Python is too slow. Each of the 16 language packs is rewritten when a package
+  has texts (about 110 MB in the library copy).
 - `aslist.aamp` only adds and changes, as BCML's log only records that: an animation list entry a mod removed stays.
 - Sizes for rebuilt parameter files are an estimate (grown in proportion to the game's entry), and so are animation
-  lists' (from the decomp's struct sizes, not checked in the game). New models, sounds and other files rely on the
-  sizes BCML wrote in `rstb.json`.
+  lists' (from the decomp's struct sizes, not checked in the game). For the data logs' files, the game data, save
+  data and language archives and the map units follow the game's own rule exactly (checked on its files); the other
+  BYML files use the pack rule (the game's entry plus what the file grew), and the main field and shrine statics,
+  drop tables and shops grow in proportion. New models, sounds and other files rely on the sizes BCML wrote in
+  `rstb.json`.
 - Packs are rebuilt by this tool: same files, but not byte for byte what BCML or Nintendo's tools make.
 
 ## Tested
@@ -112,6 +150,16 @@ To change the options, `remove` the mod and add it again.
   game's pack out, sizes for the list's new entries and the packs around it), no table when nothing changes, and
   `modman add` and `deploy` with one and two packages (the merged size table, the same in any order, and without the
   game's table).
+- Made-up packages and game files in `tests/test_bnp.py` (`DataLogs`), end to end: one package with all 14 data logs
+  (and an option's game data and texts logs, a BCML 2 log and a damaged option log) installed into a made-up game
+  that has every file they change: each file merged in its pack (`Bootup.pack`, `TitleBG.pack`, an actor pack inside
+  it, a loose actor pack, two language packs) or as a whole file, the packs' other files kept, sizes for the grown
+  files and their packs, the three things left out named; logs that change nothing add no file; a merged file
+  whose pack nobody has is named; `deploy` naming the data logs a later package's pack replaces; and the merge
+  `deploy` doesn't use yet (`files=True`): two packages sharing `Bootup.pack`, `TitleBG.pack` and an actor pack,
+  each one's game data, map, quest, shop, event and parameter changes and own files kept, sizes above either's. The
+  merge rules themselves: `tests/test_bcml_data.py`, `test_bcml_texts.py`, `test_bcml_maps.py`, and read-only round
+  trips of the game's own files (every file these logs change: BYML, game and save data, all 16 languages' texts).
 - 2026-11-07, a real Switch package (a character and armor mod, 293 MB, 3 options) added to a scratch library from
   the user's own download, then `deploy --dry-run` and a deploy into that library: 40 seconds to add; 308 RomFS files,
   132 packs filled with 1846 files from the game, 201 parameter files merged, 382 size table entries;

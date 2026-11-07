@@ -5,47 +5,63 @@
 1. **Frame rate 60, not 30.** In the game: F1 (or Esc) > Video > Frame rate: 60. At 30 the game never shows more
    than 30 fps, whatever else you change.
 2. **Laptop:** plug in the charger and pick Windows' *Best performance* power mode.
-3. **Pick a quality preset:** `python tools/quality.py set low --deploy`, then start the game with
-   `python tools/quality.py run`. Then choose the Savage Wind settings it prints, in the game's Video page.
+3. **Frame generation off** and **upscaler on FSR 1, Ultra performance** (Video page). With frame generation on, the
+   game fell to about 8 fps here.
+4. **Try a quality preset:** `python tools/quality.py set low --deploy`, then start the game with
+   `python tools/quality.py run`. Then choose the Savage Wind settings it prints, in the game's Video page. Its gain
+   on this laptop is **not proven** (below).
 
 ## Measured (2026-11-07, this laptop)
 
-Ryzen 5 7535U with Radeon 660M, Savage Wind 0.4.1-alpha.4, 1280x720 window, FSR 1 Ultra performance, **no frame
-limit** (to see what the PC can do), test save. Each number is the average fps over 20-30 s, standing still with the
-same view (median of 2-3 runs). Other programs used 27-48 % of the processor during the tests, so single runs varied
-by about 5 fps.
+**Short version:** frame rate 60, frame generation off and Ultra performance are sure. The presets' gain is not:
+other programs kept the laptop busy during every test, and that load moved fps more than any preset did.
 
-| Preset | Great Plateau (far view to Hyrule Castle, grass) | Hyrule Field (Riverside Stable, grass) |
+How: Ryzen 5 7535U with Radeon 660M, Savage Wind 0.4.1-alpha.4, 1280x720 window, FSR 1 Ultra performance, **no frame
+limit** (to see what the PC can do), test save. Every run is its own game start: warp, turn to a fixed view, wait
+25 s, then the average fps over 30 s. The setups took turns, in a different order in each of 3 rounds. Other
+programs used **54-78 % of the processor** during these runs (other tools' tests and two disk-wide searches), and it
+changed from run to run.
+
+| Setup (all with Ultra performance) | Great Plateau (far view, grass): rounds 1 / 2 / 3 | Hyrule Field (Riverside Stable): rounds 1 / 2 / 3 |
 |---|---|---|
-| Original | **42 fps** (slowest 5 %: 31-34 ms frames) | **63 fps** |
-| High | 45 fps | 67 fps |
-| Medium | 44 fps | 70 fps |
-| Low | **49 fps** (slowest 5 %: 25-26 ms frames) | **74 fps** |
+| High (no mod; Original is the same with the upscaler Off) | 41 / 26 / 27 fps | 56 / 44 / 39 fps |
+| Grass 40 % only | 43 / 35 / 36 | 57 / 57 / 34 |
+| **Low** (grass 40 %, effects off) | 42 / 41 / 22 | 62 / 61 / 36 |
+| Low + objects 60 % (in no preset) | 43 / 47 / 40 | 62 / 71 / 50 |
+| Other programs' share of the processor | 54-78 % | 56-75 % |
 
-- **What limits you is the 30 fps cap**, not the graphics: with no cap the game ran at 42-74 fps everywhere we
-  tested. Frame rate 60 is the biggest gain.
-- **Low gives about +7 to +11 fps** over Original, and fewer slow frames (frames over 33 ms on the Plateau: 47-50 in
-  20 s with Original, 7-15 with Low).
-- **The processor is the limit on this laptop, not the graphics chip:** the upscaler mode changed little.
+- **Background load decides most:** each 1 % of the processor other programs take cost about 1 fps (0.8 on the
+  Plateau, 1.5 in the Field). The same setup varied by up to 26 fps between rounds.
+- **Low vs High:** in round 1 (the least busy), Plateau 42 vs 41 fps, Field 62 vs 56. Allowing for the load (a
+  straight-line fit over all 24 runs), Low came out about 3 fps faster on the Plateau and 7 in the Field, each give
+  or take 6: **likely a small gain, not proven.** Low had fewer slow frames (over 33 ms) than High in rounds 1 and 2.
+- **Objects 60 %** came out 3-4 fps over Low, give or take 6: not proven either, and it has a visual and gameplay
+  cost ([levers](#the-levers)), so it stays out of the presets.
+- To measure the presets properly, close other programs (and other tools' tests) first.
 
-Savage Wind's own settings, Great Plateau, Original preset, one run (15 s each):
+The earlier rounds (13:00-14:25) are not used: the presets always ran in the same order, "Low" then also had Remove
+Grass on, and several setting changes never applied. They stay, marked, in `out\perfesults.jsonl`.
 
-| Setting | fps |
+Savage Wind's own settings, Hyrule Field, High, changed while the game ran (each about 20 s; one game start per
+round):
+
+| Setting | fps: rounds 1 / 2 / 3 |
 |---|---|
-| Upscaler Ultra performance (yours) | 43-50 |
-| Performance | 45 |
-| Balanced | 42 |
-| Quality | 43 |
-| Upscaler Off | 40 (Hyrule Field: 52 instead of 61) |
-| Shadow resolution High (2048) instead of Console | 50 (same as Console) |
-| Frame generation On (with no frame limit) | **8**: don't use it here |
+| Upscaler Ultra performance (yours), measured twice per round | 60 and 56 / 46 and 43 / 42 and 29 |
+| Performance | 54 / 38 / 30 |
+| Quality | 51 / 35 / 35 |
+| Upscaler Off (an earlier round, one run) | 52, against 61 with Ultra performance |
+| Shadow resolution High (2048) instead of Console (an earlier round, Plateau, one run) | 50, against 50: no change seen |
+| Frame generation On | **8**, twice: no frame limit (Plateau) and your settings, frame rate 60 + vsync fast (Field, 32-36 with it off) |
 
-So on this laptop a sharper upscaler mode (Quality) costs almost nothing: try it. On a laptop where the graphics chip
-is the limit (your other one), keep Ultra performance.
+So keep **Ultra performance**: Quality and Performance were slower in rounds 1 and 2 (round 3 was too busy to tell).
+Whether the processor or the graphics chip is the limit here we can't say from runs this busy; your other laptop (same
+model) was limited by the graphics chip, and Ultra performance made it playable.
 
-**Stability:** Low ran 5 minutes on the Plateau and 5 minutes running a 160 m square in Hyrule Field: no crash, the
-ground, rocks, trees and houses near Link were all there. Screenshots of every test: `out\shots\perf_*.png` in your
-copy of this repo (they stay on your PC; screenshots of the game never go into the repo).
+**Stability (Low as it ships):** {{STAB}}
+
+Screenshots of every test: `out\shots\perf3_*.png` in your copy of this repo (they stay on your PC; screenshots of the
+game never go into the repo).
 
 ## Presets
 
@@ -55,25 +71,26 @@ setting. It never changes Savage Wind's folder or your `savagewind.ini`.
 | | Low | Medium | High | Original |
 |---|---|---|---|---|
 | Grass distance | 40% | 60% | 100% | 100% |
-| Object draw distance | 60% | 80% | 100% | 100% |
-| Sun-shadow range (m) | 600 m | 1200 m | 3000 m | 3000 m |
-| Ambient occlusion | off | off | on | on |
+| Object draw distance | 100% | 100% | 100% | 100% |
+| Sun-shadow range | the game's | the game's | the game's | the game's |
+| Ambient occlusion | off | on | on | on |
 | Bloom (glow) | off | on | on | on |
-| Far blur (depth of field) | off | off | off | on |
+| Far blur (depth of field) | off | on | on | on |
 | Remove Grass mod | off | off | off | off |
+| Replaces a game file | `Pack/Bootup.pack` ([cost](#the-built-mods)) | no | no | no |
 | *Savage Wind:* Frame rate | 60 | 60 | 60 | 60 |
 | *Savage Wind:* Upscaler | FSR 1 | FSR 1 | FSR 1 | Off |
-| *Savage Wind:* Upscaler quality | Ultra performance | Performance | Quality | - |
+| *Savage Wind:* Upscaler quality | Ultra performance | Ultra performance | Ultra performance | - |
 | *Savage Wind:* Shadow resolution | Console | Console | Console | Console |
 | *Savage Wind:* Draw distance | Original | Original | Original | Original |
 | *Savage Wind:* Anti-aliasing | Off | Off | Off | Off |
 
 **What each one is for:**
 
-- **Low:** the most fps. Short grass, objects appear nearer, short shadows, no glow, no ambient occlusion, no far
-  blur. The ground looks lighter without ambient occlusion.
-- **Medium:** shorter grass, objects and shadows; no ambient occlusion and no far blur. Looks close to the game.
-- **High:** the game's look; only the far blur is off, and the upscaler on Quality (sharper).
+- **Low:** short grass, no glow, no ambient occlusion, no far blur. The ground looks lighter without ambient
+  occlusion. It replaces `Pack/Bootup.pack`, so Savage Wind's HUD button letters and voice size fix are off.
+- **Medium:** shorter grass only; no game file replaced. Not measured on its own (the grass lever was, at 40%).
+- **High:** the game's look with no mod; only Savage Wind's upscaler (Ultra performance) differs from Original.
 - **Original:** the game as it is: no quality mods, no start-up values.
 
 ```

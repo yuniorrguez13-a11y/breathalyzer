@@ -283,11 +283,14 @@ class Spot:
         fx, fz = self.f
         return self.p[0] + ahead * fx + left * fz, self.p[1], self.p[2] + ahead * fz - left * fx
 
-    def place(self, c: Control, ahead: float = 2.6, left: float = 1.0, facing: str = "link") -> tuple:
-        """Put the ghost there (`ghost pos`), facing Link ("link") or the camera's way ("away": its back to us)."""
+    def place(self, c: Control, ahead: float = 0.3, left: float = 1.2, facing: str = "camera") -> tuple:
+        """Put the ghost there (`ghost pos`; by default beside Link, close to the camera, so the screenshots show its
+        hands), facing the camera, Link ("link") or away from the camera ("away": its back to us)."""
         x, y, z = self.at(ahead, left)
-        yaw = math.degrees(math.atan2(self.p[0] - x, self.p[2] - z))
-        if facing == "away":
+        yaw = math.degrees(math.atan2(-self.f[0], -self.f[1]))
+        if facing == "link":
+            yaw = math.degrees(math.atan2(self.p[0] - x, self.p[2] - z))
+        elif facing == "away":
             yaw = math.degrees(math.atan2(self.f[0], self.f[1]))
         c.cmd("ghost", "pos", f"{x:.3f}", f"{y:.3f}", f"{z:.3f}", f"{yaw:.1f}")
         return x, y, z, yaw
@@ -350,8 +353,8 @@ def h1(c, port, spot, gic, rep) -> None:
     time.sleep(0.5)
     shot(c, "H1_stand")
     phases = {"standing": sample(c, 2.0)}
-    x, y, z, _ = spot.place(c)
-    th = threading.Thread(target=walk_circle, args=(port, (x, y, z), 4.0), daemon=True)
+    x, y, z = spot.at(2.2, 1.3)
+    th = threading.Thread(target=walk_circle, args=(port, (x, y, z), 4.0, 1.0), daemon=True)
     th.start()
     time.sleep(1.0)
     shot(c, "H1_walk")
@@ -413,7 +416,7 @@ def h3(c, spot, gic, rep) -> None:
 
 def h4(c, spot, gic, rep) -> None:
     ensure_ghost(c, spot, gic)
-    spot.place(c, ahead=2.2, left=0.6, facing="away")
+    spot.place(c, facing="away")
     set_items(c, ITEMS, 7)
     poll(c, lambda s: held_as(s, ITEMS, 7) is None, 3.0)
     time.sleep(0.6)
@@ -440,7 +443,7 @@ def h5(c, spot, gic, rep, label: str) -> None:
     time.sleep(0.3)
     me0 = c.cmd("ghost", "self")
     ensure_ghost(c, spot, gic)
-    x, y, z, _ = spot.place(c, ahead=2.4, left=0.0)
+    x, y, z, _ = spot.place(c, ahead=2.4, left=0.0, facing="link")
     st = gst(c)
     actors0 = [sl["actor"] for sl in slots(st)]
     start = link_pos(c)
@@ -515,36 +518,51 @@ def h8(c, spot, gic, rep) -> None:
 
 
 def h9(c, spot, gic, rep) -> None:
+    """A reload: Link teleported 90 m up falls, Game Over, Continue (A) loads the save again (as in the fourth round).
+    The ghost follows him (`ghost follow`), so after the reload it spawns next to him again."""
     st = ensure_ghost(c, spot, gic)
     fx, fz = spot.f
-    c.cmd("ghost", "follow", f"{2.6 * fx + 1.0 * fz:.2f}", "0", f"{2.6 * fz - 1.0 * fx:.2f}")
+    c.cmd("ghost", "follow", f"{0.3 * fx + 1.2 * fz:.2f}", "0", f"{0.3 * fz - 1.2 * fx:.2f}")
     before = slots(st)
     drops = st.get("drops", 0)
-    try:
-        c.cmd("teleport", "-400", "200", "1300")
-    except ControlError as e:
-        print(f"  H9: teleport: {e}", flush=True)
+    p = link_pos(c)
+    c.cmd("teleport", f"{p[0]:.2f}", f"{p[1] + 90:.2f}", f"{p[2]:.2f}")
     t0 = time.monotonic()
     lost = None                      # (the reload drops the ghost: a stage change, or the game removed it)
-    while time.monotonic() - t0 < 60 and lost is None:
+    press_at = t0 + 8.0              # (from then on A every 2.5 s: Game Over's Continue)
+    while time.monotonic() - t0 < 120 and lost is None:
         try:
             if c.cmd("ghost").get("drops", 0) > drops:
                 lost = time.monotonic() - t0
+            elif time.monotonic() >= press_at:
+                press_at = time.monotonic() + 2.5
+                c.cmd("press", "a")
         except ControlError:
             pass
         time.sleep(0.25)
-    back = gic.wait_world(c, 120.0)
-    t_world = time.monotonic()
-    took, st = poll(c, lambda s: s.get("state") == "live" and held_as(s, ITEMS, 0) is None, RELOAD_BACK_IN + 5)
+    t_world, end = None, time.monotonic() + 120
+    while lost is not None and t_world is None and time.monotonic() < end:   # (the world answers again)
+        try:
+            c.cmd("pos")
+            if gst(c).get("player", "0x0") != "0x0":
+                t_world = time.monotonic()
+                break
+        except ControlError:
+            pass
+        time.sleep(0.5)
+    took, st = (None, gst(c))
+    if t_world is not None:
+        took, st = poll(c, lambda s: s.get("state") == "live" and held_as(s, ITEMS, 0) is None, RELOAD_BACK_IN + 5)
     shot(c, "H9_after_reload")
     old = {sl["actor"] for sl in before}
     reused = [sl["actor"] for sl in slots(st) if sl["actor"] in old]
     status, text = judge_times("back after the world", [took], RELOAD_BACK_IN, held_as(st, ITEMS, 0),
                                st.get("items.stray"))
-    if not back or lost is None:   # (an old address seen again is the heap reusing it: only reported)
+    if lost is None or t_world is None:
         status = "FAIL"
-    rep.add("H9", status, f"ghost dropped after {lost if lost is None else round(lost, 1)} s, world answering "
-            f"{t_world - t0:.0f} s after the teleport; {text}; old actors reused {reused}")
+    rep.add("H9", status, f"ghost dropped {lost if lost is None else round(lost, 1)} s after the teleport up, the "
+            f"world back {None if t_world is None else round(t_world - t0, 1)} s after it; {text}; last "
+            f"{st.get('last')!r}; old addresses seen again {reused} (the heap reusing them)")
     c.cmd("ghost", "stop")
     gic.back_to(c, spot.p)
     spot.look(c)
@@ -584,18 +602,22 @@ def h10(c, port, gic, rep, relay_port: int) -> None:
 
 def h11(c, spot, gic, rep) -> None:
     ensure_ghost(c, spot, gic)
-    alone, items, us = [], [], None
+    alone, items, us, tick_alone, st = [], [], None, None, {}
     for _ in range(2):
         set_items(c, NONE3, 0)
         time.sleep(1.5)
         alone.append(gic.fps(c))
+        tick_alone = gst(c).get("tick_us")
         set_items(c, ITEMS, 0)
         poll(c, lambda s: held_as(s, ITEMS, 0) is None, 4.0)
         items.append(gic.fps(c))
-        us = gst(c).get("items.us")
-    rep.add("H11", *judge_cost(gic.mean_fps(alone), gic.mean_fps(items), us))
+        st = gst(c)
+        us = st.get("items.us")
+    status, text = judge_cost(gic.mean_fps(alone), gic.mean_fps(items), us)
+    rep.add("H11", status, text + f" (median of 64 frames; average {st.get('items.us_avg')}, most {st.get('items.us_max')}; "
+            f"{st.get('items.calls')} game calls and {st.get('items.queries')} memory queries a frame; the whole tick "
+            f"{tick_alone} us alone, {st.get('tick_us')} us with the items)")
     print(f"  H11: alone {gic.fmt_fps(alone)}, with items {gic.fmt_fps(items)}, us {us}", flush=True)
-    return gic.mean_fps(alone), gic.mean_fps(items)
 
 
 def take_given(c, spot, gic, name: str, slot_key: str) -> dict:

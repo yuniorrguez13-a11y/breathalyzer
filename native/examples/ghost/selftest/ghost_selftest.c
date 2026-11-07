@@ -660,8 +660,10 @@ static void check_items(void) {
     del = g_deletes;
     items_drop((struct Cpu *)(void *)g_cpu, g_it);
     items_run(0, 0.5);
-    check("items", "ghost_gone", g_deletes == del + 1 && live_items() == 0, "deletes +%d, live %d", g_deletes - del,
-          live_items());
+    check("items", "ghost_gone", g_deletes == del + 1 && live_items() == 0 && held_count() == 0 &&
+          t_status.items.slot[0].actor == 0 && !t_status.items.slot[0].place[0],
+          "deletes +%d, live %d, status %s %llx", g_deletes - del, live_items(),
+          IS_NAMES[t_status.items.slot[0].state], (unsigned long long)t_status.items.slot[0].actor);
     items_run(ghost, 1.5);
     check("items", "ghost_back", held_count() == 1, "held %d", held_count());
     // a stage change: forgotten without a single game call

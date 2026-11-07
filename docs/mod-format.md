@@ -27,7 +27,9 @@ version = "1.0.0"
 authors = ["yourname"]
 description = "One line."
 game_versions = ["1.9.0"]       # checked against your game's main build id: cd57b23fa4bbad65 is 1.9.0
-loader_api = 2                  # the mod API the mod needs (2 for hooks)
+loader_api = 2                  # the mod API the mod needs (2 for hooks, 3 for settings the DLL reads)
+icon = "icon.png"               # optional: the mod's picture
+url = "https://example.org/my-mod"
 
 [code]
 windows = "bin/my_mod.dll"
@@ -50,7 +52,18 @@ dlc_romfs = "01007EF00011F001/romfs"
 | `version` | yes | Up to four numbers of at most 9 digits each, like `1.0` or `0.2.1`, with an optional suffix after `-` or `+` (`1.0.0-beta.1`). `list` shows it. |
 | `authors`, `description` | no | A list of names; one line of text (no line breaks, as for `name`). |
 | `game_versions` | no; yes with hooks | The game versions the mod is made for, like `["1.9.0"]`. Checked against the build id of your game's `main`. Leave it out for a mod that works with any version. |
-| `loader_api` | no (1) | The mod API the mod needs: `SWMOD_API_VERSION` in [`swmod.h`](../native/modhost/swmod.h). modhost 0.2.0 has API 2. Hooks need 2. A mod that needs more than the modhost in this repo has is refused. |
+| `loader_api` | no (1) | The mod API the mod needs: `SWMOD_API_VERSION` in [`swmod.h`](../native/modhost/swmod.h). API 2 added hooks, API 3 adds settings. Hooks need 2; a DLL that reads its settings (`applies = "live"` or `"restart"`) needs 3. A mod that needs more than the modhost in this repo has is refused. |
+| `[mod] icon` | no | The mod's picture, a file in the mod: PNG (JPG and WEBP need Pillow). Square is best. Without Pillow at most about 2 million pixels (1920x1080), with Pillow 4096x4096; at most 8 MB. Mod Manager shows it; the game shows it only when pictures are turned on ([mod pictures](mod-pictures.md)). The player can pick another one. A mod without one gets a letter tile. |
+| `[mod] background` | no | A picture shown dark and blurred behind the Mods page while the mod is selected (turned on by the player, off by default). The same rules as `icon`; 16:9 is best. |
+| `[mod] title_picture` | no | The title-screen picture. The same rules as `icon`. The last mod that is on and has one wins, unless the player picked one in Mod Manager. |
+| `[mod] url` | no | The mod's web page: starts with `https://`, at most 300 characters, no spaces. Mod Manager shows it; the game only says the link is in Mod Manager (its font can't show web addresses). |
+| `[mod] update_url` | no | Kept for the update check that comes later. The same rules as `url`. |
+| `[font] file` | yes, in `[font]` | Makes the mod a font mod: a `.ttf` or `.otf` font in the mod. It is built into the game's fonts at deploy, on your PC, and never shared ([fonts](fonts.md)). The player picks which font is used. |
+| `[font] for` | no (`"menu"`) | Which of the game's fonts it replaces: `"menu"`, the menus and the game's texts (others come later). |
+| `[font] languages` | no (all) | Some of `"US"`, `"EU"` and `"JP"`, each once, like `["US", "EU"]`. Other languages come later. |
+| `[font] license` | no | The font's license, like `"OFL-1.1"`. Without it modman reads it from the font. A license that doesn't allow this is a warning, never a refusal. |
+| `[[settings]]` | no | The mod's settings page: one table per setting (on/off, slider, choice, key, text or button). Every key and rule is in [mod settings](mod-settings.md). |
+| `[[pages]]` | no | Sub-pages of the settings page, each a table with `key`, `label` and `description` ([mod settings](mod-settings.md)). |
 | `[code] windows` | no | The mod's DLL, relative to the folder `mod.toml` is in. It must be a 64-bit DLL that exports `swmod_init`, and it is the only one modhost loads as this mod. The mod's other 64-bit DLLs without `swmod_init` go next to it as helpers, as for a mod without `mod.toml`. Another DLL that exports `swmod_init` (a debug build, say) is left out, and `add` and `deploy` say so: next to the mod's DLL, modhost would load it as a second mod. Without `[code] windows`, every DLL that exports `swmod_init` is loaded, as for a mod without `mod.toml`. |
 | `[code] linux` | no | Allowed, for later. modman (Windows) doesn't use it. |
 | `[code] hooks` | no | Guest addresses of the functions of `main` the mod hooks, like `"0x7000cc7410"` or `"main+0xcc7410"`. Needs `windows`, `loader_api = 2` and `game_versions`. Each must be in `main`'s code and a multiple of 4 (the rebuild checks that it is a function start). |
@@ -60,6 +73,73 @@ dlc_romfs = "01007EF00011F001/romfs"
 
 Paths use `/` (or `\`) and must stay inside the mod folder. Tables and keys modman doesn't know are ignored (`add`
 says so: look for typos). A mod with a `mod.toml` that is only `[mod]` and `[data]` is fine.
+
+The game's menu font has none of ``{ } # $ % @ ^ ` | ~``. When a name, description or settings label has one, `add`
+says so but adds the mod: the game shows another character there until the symbols fix is on ([fonts](fonts.md)).
+
+## Pictures, fonts and settings pages
+
+These keys are new (Mods page v2), and the tools that use them are being built: [mod pictures](mod-pictures.md),
+[fonts](fonts.md) and [mod settings](mod-settings.md). Each part lives in its own tool. While a tool isn't there, its
+part is off: the mod is still added and deployed, and `add` says which part isn't used yet.
+
+```toml
+[mod]
+icon = "icon.png"
+background = "bg.png"
+title_picture = "title.png"
+url = "https://example.org/my-mod"
+
+[font]
+file = "fonts/MyFont.ttf"
+for = "menu"
+languages = ["US", "EU", "JP"]
+license = "OFL-1.1"
+
+[[pages]]
+key = "advanced"
+label = "Advanced"
+description = "More settings."
+
+[[settings]]
+key = "speed"
+type = "slider"
+label = "Sprint speed"
+description = "How fast Link sprints."
+applies = "live"
+min = 50
+max = 200
+step = 10
+default = 100
+unit = " percent"
+```
+
+A setting with `applies = "deploy"` can choose an option folder: a folder in the mod that holds RomFS folders
+(`Actor/`, `Pack/`, ...) directly, with no `romfs/` or title-id folder in it. Deploy puts it right after the mod's own
+RomFS files, so it replaces them, and mods later in the list still win over it.
+
+## What deploy does with them
+
+In this order, each step only when its tool is there:
+
+1. The settings tool names the option folders the chosen settings want, and they join the RomFS overlay.
+2. The RomFS overlay is planned as before (with the BCML, UKMM and Wii U parts).
+3. The font tool builds the chosen font into the font files that win.
+4. The title picture is built (the player's pick, else the last mod's `title_picture`).
+5. The pictures tool builds the Mods-page pictures, last, on top of the files that win in the end.
+6. The settings tool writes `deploy\native\settings.txt` for modhost.
+
+Files made at deploy are listed in the overlay's `.mod-deploy.json` with `generated:fonts`, `generated:title` or
+`generated:pictures` as their mod. A tool that fails is off for that deploy, and deploy says so under Needs attention.
+
+## Files in the library
+
+| File | What it holds |
+|---|---|
+| `settings\<id>.json` | The setting values the player changed: `{"format": 1, "mod": "<id>", "values": {...}}`. Values equal to the default aren't kept |
+| `pictures\<id>\chosen.png` | The picture the player picked for a mod (also `.jpg`, `.jpeg` or `.webp`). `pictures\_title\` is the title screen's, `pictures\_mods-page\` the one behind the Mods page. Never written into the mod's folder |
+| `profiles\<name>.json` | A mod set ([profiles](profiles.md)) |
+| `deploy\history.jsonl` | One line per deploy and per start: the time, the mods with their versions, on or off and in order, and the deploy settings ([profiles](profiles.md#history)) |
 
 ## RomFS folders
 
@@ -117,5 +197,7 @@ python tools/modman.py run
 ## Not done yet
 
 The mod API has logging, control commands, `hle_override`, `guest_call` and (API 2) hooks before, after or instead
-of any function of `main`. Planned: events (each frame, save loaded, actor created), calling game functions by their
-code map name, menus with Dear ImGui, and mods offering functions to other mods.
+of any function of `main`. Being built: (API 3) settings pages, mod pictures and font mods. Planned: events (each
+frame, save loaded, actor created), calling game functions by their code map name, and mods offering functions to
+other mods. Later, maybe: a script language such as Lua. For now, settings rules in `mod.toml` and C code in the DLL
+cover it.

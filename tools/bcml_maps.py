@@ -22,13 +22,11 @@ Two ways to use it:
 
 A damaged log raises LogError (a message for the player); nothing of it is used.
 
-It holds a small BYML reader and writer and a reader for BCML's BYML text (U32, byml_load, byml_dump,
-byml_from_text, byml_same, f32). tools/byml.py (the planned shared module) is meant to replace them.
+Its BYML types, reader and writer are tools/bcml_data.py's (U32, byml_load, byml_dump, byml_same here wrap them),
+and so is its reader for BCML's BYML text (byml_from_text).
 """
 from __future__ import annotations
 
-import binascii
-import base64
 import math
 import os
 import re
@@ -36,6 +34,7 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bcml_data as bd  # noqa: E402
 import bnp  # noqa: E402
 import ukmm  # noqa: E402
 import wiiu_convert as wc  # noqa: E402
@@ -67,22 +66,10 @@ class LogError(Exception):
 
 # ---------------------------------------------------------------------------------------------------- BYML values
 # int is a BYML int (I32), float a float (F32), U32 a uint; I64, U64, F64 and bytes (binary) are read and written
-# but refused in the logs here: the game's map files (version 2) never use them.
+# but refused in the logs here: the game's map files (version 2) never use them. The types, the reader and the
+# writer are tools/bcml_data.py's (one copy for every BCML log module).
 
-class U32(int):
-    """A BYML uint (type 0xD3)."""
-
-
-class I64(int):
-    """A BYML int64 (type 0xD4)."""
-
-
-class U64(int):
-    """A BYML uint64 (type 0xD5)."""
-
-
-class F64(float):
-    """A BYML double (type 0xD6)."""
+U32, I64, U64, F64 = bd.U32, bd.I64, bd.U64, bd.F64
 
 
 def f32(x: float) -> float:
@@ -93,30 +80,6 @@ def f32(x: float) -> float:
         return math.copysign(math.inf, x)
 
 
-def _typed(v):
-    """wc.byml_load's values with their types: ("uint", n) -> U32(n), a float's bits -> float..."""
-    if isinstance(v, dict):
-        return {k: _typed(x) for k, x in v.items()}
-    if isinstance(v, list):
-        return [_typed(x) for x in v]
-    if isinstance(v, tuple):
-        kind, raw = v
-        if kind == "int":
-            return raw - (1 << 32) if raw & 0x80000000 else raw
-        if kind == "uint":
-            return U32(raw)
-        if kind == "float":
-            return struct.unpack("<f", struct.pack("<I", raw))[0]
-        if kind == "int64":
-            return I64(raw - (1 << 64) if raw >> 63 else raw)
-        if kind == "uint64":
-            return U64(raw)
-        if kind == "double":
-            return F64(struct.unpack("<d", struct.pack("<Q", raw))[0])
-        raise wc.FormatError(f"BYML value type {kind}")
-    return v
-
-
 def unyaz0(data: bytes) -> bytes:
     return wc.yaz0_decompress(data)[0] if data[:4] == b"Yaz0" else data
 
@@ -124,212 +87,29 @@ def unyaz0(data: bytes) -> bytes:
 def byml_load(data: bytes):
     """A Switch (little-endian) BYML document, Yaz0 or not, as typed values."""
     data = unyaz0(data)
-    if wc.byml_order(data) != wc.LE:
+    if data[:2] != b"YB":
         raise wc.FormatError("not a Switch (little-endian) BYML document")
-    try:
-        return _typed(wc.byml_load(data))
-    except (IndexError, KeyError, ValueError, struct.error, RecursionError, UnicodeDecodeError) as e:
-        raise wc.FormatError(f"damaged BYML ({type(e).__name__})") from None
-
-
-def _kind(v) -> int:
-    if isinstance(v, bool):
-        return wc.BYML_BOOL
-    if isinstance(v, str):
-        return wc.BYML_STRING
-    if isinstance(v, dict):
-        return wc.BYML_DICT
-    if isinstance(v, list):
-        return wc.BYML_ARRAY
-    if v is None:
-        return wc.BYML_NULL
-    if isinstance(v, (bytes, bytearray)):
-        return wc.BYML_BINARY
-    for cls, t in ((U32, wc.BYML_UINT), (I64, wc.BYML_INT64), (U64, wc.BYML_UINT64), (F64, wc.BYML_DOUBLE)):
-        if isinstance(v, cls):
-            return t
-    if isinstance(v, int):
-        return wc.BYML_INT
-    if isinstance(v, float):
-        return wc.BYML_FLOAT
-    raise ValueError(f"{type(v).__name__} can't go into a BYML document")
-
-
-_RANGE = {wc.BYML_INT: (-(1 << 31), 1 << 31, "<i"), wc.BYML_UINT: (0, 1 << 32, "<I"),
-          wc.BYML_INT64: (-(1 << 63), 1 << 63, "<q"), wc.BYML_UINT64: (0, 1 << 64, "<Q")}
+    return bd.byml_load(data)
 
 
 def byml_dump(root, share: bool = True) -> bytes:
     """A Switch BYML document (version 2, little-endian) of typed values. Key and string tables are sorted and
     unique; each container comes after its parent, every node 4-aligned, 8-byte values 8-aligned. share: equal
-    containers are written once (as in the game's map files; its quest list shares none)."""
-    if not isinstance(root, (dict, list)):
-        raise ValueError("a BYML document's root is a dictionary or an array")
-    keys: set[str] = set()
-    strings: set[str] = set()
-    stack = [root]
-    while stack:
-        v = stack.pop()
-        if isinstance(v, dict):
-            for k, x in v.items():
-                if not isinstance(k, str):
-                    raise ValueError("BYML dictionary keys are strings")
-                keys.add(k)
-                stack.append(x)
-        elif isinstance(v, list):
-            stack.extend(v)
-        elif isinstance(v, str):
-            strings.add(v)
-    key_list = sorted(keys, key=lambda s: s.encode())
-    str_list = sorted(strings, key=lambda s: s.encode())
-    kidx = {k: i for i, k in enumerate(key_list)}
-    sidx = {s: i for i, s in enumerate(str_list)}
-    buf = bytearray(16)
-    shapes: dict[tuple, int] = {}       # a container's contents -> a number (equal containers: equal numbers)
-    shape_of: dict[int, int] = {}       # id() of a container in root -> its number
-    written: dict[int, int] = {}        # a number -> where that container was written
-
-    def shape(v) -> int:
-        """Equal containers are written once, as the game's own files do (they share a third of their maps)."""
-        n = shape_of.get(id(v))
-        if n is None:
-            items = sorted(v.items()) if isinstance(v, dict) else enumerate(v)
-            key = (isinstance(v, dict),) + tuple(
-                (k, _kind(x), shape(x) if isinstance(x, (dict, list)) else
-                 struct.pack("<d", x) if isinstance(x, float) else x) for k, x in items)
-            n = shape_of[id(v)] = shapes.setdefault(key, len(shapes))
-        return n
-
-    def pad(a: int) -> None:
-        buf.extend(bytes(-len(buf) % a))
-
-    def table(items: list[str]) -> int:
-        if not items:
-            return 0
-        pad(4)
-        off = len(buf)
-        enc = [s.encode() + b"\0" for s in items]
-        offs, pos = [], 4 + 4 * (len(enc) + 1)
-        for e in enc:
-            offs.append(pos)
-            pos += len(e)
-        offs.append(pos)
-        buf.extend(bytes([wc.BYML_STRINGS]) + len(enc).to_bytes(3, "little"))
-        buf.extend(struct.pack(f"<{len(offs)}I", *offs))
-        buf.extend(b"".join(enc))
-        return off
-
-    def inline(t: int, v) -> int:
-        if t == wc.BYML_STRING:
-            return sidx[v]
-        if t == wc.BYML_BOOL:
-            return int(v)
-        if t == wc.BYML_NULL:
-            return 0
-        if t == wc.BYML_FLOAT:
-            return struct.unpack("<I", struct.pack("<f", f32(v)))[0]
-        lo, hi, fmt = _RANGE[t]
-        if not lo <= v < hi:
-            raise ValueError(f"{v} doesn't fit a BYML {wc.BYML_NAMES[t]}")
-        return struct.unpack("<I", struct.pack(fmt, v))[0]
-
-    def container(v) -> int:
-        same_as = shape(v) if share else id(v)
-        if same_as in written:
-            return written[same_as]
-        pad(4)
-        off = len(buf)
-        if share:
-            written[same_as] = off
-        n = len(v)
-        if n >= 1 << 24:
-            raise ValueError("a BYML container with too many items")
-        if isinstance(v, list):
-            items = v
-            types = [_kind(x) for x in items]
-            buf.extend(bytes([wc.BYML_ARRAY]) + n.to_bytes(3, "little") + bytes(types))
-            pad(4)
-            slots = [len(buf) + 4 * k for k in range(n)]
-            buf.extend(bytes(4 * n))
-        else:
-            pairs = sorted(v.items(), key=lambda kv: kidx[kv[0]])
-            items = [x for _, x in pairs]
-            types = [_kind(x) for x in items]
-            buf.extend(bytes([wc.BYML_DICT]) + n.to_bytes(3, "little"))
-            slots = []
-            for (k, _), t in zip(pairs, types):
-                buf.extend(kidx[k].to_bytes(3, "little") + bytes([t]))
-                slots.append(len(buf))
-                buf.extend(bytes(4))
-        for x, t, at in zip(items, types, slots):
-            if t in (wc.BYML_ARRAY, wc.BYML_DICT):
-                value = container(x)
-            elif t in wc.BYML_LONG:
-                pad(8)
-                value = len(buf)
-                if t == wc.BYML_DOUBLE:
-                    buf.extend(struct.pack("<d", x))
-                else:
-                    lo, hi, fmt = _RANGE[t]
-                    if not lo <= x < hi:
-                        raise ValueError(f"{x} doesn't fit a BYML {wc.BYML_NAMES[t]}")
-                    buf.extend(struct.pack(fmt, x))
-            elif t == wc.BYML_BINARY:
-                pad(4)
-                value = len(buf)
-                buf.extend(struct.pack("<I", len(x)) + bytes(x))
-            else:
-                value = inline(t, x)
-            struct.pack_into("<I", buf, at, value)
-        return off
-
-    key_off = table(key_list)
-    str_off = table(str_list)
-    root_off = container(root)
-    pad(4)
-    struct.pack_into("<2sHIII", buf, 0, b"YB", 2, key_off, str_off, root_off)
-    return bytes(buf)
+    containers are written once (as in the game's map files; its quest list shares none). ValueError for what BYML
+    can't hold."""
+    try:
+        return bd.byml_dump(root, share=share)
+    except TypeError as e:
+        raise ValueError(str(e)) from None
 
 
-def byml_same(a, b) -> bool:
-    """Deep equality that minds the BYML type (int vs U32 vs bool...); floats compare as 32-bit floats."""
-    stack = [(a, b)]
-    while stack:
-        x, y = stack.pop()
-        if type(x) is not type(y):
-            return False
-        if isinstance(x, dict):
-            if x.keys() != y.keys():
-                return False
-            stack.extend((x[k], y[k]) for k in x)
-        elif isinstance(x, list):
-            if len(x) != len(y):
-                return False
-            stack.extend(zip(x, y))
-        elif isinstance(x, F64):
-            if struct.pack("<d", x) != struct.pack("<d", y):
-                return False
-        elif isinstance(x, float):
-            if struct.pack("<f", f32(x)) != struct.pack("<f", f32(y)):
-                return False
-        elif x != y:
-            return False
-    return True
+byml_same = bd.same      # deep equality that minds the BYML type (int vs U32 vs bool...); floats as 32-bit floats
 
 
 # ---------------------------------------------------------------------------------------------------- BYML text
-# What oead.byml.to_text writes (libyaml): block maps and lists, flow [..] and {..} of scalars that libyaml wraps over
-# lines at 80 columns, quoted and folded strings, the tags !u (U32, hex), !l (I64), !ul (U64), !f64 (F64) and
-# !!binary. Untagged: true/false, null, an integer is an int (0x hex, a leading 0 octal), a number with "." or an
-# exponent a float, anything else a string; quoted text is always a string. Anchors and aliases are refused (oead
-# never writes them). Scalar and key reading come from tools/ukmm.py's YAML subset.
-
-_NULLS = {"", "~", "null", "Null", "NULL"}
-_TRUE = {"true", "True", "TRUE"}
-_FALSE = {"false", "False", "FALSE"}
-_INT_RE = re.compile(r"[-+]?(?:0[xX][0-9a-fA-F]+|0[0-7]*|[1-9][0-9]*)")
-_FLOAT_RE = re.compile(r"[-+]?(?:(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?|\d+[eE][-+]?\d+|\.(?:inf|Inf|INF))"
-                       r"|\.(?:nan|NaN|NAN)")
+# What oead.byml.to_text writes (libyaml), read by tools/bcml_data.py's reader (the one copy for every BCML log
+# module): typed scalars and tags, flow collections libyaml wraps over lines, quoted and folded strings; anchors and
+# aliases refused.
 
 
 def _int(text: str) -> int:
@@ -347,304 +127,14 @@ def _int(text: str) -> int:
     return -v if neg else v
 
 
-def _float(text: str) -> float:
-    t = text.strip()
-    low = t.lower()
-    if low.lstrip("+-") == ".inf":
-        return -math.inf if low.startswith("-") else math.inf
-    if low == ".nan":
-        return math.nan
-    return float(t)
-
-
-def _plain(text: str):
-    """An untagged plain scalar's value."""
-    if text in _NULLS:
-        return None
-    if text in _TRUE:
-        return True
-    if text in _FALSE:
-        return False
-    if _INT_RE.fullmatch(text):
-        v = _int(text)
-        for cls, lo, hi in ((int, -(1 << 31), 1 << 31), (U32, 0, 1 << 32), (I64, -(1 << 63), 1 << 63),
-                            (U64, 0, 1 << 64)):
-            if lo <= v < hi:
-                return cls(v)
-        raise LogError(f"the number {text} is too big")
-    if _FLOAT_RE.fullmatch(text):
-        return f32(_float(text))
-    return text
-
-
-def _tagged(tag: str, text: str, plain: bool):
-    try:
-        if tag in ("!u", "!l", "!ul", "!!int"):
-            v = _int(text)
-            cls, lo, hi = {"!u": (U32, 0, 1 << 32), "!l": (I64, -(1 << 63), 1 << 63), "!ul": (U64, 0, 1 << 64),
-                           "!!int": (int, -(1 << 31), 1 << 31)}[tag]
-            if not lo <= v < hi:
-                raise ValueError
-            return cls(v)
-        if tag == "!f64":
-            return F64(_float(text))
-        if tag == "!!float":
-            return f32(_float(text))
-        if tag == "!!str":
-            return text
-        if tag == "!!bool" and text in _TRUE | _FALSE:
-            return text in _TRUE
-        if tag == "!!null" and (text in _NULLS or not plain):
-            return None
-        if tag in ("!!binary", "!<tag:yaml.org,2002:binary>"):
-            return base64.b64decode("".join(text.split()), validate=True)
-    except (ValueError, binascii.Error):
-        raise LogError(f"the value {text!r} doesn't fit its tag {tag}") from None
-    raise LogError(f"the tag {tag} on {text!r} isn't one BCML writes")
-
-
-def _dash(s: str) -> bool:
-    return s == "-" or s.startswith("- ")
-
-
-def _keyish(s: str) -> bool:
-    return s[:1] not in ("-", "[", "{", "!", "&", "*", "|", ">", "?", "#") and ukmm._key(s) is not None
-
-
-class _Text:
-    """One BYML text document, read line by line (block style) with flow collections read by _Flow."""
-
-    def __init__(self, text: str):
-        self.ls = ukmm._Lines(text)
-
-    def fail(self, what: str):
-        raise LogError(f"line {self.ls.i + 1}: {what}")
-
-    def doc(self):
-        nxt = self.ls.peek()
-        if nxt is None:
-            return None
-        ind, s = nxt
-        if s.startswith("? ") or s == "?":
-            self.fail("complex keys aren't used by BCML")
-        if _dash(s) or _keyish(s):
-            v = self.block(ind, 0)
-        else:
-            self.ls.i += 1
-            v = self.node(s, -1, 0, True)
-        if self.ls.peek() is not None:
-            self.fail("text after the end of the document")
-        return v
-
-    def block(self, indent: int, depth: int):
-        if depth > DEPTH:
-            raise LogError("the log nests too deep")
-        if _dash(self.ls.peek()[1]):
-            out: list = []
-            while True:
-                nxt = self.ls.peek()
-                if nxt is None or nxt[0] != indent or not _dash(nxt[1]):
-                    break
-                rest = nxt[1][1:].strip()
-                if rest and (_dash(rest) or _keyish(rest)):
-                    # "- key: value" or "- - item": a map or list that starts on the dash's line
-                    after = self.ls.lines[self.ls.i][indent + 1:]
-                    inner = indent + 1 + len(after) - len(after.lstrip(" "))
-                    self.ls.lines[self.ls.i] = " " * inner + rest
-                    out.append(self.block(inner, depth + 1))
-                else:
-                    self.ls.i += 1
-                    out.append(self.node(rest, indent, depth + 1, True))
-        else:
-            out = {}
-            while True:
-                nxt = self.ls.peek()
-                if nxt is None or nxt[0] != indent:
-                    break
-                s = nxt[1]
-                if s.startswith("? "):
-                    self.fail("complex keys aren't used by BCML")
-                kv = ukmm._key(s) if _keyish(s) else None
-                if kv is None:
-                    self.fail("isn't a 'key: value' line")
-                self.ls.i += 1
-                if kv[0] in out:
-                    self.fail(f"the key {kv[0]!r} is there twice")
-                out[kv[0]] = self.node(kv[1], indent, depth + 1, False)
-        nxt = self.ls.peek()
-        if nxt is not None and nxt[0] > indent:
-            self.fail("is indented more than it should be")
-        return out
-
-    def node(self, first: str, parent: int, depth: int, in_list: bool):
-        """A value whose text starts with `first` (the rest of a line already read), maybe the block below it."""
-        if depth > DEPTH:
-            raise LogError("the log nests too deep")
-        tag = None
-        if first.startswith("!"):
-            tag, _, first = first.partition(" ")
-            first = first.strip()
-        if first[:1] in ("&", "*"):
-            self.fail("anchors and aliases (& *) aren't used by BCML")
-        if not first or first.startswith("#"):
-            nxt = self.ls.peek()
-            if nxt is not None and (nxt[0] > parent or (not in_list and nxt[0] == parent and _dash(nxt[1]))):
-                if tag not in (None, "!!map", "!!seq"):
-                    self.fail(f"the tag {tag} on a list or map")
-                return self.block(nxt[0], depth + 1)
-            return _tagged(tag, "", True) if tag else None
-        if first[0] in "[{":
-            if tag not in (None, "!!map", "!!seq"):
-                self.fail(f"the tag {tag} on a list or map")
-            f = _Flow(self, first)
-            v = f.value(depth)
-            f.end()
-            return v
-        try:
-            text = ukmm._scalar_text(first, self.ls, parent)
-        except ukmm.UkmmError as e:
-            raise LogError(f"line {self.ls.i + 1}: {e}") from None
-        quoted = first[0] in ("'", '"', "|", ">")
-        if tag:
-            return _tagged(tag, text, not quoted)
-        return text if quoted else _plain(text)
-
-
-class _Flow:
-    """A flow collection ([...] or {...}) of BYML text, which may run over several lines."""
-
-    def __init__(self, owner: _Text, first: str):
-        self.o = owner
-        self.line = first
-        self.i = 0
-
-    def more(self) -> bool:
-        ls = self.o.ls
-        if ls.i >= len(ls.lines):
-            return False
-        self.line = ls.lines[ls.i]
-        ls.i += 1
-        self.i = 0
-        return True
-
-    def peek(self) -> str:
-        """The next character that isn't a space or in a comment, reading more lines when needed."""
-        while True:
-            line = self.line
-            while self.i < len(line) and line[self.i] in " \t":
-                self.i += 1
-            if self.i < len(line) and line[self.i] != "#":
-                return line[self.i]
-            if not self.more():
-                self.o.fail("a [ or { without its closing bracket")
-
-    def end(self) -> None:
-        """Only a comment may follow the collection on its last line."""
-        rest = self.line[self.i:].strip()
-        if rest and not rest.startswith("#"):
-            self.o.fail(f"text after a closing bracket: {rest[:20]!r}")
-
-    def value(self, depth: int):
-        if depth > DEPTH:
-            raise LogError("the log nests too deep")
-        c = self.peek()
-        tag = None
-        if c == "!":
-            j = self.i
-            while j < len(self.line) and self.line[j] not in " ,[]{}":
-                j += 1
-            tag, self.i = self.line[self.i:j], j
-            c = self.peek()
-        if c in "&*":
-            self.o.fail("anchors and aliases (& *) aren't used by BCML")
-        if c in "[{":
-            if tag not in (None, "!!map", "!!seq"):
-                self.o.fail(f"the tag {tag} on a list or map")
-            close = "]" if c == "[" else "}"
-            self.i += 1
-            out: list | dict = [] if c == "[" else {}
-            while True:
-                c = self.peek()
-                if c == close:
-                    self.i += 1
-                    return out
-                if close == "]":
-                    out.append(self.value(depth + 1))
-                else:
-                    key = self.scalar(True)[0]
-                    if self.peek() != ":":
-                        self.o.fail("a key without ':' in a { } map")
-                    self.i += 1
-                    if key in out:
-                        self.o.fail(f"the key {key!r} is there twice")
-                    out[key] = None if self.peek() in ",}" else self.value(depth + 1)
-                c = self.peek()
-                if c == ",":
-                    self.i += 1
-                elif c != close:
-                    self.o.fail(f"expected ',' or '{close}', found {c!r}")
-        if c in ",]}":
-            return _tagged(tag, "", True) if tag else None
-        text, quoted = self.scalar(False)
-        if tag:
-            return _tagged(tag, text, not quoted)
-        return text if quoted else _plain(text)
-
-    def scalar(self, key: bool) -> tuple[str, bool]:
-        """A quoted or plain scalar (its text, quoted?), folded over line breaks as YAML does."""
-        q = self.line[self.i]
-        parts: list[str] = []
-        if q in ("'", '"'):
-            self.i += 1
-            while True:
-                end = ukmm._quote_end(self.line[self.i:], q)
-                if end >= 0:
-                    parts.append(self.line[self.i:self.i + end])
-                    self.i += end + 1
-                    break
-                parts.append(self.line[self.i:])
-                if not self.more():
-                    self.o.fail("quoted text without its closing quote")
-            if len(parts) > 1:                               # line breaks fold: the spaces around them go
-                parts = [parts[0].rstrip()] + [p.strip() for p in parts[1:-1]] + [parts[-1].lstrip()]
-            if q == "'":
-                return ukmm._fold([p.replace("''", "'") for p in parts]), True
-            text = ""
-            for k, p in enumerate(parts):
-                if k:
-                    if text.endswith("\\") and not text.endswith("\\\\"):
-                        text = text[:-1]
-                    else:
-                        text += " " if p else "\n"
-                text += p
-            return ukmm._unquote_double(text), True
-        while True:
-            line, j = self.line, self.i
-            while j < len(line):
-                ch = line[j]
-                if ch in ",[]{}" or (ch == "#" and j and line[j - 1] in " \t"):
-                    break
-                if key and ch == ":" and (j + 1 >= len(line) or line[j + 1] in " ,]}"):
-                    break
-                j += 1
-            parts.append(line[self.i:j].strip())
-            self.i = j
-            if j < len(line) and line[j] != "#":
-                break
-            if not self.more():
-                self.o.fail("a [ or { without its closing bracket")
-            c = self.peek()
-            if c in ",[]{}" or (key and c == ":"):
-                break
-        return ukmm._fold(parts), False
-
-
 def byml_from_text(text: str):
     """BCML's BYML text (YAML written by oead) as typed values. Raises LogError when it can't be read."""
     try:
-        return _Text(text).doc()
-    except RecursionError:
-        raise LogError("the log nests too deep") from None
+        return bd.from_text(text)
+    except bd.LogError as e:
+        raise LogError(str(e)) from None
+    except (ValueError, TypeError, IndexError, RecursionError) as e:
+        raise LogError(f"it can't be read ({e})") from None
 
 
 # ---------------------------------------------------------------------------------------------------- helpers

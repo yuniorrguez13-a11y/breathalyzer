@@ -36,7 +36,8 @@
 #include "sw_runtime.h"
 #include "swmod.h"
 
-#define MODHOST_VERSION "0.3.0"
+#define MODHOST_C  // (settings.c is part of this file: see the #include before fill_api)
+#define MODHOST_VERSION "0.4.0"
 #define MAX_MODS 64
 #define PATH_W 1024  // wide characters
 #define PATH_U 3072  // UTF-8 bytes
@@ -122,6 +123,7 @@ typedef struct {
     int nhooks;
     bool ok;
     bool told_no_slots;  // the "no hook slots" line was logged for it
+    int settings;        // its mod's index in settings.txt (settings.c), -1: none
     HMODULE h;
     SwModApi api;
 } Mod;
@@ -881,6 +883,11 @@ static void load_hooks(void) {
     host_log("game code has %u hook slot%s", t->count, t->count == 1 ? "" : "s");
 }
 
+// ------------------------------------------------------------------ mod settings (API version 3): settings.c
+
+static void join_args(int from, int argc, char **argv, char *out, size_t cap);
+#include "settings.c"
+
 static void fill_api(SwModApi *a, const char *mod_name) {
     memset(a, 0, sizeof *a);
     a->api_version = SWMOD_API_VERSION;
@@ -904,6 +911,13 @@ static void fill_api(SwModApi *a, const char *mod_name) {
     a->current_cpu = api_current_cpu;
     a->hook = api_hook;
     a->can_hook = api_can_hook;
+    a->mod_id = NULL;  // (st_attach sets it once the mod's file name is known)
+    a->setting_int = api_setting_int;
+    a->setting_num = api_setting_num;
+    a->setting_str = api_setting_str;
+    a->setting_watch = api_setting_watch;
+    a->setting_set = api_setting_set;
+    a->settings_ui = api_settings_ui;
 }
 
 // ------------------------------------------------------------------ unloading (mods loaded while the game runs)
@@ -948,6 +962,7 @@ static bool unload_mod(Mod *m, bool call_exit, char *why, size_t cap) {
         }
         for (int k = 0; k < n; k++) ok &= gate_sync(&sts[k]->gate, until);
         for (int k = 0; k < no; k++) ok &= gate_sync(&ovs[k]->gate, until);
+        if (ok) ok = st_detach_watchers(m, until);  // (its setting watchers; put back by itself on a timeout)
         if (!ok) {  // put them back: the old lists weren't changed (and stay dirty until a later wait succeeds)
             for (int k = 0; k < n; k++) {
                 __atomic_store_n(&sts[k]->pub, &sts[k]->hot[was[k].cur], __ATOMIC_SEQ_CST);
@@ -995,6 +1010,7 @@ static bool unload_mod(Mod *m, bool call_exit, char *why, size_t cap) {
             g_hot_cmds[k].fn = NULL;
             g_hot_cmds[k].mod = 0;
         }
+    st_forget(m);
     if (call_exit && m->ok) {  // (not for a mod whose swmod_init failed)
         SwModExitFn ex = (SwModExitFn)GetProcAddress(m->h, SWMOD_EXIT_NAME);
         if (ex) ex(&m->api);
@@ -1028,6 +1044,7 @@ static void start_mod(Mod *m, const char *file, const char *name, bool hot) {
     copy_str(m->file, sizeof m->file, file);
     copy_str(m->name, sizeof m->name, name);
     fill_api(&m->api, m->name);
+    st_attach(m);
 }
 
 static void log_loaded(const char *prefix, const Mod *m) {
@@ -1464,6 +1481,7 @@ static void load_mods(void) {
     size_t n = wlen(dir);
     while (n > 3 && (dir[n - 1] == L'\\' || dir[n - 1] == L'/')) dir[--n] = 0;
     to_utf8(dir, g_mod_dir, sizeof g_mod_dir);
+    st_load();  // (deploy\native\settings.txt, next to the mods folder: before any mod starts)
     if (!is_dir(dir)) {
         host_log("no mods folder at %s", g_mod_dir);
         return;
@@ -1530,11 +1548,16 @@ GAMELIB_EXPORT const GameLibTables *swgame_tables(void) {
         {"modload", "<path to .dll>", "Load a native code mod while the game runs", cmd_modload, 0},
         {"modunload", "<name>", "Unload a mod that modload loaded", cmd_modunload, 0},
         {"modreload", "<name> <path to .dll>", "Unload a mod and load the new build of it", cmd_modreload, 0},
+        {"modsettings", "[<mod>]", "List the mods with settings, or one mod's settings", cmd_modsettings,
+         CONTROL_PLAYER},
+        {"modset", "<mod> <key> [<value>]", "Change a mod's setting as the Mod menu does (reset: all)", cmd_modset, 0},
     };
     for (size_t i = 0; i < sizeof host_cmds / sizeof *host_cmds; i++)
         if (register_one(&host_cmds[i]) != REG_ADDED)
-            host_log(i ? "couldn't add the command %s (the name is taken?): mods can't be loaded while the game runs"
-                       : "couldn't add the command %s (the name is taken?): see these [modhost] lines instead",
+            host_log(i >= 4 ? "couldn't add the command %s (the name is taken?): mod settings work, but not from "
+                              "the console"
+                     : i ? "couldn't add the command %s (the name is taken?): mods can't be loaded while the game runs"
+                         : "couldn't add the command %s (the name is taken?): see these [modhost] lines instead",
                      host_cmds[i].name);
     load_hooks();
     load_mods();

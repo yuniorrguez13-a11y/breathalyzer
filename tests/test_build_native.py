@@ -215,11 +215,11 @@ class Commands(unittest.TestCase):
         plan = bn.plan_build(TC, out, (bn.HOST, *bn.EXAMPLES))
         self.assertEqual([t.name for t, _ in plan], ["modhost", "hello"])
         host_cmds = plan[0][1]
-        self.assertEqual(len(host_cmds), 2)
+        self.assertEqual(len(host_cmds), len(bn.HOST.sources) + 1)  # (each source, then the link)
         self.assertIn(str(out / "obj" / "modhost-modhost.o"), host_cmds[0])
         self.assertIn(f"-I{bn.HOST_SRC}", host_cmds[0])
-        self.assertIn(f"-OUT:{out / 'modhost.dll'}", host_cmds[1])
-        self.assertIn(str(TC.implib), host_cmds[1])
+        self.assertIn(f"-OUT:{out / 'modhost.dll'}", host_cmds[-1])
+        self.assertIn(str(TC.implib), host_cmds[-1])
         self.assertIn(f"-OUT:{out / 'mods' / 'hello.dll'}", plan[1][1][1])
         self.assertNotIn(str(TC.implib), plan[1][1][1])
 
@@ -247,7 +247,7 @@ class Commands(unittest.TestCase):
             self.assertTrue((out / "mods").is_dir())
             self.assertTrue((out / "obj").is_dir())
         self.assertEqual(built, [out / "modhost.dll", out / "mods" / "hello.dll"])
-        self.assertEqual(len(ran), 4)
+        self.assertEqual(len(ran), len(bn.HOST.sources) + 1 + 2)
         env = ran[0][1]
         self.assertEqual(env["ZIG_GLOBAL_CACHE_DIR"], str(out / "zig-cache"))
         self.assertEqual(env["ZIG_LOCAL_CACHE_DIR"], str(out / "zig-cache"))
@@ -269,9 +269,20 @@ class Commands(unittest.TestCase):
         with self.assertRaisesRegex(bn.BuildError, "bad .* bytes"):
             bn.run_cmd([sys.executable, "-c", child], dict(os.environ))
 
+    def test_settings_sources_join_when_they_are_there(self):
+        """settings.c joins modhost (and its test build) once it is there; settings_demo is built but not installed."""
+        self.assertEqual(bn.HOST.sources[0], bn.HOST_SRC / "modhost.c")
+        self.assertEqual(bn.SETTINGS_SRC in bn.HOST.sources, bn.SETTINGS_SRC.is_file())
+        self.assertEqual(bn.HOST_TEST.sources, bn.HOST.sources)
+        for t in bn.SETTINGS_EXAMPLES:
+            self.assertEqual((t.subdir, t.export, t.runtime), ("settings-mods", "swmod_init", False))
+            self.assertNotIn(t.name, [x.name for x in bn.EXAMPLES])  # (install copies EXAMPLES only)
+        swmod = (bn.HOST_SRC / "swmod.h").read_text(encoding="utf-8")
+        self.assertIn(f"#define SWMOD_API_VERSION {bn.API_VERSION}\n", swmod)
+
     def test_sources_exist(self):
         for t in (bn.HOST, *bn.EXAMPLES, *bn.SELFTEST, *bn.HOOK_EXAMPLES, *bn.GHOST_EXAMPLES, *bn.SELFTEST_HOOKS,
-                  *bn.SELFTEST_HOT, bn.HOST_TEST, *bn.SELFTEST_RACE):
+                  *bn.SELFTEST_HOT, bn.HOST_TEST, *bn.SELFTEST_RACE, *bn.SETTINGS_EXAMPLES):
             for s in t.sources:
                 self.assertTrue(s.is_file(), s)
         self.assertTrue((bn.HOST_SRC / "swmod.h").is_file())
@@ -311,7 +322,7 @@ class Commands(unittest.TestCase):
                 redirect_stdout(io.StringIO()) as text:
             self.assertEqual(bn.main(["build", "--out", str(out)]), 0)
         self.assertEqual(seen, ["modhost", "hello", "stamina_hook", "ghost", "basics_show_pos", "basics_inf_stamina",
-                                "basics_teleport_up"])
+                                "basics_teleport_up", *(["settings_demo"] if bn.SETTINGS_EXAMPLES else [])])
         self.assertIn(str(Path("ghost-mods") / "ghost.dll"), text.getvalue())
         self.assertIn("docs/ghost.md", text.getvalue())
         self.assertIn(str(out / "basics-mods"), text.getvalue())

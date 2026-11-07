@@ -19,7 +19,7 @@ import mod_inspect as mi  # noqa: E402
 from wiiu_model import convert, materials, nx_bfres, nx_model, wiiu_anims, wiiu_bfres, wiiu_models  # noqa: E402
 from wiiu_model.errors import Damaged  # noqa: E402
 from wiiu_model.neutral import (AnimCurve, BoneAnim, ExtFile, MatAnim, MatAnimData, RenderInfo, ResFile,  # noqa: E402
-                                SkelAnim, Texture, TextureSet, UserData, diff)
+                                SamplerState, SkelAnim, Texture, TextureSet, UserData, diff)
 from test_wiiu_model_models import make_model, make_small_model  # noqa: E402
 from test_wiiu_model_textures import made_up_set, smooth_chain  # noqa: E402
 
@@ -409,7 +409,8 @@ class ModConverterTests(unittest.TestCase):
         self.assertEqual(table[zlib.crc32(b"Model/Single.Tex.bfres")], 10)
         # TestBody, TestProp.Tex and Single.Tex hold the game's values: written as the game's own files
         self.assertIn("3 file(s) came out the same as your game's", text)
-        self.assertEqual((out / "romfs/Model/TestBody.sbfres").read_bytes(), (game / "Model/TestBody.sbfres").read_bytes())
+        self.assertEqual((out / "romfs/Model/TestBody.sbfres").read_bytes(),
+                         (game / "Model/TestBody.sbfres").read_bytes())
         self.assertEqual(table[zlib.crc32(b"Model/TestBody.bfres")], len(self.vanilla_body) + 50000)
         self.assertEqual(table[zlib.crc32(b"Model/TestBody.Tex.bfres")],
                          len(plain((out / "romfs/Model/TestBody.Tex.sbfres").read_bytes())) + 8208)
@@ -579,6 +580,20 @@ class ReviewFixTests(unittest.TestCase):
         out, changed, _ = materials.donor_material(mod, donor)
         self.assertEqual(out.samplers[0].state.wrap_u, 2)
         self.assertIn("sampler _a0 values", changed)
+        # an anisotropic sampler (filter 0x6a, anisotropy 2: GX2 says it with its ratio): the same values keep yours, and
+        # the warning about the missing anisotropic bit goes
+        aniso = SamplerState(0, 0, 0, 0, 0, 2, 0x6A, 0.0, 13.0, 0.0)
+        st = materials.sampler_from_gx2(materials.sampler_to_gx2(aniso))
+        self.assertEqual((st.filter, st.max_aniso), (0x2A, 2))
+        self.assertTrue(materials.same_sampler_state(st, aniso))
+        donor_m = make_model(random.Random(3))
+        donor_m.materials[0].samplers[0].state = aniso
+        mod_m = copy.deepcopy(donor_m)
+        mod_m.materials[0].samplers[0].state = st
+        warn = materials.sampler_notes(st, "material 'matA' sampler '_a0'")
+        self.assertEqual(len(warn), 1)
+        materials.donor_overlay(mod_m, donor_m, warn)
+        self.assertEqual((mod_m.materials[0].samplers[0].state, warn), (aniso, []))
         # the mod's order
         mod = copy.deepcopy(donor)
         mod.samplers.reverse()
@@ -594,7 +609,8 @@ class ReviewFixTests(unittest.TestCase):
             mat.samplers, mat.textures = [mat.samplers[i] for i in keep], [mat.textures[i] for i in keep]
             mat.shader.samplers = [p for p in mat.shader.samplers if p[1] != "_n0"]
         t1, t2 = wiiu_bfres.write_textures(named_tex(["TestTex_Alb"]))
-        src = write_tree(self.tmp / "m", {"content/Model/TestBody.sbfres": wiiu_models.write(res, keep_render_infos=False),
+        wu = wiiu_models.write(res, keep_render_infos=False)
+        src = write_tree(self.tmp / "m", {"content/Model/TestBody.sbfres": wu,
                                           "content/Model/TestBody.Tex1.sbfres": t1,
                                           "content/Model/TestBody.Tex2.sbfres": t2})
         out_dir = self.tmp / "out"
@@ -672,6 +688,7 @@ class ReviewFixTests(unittest.TestCase):
         self.assertNotIn(("model/test_animation.sbfres", None), job.game._donors)   # only its size was read
         self.assertEqual(rep.models["same"], 4)
         self.assertIn("4 file(s) came out the same as your game's", rep.text())
+        self.assertEqual(rep.attention(), [])          # (notes on converting don't apply to the game's own files)
         self.assertEqual(rep.verdict(), "everything converted")
         # a changed animation file is converted and compressed as before
         anim2 = anim_file(seed=6)
@@ -729,8 +746,10 @@ class ReviewFixTests(unittest.TestCase):
             row = wc._verify_model(files, "models with X.Tex1 + X.Tex2", "Model/TestBody.sbfres")
         self.assertTrue(any(p.startswith("B model") for p in row["problems"]), row["problems"])
         # the whole-pack group on a made-up TitleBG.pack: every file comes back as the game's own bytes
+        prop = model_res("TestProp", 2)
+        prop.external = [ExtFile("TexInfo.txt", b"3")]
         write_tree(game, {"Pack/TitleBG.pack": wc.sarc_build([
-            ("Model/TestProp.sbfres", wc.yaz0_compress(nx_model.write(model_res("TestProp", 2)))),
+            ("Model/TestProp.sbfres", wc.yaz0_compress(nx_model.write(prop))),
             ("Model/TestProp.Tex.sbfres", nx_bfres.write_textures(tex_set("TestProp"))),
             ("Actor/X.byml", tiny_byml(LE))], LE)})
         row = wc._verify_titlebg(wc.GameFiles(str(game)), say=lambda s: None)

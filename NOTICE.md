@@ -21,6 +21,11 @@ Breathalyzer, by giruka.
   `runtime/ui/game_options.mm`: the option entry and row layouts, how a text is handed to the game, the reopen logic
   of the title and pause menus, and `rt_opt_pointer_kind`'s logic. Savage Wind Recomp is MIT licensed: Copyright (c)
   2026 Revivedx and the Savage Wind Recomp contributors; Copyright (c) 2026 Peiikai.
+- Mods page v2 (being built): the easy-to-read font and the symbols the menu font lacks use Fira Sans (SIL Open
+  Font License 1.1, Copyright (c) 2012-2015 The Mozilla Foundation and Telefonica S.A.), taken from your Savage Wind
+  folder when it ships `FiraSans-*.ttf`, else from `assets/fonts/` with its license file. Ports of Savage Wind Recomp
+  code for the Mods page (the HUD-letter layout patch, the grey text tag) are credited here under the MIT license
+  above when they land. A font a mod brings keeps its own license; fonts built from it stay on your PC.
 - The Wii U texture tiling in `tools/wiiu_model/gx2.py` is our own code that follows the surface math of AMD's
   addrlib as adapted for R600/R700 by decaf-emu/addrlib (MIT licensed: Copyright (c) 2014 Advanced Micro Devices,
   Inc.) and the Wii U constants and per-level rules of wiiu_swizzle (MIT licensed: Copyright (c) 2024 SMG). The Wii U

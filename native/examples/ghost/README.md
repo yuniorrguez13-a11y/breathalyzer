@@ -10,7 +10,8 @@ launch commands, test results and limits: [docs/ghost.md](../../../docs/ghost.md
   `ghost pos` targets are smoothed to the frame rate (`smooth_*`); an actor with physics also gets its rigid bodies
   moved (`0x7001212820`). The animation (`anim_*`, `as_*`) is played by name with the game's own call
   (`0x700151e42c`), only when the choice changes.
-- `selftest/ghost_selftest.c`: ghost.c's animation-name logic against a made-up actor, without the game
+- `selftest/ghost_selftest.c`: ghost.c's animation-name logic and its held items against a made-up actor and
+  world, without the game
   (`tests/test_ghost_native.py` builds and runs it with Savage Wind's zig).
 - Built by `python tools/build_native.py build` into `build\native\ghost-mods\ghost.dll`. `install` doesn't copy it;
   start the game with `SWMOD_DIR=<repo>\build\native\ghost-mods` (and `SAVAGEWIND_GAME_LIB` pointing at modhost),
@@ -18,11 +19,12 @@ launch commands, test results and limits: [docs/ghost.md](../../../docs/ghost.md
 
 Commands (developer mode): `ghost`, `ghost spawn [actor|link] [dx dy dz]`, `ghost pos x y z [yaw [speed [anim]]]`,
 `ghost follow dx dy dz`, `ghost stop`, `ghost despawn`, `ghost anim auto|off|<name>`, `ghost far far_m [near_m]`,
-`ghost self`. 0.5.0 adds, opt-in: the other player's animation name in `ghost pos` (played when the actor has it,
+`ghost self`, `ghost items w|- s|- b|- [mask]`, `ghost items off|back on|off`, `ghost give actor`. 0.5.0 adds, opt-in: the other player's animation name in `ghost pos` (played when the actor has it,
 learned per actor), `ghost self` (your own Link's animation and items: plain reads, each address checked first) and
 `ghost spawn link` (the Link body: `tools/mp/ghost_link_pack.py`). Tested in the game on one PC with 0.5.1
 (docs/ghost.md, tenth round); not yet over two PCs.
-A ghost whose place is over 60 m from Link (the game removes it at about 75 m) is not spawned until it is within
+0.6.0 adds, opt-in: held items (`ghost items`: the ghost holds real item actors through the item's own grab
+call; see docs/ghost.md, "Held items"). A ghost whose place is over 60 m from Link (the game removes it at about 75 m) is not spawned until it is within
 50 m again (state `far`), and one the game keeps removing is tried again less and less often.
 
 The addresses come from read-only research on the user's own 1.9.0 `main` (out\research, never committed) and from
