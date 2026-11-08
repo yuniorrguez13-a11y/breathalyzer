@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import os
 import shutil
 import subprocess
@@ -57,7 +58,7 @@ OVERLAY = REPO / "out" / "ghost-check-overlay"
 SHOTS = REPO / "out" / "shots" / "ghostcheck"
 RESULTS = REPO / "out" / "research" / "ghost-ingame-results.txt"
 RELAY_PORT = 7790          # (not the usual 7788, so a relay you run for play doesn't clash)
-WANT_VERSION = "0.6.0"
+WANT_VERSION = "0.6.1"
 SHAPE = (2, 2, 1, 3, 1)
 LINK_NAMES = ("Wait", "Walk", "Run", "RunGear2", "CutS1", "CutSF", "Jump", "ParashawlGlide", "ClimbMove", "SwimMove")
 # The bot's names for R1 (NAME@m/s:seconds): stand, walk, run, three attacks, a jump, a glide, a climb, stand
@@ -185,6 +186,49 @@ def deploy_link(game_dir: Path, overlay: Path = OVERLAY) -> dict[str, str]:
     env = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
     env["_built"] = f"{r['unpacked']:,} bytes unpacked (limit {glp.SIZE_LIMIT:,})"
     return env
+
+
+def game_pids() -> set[int]:
+    """The process ids of every running savagewind.exe (tasklist)."""
+    try:
+        out = subprocess.run(["tasklist", "/fi", "imagename eq savagewind.exe", "/fo", "csv", "/nh"],
+                             capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    pids = set()
+    for row in csv.reader(out.splitlines()):
+        if len(row) > 1 and row[0].lower() == "savagewind.exe" and row[1].isdigit():
+            pids.add(int(row[1]))
+    return pids
+
+
+def start_game_alone(cmd: list[str], cwd: Path, env: dict, poll: float = 30.0, max_wait: float = 7200.0,
+                     watch: float = 20.0, log=print) -> subprocess.Popen | None:
+    """Start the game only while no other copy runs: one that another program started is never touched; the check
+    waits, asking every `poll` s, at most max_wait s. If another copy shows up within `watch` s of ours (both started
+    at once), ours (still loading) is closed and the wait goes on. None: no free moment within max_wait."""
+    t0, said = time.monotonic(), False
+    while time.monotonic() - t0 < max_wait:
+        others = game_pids()
+        if others:
+            if not said:
+                log(f"Another game runs (process {sorted(others)}): waiting, asking every {poll:g} s.")
+                said = True
+            time.sleep(poll)
+            continue
+        game = subprocess.Popen(cmd, cwd=cwd, env=env)
+        end, clash = time.monotonic() + watch, set()
+        while time.monotonic() < end and not clash and game.poll() is None:
+            clash = game_pids() - {game.pid}
+            time.sleep(0.5)
+        if not clash:
+            log(f"Game started (process {game.pid}) after {time.monotonic() - t0:.0f} s.")
+            return game
+        log(f"Another game started at the same time (process {sorted(clash)}): closing ours, waiting again.")
+        game.kill()   # (ours, still loading; never the other one)
+        game.wait(30)
+        said = False
+    return None
 
 
 def wait_world(c: Control, timeout: float = 240.0) -> bool:
@@ -540,6 +584,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--items", action="store_true",
                     help="the held items' checks H1-H14 instead of the others (ghost mod 0.6.0; implies --link; "
                          "tools/mp/ghost_items_check.py); --give-weapon adds H12 (`ghost give`)")
+    ap.add_argument("--wait-max", type=float, default=120.0, metavar="MIN",
+                    help="another program's game runs: wait at most this many minutes for it to close (asking every "
+                         "30 s; default 120); it is never touched")
     ap.add_argument("--lib", type=Path, metavar="DIR",
                     help="a scratch mod library: ghost.dll goes to DIR\\mods and the Link body to DIR\\overlay (default: "
                          "build\\native\\ghost-mods and out\\ghost-check-overlay)")
@@ -580,8 +627,11 @@ def main(argv: list[str] | None = None) -> int:
         if not dll.is_file():
             print(f"No {dll}: run python tools\\build_native.py build first.")
             return 2
-        game = subprocess.Popen([str(args.game / "savagewind.exe"), "--play"], cwd=args.game,
-                                env=game_env(args.port, overlay, mods))
+        game = start_game_alone([str(args.game / "savagewind.exe"), "--play"], args.game,
+                                game_env(args.port, overlay, mods), max_wait=args.wait_max * 60)
+        if game is None:
+            rep.add("setup", "SKIP", "another program's game ran the whole time: no free moment to start ours")
+            return 1
     try:
         c = wait_for_game(args.port, timeout=180)
         if not wait_world(c):

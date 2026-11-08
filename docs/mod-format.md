@@ -58,9 +58,9 @@ dlc_romfs = "01007EF00011F001/romfs"
 | `[mod] title_picture` | no | The title-screen picture. The same rules as `icon`. The last mod that is on and has one wins, unless the player picked one in Mod Manager. |
 | `[mod] url` | no | The mod's web page: starts with `https://`, at most 300 characters, no spaces. Mod Manager shows it; the game only says the link is in Mod Manager (its font can't show web addresses). |
 | `[mod] update_url` | no | Kept for the update check that comes later. The same rules as `url`. |
-| `[font] file` | yes, in `[font]` | Makes the mod a font mod: a `.ttf` or `.otf` font in the mod. It is built into the game's fonts at deploy, on your PC, and never shared ([fonts](fonts.md)). The player picks which font is used. |
-| `[font] for` | no (`"menu"`) | Which of the game's fonts it replaces: `"menu"`, the menus and the game's texts (others come later). |
-| `[font] languages` | no (all) | Some of `"US"`, `"EU"` and `"JP"`, each once, like `["US", "EU"]`. Other languages come later. |
+| `[font] file` | yes, in `[font]` | Makes the mod a font mod: a `.ttf` font (TrueType outlines) in the mod. It is built into the game's fonts at deploy, on your PC, and never shared ([fonts](fonts.md)). The player picks which font is used. |
+| `[font] for` | no (`"menu"`) | Which of the game's fonts it replaces: `"menu"`, the menus and the game's texts. `"all"` comes later: `add` says so and uses `"menu"` for now. |
+| `[font] languages` | no (all) | Some of `"US"`, `"EU"` and `"JP"`, like `["US", "EU"]`. `"KR"`, `"CN"`, `"TW"` and `"TH"` come later: `add` says so and leaves them out. |
 | `[font] license` | no | The font's license, like `"OFL-1.1"`. Without it modman reads it from the font. A license that doesn't allow this is a warning, never a refusal. |
 | `[[settings]]` | no | The mod's settings page: one table per setting (on/off, slider, choice, key, text or button). Every key and rule is in [mod settings](mod-settings.md). |
 | `[[pages]]` | no | Sub-pages of the settings page, each a table with `key`, `label` and `description` ([mod settings](mod-settings.md)). |

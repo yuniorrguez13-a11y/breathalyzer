@@ -82,12 +82,14 @@
 #include "swmod.h"
 #include "botw.h"  // (only BOTW_ADDR_MAIN and BOTW_ADDR_GUEST_END: the guest window for `ghost self`'s pointer check)
 
-#define GHOST_VERSION "0.6.0"  // (the same as mod.toml)
+#define GHOST_VERSION "0.6.1"  // (the same as mod.toml)
 
 // ---- Win32 / C runtime (declared here: the zig that ships with Savage Wind has no windows.h or stdio.h)
 __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
 __declspec(dllimport) int __stdcall QueryPerformanceCounter(int64_t *out);
 __declspec(dllimport) int __stdcall QueryPerformanceFrequency(int64_t *out);
+__declspec(dllimport) void *__stdcall GetCurrentThread(void);
+__declspec(dllimport) int __stdcall QueryThreadCycleTime(void *thread, uint64_t *cycles);
 typedef struct {  // MEMORY_BASIC_INFORMATION (64-bit)
     uint64_t base, alloc_base;
     uint32_t alloc_protect;
@@ -256,6 +258,11 @@ int vsnprintf(char *buf, size_t n, const char *fmt, __builtin_va_list ap);
 #define WEAPON_GRAB 0x70007ac82cull      // ... the Weapon class's (its vtable is checked to hold it, when readable)
 #define ITEM_STATE 0x920                 // item: u8 grab state: 0 asked, 1 let go, 2 dropped, 0xff settled
 #define ITEM_HOLDER 0x938                // item: link to its holder (data*, u32 id), set once it is settled
+#define ITEM_HOLD_ASK 0x880              // item: link to the holder a grab asked for (the grab sets it at once)
+#define ACTOR_FLAGS 0x520                // actor: u32 flags; bit 5 set: FOLLOW_SET refuses, and the actor deletes the
+#define FLAG_OWNS_FOLLOW (1u << 5)       // follow at +0x4d0 when it goes (so ours must never be there then)
+#define ITEM_PARK_UP 6.0f                // m above the ghost's feet (about 4 m over its head, out of Link's reach): a
+                                         // new item is spawned there and kept there until the ghost's grab took it
 #define ITEM_FOLLOW 0xa00                // item: its own bone follow (the game uses it for the hand)
 #define ITEM_KIND 0xcf0                  // Weapon: u32 kind: 0 one-handed, 1 two-handed, 2 spear, 3 shield, 4 bow
 #define ACTOR_PARAMS 0x570               // actor: -> +PARAMS_LIST: its parameter list
@@ -299,6 +306,10 @@ int vsnprintf(char *buf, size_t n, const char *fmt, __builtin_va_list ap);
 #define TRASH_STRAY_S 1.0                // a deleted item still there after this long is a stray
 #define TRASH_FORGET_S 30.0              // ... watched at most this long
 #define MAX_ITEM_NAMES 256               // different item names used (the request keeps the pointer)
+#define SLOW_CALL_MS 5.0                 // a game call that takes longer is counted and noted (its name, its time)
+#define SLOW_PART_MS 5.0                 // an items part that takes longer is counted (wall time and the thread's own
+                                         // cycles: few cycles = the thread was switched out, not working)
+#define SLOW_FRAME_MS 50.0               // a frame (tick to tick) longer than this is counted as slow
 
 static const SwModApi *api;
 static SwModGuestFn g_orig_job;
@@ -348,14 +359,23 @@ static void restore_regs(struct Cpu *c, const SavedRegs *s) {
 }
 
 static int64_t g_ncalls, g_nqueries;  // game calls made and memory queries (VirtualQuery) done, for the cost
+static int64_t g_slow_calls;           // 0.6.1: game calls that took over SLOW_CALL_MS (wall clock) ...
+static uint64_t g_slow_fn;             // ... the latest one's address and time, and the longest call seen
+static double g_slow_ms, g_call_most_ms;
 
-// Call a guest function with up to 7 integer arguments; returns x0.
+// Call a guest function with up to 7 integer arguments; returns x0. Each call is timed (two counter reads).
 static uint64_t gcall(struct Cpu *c, uint64_t fn, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                       uint64_t a5, uint64_t a6) {
     SwModRegs *r = SWMOD_REGS(c);
     r->x[0] = a0, r->x[1] = a1, r->x[2] = a2, r->x[3] = a3, r->x[4] = a4, r->x[5] = a5, r->x[6] = a6;
+    int64_t q0, q1;
+    QueryPerformanceCounter(&q0);
     api->guest_call(c, fn);
+    QueryPerformanceCounter(&q1);
     g_ncalls++;
+    double ms = g_qpf > 0 ? (double)(q1 - q0) * 1e3 / (double)g_qpf : 0.0;
+    if (ms > g_call_most_ms) g_call_most_ms = ms;
+    if (ms > SLOW_CALL_MS) g_slow_calls++, g_slow_fn = fn, g_slow_ms = ms;
     return r->x[0];
 }
 #define P(v) ((uint64_t)(uintptr_t)(v))
@@ -741,6 +761,11 @@ typedef struct {
     int weapon_class;          // the weapon is of the Weapon class
     int back[3];               // 0.6.0: weapon, shield, bow on his back (the holder's slot byte; 0 when the slot is
                                // empty)
+    uint64_t item[3];          // 0.6.1: the items' actors (0: none), as read with the names
+    float rel[3][12];          // ... each one's matrix in the frame of Link's Pod_A (3x4 row by row, m) ...
+    float pods[3][3];          // ... its distance to Link's Pod_A, Pod_B, Pod_C (m; -1: not readable)
+    int has_rel[3];            // ... (0: not read: no item, or no bone)
+    int equip_new;             // ... the equipment was just read (self_rel runs once after each read)
     double equip_t;            // when the equipment was read last
     int64_t reads;
     double read_t;             // when it was read last
@@ -766,18 +791,19 @@ static int self_sub(uint64_t h, int slot, int sub, char name[32], float *w, doub
 
 // Equipment slot i (0 weapon, 1 shield, 2 bow) of actor a: the item's actor name, "" when the slot is empty or the
 // item is gone or being deleted, "?" when its name can't be read.
-static void self_item(uint64_t a, int i, char out[64], int *weapon_class, double t) {
+static uint64_t self_item(uint64_t a, int i, char out[64], int *weapon_class, double t) {
     out[0] = 0;
     if (weapon_class) *weapon_class = 0;
     uint64_t l = a + ACTOR_EQUIP + EQUIP_LINKS + (uint64_t)i * EQUIP_LINK_SIZE;
     uint64_t data = self_u64(l, t);
     uint32_t id = self_u32(l + 8, t);
-    if (!data || id == 0xffffffffu || self_u32(data + LINKDATA_ID, t) != id) return;
+    if (!data || id == 0xffffffffu || self_u32(data + LINKDATA_ID, t) != id) return 0;
     uint64_t w = self_u64(data + LINKDATA_PROC, t);
     if (!w || !mem_ok(w + PROC_STATE, 1, t) || *(volatile const uint8_t *)(uintptr_t)(w + PROC_STATE) == PROC_DELETING)
-        return;
+        return 0;
     if (!self_text(self_u64(w + PROC_NAME, t), out, 64, t)) memcpy(out, "?", 2);
     else if (weapon_class) *weapon_class = self_u64(w, t) == WEAPON_VPTR;
+    return w;
 }
 
 // Read your own Link's state into s (pi: the player info block). Each frame while a client asks; the equipment every
@@ -814,9 +840,9 @@ static void self_read(SelfState *s, uint64_t pi, double t) {
         s->equip_ok = s->found && self_u64(a + ACTOR_EQUIP, t) == EQUIP_VPTR &&
                       self_u64(a + ACTOR_EQUIP + EQUIP_OWNER, t) == a;
         if (s->equip_ok) {
-            self_item(a, 0, s->weapon, &s->weapon_class, t);
-            self_item(a, 1, s->shield, NULL, t);
-            self_item(a, 2, s->bow, NULL, t);
+            s->item[0] = self_item(a, 0, s->weapon, &s->weapon_class, t);
+            s->item[1] = self_item(a, 1, s->shield, NULL, t);
+            s->item[2] = self_item(a, 2, s->bow, NULL, t);
             const char *names[3] = {s->weapon, s->shield, s->bow};
             for (int i = 0; i < 3; i++) {  // (the slot's byte: not 0 = on the back; out/research/ghost-items-plan.md)
                 uint64_t b = a + ACTOR_EQUIP + EQUIP_LINKS + (uint64_t)i * EQUIP_LINK_SIZE + EQUIP_BACK;
@@ -825,7 +851,9 @@ static void self_read(SelfState *s, uint64_t pi, double t) {
         } else {
             s->weapon[0] = s->shield[0] = s->bow[0] = 0, s->weapon_class = 0;
             s->back[0] = s->back[1] = s->back[2] = 0;
+            s->item[0] = s->item[1] = s->item[2] = 0;
         }
+        s->equip_new = 1;  // (self_rel reads the items' places in the tick)
     }
 }
 
@@ -929,6 +957,27 @@ static const char *intern_item(const char *name) {  // (tick thread only; NULL: 
     return g_item_names[g_nitem_names++];
 }
 
+// 0.6.1: the only names `ghost items` spawns (the names come from the other player's network data): slot 0 a one-handed
+// sword, two-hander or spear, slot 1 a shield, slot 2 a bow, by the game's own name prefixes, and none of the special
+// ones that were never tried: Weapon_Sword_070 and the four the game's data gives the same sort key (11000-11002: 071,
+// 072, 080, 081), Weapon_Sword_500 (sort key 0: not an inventory item) and Weapon_Bow_071. tools/mp/client.py keeps
+// the same rule (ITEM_PREFIXES, ITEM_BLOCKED).
+static const char *const ITEM_PREFIX[] = {"Weapon_Sword_", "Weapon_Lsword_", "Weapon_Spear_", "Weapon_Shield_",
+                                          "Weapon_Bow_"};
+static const int ITEM_PREFIX_SLOT[] = {0, 0, 0, 1, 2};
+static const char *const ITEM_BLOCKED[] = {"Weapon_Sword_070", "Weapon_Sword_071", "Weapon_Sword_072",
+                                           "Weapon_Sword_080", "Weapon_Sword_081", "Weapon_Sword_500",
+                                           "Weapon_Bow_071"};
+static int item_name_ok(int slot, const char *name) {
+    for (size_t k = 0; k < sizeof ITEM_BLOCKED / sizeof *ITEM_BLOCKED; k++)
+        if (!strcmp(name, ITEM_BLOCKED[k])) return 0;
+    for (size_t k = 0; k < sizeof ITEM_PREFIX / sizeof *ITEM_PREFIX; k++) {
+        size_t n = strlen(ITEM_PREFIX[k]);
+        if (ITEM_PREFIX_SLOT[k] == slot && !strncmp(name, ITEM_PREFIX[k], n) && name[n]) return 1;
+    }
+    return 0;
+}
+
 // ------------------------------------------------------------------ requests (commands -> tick) and status
 
 enum { MOVE_NONE, MOVE_POS, MOVE_FOLLOW };
@@ -980,6 +1029,9 @@ typedef struct {
     int item_state;      // its grab state byte (-1: not read)
     int holder_ok;       // its holder link names the ghost
     char why[64];        // why the last try failed or the item was dropped
+    int refusals;        // 0.6.1: grab calls refused before the held item's grab was taken (0 until held)
+    float rel[12];       // 0.6.1: the held item's matrix in Pod_A's frame (3x4 row by row, m), for the comparison
+    int has_rel;         // ... with Link's own items (`ghost self`); 0: not read
 } ItemStatus;
 
 typedef struct {
@@ -987,11 +1039,24 @@ typedef struct {
     char bones[48];                // the ghost's bones: "ok", "ok, no Pod_A", "missing ...", "looking", "no model"
     ItemStatus slot[3];
     int stray;                     // deleted items still there TRASH_STRAY_S after the delete
+    int dying;                     // 0.6.1: deleted items still there (any age; watched with plain reads)
     int64_t requests, held, deleted, lost;  // item requests; items settled in the hand; deleted; lost while held
+    int64_t taken;                 // 0.6.1: items someone else (Link) held when the mod went to delete them: forgotten
+    int64_t kept;                  // ... items not deleted because our follow couldn't be taken off (FLAG_OWNS_FOLLOW)
+    int64_t parks;                 // ... moves of a new item back to its place over the ghost before the grab took it
     double us, us_avg, us_max;     // the items' part of a tick in microseconds: the median, the average and the most
                                    // over the last TIME_KEEP ticks it worked (wall clock: a thread switch counts)
+    double us_mean;                // ... 0.6.1: the plain mean over those ticks (us_avg is a running average)
     double calls, queries;         // ... game calls and memory queries a tick (average)
-    double tick_us;                // the whole tick (ghost and items), median over the last TIME_KEEP ticks
+    double tick_us, tick_us_avg, tick_us_max;  // the whole tick (ghost and items): median, average, most over the
+                                               // last TIME_KEEP ticks
+    int64_t slow_parts;            // 0.6.1: items parts over SLOW_PART_MS ...
+    char slow_part[80];            // ... the latest: wall ms, the thread's own cycles, game calls
+    int64_t slow_calls;            // game calls over SLOW_CALL_MS (all of the mod's) ...
+    char slow_call[48];            // ... the latest one's name and ms
+    double call_most_ms;           // ... the longest game call so far
+    double frame_ms, frame_ms_max; // frames (tick to tick): median and most over the last TIME_KEEP
+    int64_t frames, frames_slow;   // frames counted; frames over SLOW_FRAME_MS
     int give_state;                // GV_*
     char give_name[64];
     uint64_t give_actor;
@@ -1044,6 +1109,8 @@ typedef struct {
     int64_t fars;            // times it went far
     int quick;               // times in a row the game removed it sooner than STABLE_S after it spawned
     double retry_at;         // idle and wanted: the next try is due at this time (now_s)
+    int no_player;           // 0.6.1: live, but no player actor this frame and the same spawn heap: the ghost and its
+    int64_t no_player_ticks; // items are left alone (no call) until he is back or the heap changes; frames of that
     ItemsStatus items;       // 0.6.0: held items
 } Status;
 
@@ -1335,6 +1402,7 @@ typedef struct {
     int next_follow;    // which of the slot's two follows is set up next
     int has_hold;       // its "on the back" offsets were read ...
     float rot[3], trans[3];  // ... (degrees; m)
+    int grab_refusals;  // 0.6.1: grab calls refused for the item now in IS_GRAB (its AI hadn't run yet)
 } ItemSlot;
 
 static ItemSlot t_items[ITEM_SLOTS];
@@ -1343,9 +1411,14 @@ static int t_bone_unit[NBONES], t_bone_idx[NBONES];  // -1: not found
 static int t_bones_done;                  // the bone lookup is over for this ghost (found, or gave up)
 static double t_bones_next, t_bones_until;
 static uint8_t t_follow_built[ITEM_SLOTS][2];
+static uint8_t t_item_orphan[ITEM_SLOTS]; // a request still pending at a stage change: released (if still ours) by the
+                                          // next items part, before the slot's handle is used again
 static double t_trash_t[TRASH_MAX];       // when each watched item was deleted (0: free)
 static double t_items_us_avg, t_items_calls, t_items_queries;
-static Times t_items_times, t_tick_times;
+static Times t_items_times, t_tick_times, t_frame_times;
+static double t_last_tick_t;              // the previous tick's time (frame times)
+static int64_t t_slow_seen;               // g_slow_calls when the last one was noted
+static double t_slow_note_t;              // ... and when (at most one note a second)
 static int t_give_seq, t_give_state;
 static double t_give_since;
 static double t_now;                      // this tick's time (for remove_ghost)
@@ -1403,6 +1476,89 @@ static int bone_pos(uint64_t a, int u, int b, float out[3], double t) {
     return 1;
 }
 
+static int finite_f(float f, float lim) { return f == f && f <= lim && f >= -lim; }
+
+// 0.6.1: the world matrix of bone b of unit u of actor a, as 3x4 rows (the skeleton keeps 4x4 columns). 0: not readable.
+static int bone_mtx(uint64_t a, int u, int b, float out[12], double t) {
+    uint64_t sk = model_skel(a, u, NULL, t);
+    if (!sk || b < 0 || b >= skel_nbones(sk, t)) return 0;
+    uint64_t w = self_u64(sk + SKEL_WORLD, t);
+    if (!w || !mem_ok(w + (uint64_t)b * 0x40, 0x40, t)) return 0;
+    w += (uint64_t)b * 0x40;
+    for (int r = 0; r < 3; r++)
+        for (int k = 0; k < 4; k++) {
+            out[r * 4 + k] = rdf(w + 16 * (uint64_t)k + 4 * (uint64_t)r);
+            if (!finite_f(out[r * 4 + k], 1e6f)) return 0;
+        }
+    return 1;
+}
+
+// Actor `item`'s matrix in the frame of bone matrix bm (both 3x4 rows): bm^-1 x item (the bone's axes may carry a
+// scale; each is divided out). 0: not readable.
+static int rel_to_bone(const float bm[12], uint64_t item, float out[12], double t) {
+    if (!mem_ok(item + ACTOR_MTX, 0x30, t)) return 0;
+    float im[12];
+    for (int k = 0; k < 12; k++) {
+        im[k] = rdf(item + ACTOR_MTX + 4 * (uint64_t)k);
+        if (!finite_f(im[k], 1e6f)) return 0;
+    }
+    for (int i = 0; i < 3; i++) {  // row i of the result: bone axis i (column i of bm) dotted with item's columns
+        float s2 = bm[0 * 4 + i] * bm[0 * 4 + i] + bm[1 * 4 + i] * bm[1 * 4 + i] + bm[2 * 4 + i] * bm[2 * 4 + i];
+        if (!(s2 > 1e-6f)) return 0;
+        for (int j = 0; j < 4; j++) {
+            float v = 0;
+            for (int k = 0; k < 3; k++) v += bm[k * 4 + i] * (j < 3 ? im[k * 4 + j] : im[k * 4 + 3] - bm[k * 4 + 3]);
+            out[i * 4 + j] = v / s2;
+        }
+    }
+    return 1;
+}
+
+// Bone `name` of actor a: its unit and index (-1: not found), looked through the first 8 units.
+static int actor_bone(uint64_t a, const char *name, int *unit, double t) {
+    int nunits = 0;
+    model_skel(a, 0, &nunits, t);
+    for (int u = 0; u < nunits && u < 8; u++) {
+        uint64_t sk = model_skel(a, u, NULL, t);
+        int b = sk ? skel_find(sk, name, t) : -1;
+        if (b >= 0) {
+            *unit = u;
+            return b;
+        }
+    }
+    return -1;
+}
+
+// `ghost self` (0.6.1): where Link's own items are on him: each one's matrix in his Pod_A's frame and its distance
+// to Pod_A, Pod_B and Pod_C, for the comparison with the ghost's (tools/mp/ghost_items_check.py H4). Once after each
+// equipment read (SELF_EQUIP_S), only while a client asks; plain reads. The bones are looked up once per Link actor.
+static uint64_t t_self_bones_for;
+static int t_self_pod_unit[3], t_self_pod_idx[3];
+static double t_self_bones_next;
+static void self_rel(SelfState *s, uint64_t pi, double t) {
+    if (!s->equip_new) return;
+    s->equip_new = 0;
+    uint64_t a = s->found && pi ? self_u64(pi + PI_PLAYER, t) : 0;
+    static const char *const PODS[3] = {"Pod_A", "Pod_B", "Pod_C"};
+    if (a && (a != t_self_bones_for || (t_self_pod_idx[0] < 0 && t >= t_self_bones_next))) {
+        t_self_bones_for = a, t_self_bones_next = t + 2.0;  // (not found: looked up again at most every 2 s)
+        for (int k = 0; k < 3; k++) t_self_pod_idx[k] = actor_bone(a, PODS[k], &t_self_pod_unit[k], t);
+    }
+    float pm[3][12];
+    int has_pm[3];
+    for (int k = 0; k < 3; k++) has_pm[k] = a && bone_mtx(a, t_self_pod_unit[k], t_self_pod_idx[k], pm[k], t);
+    for (int i = 0; i < 3; i++) {
+        uint64_t it = s->item[i];
+        s->has_rel[i] = it && has_pm[0] && rel_to_bone(pm[0], it, s->rel[i], t);
+        float ip[3] = {it ? self_f32(it + ACTOR_MTX + 0x0c, t) : 0, it ? self_f32(it + ACTOR_MTX + 0x1c, t) : 0,
+                       it ? self_f32(it + ACTOR_MTX + 0x2c, t) : 0};
+        for (int k = 0; k < 3; k++) {
+            float bp[3] = {pm[k][3], pm[k][7], pm[k][11]};
+            s->pods[i][k] = it && has_pm[k] ? dist3(ip, bp) : -1.0f;
+        }
+    }
+}
+
 // Look the ghost's Weapon_R, Weapon_L and Pod_A up (once per ghost; its model may come a little after it spawned).
 static void items_bones(uint64_t ghost, double t) {
     ItemsStatus *st = &t_status.items;
@@ -1441,19 +1597,30 @@ static int items_hands(void) { return t_bones_done && t_bone_idx[BONE_R] >= 0 &&
 
 // ---- an item's own fields (plain reads)
 
-// Its holder link names `holder` (the link's data has the same id and points at it).
+// The actor a game link stored at `at` (data*, u32 id) names: 0 when it names none (no data, the ids differ: that
+// actor is gone).
+static uint64_t link_at(uint64_t at, double t) {
+    uint64_t data = self_u64(at, t);
+    uint32_t id = self_u32(at + 8, t);
+    if (!data || id == 0xffffffffu || self_u32(data + LINKDATA_ID, t) != id) return 0;
+    return self_u64(data + LINKDATA_PROC, t);
+}
+
+// Its holder link names `holder`.
 static int item_holder_is(uint64_t item, uint64_t holder, double t) {
-    uint64_t data = self_u64(item + ITEM_HOLDER, t);
-    uint32_t id = self_u32(item + ITEM_HOLDER + 8, t);
-    return data && id != 0xffffffffu && self_u32(data + LINKDATA_ID, t) == id &&
-           self_u64(data + LINKDATA_PROC, t) == holder;
+    return holder && link_at(item + ITEM_HOLDER, t) == holder;
+}
+
+// 0.6.1: someone other than the ghost holds the item, or a grab asked for someone else (Link took it in the moment
+// before the ghost's grab): that actor, else 0. Such an item is never deleted (it is Link's now).
+static uint64_t item_other_holder(uint64_t item, uint64_t ghost, double t) {
+    uint64_t a = link_at(item + ITEM_HOLDER, t), b = link_at(item + ITEM_HOLD_ASK, t);
+    return a && a != ghost ? a : b && b != ghost ? b : 0;
 }
 
 static int item_state(uint64_t item, double t) {
     return mem_ok(item + ITEM_STATE, 1, t) ? *(volatile const uint8_t *)(uintptr_t)(item + ITEM_STATE) : -1;
 }
-
-static int finite_f(float f, float lim) { return f == f && f <= lim && f >= -lim; }
 
 // Its own "on the back" offsets (the player's: trans in m, rot in degrees), by its kind (out/research/
 // ghost-items-plan.md): the parameter object and the two values' places in it. 0: not readable.
@@ -1477,6 +1644,16 @@ static int item_hold(uint64_t item, float rot[3], float trans[3], double t) {
     return 1;
 }
 
+// A link still names a live actor: the same test as the game's LINK_VALID (the id matches the link data's; the actor
+// is there and, for a link that doesn't hold it, not being deleted), as plain reads, every address checked. So a held
+// item costs no game call a frame.
+static int link_ok(const Link *l, double t) {
+    if (!l->data || l->id == 0xffffffffu || self_u32(l->data + LINKDATA_ID, t) != l->id) return 0;
+    uint64_t proc = self_u64(l->data + LINKDATA_PROC, t);
+    if (l->acquired) return proc != 0;
+    return proc && mem_ok(proc + PROC_STATE, 1, t) && rd8(proc + PROC_STATE) != PROC_DELETING;
+}
+
 // ---- deleted items: watched until they are gone
 
 static void trash_add(const Link *l, double t) {
@@ -1488,18 +1665,19 @@ static void trash_add(const Link *l, double t) {
         }
 }
 
-static void trash_tick(struct Cpu *c, double t) {
-    int stray = 0;
+static void trash_tick(double t) {
+    int stray = 0, dying = 0;
     for (int k = 0; k < TRASH_MAX; k++) {
         if (!t_trash_t[k]) continue;
-        if (!(GCALL1(c, LINK_VALID, &g_trash[k]) & 1) || t - t_trash_t[k] > TRASH_FORGET_S) {
+        if (!link_ok(&g_trash[k], t) || t - t_trash_t[k] > TRASH_FORGET_S) {
             memset(&g_trash[k], 0, sizeof g_trash[k]);
             t_trash_t[k] = 0;
-        } else if (t - t_trash_t[k] > TRASH_STRAY_S) {
-            stray++;
+        } else {
+            dying++;
+            stray += t - t_trash_t[k] > TRASH_STRAY_S;
         }
     }
-    t_status.items.stray = stray;
+    t_status.items.stray = stray, t_status.items.dying = dying;
 }
 
 // ---- one slot
@@ -1509,8 +1687,21 @@ static void item_zero_link(int i) {
     g_item_link[i].id = 0xffffffffu;
 }
 
+static int follow_is_ours(int i, uint64_t follow) {
+    return follow && (follow == P(&g_follow[i][0]) || follow == P(&g_follow[i][1]));
+}
+
+// 0.6.1: before an item is deleted (or forgotten), it gets its own bone follow back, so no item ever runs ours (our
+// memory) after we let it go. 0: ours is still on it (the game refused: FLAG_OWNS_FOLLOW), so it must not be deleted.
+static int item_follow_own(struct Cpu *c, int i, uint64_t item, double t) {
+    if (!follow_is_ours(i, self_u64(item + ACTOR_FOLLOW, t))) return 1;
+    gcall(c, FOLLOW_SET, item, item + ITEM_FOLLOW, 0, 0, 0, 0, 0);
+    return !follow_is_ours(i, self_u64(item + ACTOR_FOLLOW, t));
+}
+
 // Remove what slot i has: a pending request is released, an item deleted (never let go first). The slot is empty
-// after this (its name stays).
+// after this (its name stays). 0.6.1: an item someone else holds (Link took it before the ghost's grab) is not
+// deleted, only forgotten; an item gets its own follow back first.
 static void item_remove(struct Cpu *c, int i, double t) {
     ItemSlot *s = &t_items[i];
     if (s->state == IS_PENDING) {
@@ -1519,7 +1710,17 @@ static void item_remove(struct Cpu *c, int i, double t) {
     } else if (s->state == IS_GRAB || s->state == IS_HELD) {
         if (GCALL1(c, LINK_VALID, &g_item_link[i]) & 1) {
             uint64_t proc = rd64(g_item_link[i].data + LINKDATA_PROC);
-            if (proc) {
+            uint64_t other = proc ? item_other_holder(proc, t_items_ghost, t) : 0;
+            if (other) {
+                uint64_t pi = self_u64(PLAYER_INFO_PTR, t), player = pi ? self_u64(pi + PI_PLAYER, t) : 0;
+                t_status.items.taken++;
+                note("items: %s was taken by %s before the ghost held it: not deleted, forgotten",
+                     s->name ? s->name : "?", other == player ? "Link" : "another actor");
+            } else if (proc && !item_follow_own(c, i, proc, t)) {
+                t_status.items.kept++;
+                note("items: %s keeps the mod's bone follow (the game refused to change it): not deleted",
+                     s->name ? s->name : "?");
+            } else if (proc) {
                 trash_add(&g_item_link[i], t);
                 gcall(c, DELETE_LATER, proc, 0, 0, 0, 0, 0, 0);
                 t_status.items.deleted++;
@@ -1548,21 +1749,35 @@ static void item_fail(int i, const char *why, double delay, double t) {
     }
 }
 
-// Ask for slot i's item next to the ghost's hand. 0: not now (no world, the creator busy: asked again soon).
+// Slot i's parking place: ITEM_PARK_UP over the ghost's feet, turned as the ghost (into g_item_mtx[i]). A new item is
+// spawned there and kept there until the ghost's grab took it (0.6.1): before that it is a loose world item, and Link
+// can't reach it up there. 0: the ghost's matrix isn't readable.
+static int item_park_mtx(int i, uint64_t ghost, double t) {
+    if (!mem_ok(ghost + ACTOR_MTX, 0x30, t)) return 0;
+    float m[12];
+    for (int k = 0; k < 12; k++) {
+        m[k] = rdf(ghost + ACTOR_MTX + 4 * (uint64_t)k);
+        if (!finite_f(m[k], 1e6f)) return 0;
+    }
+    m[7] += ITEM_PARK_UP;
+    memcpy(g_item_mtx[i], m, sizeof m);
+    return 1;
+}
+
+// Move a new item (not taken by the grab yet) back to its parking place: its matrix and, if it has physics, its rigid
+// bodies (or it falls).
+static void item_park(struct Cpu *c, int i, uint64_t item, uint64_t ghost, double t) {
+    if (!item_park_mtx(i, ghost, t)) return;
+    GCALL3(c, SET_MTX, item, g_item_mtx[i], 0);
+    if (self_u64(item + ACTOR_PHYSICS, t)) GCALL2(c, PHYS_SET_MTX, item, g_item_mtx[i]);
+    t_status.items.parks++;
+}
+
+// Ask for slot i's item at its parking place over the ghost. 0: not now (no world, the creator busy: asked again soon).
 static int item_request(struct Cpu *c, int i, uint64_t ghost, double t) {
     ItemSlot *s = &t_items[i];
     uint64_t creator = rd64(CREATOR_PTR), heap = spawn_heap();
-    if (!creator || !heap || rd8(creator + CREATOR_BLOCKED)) return 0;
-    float r[9], p[3];
-    for (int row = 0; row < 3; row++)
-        for (int col = 0; col < 3; col++) r[row * 3 + col] = self_f32(ghost + ACTOR_MTX + 16 * (uint64_t)row + 4 * (uint64_t)col, t);
-    int hb = i == 0 ? BONE_R : BONE_L;
-    if (!bone_pos(ghost, t_bone_unit[hb], t_bone_idx[hb], p, t)) {
-        p[0] = self_f32(ghost + ACTOR_MTX + 0x0c, t), p[1] = self_f32(ghost + ACTOR_MTX + 0x1c, t) + 1.0f;
-        p[2] = self_f32(ghost + ACTOR_MTX + 0x2c, t);
-    }
-    float m[12] = {r[0], r[1], r[2], p[0], r[3], r[4], r[5], p[1], r[6], r[7], r[8], p[2]};
-    memcpy(g_item_mtx[i], m, sizeof m);
+    if (!creator || !heap || rd8(creator + CREATOR_BLOCKED) || !item_park_mtx(i, ghost, t)) return 0;
     GCALL1(c, HANDLE_CLEAR, &g_item_handle[i]);
     memset(&g_item_pack[i], 0, sizeof g_item_pack[i]);
     g_item_pack[i].vptr = PACK_VPTR;
@@ -1608,13 +1823,16 @@ static void item_pending(struct Cpu *c, int i, uint64_t ghost, double t) {
             note("items: %s is not of the Weapon class; released", s->name);
             return;
         }
+        item_park_mtx(i, ghost, t);  // (where the ghost is now; else where it was at the request)
         GCALL3(c, SET_MTX, proc, g_item_mtx[i], 0);
         GCALL1(c, HANDLE_TAKE, &g_item_handle[i]);
         GCALL3(c, LINK_SET, &g_item_link[i], proc, 0);
         s->state = IS_GRAB;
         s->since = t;
+        s->grab_refusals = 0;
         s->grabbed = item_grab(c, i, proc, ghost, t);
         if (s->grabbed) s->grab_t = t;
+        else s->grab_refusals++;
         return;
     }
     if (GCALL1(c, HANDLE_FAILED, &g_item_handle[i]) & 1) {
@@ -1657,7 +1875,7 @@ static uint64_t follow_setup(struct Cpu *c, int i, uint64_t ghost) {
 static const char *item_place(struct Cpu *c, int i, uint64_t item, uint64_t ghost, int want_back, double t) {
     ItemSlot *s = &t_items[i];
     uint64_t cur = self_u64(item + ACTOR_FOLLOW, t), own = item + ITEM_FOLLOW;
-    int ours = cur && (cur == P(&g_follow[i][0]) || cur == P(&g_follow[i][1]));
+    int ours = follow_is_ours(i, cur);
     if (!cur) return "none";
     if (want_back && cur == own) {
         if (s->back_asked) {  // (asked last time and it is still its own: the game refused it; again in a second)
@@ -1665,6 +1883,8 @@ static const char *item_place(struct Cpu *c, int i, uint64_t item, uint64_t ghos
             return "hand";
         }
         if (s->back_t && t - s->back_t < 1.0 && t >= s->back_t) return "hand";
+        // (0.6.1: never ours on an actor that deletes its follow when it goes: the game would free our memory)
+        if (!mem_ok(item + ACTOR_FLAGS, 4, t) || (self_u32(item + ACTOR_FLAGS, t) & FLAG_OWNS_FOLLOW)) return "hand";
         gcall(c, FOLLOW_SET, item, follow_setup(c, i, ghost), 0, 0, 0, 0, 0);
         s->back_asked = 1;
         return "hand";  // (until the next tick reads it back)
@@ -1681,7 +1901,7 @@ static const char *item_place(struct Cpu *c, int i, uint64_t item, uint64_t ghos
 static void item_held(struct Cpu *c, int i, uint64_t ghost, int want_back, double t) {
     ItemSlot *s = &t_items[i];
     ItemStatus *o = &t_status.items.slot[i];
-    if (!(GCALL1(c, LINK_VALID, &g_item_link[i]) & 1)) {
+    if (!link_ok(&g_item_link[i], t)) {
         GCALL1(c, LINK_RESET, &g_item_link[i]);
         item_zero_link(i);
         s->state = IS_NONE;
@@ -1719,13 +1939,16 @@ static void item_held(struct Cpu *c, int i, uint64_t ghost, int want_back, doubl
         float bp[3], ip[3] = {self_f32(item + ACTOR_MTX + 0x0c, t), self_f32(item + ACTOR_MTX + 0x1c, t),
                               self_f32(item + ACTOR_MTX + 0x2c, t)};
         o->dist = bone_pos(ghost, t_bone_unit[b], t_bone_idx[b], bp, t) ? dist3(ip, bp) : -1.0f;
+        float pm[12];  // (0.6.1: its matrix in Pod_A's frame, to compare with Link's own: `ghost self`)
+        o->has_rel = t_bone_idx[BONE_POD] >= 0 && bone_mtx(ghost, t_bone_unit[BONE_POD], t_bone_idx[BONE_POD], pm, t) &&
+                     rel_to_bone(pm, item, o->rel, t);
     }
 }
 
 static void item_grab_tick(struct Cpu *c, int i, uint64_t ghost, double t) {
     ItemSlot *s = &t_items[i];
     ItemStatus *o = &t_status.items.slot[i];
-    if (!(GCALL1(c, LINK_VALID, &g_item_link[i]) & 1)) {
+    if (!link_ok(&g_item_link[i], t)) {
         GCALL1(c, LINK_RESET, &g_item_link[i]);
         item_zero_link(i);
         s->state = IS_NONE;
@@ -1736,17 +1959,23 @@ static void item_grab_tick(struct Cpu *c, int i, uint64_t ghost, double t) {
     o->actor = item;
     o->item_state = item_state(item, t);
     o->holder_ok = item_holder_is(item, ghost, t);
-    if (!s->grabbed) {
-        if (t - s->since > ITEM_GRAB_S) {
-            item_remove(c, i, t);
-            item_fail(i, "the grab was refused", ITEM_RETRY_S, t);
+    if (!s->grabbed) {  // (a loose world item until the grab takes it: kept out of Link's reach over the ghost)
+        uint64_t other = item_other_holder(item, ghost, t);
+        if (other || t - s->since > ITEM_GRAB_S) {
+            item_remove(c, i, t);  // (one someone else took is only forgotten)
+            item_fail(i, other ? "someone else took it before the ghost's grab" : "the grab was refused",
+                      ITEM_RETRY_S, t);
             return;
         }
+        item_park(c, i, item, ghost, t);
         if ((s->grabbed = item_grab(c, i, item, ghost, t))) s->grab_t = t;
+        else s->grab_refusals++;
         return;
     }
     if (o->item_state == 0xff && o->holder_ok) {
-        note("items: the ghost holds %s (%.2f s after it was taken)", s->name, t - s->since);
+        note("items: the ghost holds %s (%.2f s after it was taken; the grab was refused %d times first)", s->name,
+             t - s->since, s->grab_refusals);
+        o->refusals = s->grab_refusals;
         s->state = IS_HELD;
         s->since = t;
         s->dist_t = 0, s->back_t = 0, s->back_asked = 0, s->nofollow_t = 0;
@@ -1762,21 +1991,39 @@ static void item_grab_tick(struct Cpu *c, int i, uint64_t ghost, double t) {
 static void item_status_empty(int i) {
     ItemStatus *o = &t_status.items.slot[i];
     o->state = t_items[i].state;
-    o->actor = 0, o->place[0] = 0, o->dist = -1.0f, o->item_state = -1, o->holder_ok = 0;
+    o->actor = 0, o->place[0] = 0, o->dist = -1.0f, o->item_state = -1, o->holder_ok = 0, o->has_rel = 0;
 }
 
-// Forget every item without a call (a stage change took them along, as the ghost).
-static void items_forget(void) {
+// Forget every item without a call (a stage change took them along, as the ghost). 0.6.1: a taken item goes on the
+// watch list (plain reads), so one the stage change did not take along counts as a stray; a request still pending
+// is released by the next items part if its unit still points back at our handle (items_orphans).
+static void items_forget(double t) {
     for (int i = 0; i < ITEM_SLOTS; i++) {
+        if (t_items[i].state == IS_GRAB || t_items[i].state == IS_HELD) trash_add(&g_item_link[i], t);
+        if (t_items[i].state == IS_PENDING) t_item_orphan[i] = 1;
+        else memset(&g_item_handle[i], 0, sizeof g_item_handle[i]);
         if (t_items[i].state != IS_NONE && t_items[i].state != IS_FAILED) t_items[i].state = IS_NONE;
         t_items[i].name = NULL;
-        memset(&g_item_handle[i], 0, sizeof g_item_handle[i]);
         item_zero_link(i);
         item_status_empty(i);
     }
-    memset(g_trash, 0, sizeof g_trash);
-    memset(t_trash_t, 0, sizeof t_trash_t);
     t_items_ghost = 0;
+}
+
+// The requests items_forget left pending: released if the unit is still ours (as tick_pending does for the ghost),
+// else only forgotten. Before anything else uses the handles.
+static void items_orphans(struct Cpu *c, double t) {
+    for (int i = 0; i < ITEM_SLOTS; i++) {
+        if (!t_item_orphan[i]) continue;
+        t_item_orphan[i] = 0;
+        uint64_t unit = g_item_handle[i].unit;
+        if (unit && self_u64(unit + 8, t) == P(&g_item_handle[i])) {
+            GCALL1(c, HANDLE_RELEASE, &g_item_handle[i]);
+            GCALL1(c, HANDLE_CLEAR, &g_item_handle[i]);
+        } else {
+            memset(&g_item_handle[i], 0, sizeof g_item_handle[i]);
+        }
+    }
 }
 
 // Delete every item (the ghost goes, or went: the game removed it). Their names stay: a new ghost asks for them again.
@@ -1793,6 +2040,11 @@ static void items_drop(struct Cpu *c, double t) {
 static void items_tick(struct Cpu *c, uint64_t ghost, const Requests *rq, double t) {
     ItemsStatus *st = &t_status.items;
     st->on = rq->items_on, st->back = rq->items_back, st->mask = rq->items_mask;
+    for (int i = 0; i < ITEM_SLOTS; i++)
+        if (t_item_orphan[i]) {
+            items_orphans(c, t);  // (requests a stage change left pending: before a handle is used again)
+            break;
+        }
     int busy = 0;
     for (int i = 0; i < ITEM_SLOTS; i++) busy |= t_items[i].state != IS_NONE && t_items[i].state != IS_FAILED;
     for (int k = 0; k < TRASH_MAX && !busy; k++) busy = t_trash_t[k] != 0;
@@ -1807,6 +2059,8 @@ static void items_tick(struct Cpu *c, uint64_t ghost, const Requests *rq, double
         return;
     }
     int64_t q0, q1, calls0 = g_ncalls, queries0 = g_nqueries;
+    uint64_t cy0 = 0, cy1 = 0;
+    QueryThreadCycleTime(GetCurrentThread(), &cy0);
     QueryPerformanceCounter(&q0);
     if (!ghost) {
         items_drop(c, t);  // (a safety: every way out of "live" removes them first)
@@ -1824,6 +2078,7 @@ static void items_tick(struct Cpu *c, uint64_t ghost, const Requests *rq, double
             ItemStatus *o = &st->slot[i];
             if (!t_bones_done) break;  // (still looking: nothing changes yet)
             const char *want = rq->items_on && items_hands() ? rq->item_names[i] : "";
+            if (*want && !item_name_ok(i, want)) want = "";  // (cmd_items refused it already: a second check)
             if (strcmp(want, s->name ? s->name : "")) {  // a new name, or none: the old item goes first
                 item_remove(c, i, t);
                 s->name = *want ? intern_item(want) : NULL;
@@ -1854,19 +2109,33 @@ static void items_tick(struct Cpu *c, uint64_t ghost, const Requests *rq, double
             }
             o->state = s->state;
             o->tries = s->tries;
-            if (s->state != IS_HELD) o->place[0] = 0, o->dist = -1.0f;
+            if (s->state != IS_HELD) o->place[0] = 0, o->dist = -1.0f, o->has_rel = 0;
             if (s->state != IS_GRAB && s->state != IS_HELD) o->actor = 0, o->item_state = -1, o->holder_ok = 0;
         }
     }
-    trash_tick(c, t);
+    trash_tick(t);
     QueryPerformanceCounter(&q1);
+    QueryThreadCycleTime(GetCurrentThread(), &cy1);
     double us = (double)(q1 - q0) * 1e6 / (double)g_qpf;
+    int64_t calls = g_ncalls - calls0;
     t_items_us_avg = t_items_us_avg > 0 ? t_items_us_avg + (us - t_items_us_avg) * 0.05 : us;
-    t_items_calls += ((double)(g_ncalls - calls0) - t_items_calls) * 0.05;
+    t_items_calls += ((double)calls - t_items_calls) * 0.05;
     t_items_queries += ((double)(g_nqueries - queries0) - t_items_queries) * 0.05;
     times_add(&t_items_times, us);
     st->us = times_median(&t_items_times, &st->us_max);
+    double sum = 0;
+    for (int k = 0; k < t_items_times.n; k++) sum += t_items_times.v[k];
+    st->us_mean = t_items_times.n ? sum / t_items_times.n : 0;
     st->us_avg = t_items_us_avg, st->calls = t_items_calls, st->queries = t_items_queries;
+    if (us > SLOW_PART_MS * 1e3) {  // (0.6.1: few cycles for a long wall time = the thread was switched out)
+        st->slow_parts++;
+        snprintf(st->slow_part, sizeof st->slow_part, "%.1f ms wall, %llu cycles, %lld game calls", us / 1e3,
+                 (unsigned long long)(cy1 - cy0), (long long)calls);
+        if (t - t_slow_note_t >= 1.0) {
+            t_slow_note_t = t;
+            note("items: a slow frame part: %s", st->slow_part);
+        }
+    }
 }
 
 // `ghost give` (tests): spawn an actor near Link with a handle of its own, take it and forget it. Never the ghost or
@@ -1882,7 +2151,7 @@ static void give_tick(struct Cpu *c, const Requests *rq, uint64_t pi, uint64_t p
         snprintf(st->give_name, sizeof st->give_name, "%s", rq->give_name);
         st->give_actor = 0;
         uint64_t creator = rd64(CREATOR_PTR), heap = spawn_heap();
-        const char *name = intern(rq->give_name);
+        const char *name = intern_item(rq->give_name);  // (0.6.1: the item table, not the ghost's 32 names)
         float pos[3], yaw;
         if (!name || !creator || !heap || rd8(creator + CREATOR_BLOCKED) || !player_pose(pi, player, pos, &yaw)) {
             t_give_state = GV_FAILED;
@@ -2204,13 +2473,51 @@ static void far_check(struct Cpu *c, uint64_t pi, uint64_t player, float far_m, 
 
 static void ghost_tick_body(struct Cpu *c, double t);
 
+// The name of a game call the mod makes (for the slow-call note).
+static const char *call_name(uint64_t fn) {
+    static const struct {
+        uint64_t fn;
+        const char *name;
+    } N[] = {{REQUEST_CREATE, "REQUEST_CREATE"}, {HANDLE_TAKE, "HANDLE_TAKE"}, {HANDLE_RELEASE, "HANDLE_RELEASE"},
+             {HANDLE_READY, "HANDLE_READY"}, {HANDLE_PEEK, "HANDLE_PEEK"}, {DELETE_LATER, "DELETE_LATER"},
+             {WEAPON_GRAB, "WEAPON_GRAB"}, {SET_MTX, "SET_MTX"}, {SET_TRANSFORM, "SET_TRANSFORM"},
+             {PHYS_SET_MTX, "PHYS_SET_MTX"}, {FOLLOW_SET, "FOLLOW_SET"}, {FOLLOW_CTOR, "FOLLOW_CTOR"},
+             {LINK_VALID, "LINK_VALID"}, {LINK_SET, "LINK_SET"}, {LINK_RESET, "LINK_RESET"}, {AS_PLAY, "AS_PLAY"},
+             {AS_CURRENT, "AS_CURRENT"}, {PLAYER_INFO_GET, "PLAYER_INFO_GET"}, {MTX_FROM_EULER, "MTX_FROM_EULER"}};
+    for (size_t k = 0; k < sizeof N / sizeof *N; k++)
+        if (N[k].fn == fn) return N[k].name;
+    return "another call";
+}
+
 static void ghost_tick(struct Cpu *c) {
     int64_t q0, q1;
     QueryPerformanceCounter(&q0);
-    ghost_tick_body(c, now_s());
+    double now = now_s();
+    if (t_last_tick_t > 0 && now > t_last_tick_t) {  // (0.6.1: frame times: the tick runs once a frame)
+        double ms = (now - t_last_tick_t) * 1e3;
+        times_add(&t_frame_times, ms);
+        t_status.items.frames++;
+        t_status.items.frames_slow += ms > SLOW_FRAME_MS;
+        t_status.items.frame_ms = times_median(&t_frame_times, &t_status.items.frame_ms_max);
+    }
+    t_last_tick_t = now;
+    ghost_tick_body(c, now);
     QueryPerformanceCounter(&q1);
-    times_add(&t_tick_times, (double)(q1 - q0) * 1e6 / (double)g_qpf);
-    t_status.items.tick_us = times_median(&t_tick_times, NULL);
+    double us = (double)(q1 - q0) * 1e6 / (double)g_qpf, sum = 0;
+    times_add(&t_tick_times, us);
+    t_status.items.tick_us = times_median(&t_tick_times, &t_status.items.tick_us_max);
+    for (int k = 0; k < t_tick_times.n; k++) sum += t_tick_times.v[k];
+    t_status.items.tick_us_avg = t_tick_times.n ? sum / t_tick_times.n : 0;
+    t_status.items.slow_calls = g_slow_calls, t_status.items.call_most_ms = g_call_most_ms;
+    if (g_slow_calls != t_slow_seen) {  // (0.6.1: a game call over SLOW_CALL_MS: its name; at most a note a second)
+        t_slow_seen = g_slow_calls;
+        snprintf(t_status.items.slow_call, sizeof t_status.items.slow_call, "%s %.1f ms", call_name(g_slow_fn),
+                 g_slow_ms);
+        if (now - t_slow_note_t >= 1.0) {
+            t_slow_note_t = now;
+            note("a slow game call: %s", t_status.items.slow_call);
+        }
+    }
 }
 
 static void ghost_tick_body(struct Cpu *c, double t) {
@@ -2279,14 +2586,31 @@ static void ghost_tick_body(struct Cpu *c, double t) {
         if (rq.anim == ANIM_NAME && !t_anim_forced) note("too many different animation names used; restart the game");
         t_anim_asked = NULL;
     }
-    if (t < rq.self_until) self_read(&t_status.self, pi, t);  // `ghost self` (only while a client asks)
-
-    // a stage change takes the ghost along: forget it without touching it, spawn again later
-    if (t_status.state == ST_LIVE && (!player || player != t_stage_player || spawn_heap() != t_stage_heap)) {
-        items_forget();  // (its items too, without a call)
-        zero_link();
-        lose("stage changed: ghost dropped", t, t - t_live_since);
+    if (t < rq.self_until) {  // `ghost self` (only while a client asks)
+        self_read(&t_status.self, pi, t);
+        self_rel(&t_status.self, pi, t);  // (0.6.1: where his items are on him, after each equipment read)
     }
+
+    // A stage change (a new spawn heap) takes the ghost along: forget it without touching it, spawn again later.
+    // 0.6.1: the same heap with another player actor is no reload: the ghost and its items are removed the normal
+    // way (the link checks come first). No player but the same heap: they are left alone (no call) until he is
+    // back or the heap changes (before, this forgot them, and a ghost the game kept went on holding its items).
+    int no_player = 0;
+    if (t_status.state == ST_LIVE) {
+        if (spawn_heap() != t_stage_heap) {
+            items_forget(t);  // (its items too, without a call: watched until they are gone)
+            zero_link();
+            lose("stage changed: ghost dropped", t, t - t_live_since);
+        } else if (player && player != t_stage_player) {
+            double live_s = t - t_live_since;
+            remove_ghost(c);
+            lose("the player actor changed without a reload: ghost removed", t, live_s);
+        } else if (!player) {
+            no_player = 1;
+            t_status.no_player_ticks++;
+        }
+    }
+    t_status.no_player = no_player;
     far_check(c, pi, player, rq.far_m, rq.near_m, t);
 
     switch (t_status.state) {
@@ -2297,11 +2621,11 @@ static void ghost_tick_body(struct Cpu *c, double t) {
         tick_pending(c, t);
         break;
     case ST_LIVE:
-        tick_live(c, pi, player, t);
+        if (!no_player) tick_live(c, pi, player, t);
         break;
     }
     if (t_status.state != ST_LIVE && t_anim_actor) anim_forget();  // (never touch an old actor's animations)
-    items_tick(c, t_status.state == ST_LIVE ? t_status.actor : 0, &rq, t);  // 0.6.0: held items (opt-in)
+    if (!no_player) items_tick(c, t_status.state == ST_LIVE ? t_status.actor : 0, &rq, t);  // 0.6.0: held items
     if (rq.give_seq != t_give_seq || t_give_state == GV_PENDING) give_tick(c, &rq, pi, player, t);
     t_status.targets = t_smooth.targets, t_status.snaps = t_smooth.snaps;
     t_status.interval = t_smooth.interval;
@@ -2357,6 +2681,17 @@ static int valid_name(const char *s) {
     return 1;
 }
 
+// A 3x4 matrix as 12 numbers (row by row), "" when there is none.
+static void rel_text(int has, const float m[12], char *out, size_t cap) {
+    size_t n = 0;
+    out[0] = 0;
+    for (int k = 0; has && k < 12 && n < cap; k++) {
+        int w = snprintf(out + n, cap - n, k ? " %.4f" : "%.4f", (double)m[k]);
+        if (w < 0) break;
+        n += (size_t)w;
+    }
+}
+
 static void report(SwModReply *r) {
     Status s;
     lock();
@@ -2409,16 +2744,34 @@ static void report(SwModReply *r) {
     api->reply_int(r, "items.mask", it->mask);
     api->reply_str(r, "items.bones", it->bones);
     api->reply_int(r, "items.stray", it->stray);
+    api->reply_int(r, "items.dying", it->dying);
     api->reply_num(r, "items.us", it->us);
     api->reply_num(r, "items.us_avg", it->us_avg);
+    api->reply_num(r, "items.us_mean", it->us_mean);
     api->reply_num(r, "items.us_max", it->us_max);
     api->reply_num(r, "items.calls", it->calls);
     api->reply_num(r, "items.queries", it->queries);
     api->reply_num(r, "tick_us", it->tick_us);
+    api->reply_num(r, "tick_us_avg", it->tick_us_avg);
+    api->reply_num(r, "tick_us_max", it->tick_us_max);
+    api->reply_int(r, "items.slow_parts", it->slow_parts);
+    api->reply_str(r, "items.slow_part", it->slow_part);
+    api->reply_int(r, "slow_calls", it->slow_calls);
+    api->reply_str(r, "slow_call", it->slow_call);
+    api->reply_num(r, "call_most_ms", it->call_most_ms);
+    api->reply_num(r, "frame_ms", it->frame_ms);
+    api->reply_num(r, "frame_ms_max", it->frame_ms_max);
+    api->reply_int(r, "frames", it->frames);
+    api->reply_int(r, "frames_slow", it->frames_slow);
+    api->reply_bool(r, "no_player", s.no_player != 0);
+    api->reply_int(r, "no_player_ticks", s.no_player_ticks);
     api->reply_int(r, "items.requests", it->requests);
     api->reply_int(r, "items.held", it->held);
     api->reply_int(r, "items.deleted", it->deleted);
     api->reply_int(r, "items.lost", it->lost);
+    api->reply_int(r, "items.taken", it->taken);
+    api->reply_int(r, "items.kept", it->kept);
+    api->reply_int(r, "items.parks", it->parks);
     for (int i = 0; i < ITEM_SLOTS; i++) {
         const ItemStatus *o = &it->slot[i];
         char key[32];
@@ -2433,6 +2786,10 @@ static void report(SwModReply *r) {
         api->reply_int(r, ITEM_KEY("item_state"), o->item_state);
         api->reply_bool(r, ITEM_KEY("holder_ok"), o->holder_ok != 0);
         api->reply_str(r, ITEM_KEY("why"), o->why);
+        api->reply_int(r, ITEM_KEY("refusals"), o->refusals);
+        char rel[160];
+        rel_text(o->has_rel, o->rel, rel, sizeof rel);
+        api->reply_str(r, ITEM_KEY("rel"), rel);
 #undef ITEM_KEY
     }
     api->reply_str(r, "give.state", GV_NAMES[it->give_state >= 0 && it->give_state <= GV_FAILED ? it->give_state : 0]);
@@ -2513,6 +2870,17 @@ static void report_self(SwModReply *r) {
     api->reply_bool(r, "shield_back", s->back[1] != 0);
     api->reply_bool(r, "bow_back", s->back[2] != 0);
     api->reply_int(r, "on_back", (s->back[0] ? 1 : 0) | (s->back[1] ? 2 : 0) | (s->back[2] ? 4 : 0));
+    static const char *const KEYS[3] = {"weapon", "shield", "bow"};
+    for (int i = 0; i < 3; i++) {  // (0.6.1: each item in the frame of his Pod_A, and its distance to Pod_A, B, C)
+        char key[32], text[160];
+        snprintf(key, sizeof key, "%s_rel", KEYS[i]);
+        rel_text(s->has_rel[i], s->rel[i], text, sizeof text);
+        api->reply_str(r, key, text);
+        snprintf(key, sizeof key, "%s_pods", KEYS[i]);
+        snprintf(text, sizeof text, "%.4f %.4f %.4f", (double)s->pods[i][0], (double)s->pods[i][1],
+                 (double)s->pods[i][2]);
+        api->reply_str(r, key, s->item[i] ? text : "");
+    }
     char shape[64];
     int n = 0;
     shape[0] = 0;
@@ -2559,13 +2927,18 @@ static void cmd_items(int argc, char **argv, SwModReply *r) {
         api->reply_fail(r, "usage: ghost items weapon|- shield|- bow|- [mask 0-7] | off | back on|off");
         return;
     }
-    char names[3][64] = {{0}};
+    char names[3][64] = {{0}}, refused[200] = {0};
     for (int i = 0; i < 3; i++) {
         const char *a = argv[2 + i];
         if (!strcmp(a, "-")) continue;
         if (!valid_name(a)) {
             api->reply_fail(r, "bad item name (letters, digits and _, up to 63; - for none): %s", a);
             return;
+        }
+        if (!item_name_ok(i, a)) {  // (0.6.1: not an item for that hand, or a special one: shown as none)
+            size_t n = strlen(refused);
+            snprintf(refused + n, sizeof refused - n, "%s%s", n ? " " : "", a);
+            continue;
         }
         memcpy(names[i], a, strlen(a) + 1);
     }
@@ -2588,6 +2961,8 @@ static void cmd_items(int argc, char **argv, SwModReply *r) {
     api->reply_str(r, "shield", names[1]);
     api->reply_str(r, "bow", names[2]);
     api->reply_int(r, "mask", mask);
+    api->reply_str(r, "refused", refused);  // (0.6.1: names not spawned: not a weapon, shield or bow for that hand,
+                                            // or a special one never tried; "" none)
 }
 
 // `ghost give name [dx dy dz]` (tests): an actor near Link for him to take; never the ghost or its items.

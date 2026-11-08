@@ -32,6 +32,7 @@ import io
 import json
 import math
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -78,6 +79,9 @@ GLOW_GAIN = 0.63           # the menu's glow adds about this much of a picture's
 FULL_SHADE = (0.55, 0.5)   # full mode: from this share of the screen width, darker to the right, down to this light
 SOFTEN_PX = 1.5            # cut-outs: their edge is softened by about this many texels
 EDGE_TOL = 1.0             # a box edge this close to (or past) the screen border counts as off screen
+# The self-check's floor: real pictures come out at 38-44 dB after texture compression, pure noise at about 20 dB;
+# a wrong mapping or a broken encoder gives far less.
+MIN_SELF_CHECK_DB = 18.0
 
 MODES = ("art", "full")
 FOCUS = ("left", "center", "right")
@@ -102,6 +106,7 @@ class Picture:
     name: str = ""
     sha256: str = ""
     cutout: bool = False
+    cache: dict = field(default_factory=dict, repr=False, compare=False)
 
     def row(self, y: int) -> bytearray:
         return self.px[y * self.w * 4:(y + 1) * self.w * 4]
@@ -497,9 +502,8 @@ def _taps(src_len: int, x0: float, x1: float, n: int) -> list[list[tuple[int, in
         for j in range(n):
             c = x0 + (j + 0.5) * k - 0.5
             i = math.floor(c)
-            t = c - i
-            w1 = int(t * 16384 + 0.5)
-            out.append([(min(last, max(0, i)), 16384 - w1), (min(last, max(0, i + 1)), w1)])
+            w1 = int((c - i) * 256 + 0.5)
+            out.append([(min(last, max(0, i)), 256 - w1), (min(last, max(0, i + 1)), w1)])
         return out
     for j in range(n):
         a, b = x0 + j * k, x0 + (j + 1) * k
@@ -510,49 +514,67 @@ def _taps(src_len: int, x0: float, x1: float, n: int) -> list[list[tuple[int, in
                 taps.append([min(last, max(0, i)), ov])
                 total += ov
             i += 1
-        ws = [int(ov / total * 16384 + 0.5) for _, ov in taps]
-        ws[max(range(len(ws)), key=ws.__getitem__)] += 16384 - sum(ws)
+        ws = [int(ov / total * 256 + 0.5) for _, ov in taps]
+        ws[max(range(len(ws)), key=ws.__getitem__)] += 256 - sum(ws)
         out.append([(i, w) for (i, _), w in zip(taps, ws)])
     return out
 
 
-def _resample_rows(rows: list[bytes], src_w: int, x0: float, x1: float, out_w: int) -> list[bytes]:
-    """Horizontal pass: every row (RGBA) to out_w pixels over [x0, x1)."""
-    while (x1 - x0) / out_w > 2.0:   # (2x box steps first: at most 3 taps in the last pass)
-        half = max(1, (src_w + 1) // 2)
-        get_a = itemgetter(*[4 * min(src_w - 1, 2 * j) + c for j in range(half) for c in range(4)])
-        get_b = itemgetter(*[4 * min(src_w - 1, 2 * j + 1) + c for j in range(half) for c in range(4)])
-        rows = [bytes((p + q + 1) >> 1 for p, q in zip(get_a(r), get_b(r))) for r in rows]
-        src_w, x0, x1 = half, x0 / 2, x1 / 2
-    taps = _taps(src_w, x0, x1, out_w)
-    n = max(len(t) for t in taps)
+# Lines of bytes are filtered as big integers with one 16-bit lane per byte: line * weight (weights sum to 256)
+# never carries from one lane into the next, so a whole line is weighted and summed at C speed, and the result is
+# every lane's high byte.
+
+def _lanes(line: bytes) -> int:
+    buf = bytearray(2 * len(line))
+    buf[0::2] = line
+    return int.from_bytes(buf, "little")
+
+
+def _filter_lines(lines: list[bytes], taps: list) -> list[bytes]:
+    """Each output line = sum of weight * source line (weights /256), rounded."""
+    n = len(lines[0])
+    rnd = int.from_bytes(b"\x80\x00" * n, "little")
+    cache: dict[int, int] = {}
+    out = []
     for t in taps:
-        t += [(t[0][0], 0)] * (n - len(t))
-    getters = [itemgetter(*[4 * t[s][0] + c for t in taps for c in range(4)]) for s in range(n)]
-    weights = [[t[s][1] for t in taps for _ in range(4)] for s in range(n)]
-    out = []   # (4 indices per pixel: itemgetter always returns tuples)
-    if n == 2:
-        ga, gb = getters
-        wa, wb = weights
-        for r in rows:
-            out.append(bytes((a * x + b * y + 8192) >> 14 for a, b, x, y in zip(ga(r), gb(r), wa, wb)))
-    elif n == 3:
-        ga, gb, gc = getters
-        wa, wb, wc_ = weights
-        for r in rows:
-            out.append(bytes((a * x + b * y + c * z + 8192) >> 14
-                             for a, b, c, x, y, z in zip(ga(r), gb(r), gc(r), wa, wb, wc_)))
-    else:
-        for r in rows:
-            gs = [g(r) for g in getters]
-            out.append(bytes((sum(v * w for v, w in zip(col, ws)) + 8192) >> 14
-                             for col, ws in zip(zip(*gs), zip(*weights))))
+        acc = rnd
+        for i, w in t:
+            if w:
+                v = cache.get(i)
+                if v is None:
+                    if len(cache) > 8:
+                        cache.pop(min(cache))
+                    v = cache[i] = _lanes(lines[i])
+                acc += v * w
+        out.append(acc.to_bytes(2 * n, "little")[1::2])
     return out
+
+
+def _transpose(lines: list[bytes], w: int) -> list[bytes]:
+    """RGBA lines (w pixels each) -> the columns as RGBA lines."""
+    h = len(lines)
+    flat = b"".join(lines)
+    out = []
+    for x in range(w):
+        col = bytearray(4 * h)
+        for c in range(4):
+            col[c::4] = flat[4 * x + c::4 * w]
+        out.append(bytes(col))
+    return out
+
+
+def _scale_axis(lines: list[bytes], a0: float, a1: float, out_n: int) -> list[bytes]:
+    n = len(lines)
+    while (a1 - a0) / out_n > 2.0 and n > 1:   # (2x box steps first: at most 3 taps in the last pass)
+        half = (n + 1) // 2
+        lines = _filter_lines(lines, [[(2 * j, 128), (min(n - 1, 2 * j + 1), 128)] for j in range(half)])
+        n, a0, a1 = half, a0 / 2, a1 / 2
+    return _filter_lines(lines, _taps(n, a0, a1, out_n))
 
 
 def resample(pic: Picture, box: tuple[float, float, float, float], out_w: int, out_h: int) -> Picture:
     """The source box (pixel units, may extend past the picture: edges repeat) scaled to out_w x out_h.
-    Pillow's LANCZOS when Pillow is there, else an area/bilinear filter in pure Python."""
+    Pillow's LANCZOS when Pillow is there, else an area (down) / bilinear (up) filter in pure Python."""
     x0, y0, x1, y1 = box
     Image = pillow()
     if Image is not None and 0 <= x0 < x1 <= pic.w and 0 <= y0 < y1 <= pic.h:
@@ -560,32 +582,17 @@ def resample(pic: Picture, box: tuple[float, float, float, float], out_w: int, o
         out = im.resize((out_w, out_h), Image.Resampling.LANCZOS, box=(x0, y0, x1, y1))
         return Picture(out_w, out_h, bytearray(out.tobytes()))
     stride = pic.w * 4
-    ky = (y1 - y0) / out_h
-    while ky > 2.0 and pic.h > 1:   # (vertical 2x box steps)
-        h2 = (pic.h + 1) // 2
-        rows = []
-        for j in range(h2):
-            a = pic.px[2 * j * stride:(2 * j + 1) * stride]
-            b = pic.px[min(pic.h - 1, 2 * j + 1) * stride:(min(pic.h - 1, 2 * j + 1) + 1) * stride]
-            rows.append(bytes((p + q + 1) >> 1 for p, q in zip(a, b)))
-        pic = Picture(pic.w, h2, bytearray(b"".join(rows)))
-        y0, y1, ky = y0 / 2, y1 / 2, ky / 2
-    vt = _taps(pic.h, y0, y1, out_h)
-    need = sorted({i for t in vt for i, _ in t})
-    src_rows = [bytes(pic.px[i * stride:(i + 1) * stride]) for i in need]
-    hrows = dict(zip(need, _resample_rows(src_rows, pic.w, x0, x1, out_w)))
-    out = bytearray()
-    for t in vt:
-        if len(t) == 1 or all(w == 0 for _, w in t[1:]):
-            out += hrows[t[0][0]]
-        elif len(t) == 2:
-            (ia, wa), (ib, wb) = t
-            out += bytes((a * wa + b * wb + 8192) >> 14 for a, b in zip(hrows[ia], hrows[ib]))
-        else:
-            rs = [hrows[i] for i, _ in t]
-            ws = [w for _, w in t]
-            out += bytes((sum(v * w for v, w in zip(col, ws)) + 8192) >> 14 for col in zip(*rs))
-    return Picture(out_w, out_h, out)
+    # only the source rows the box needs (plus a margin for the filters)
+    r0 = max(0, min(pic.h - 1, math.floor(y0) - 1))
+    r1 = max(r0 + 1, min(pic.h, math.ceil(y1) + 1))
+    rows = [bytes(pic.px[i * stride:(i + 1) * stride]) for i in range(r0, r1)]
+    rows = _scale_axis(rows, y0 - r0, y1 - r0, out_h)
+    c0 = max(0, min(pic.w - 1, math.floor(x0) - 1))
+    c1 = max(c0 + 1, min(pic.w, math.ceil(x1) + 1))
+    if (c0, c1) != (0, pic.w):
+        rows = [r[4 * c0:4 * c1] for r in rows]
+    cols = _scale_axis(_transpose(rows, c1 - c0), x0 - c0, x1 - c0, out_w)
+    return Picture(out_w, out_h, bytearray(b"".join(_transpose(cols, out_h))))
 
 
 def premultiply(pic: Picture) -> Picture:
@@ -606,9 +613,10 @@ def unpremultiply(pic: Picture) -> Picture:
     return Picture(pic.w, pic.h, out, pic.name, pic.sha256, pic.cutout)
 
 
-def sample(pic: Picture, box, out_w: int, out_h: int, outside: str = "clamp") -> Picture:
+def sample(pic: Picture, box, out_w: int, out_h: int, outside: str = "clamp", keep: tuple | None = None) -> Picture:
     """resample(), where the part of the box outside the picture repeats its edge ("clamp") or is clear ("clear").
-    A picture with alpha is filtered premultiplied, so no dark or light fringe comes from its clear parts."""
+    A picture with alpha is filtered premultiplied, so no dark or light fringe comes from its clear parts.
+    keep: (j0, i0, j1, i1), the only output texels needed (the rest is treated as outside the picture)."""
     x0, y0, x1, y1 = box
     kx, ky = (x1 - x0) / out_w, (y1 - y0) / out_h
     # output columns / rows whose centre is inside the picture
@@ -616,12 +624,17 @@ def sample(pic: Picture, box, out_w: int, out_h: int, outside: str = "clamp") ->
     j1 = max(j0, min(out_w, math.ceil((pic.w - x0) / kx - 0.5)))
     i0 = max(0, min(out_h, math.ceil((0 - y0) / ky - 0.5)))
     i1 = max(i0, min(out_h, math.ceil((pic.h - y0) / ky - 0.5)))
+    if keep is not None:
+        j0, i0 = max(j0, keep[0]), max(i0, keep[1])
+        j1, i1 = max(j0, min(j1, keep[2])), max(i0, min(i1, keep[3]))
     if j1 <= j0 or i1 <= i0:
         return blank(out_w, out_h) if outside == "clear" else blank(out_w, out_h, bytes(pic.px[0:4]))
     sub = (max(0.0, x0 + j0 * kx), max(0.0, y0 + i0 * ky), min(float(pic.w), x0 + j1 * kx),
            min(float(pic.h), y0 + i1 * ky))
     alpha = pic.cutout
-    src = premultiply(pic) if alpha else pic
+    if alpha and "premultiplied" not in pic.cache:
+        pic.cache["premultiplied"] = premultiply(pic)
+    src = pic.cache["premultiplied"] if alpha else pic
     inner = resample(src, sub, j1 - j0, i1 - i0)
     if alpha:
         inner = unpremultiply(inner)
@@ -662,17 +675,32 @@ def ramp(n: int, start: float, step: float, edges: list[tuple[float, float, int]
 
 
 def mul_alpha(pic: Picture, fx: list[float], fy: list[float]) -> None:
-    """alpha *= fx[column] * fy[row], in place (only the rows and columns that change are touched)."""
+    """alpha *= fx[column] * fy[row], in place (only the rows and columns that change are touched; opaque runs use
+    one precomputed result)."""
     w = pic.w
-    cols = [j for j, f in enumerate(fx) if f < 1.0]
+    runs = []   # column ranges where fx < 1
+    j = 0
+    while j < w:
+        if fx[j] < 1.0:
+            k = j
+            while k < w and fx[k] < 1.0:
+                k += 1
+            runs.append((j, k, bytes(int(255 * f + 0.5) for f in fx[j:k])))
+            j = k
+        else:
+            j += 1
+    full = bytes(int(255 * f + 0.5) for f in fx)
     for y, g in enumerate(fy):
-        if g >= 1.0 and not cols:
+        if g >= 1.0 and not runs:
             continue
         o = y * w * 4
         a = pic.px[o + 3:o + w * 4:4]
         if g >= 1.0:
-            for j in cols:
-                a[j] = int(a[j] * fx[j] + 0.5)
+            for s, e, opaque in runs:
+                seg = a[s:e]
+                a[s:e] = opaque if seg == b"\xff" * (e - s) else bytes(int(v * f + 0.5) for v, f in zip(seg, fx[s:e]))
+        elif a == b"\xff" * w:
+            a = bytearray(int(v * g + 0.5) for v in full)
         else:
             a = bytearray(int(v * f * g + 0.5) for v, f in zip(a, fx))
         pic.px[o + 3:o + w * 4:4] = a
@@ -717,22 +745,19 @@ def soften_alpha(pic: Picture, radius: int) -> None:
     if radius <= 0:
         return
     w, h = pic.w, pic.h
-    a = pic.px[3::4]
+    a = bytes(pic.px[3::4])
     k = 2 * radius + 1
-    rows = []
-    for y in range(h):
-        r = a[y * w:(y + 1) * w]
-        pad = r[:1] * radius + r + r[-1:] * radius
-        acc = list(accumulate(pad, initial=0))
-        rows.append([(acc[j + k] - acc[j]) / k for j in range(w)])
-    out = bytearray(w * h)
-    for x in range(w):
-        col = [rows[y][x] for y in range(h)]
-        pad = col[:1] * radius + col + col[-1:] * radius
-        acc = list(accumulate(pad, initial=0.0))
-        for y in range(h):
-            out[y * w + x] = min(255, int((acc[y + k] - acc[y]) / k + 0.5))
-    pic.px[3::4] = out
+    ws = [256 // k] * k
+    ws[radius] += 256 - sum(ws)
+
+    def taps(n):
+        return [[(min(n - 1, max(0, i + d - radius)), ws[d]) for d in range(k)] for i in range(n)]
+
+    rows = _filter_lines([a[y * w:(y + 1) * w] for y in range(h)], taps(h))
+    flat = b"".join(rows)
+    cols = _filter_lines([flat[x::w] for x in range(w)], taps(w))
+    flat = b"".join(cols)
+    pic.px[3::4] = b"".join(flat[y::h] for y in range(h))
 
 
 def push_pull(pic: Picture) -> None:
@@ -1021,8 +1046,45 @@ def _exact_color(px: list[int], bc1: bool):
     return None
 
 
+_SOLID: dict[int, list] = {}
+
+
+def _solid_tables() -> None:
+    """Per 5/6-bit channel and 8-bit value: the endpoint pair whose 2/3 step comes closest (equal endpoints first)."""
+    for bits in (5, 6):
+        n = 1 << bits
+        ex = [(x << 3) | (x >> 2) for x in range(32)] if bits == 5 else [(x << 2) | (x >> 4) for x in range(64)]
+        best: dict[int, tuple[int, int]] = {}
+        for a in range(n):
+            for b in range(n):
+                v = (2 * ex[a] + ex[b]) // 3
+                if v not in best or abs(a - b) < abs(best[v][0] - best[v][1]):
+                    best[v] = (a, b)
+        hit = sorted(best)
+        _SOLID[bits] = [best[min(hit, key=lambda h: (abs(h - v), h))] for v in range(256)]
+
+
+def _solid_block(r: int, g: int, b: int) -> bytes:
+    """A one-colour block: every texel on the 2/3 step of a 4-colour palette (c0 > c1), or index 0 when the
+    endpoints are equal."""
+    if not _SOLID:
+        _solid_tables()
+    ra, rb = _SOLID[5][r]
+    ga, gb = _SOLID[6][g]
+    ba, bb = _SOLID[5][b]
+    c0, c1 = (ra << 11) | (ga << 5) | ba, (rb << 11) | (gb << 5) | bb
+    if c0 > c1:
+        return struct.pack("<HHI", c0, c1, 0xAAAAAAAA)
+    if c0 < c1:
+        return struct.pack("<HHI", c1, c0, 0xFFFFFFFF)
+    return struct.pack("<HHI", c0, c1, 0)
+
+
 def _color_block(px: list[int], bc1: bool) -> bytes:
     """px: 16 x (r, g, b) flattened. An 8-byte colour block in 4-colour mode (c0 > c1, or c0 == c1 with index 0)."""
+    r, g, b = px[0], px[1], px[2]
+    if px == [r, g, b] * 16:
+        return _solid_block(r, g, b)
     ex = _exact_color(px, bc1)
     if ex is not None:
         return ex
@@ -1106,7 +1168,8 @@ def encode_bc(rgba, w: int, h: int, bc3: bool) -> bytes:
     stride = pw * 4
     out = []
     ap = out.append
-    clear16 = bytes(16)
+    clear64 = bytes(64)   # (clear and black: the clear block; clear texels with a colour keep it, for filtering)
+    memo: dict[bytes, bytes] = {}   # (flat and repeated areas: a block seen before costs one lookup)
     for j in range(by):
         r0 = j * 4 * stride
         rows = (src[r0:r0 + stride], src[r0 + stride:r0 + 2 * stride], src[r0 + 2 * stride:r0 + 3 * stride],
@@ -1114,19 +1177,24 @@ def encode_bc(rgba, w: int, h: int, bc3: bool) -> bytes:
         for i in range(bx):
             a = i * 16
             blk = rows[0][a:a + 16] + rows[1][a:a + 16] + rows[2][a:a + 16] + rows[3][a:a + 16]
+            hit = memo.get(blk)
+            if hit is not None:
+                ap(hit)
+                continue
             if bc3:
-                al = blk[3::4]
-                if al == clear16:
-                    ap(CLEAR_BC3)
-                    continue
-                rgb = list(blk)
-                del rgb[3::4]
-                ap(_alpha_block(al))
-                ap(_color_block(rgb, False))
+                if blk == clear64:
+                    enc = CLEAR_BC3
+                else:
+                    rgb = list(blk)
+                    del rgb[3::4]
+                    enc = _alpha_block(blk[3::4]) + _color_block(rgb, False)
             else:
                 rgb = list(blk)
                 del rgb[3::4]
-                ap(_color_block(rgb, True))
+                enc = _color_block(rgb, True)
+            if len(memo) < 65536:
+                memo[blk] = enc
+            ap(enc)
     return b"".join(out)
 
 
@@ -1961,35 +2029,47 @@ def pattern_values(pattern: Pattern, plane: tuple, rect: tuple, tw: int, th: int
     sx, sy = pattern.scale
     cx, cy = pattern.center
     kx, ky = (rect[2] - rect[0]) / tw, (rect[3] - rect[1]) / th
-    us = [pw / 2 + ((rect[0] + (i + 0.5) * kx) / unit - cx) * sx - 0.5 - pattern.offset[0] * pw for i in range(tw)]
-    u0 = [math.floor(u) % pw for u in us]
-    u1 = [(i + 1) % pw for i in u0]
-    wu = [int((u - math.floor(u)) * 256) for u in us]
-    g0, g1 = itemgetter(*u0), itemgetter(*u1)
-    if tw == 1:
-        g0, g1 = (lambda r, f=g0: (f(r),)), (lambda r, f=g1: (f(r),))
+    # (nearest texel: the pattern is drawn at about one texel per texel, and the game samples it without mips too)
+    us = [math.floor(pw / 2 + ((rect[0] + (i + 0.5) * kx) / unit - cx) * sx - pattern.offset[0] * pw) % pw
+          for i in range(tw)]
+    get = itemgetter(*us)
     rows = []
     for j in range(th):
-        v = ph / 2 + ((rect[1] + (j + 0.5) * ky) / unit - cy) * sy - 0.5 + pattern.offset[1] * ph
-        v0 = math.floor(v)
-        wv = int((v - v0) * 256)
-        ra = vals[(v0 % ph) * pw:(v0 % ph + 1) * pw]
-        rb = vals[((v0 + 1) % ph) * pw:((v0 + 1) % ph + 1) * pw]
-        row = [(a * (256 - wv) + b * wv) >> 8 for a, b in zip(ra, rb)]
-        rows.append(bytes((a * (256 - w) + b * w + 128) >> 8 for a, b, w in zip(g0(row), g1(row), wu)))
+        v = math.floor(ph / 2 + ((rect[1] + (j + 0.5) * ky) / unit - cy) * sy + pattern.offset[1] * ph) % ph
+        got = get(vals[v * pw:(v + 1) * pw])
+        rows.append(bytes(got) if tw > 1 else bytes((got,)))
     return b"".join(rows)
 
 
+_PARTIAL = re.compile(rb"[\x01-\xfe]+")
+_ONLY255 = bytes(255 if v == 255 else 0 for v in range(256))
+
+
 def composite(top: Picture, base: Picture) -> Picture:
-    """top over base (opaque), blended in linear light."""
-    L = _SRGB2LIN
+    """top over base (opaque), blended in linear light. Texels that are fully on or off are copied with masks; only
+    the partly clear ones (soft edges) are blended one by one."""
     K = (_LIN_STEPS - 1) / 255
+    LK = [v * K for v in _SRGB2LIN]
     S = _LIN2SRGB
-    out = bytearray(base.px)
-    alpha = top.px[3::4]
-    for c in range(3):
-        out[c::4] = bytes(t if a == 255 else b if a == 0 else S[int((L[t] * a + L[b] * (255 - a)) * K + 0.5)]
-                          for t, b, a in zip(top.px[c::4], base.px[c::4], alpha))
+    w = top.w
+    n = 4 * w
+    out = bytearray()
+    for y in range(top.h):
+        t = top.px[y * n:(y + 1) * n]
+        b = base.px[y * n:(y + 1) * n]
+        al = t[3::4]
+        on = al.translate(_ONLY255)
+        mask = bytearray(n)
+        mask[0::4] = mask[1::4] = mask[2::4] = mask[3::4] = on
+        m = int.from_bytes(mask, "little")
+        row = bytearray(((int.from_bytes(t, "little") & m) | (int.from_bytes(b, "little") & ~m)).to_bytes(n, "little"))
+        for run in _PARTIAL.finditer(al):
+            s, e = run.span()
+            aa = al[s:e]
+            for c in range(3):
+                row[4 * s + c:4 * e:4] = bytes(S[int(LK[x] * a + LK[z] * (255 - a) + 0.5)]
+                                               for x, z, a in zip(t[4 * s + c:4 * e:4], b[4 * s + c:4 * e:4], aa))
+        out += row
     out[3::4] = b"\xff" * (top.w * top.h)
     return Picture(top.w, top.h, out)
 
@@ -2015,7 +2095,9 @@ def make_slots(model: Model, pics: list[Picture], mode: str, numbers: set, focus
             if mode == "full":
                 src = pic
                 if pic.cutout:
-                    src = flat.setdefault(id(pic), flatten(pic))
+                    if id(pic) not in flat:
+                        flat[id(pic)] = flatten(pic)
+                    src = flat[id(pic)]
                 img = sample(src, source_box(R, fit(src, ext, False, focus)), tw, th, "clamp")
                 apply_gain_columns(img, shade_gains(tw, R, W))
                 if s.role == "single":
@@ -2033,7 +2115,10 @@ def make_slots(model: Model, pics: list[Picture], mode: str, numbers: set, focus
                     feather(img, R, R, edges_on_screen(R, s.pan, W, H), intersect(R, screen))
             else:   # art mode, a back slot: the pattern, with the picture where the first single picture is
                 FA = intersect(art, ext)
-                top = sample(pic, source_box(R, fit(pic, FA, pic.cutout, focus)), tw, th, "clear")
+                kx, ky = (R[2] - R[0]) / tw, (R[3] - R[1]) / th
+                keep = (math.floor((art[0] - R[0]) / kx) - 2, math.floor((art[1] - R[1]) / ky) - 2,
+                        math.ceil((art[2] - R[0]) / kx) + 2, math.ceil((art[3] - R[1]) / ky) + 2)
+                top = sample(pic, source_box(R, fit(pic, FA, pic.cutout, focus)), tw, th, "clear", keep)
                 if pic.cutout:
                     soften_alpha(top, 1)
                 else:
@@ -2360,15 +2445,15 @@ def sets_text(numbers: list[int], total: int) -> str:
     return "slideshow pictures " + ", ".join(str(n) for n in numbers)
 
 
-def parse_sets(text: str, total: int) -> list[int]:
+def parse_sets(text: str, total: int, option: str = "--sets") -> list[int]:
     t = (text or "all").strip().lower()
     if t == "all":
         return list(range(1, total + 1))
     out = []
     for part in t.replace(" ", "").split(","):
         if not part.isdigit() or not 1 <= int(part) <= total:
-            raise MenuBgError(f"--sets {text}: the menu has {total} slideshow pictures, so use numbers 1 to {total} "
-                              "(like --sets 2 or --sets 1,3,5), or all.")
+            raise MenuBgError(f"{option} {text}: the menu has {total} slideshow pictures, so use numbers 1 to {total} "
+                              f"(like {option} 2), or all.")
         if int(part) not in out:
             out.append(int(part))
     return sorted(out)
@@ -2408,12 +2493,17 @@ def deploy_now(lib: modman.Library, no_deploy: bool) -> tuple[bool, list[str]]:
         return False, ["Not deployed (--no-deploy). To use it: python tools/modman.py deploy"]
     if modman.game_running():
         return False, ["Close the game, then deploy: python tools/modman.py deploy"]
-    dry = modman.deploy(lib, dry_run=True)
-    parts = dry.get("parts") or {}
-    if (parts.get("exefs") or {}).get("rebuild") == "build" or (parts.get("hooks") or {}).get("rebuild") == "build":
-        return False, [f"Not deployed: your other mods need the game code rebuilt first ({modman.REBUILD_TIME}). "
-                       "To do it: python tools/modman.py deploy"]
-    launch = modman.deploy(lib)
+    try:
+        dry = modman.deploy(lib, dry_run=True)
+        parts = dry.get("parts") or {}
+        if (parts.get("exefs") or {}).get("rebuild") == "build" or \
+                (parts.get("hooks") or {}).get("rebuild") == "build":
+            return False, [f"Not deployed: your other mods need the game code rebuilt first ({modman.REBUILD_TIME}). "
+                           "To do it: python tools/modman.py deploy"]
+        say("Deploying...")
+        launch = modman.deploy(lib)
+    except (modman.ModmanError, rm.DeployError) as e:
+        return False, [f"Not deployed: {e}"]
     lines = []
     att = launch.get("attention") or []
     if att:
@@ -2740,8 +2830,9 @@ def took(seconds: float) -> str:
 
 
 def estimate(kind: str, fast: bool) -> str:
-    t = {"read": ("", " (about 10 s a picture)"), "fit": (" (about 10 s)", " (about 45 s)"),
-         "encode": " (about 25 s)", "pack": " (about 30 s)"}[kind]
+    """How long a step takes on this PC with the game closed (measured; about 2x while the game runs)."""
+    t = {"read": ("", " (up to 10 s a picture)"), "fit": (" (a few seconds)", " (about 10 s)"),
+         "encode": (" (up to 30 s)", " (up to 45 s)"), "pack": " (about 30 s)"}[kind]
     return t if isinstance(t, str) else t[0 if fast else 1]
 
 
@@ -2784,6 +2875,9 @@ def cmd_set(args) -> int:
     if limit is not None and size > limit:
         raise MenuBgError("The new menu file would be too big for the game's size table. Nothing was changed.")
     quality = self_check(menu, pack, levels, images)
+    if quality < MIN_SELF_CHECK_DB:
+        raise MenuBgError(f"Self-check failed: the new picture comes out too different ({quality:.0f} dB). Nothing "
+                          "was changed.")
     name = mod_name(pics, args.name)
     info = {"tool": TOOL_ID, "version": TOOL_VERSION, "made": datetime.datetime.now().isoformat(timespec="seconds"),
             "mode": args.mode, "focus": args.focus, "sets": numbers, "slideshow": len(menu.model.sets),
@@ -2802,8 +2896,6 @@ def cmd_set(args) -> int:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     what = sets_text(numbers, len(menu.model.sets))
-    if not args.no_deploy and not modman.game_running():
-        say("Deploying...")
     deployed, lines = deploy_now(lib, args.no_deploy)
     if deployed:
         say(f"Done: your picture is on the main menu ({what}).")
@@ -2879,7 +2971,7 @@ def cmd_preview(args) -> int:
     if args.set == "all":
         numbers = list(range(1, total + 1))
     elif args.set:
-        numbers = parse_sets(args.set, total)[:1]
+        numbers = parse_sets(args.set, total, "--set")[:1]
     else:
         numbers = [next((st.number for st in model.sets if any(s.role == "single" for s in st.slots)), 1)]
     overrides = {}

@@ -1,0 +1,7 @@
+# The functions zelda_view.dll hooks (BotW 1.9.0). modman deploy rebuilds the game code with them (mod.toml [code]
+# hooks); by hand:
+#   python tools/sw_rebuild.py build --hooks native\examples\zelda_view\hooks.txt --out out\rebuild-hooks
+0x7000045d60   # skin upload: skeleton -> GPU skin matrices (replace: the buff's scaled copy)
+0x7000045d0c   # bone world calc: local pose -> world (before: the wider shoulders)
+0x70014a1d04   # animation holder: set a string parameter (before: heavy weapons as one-handers)
+0x7001129af8   # the per-frame job (after: the mod's tick)

@@ -70,7 +70,8 @@ class GhostNative(unittest.TestCase):
         released, no items on a body without hand bones, nothing at all while off, and `ghost give`."""
         self.group("items", ["bones", "held", "in_hand", "same_again", "switch", "quick_switches", "back",
                              "back_toggles", "back_off", "clear_one", "clear_all", "let_go", "ghost_gone",
-                             "ghost_back", "stage_change", "gave_up", "not_a_weapon", "no_hand_bones",
+                             "ghost_back", "stage_change", "stage_change_stray", "orphan_released", "parked", "taken_in_gap",
+                             "own_follow_first", "owns_follow_kept", "names", "gave_up", "not_a_weapon", "no_hand_bones",
                              "off_costs_nothing", "give"])
 
     def test_nothing_else_failed(self):

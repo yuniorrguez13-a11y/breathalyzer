@@ -1,0 +1,1 @@
+settings_demo: a harmless text file the game never reads (its own RomFS folder).

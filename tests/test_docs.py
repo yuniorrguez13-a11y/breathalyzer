@@ -25,12 +25,14 @@ import cheats as ch  # noqa: E402
 import check_clean as cc  # noqa: E402
 import mod_inspect as mi  # noqa: E402
 import modman  # noqa: E402
+import romfs_mods  # noqa: E402
 import sw_rebuild as sw  # noqa: E402
 
-# The docs these tests cover. (docs/ghost.md and docs/multiplayer.md can join once their own work is done.)
+# The docs these tests cover. (docs/ghost.md and docs/multiplayer.md can join once their own work is done, and so can
+# the Mods page v2 docs being written: docs/mod-settings.md, docs/fonts.md, docs/mod-pictures.md.)
 DOCS = ["README.md", "NOTICE.md", "docs/cheats.md", "docs/code-mods.md", "docs/mod-manager.md", "docs/MOD-COMPAT.md",
         "docs/mod-format.md", "docs/rebuild.md", "docs/exefs-patches.md", "docs/hooks.md", "docs/romfs-mods.md",
-        "docs/code-map.md", "docs/PLAN.md", "docs/addresses.md", "native/modhost/README.md"]
+        "docs/code-map.md", "docs/PLAN.md", "docs/addresses.md", "native/modhost/README.md", "docs/profiles.md"]
 
 BUILD_190 = "cd57b23fa4bbad65"
 CMD_RE = re.compile(r"^python\s+tools[\\/]((?:mp[\\/])?[A-Za-z_]+)\.py(?:\s+(.*))?$")
@@ -302,6 +304,70 @@ class ModFormatIdRules(unittest.TestCase):
         longest = next(n for n in range(1, 5000) if name_error(n + 1))
         self.assertFalse(name_error(longest))
         self.assertIn(f"at most {longest} characters", self.name_row)
+
+
+class ModFormatV2(unittest.TestCase):
+    """The Mods page v2 contract: every mod.toml key modman knows is in the key table, the deploy order and the owners
+    of files made at deploy are the ones modman uses, and the library files are named."""
+
+    def setUp(self):
+        self.text = read("docs/mod-format.md")
+        self.cells = [r[0] for r in table_rows(section(self.text, "The keys"))]
+
+    def test_every_key_is_in_the_table(self):
+        for table, keys in modman.MANIFEST_KEYS.items():
+            if keys is None:
+                want = (f"`[{table}]`", f"`[[{table}]]`")
+                self.assertTrue(any(w in c for c in self.cells for w in want), f"[{table}] has no row")
+                continue
+            for k in keys:
+                with self.subTest(table=table, key=k):
+                    self.assertTrue(any(re.search(rf"`(\[{table}\] )?{k}`", c) for c in self.cells),
+                                    f"[{table}] {k} has no row")
+
+    def test_deploy_order_and_owners(self):
+        self.assertEqual(modman.FEATURES, ("mod_settings", "font", "menu_bg", "mod_pictures"))
+        steps = section(self.text, "What deploy does with them")
+        order = [steps.find(w) for w in ("option folders", "font tool", "title picture", "pictures tool",
+                                         "settings.txt")]
+        self.assertTrue(all(i >= 0 for i in order) and order == sorted(order), order)
+        for owner in modman.GENERATED_OWNER.values():
+            self.assertIn(f"`{owner}`", steps)
+        self.assertTrue(all(o.startswith(romfs_mods.GENERATED) for o in modman.GENERATED_OWNER.values()))
+
+    def test_library_files(self):
+        files = flat(section(self.text, "Files in the library"))
+        for name in (f"`{modman.SETTINGS_DIR}\\<id>.json`", f"`{modman.PICTURES_DIR}\\<id>\\chosen.png`",
+                     f"`{modman.PROFILES_DIR}\\<name>.json`", f"`deploy\\{modman.HISTORY}`",
+                     f"`{modman.PICTURES_DIR}\\{modman.TITLE_PICK}\\`", f"`{modman.PICTURES_DIR}\\{modman.MODS_PAGE_PICK}\\`"):
+            self.assertIn(name, files)
+        self.assertIn("``" + " ".join("{}#$%@^`|~") + "``", self.text)   # (the symbols add warns about)
+        self.assertEqual(modman.MENU_SYMBOLS, set("{}#$%@^`|~"))
+
+
+class ProfilesDocs(unittest.TestCase):
+    def setUp(self):
+        self.text = read("docs/profiles.md")
+
+    def test_file_example_is_what_modman_writes(self):
+        sample = json.loads(re.search(r"```json\n(.*?)```", self.text, re.S).group(1))
+        lib = modman.Library(tempfile.gettempdir(), None, [{"id": "x", "name": "X", "enabled": True, "kinds": []}])
+        with mock.patch.object(modman, "read_setting_values", return_value={}):
+            snap = modman.profile_snapshot(lib, "Hard mode")
+        self.assertEqual(list(sample), list(snap))
+        self.assertEqual((sample["tool"], sample["kind"]), (modman.TOOL_ID, "profile"))
+        self.assertEqual(os.path.basename(modman.profile_file(lib, sample["name"])), "hard-mode.json")
+        self.assertIn("`hard-mode.json`", self.text)
+        self.assertEqual(modman.DEFAULT_PROFILE, "Default")
+
+    def test_history_and_names(self):
+        text = flat(self.text)
+        self.assertIn(f"past {2 * modman.HISTORY_KEEP} lines only the newest {modman.HISTORY_KEEP} stay", text)
+        types_ = [r[0] for r in table_rows(section(self.text, "History"))]
+        self.assertEqual(types_, ["`deploy`", "`start`", "`result`"])
+        self.assertIn("up to 40 letters, digits, spaces, `.`, `-` and `_`, starting with a letter or digit", text)
+        self.assertTrue(modman.profile_name_ok("A" * 40) and not modman.profile_name_ok("A" * 41))
+        self.assertFalse(modman.profile_name_ok(" lead") or modman.profile_name_ok("a/b"))
 
 
 class ModManagerDocs(unittest.TestCase):

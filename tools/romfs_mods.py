@@ -159,6 +159,16 @@ class Winner:
     game_path: str | None = None
     zip: zipfile.ZipFile | None = None
 
+    @property
+    def data(self) -> bytes | None:
+        """The bytes when they are in memory (a file made at deploy, the merged RSTB), else None."""
+        return self.entry.data if self.entry is not None else None
+
+    @property
+    def src(self) -> str:
+        """The file on disk ("" for a .zip member or bytes in memory)."""
+        return self.game_path or "" if self.entry is None else self.entry.src
+
     def read(self) -> bytes:
         """The bytes the game would read for this path."""
         e = self.entry
@@ -659,9 +669,10 @@ GENERATED = "generated:"   # the owner of files made at deploy: generated:pictur
 
 def add_generated(p: Plan, files: list, owner: str) -> list[str]:
     """Files made at deploy (tools/font.py, tools/menu_bg.py, tools/mod_pictures.py) as overlay files that win over
-    every mod's. `files`: (RomFS path, bytes, size-table entry or None) tuples; the entry is the size the file needs in
-    the RSTB (None: it fits the entry already there). `owner` is "generated:<what>", listed as the file's mod in
-    .mod-deploy.json, with "built_on": the mod whose file it was made from. Returns the paths taken.
+    every mod's. `files`: (RomFS path, bytes, size-table entry or None) tuples; the entry is (the file's name in the
+    RSTB, the size it needs there), like ("Font/Font_US.bfarc", 3650016); None: it fits the entry already there.
+    `owner` is "generated:<what>", listed as the file's mod in .mod-deploy.json, with "built_on": the mod whose file
+    it was made from. Returns the paths taken.
 
     Size-table entries aren't merged yet (docs/mod-pictures.md, rule S2): a file that needs one is left out, with a
     warning, so the game never reads a file bigger than its entry."""

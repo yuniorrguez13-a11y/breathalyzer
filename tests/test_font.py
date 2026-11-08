@@ -371,6 +371,9 @@ class TrueTypeReading(unittest.TestCase):
         info = F.license_info(tt(notice="All rights reserved", fstype=2))
         self.assertFalse(info["free"])
         self.assertEqual(len(info["warnings"]), 2)
+        # a licence that names a free one only for a part of the font further down (as Arial's does)
+        ms = "Microsoft supplied font. Any other use is prohibited. " + "x" * 200 + " based on the MIT license"
+        self.assertFalse(F.license_info(tt(notice=ms))["free"])
 
 
 class Drawing(unittest.TestCase):
@@ -712,6 +715,36 @@ class Deploy(unittest.TestCase):
         b = F.Bffnt(F.Sarc(F.yaz0_decode(us.data)[0]).get("Caption_00.bffnt"))
         self.assertEqual(b.lacks(), "")
         self.assertEqual(len(F.Bffnt(game_like(lacks="~")).codes()) + 1, len(b.codes()))
+
+    def test_reads_the_winner_through_romfs_mods_plan(self):
+        import romfs_mods as rm
+        F.save_settings(self.lib, fix_symbols=True)
+        mod = os.path.join(self.tmp.name, "bigfont")
+        os.makedirs(os.path.join(mod, "romfs", "Font"))
+        with open(os.path.join(mod, "romfs", "Font", "Font_EU.sbfarc"), "wb") as f:
+            f.write(F.yaz0_stored(archive(lacks="~"), 0x80))
+        os.makedirs(os.path.join(self.game, "Pack"))  # (what makes a folder look like the game's RomFS)
+        plan = rm.plan([mod], rm.GameIndex.scan(self.game))
+        self.assertIsNone(plan.winner("Font/Font_US.sbfarc").mod)          # (the game's own file)
+        gen = F.deploy_files(self.lib, plan, game_romfs=None)
+        eu = next(g for g in gen if g.path.endswith("_EU.sbfarc"))
+        b = F.Bffnt(F.Sarc(F.yaz0_decode(eu.data)[0]).get("Caption_00.bffnt"))
+        self.assertEqual(len(F.Bffnt(game_like(lacks="~")).codes()) + 1, len(b.codes()))
+        self.assertEqual(len(gen), 3)
+
+    def test_on_add_says_what_the_font_is(self):
+        folder = os.path.join(self.tmp.name, "m")
+        os.makedirs(os.path.join(folder, "fonts"))
+        with open(os.path.join(folder, "fonts", "F.ttf"), "wb") as f:
+            f.write(make_ttf(notice="All rights reserved"))
+        man = SimpleNamespace(font={"file": "fonts/F.ttf"}, rel=lambda p: p)
+        notes = F.on_add(self.lib, {"id": "m"}, folder, man)
+        self.assertIn("choose m", notes[0])
+        self.assertTrue(any("licence" in n for n in notes))
+        with open(os.path.join(folder, "fonts", "F.ttf"), "wb") as f:
+            f.write(b"OTTO" + bytes(64))
+        self.assertIn("CFF", F.on_add(self.lib, {"id": "m"}, folder, man)[0])
+        self.assertEqual(F.on_add(self.lib, {"id": "m"}, folder, SimpleNamespace(font=None)), [])
 
     def test_a_font_mod_for_some_languages(self):
         self.lib.mods = [font_mod(self.lib.root, "f", toml_extra='languages = ["US"]\n')]

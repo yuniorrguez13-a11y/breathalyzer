@@ -85,7 +85,7 @@ use (1.9.0 only), with how each one was verified, are listed in [addresses](addr
 mode. Over the socket:
 
 ```
-{"ok":true,"data":{"host":"0.3.0","api":2,"game_version":"1.9.0","game_lib":"...\\extracted\\swgame.dll",
+{"ok":true,"data":{"host":"0.4.0","api":3,"game_version":"1.9.0","game_lib":"...\\extracted\\swgame.dll",
  "dir":"...\\mods\\native","found":1,"loaded":1,"hot":0,"hook_slots":0,"hooked":0,"mods.0.name":"hello",
  "mods.0.id":1,"mods.0.file":"hello.dll","mods.0.hot":false,"mods.0.ok":true,"mods.0.status":"ok",
  "mods.0.commands":"hello","mods.0.skipped":"","mods.0.hooks":"","mods.0.overrides":""}}
@@ -267,3 +267,22 @@ Not verified yet (needs the real game):
 
 Since mod API 2, mods can also hook any game function (before, after or instead of it), including ones
 called directly. That needs game code rebuilt with hook slots. See [hooks](hooks.md). Tested in game on 2026-11-06.
+
+## Settings
+
+Since mod API 3 (modhost 0.4.0), a mod can have a settings page: it lists `[[settings]]` in its `mod.toml`, and the
+player changes them in the game's Mod menu or in Mod Manager. The DLL reads them with `api->setting_int`,
+`setting_num` and `setting_str` (any thread, no lock), and `api->setting_watch` tells it when a `live` setting
+changed. Everything about them is in [mod settings](mod-settings.md); the example is
+[`native/examples/settings_demo`](../native/examples/settings_demo/settings_demo.c).
+
+- Mods built for API 1 or 2 run unchanged; a mod that wants settings checks `SWMOD_HAS(api, setting_int)` and uses
+  its defaults on an older modhost.
+- modhost reads `deploy\native\settings.txt` (next to its mods folder; `SWMOD_SETTINGS` to point elsewhere) before any
+  mod starts, and finds each DLL's settings by its file name. Without the file, every mod gets its defaults and
+  `api->mod_id` is NULL.
+- Two more commands: `modsettings [<mod>]` (any player) lists the settings, and `modset <mod> <key> [<value>]`
+  (developer mode) changes one as the Mod menu does.
+- Checked without the game (`tests/test_mod_settings.py`, the fake game of `build_native.py selftest`): the getters,
+  watchers, locks, presets, the values file, a mod loaded with `modload`, and Python and C agreeing on 280 condition
+  cases. Not yet in the game.

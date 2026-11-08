@@ -31,16 +31,17 @@ changed from run to run.
 | Other programs' share of the processor | 54-78 % | 56-75 % |
 
 - **Background load decides most:** each 1 % of the processor other programs take cost about 1 fps (0.8 on the
-  Plateau, 1.5 in the Field). The same setup varied by up to 26 fps between rounds.
+  Plateau, 1.5 in the Field). The same setup varied by up to 27 fps between rounds.
 - **Low vs High:** in round 1 (the least busy), Plateau 42 vs 41 fps, Field 62 vs 56. Allowing for the load (a
   straight-line fit over all 24 runs), Low came out about 3 fps faster on the Plateau and 7 in the Field, each give
-  or take 6: **likely a small gain, not proven.** Low had fewer slow frames (over 33 ms) than High in rounds 1 and 2.
+  or take 6: **likely a small gain, not proven.** In round 1 Low also had fewer slow frames (over 33 ms in 30 s:
+  Plateau 15 vs 26, Field 4 vs 13).
 - **Objects 60 %** came out 3-4 fps over Low, give or take 6: not proven either, and it has a visual and gameplay
   cost ([levers](#the-levers)), so it stays out of the presets.
 - To measure the presets properly, close other programs (and other tools' tests) first.
 
 The earlier rounds (13:00-14:25) are not used: the presets always ran in the same order, "Low" then also had Remove
-Grass on, and several setting changes never applied. They stay, marked, in `out\perfesults.jsonl`.
+Grass on, and several setting changes never applied. They stay, marked, in `out\perf\results.jsonl`.
 
 Savage Wind's own settings, Hyrule Field, High, changed while the game ran (each about 20 s; one game start per
 round):
@@ -58,7 +59,9 @@ So keep **Ultra performance**: Quality and Performance were slower in rounds 1 a
 Whether the processor or the graphics chip is the limit here we can't say from runs this busy; your other laptop (same
 model) was limited by the graphics chip, and Ultra performance made it playable.
 
-**Stability (Low as it ships):** {{STAB}}
+**Stability (Low as it ships):** 5 minutes on the Plateau (short walks, camera turning) and 5 minutes running a
+165 m square in Hyrule Field: no crash; ground, grass, rocks and trees near Link were all there. The king's voiced
+reveal on the Temple of Time roof also played with Low on ([below](#the-built-mods)).
 
 Screenshots of every test: `out\shots\perf3_*.png` in your copy of this repo (they stay on your PC; screenshots of the
 game never go into the repo).
@@ -115,18 +118,18 @@ in `quality.json` in the library). `modman run` started from a window where they
 | Lever | What it does | How | Risk |
 |---|---|---|---|
 | Grass distance | Grass ends nearer (the game: blades ~21 m, tufts ~46 m). Grass by Link stays: you can still cut it and burn it | Start-up values `SAVAGEWIND_GRASS_BLADES` and `SAVAGEWIND_GRASS_QUADS` | Low |
-| Object draw distance (in no preset) | Trees, rocks, enemies and animals appear nearer. Far landmarks (Hyrule Castle, mountains) stay | `SAVAGEWIND_TRAVERSE_SCALE`, with `SAVAGEWIND_FAR_SCALE=1` | High: at 0.6 actor trees end at 90 m (the game: 150 m) while the distant trees still fade in at 100-200 m, so forests can show a gap; enemies and animals exist only within 90 m. Savage Wind marks these variables "tests" and only tried 1 and up |
+| Object draw distance (in no preset) | Trees, rocks, enemies and animals appear nearer. Far landmarks (Hyrule Castle, mountains) stay | `SAVAGEWIND_TRAVERSE_SCALE`, with `SAVAGEWIND_FAR_SCALE=1` | High: at 0.6 actor trees end at 90 m (the game: 150 m) while the distant trees still fade in at 100-200 m, so forests can show a gap; enemies and animals exist only within 90 m. Savage Wind marks these variables "tests" and only tried 1 and up. Gain over Low: 3-4 fps, give or take 6 (not proven). The forest gap is not checked yet: our Kakariko shots at 60 % and 80 % only caught a near view (a guard's talk held the camera) |
 | Sun-shadow range (in no preset) | Meant to end sun shadows nearer | A RomFS mod built from your `Pack/Bootup_Graphics.pack` (recipe: `native/examples/perf_shadows`) | Unverified: no visible change, and `depth_shadow_far_0` may not be the range (the cascade splits are 2/32/64/200 m). It replaces the whole 20 MB pack |
 | Ambient occlusion, bloom, far blur (Low) | The game's own switches for these effects, off, in the open world and shrines | A RomFS mod built from your `Pack/Bootup.pack` (recipe: `native/examples/perf_effects`) | A flatter image, no glow; and Savage Wind's HUD letters and voice size fix are skipped ([below](#the-built-mods)) |
 | Remove Grass | No grass at all | Sen Uii's mod, which you add yourself (below) | No grass to cut, no grass fires, so no updrafts from burning grass |
 
 Savage Wind's own settings (Video page) are levers too: see the results above for what each one did here.
 
-- **Remove Grass** is not in any preset: in Hyrule Field, Low with it ran 67 fps and without it 69 (no gain over
-  short grass), and it takes away grass fires and their updrafts. Turn it on yourself if you want no grass at all:
-  `python tools/quality.py toggle no_grass on --deploy`.
+- **Remove Grass** is not in any preset: in Hyrule Field, Low with it ran 67 fps and without it 69 (one run each, an
+  earlier round: no gain seen over short grass), and it takes away grass fires and their updrafts. Turn it on
+  yourself if you want no grass at all: `python tools/quality.py toggle no_grass on --deploy`.
 - **Ambient occlusion off** changes the look most: at Ultra performance the game's ambient occlusion darkens the
-  grass a lot, so Medium and Low look lighter and flatter than Original.
+  grass a lot, so Low looks lighter and flatter than the other presets.
 - **Sun-shadow range:** the built mod loads and the game runs with it, but no change was visible in our screenshots,
   so it may not do much (Savage Wind may set the shadow range itself).
 
@@ -148,28 +151,29 @@ Wind 0.4.1-alpha.4 skips two of its own fixes, without a word in its log:
 - its **voice size-table fix**. On this PC Savage Wind grows one voice bank's size entry (`[fs] voices: 1 files
   bigger than the game's own, 1 ResourceSizeTable entries grown` in every Original log, missing from every log with
   the effects mod). Without it that voice may fail to load: silent, or a crash in the scene that uses it. Which bank
-  it is isn't in the log; a voiced cutscene with Low on was {{CUTSCENE}}.
+  it is isn't in the log. With Low on, the king's voiced reveal on the Temple of Time roof played on into the
+  prophecy film with no crash (one test; we can't check by test whether the voice was heard, and it may not be the
+  bank Savage Wind grows).
 
 So High and Medium replace no game file, `quality.py` prints this as a note whenever the effects mod is on, and the
 mod menu gets it as `bootup_note`. The other built mod (shadows) ships `Pack/Bootup_Graphics.pack` and is in no
 preset.
 
-**"2 files bigger than the game's" when you deploy:** the rebuilt packs are a few KB bigger than the game's (8 KB
-for `Bootup.pack`), because our Yaz0 compression is less tight than Nintendo's. The files inside keep their sizes, and
-the size table (RSTB) has no entry for the packs themselves, so this warning is harmless here; the game loaded them
-in every test.
+**"Files bigger than the game's" when you deploy:** the rebuilt packs are a few KB bigger than the game's (8 KB
+for `Bootup.pack`, 5.5 KB for `Bootup_Graphics.pack`), because our Yaz0 compression is less tight than Nintendo's.
+The files inside keep their sizes, and the size table (RSTB) has no entry for the packs themselves, so this warning
+(it suggests merging with UKMM) is harmless here; the game loaded them in every test.
 
 ## Mods made by others
 
-Only one existing mod could save GPU time: **Remove Grass** (on this laptop it gave no gain over short grass). Nothing
-else was found for the Switch version (no
-"potato", simple-shader, no-shadow, no-bloom or LOD mod; checked all Switch mods on GameBanana and the Switch patch
-archives on 2026-11-07). The 1.6.0 ExeFS patches there are "60 FPS" and "disable dynamic resolution", which Savage
-Wind already does itself, so there was nothing to port to 1.9.0.
+Only one existing mod could save GPU time: **Remove Grass** (one run on this laptop: no gain seen over short grass).
+Nothing else was found for the Switch version (no "potato", simple-shader, no-shadow, no-bloom or LOD mod; checked
+all Switch mods on GameBanana and the Switch patch archives on 2026-11-07). The 1.6.0 ExeFS patches there are "60 FPS"
+and "disable dynamic resolution", which Savage Wind already does itself, so there was nothing to port to 1.9.0.
 
 | Mod | Author | Licence | Use |
 |---|---|---|---|
-| [Remove Water & Grass](https://gamebanana.com/mods/328281) (Wii U), option *Remove Grass* | Sen Uii (contributor rick1234-) | CC BY-NC-ND 4.0: personal use; don't share changed copies | Optional (`toggle no_grass on`): no fps gain measured over short grass. Repack it first: below |
+| [Remove Water & Grass](https://gamebanana.com/mods/328281) (Wii U), option *Remove Grass* | Sen Uii (contributor rick1234-) | CC BY-NC-ND 4.0: personal use; don't share changed copies | Optional (`toggle no_grass on`): no fps gain seen over short grass (one run). Repack it first: below |
 | [No fog in Korok Forest](https://gamebanana.com/mods/418477) (Switch) | Echocolat (key author), submitted by HGStone | Personal use only | Not recommended: a gameplay change, not a performance one (the Koroks stop sending you back: `ForbidComeback` off), no fps measured, and this loader installs only part of it (its `map.yml` changes aren't merged) |
 | [Depth of Field Mod](https://gamebanana.com/mods/553934) (Switch) | Logansam (from Silentverge's, original by Nograd) | CC BY-NC-ND 4.0 | No: it adds blur. It showed where the blur values live |
 | [Wii U Console Performance Patch](https://gamebanana.com/mods/323044) | Exzap, Xalphenos, Torphedo | CC BY-NC-ND 4.0 | Not for Savage Wind (a Wii U code patch for the CPU/GPU wait, which Savage Wind does its own way) |
@@ -218,12 +222,14 @@ and setting a preset again turns it off.
 
 ## What was tested
 
-- **In the game** (2026-11-07, Savage Wind 0.4.1-alpha.4, test save, scratch mod library): every preset at both
-  places, built with `quality.py set` and started with `quality.py run`; Savage Wind's upscaler, shadow resolution
-  and frame generation changed while the game ran; Low for 10 minutes in all (no crash). Remove Grass removed the grass
-  on the Plateau as expected.
+- **In the game** (2026-11-07, Savage Wind 0.4.1-alpha.4, test save, scratch mod library): High (no mod), grass
+  40 %, Low and Low + objects 60 % at both places, 3 rounds taking turns (24 game starts, each set with
+  `quality.py set` and started with `quality.py run`); the upscaler modes and frame generation changed while the game
+  ran; Low for 5 minutes at each place and in the king's cutscene (no crash). Remove Grass removed the grass on the
+  Plateau as expected. Medium (grass 60 %) was not measured on its own.
 - **Made-up files only** (`tests/test_quality.py`): the presets, the start-up values, the in-place value changes
   (also values the file shares between switches), the built packs (only those values change, sizes stay), the
   library changes (built once, kept, rebuilt when needed, other mods left alone, built on another mod's pack), and
   `run` passing the start-up values on.
-- Not tested: the mod menu calling `set_quality` (not written yet), a laptop where the graphics chip is the limit.
+- Not tested: the presets on an idle laptop, the mod menu calling `set_quality` (not written yet), a laptop where the
+  graphics chip is the limit.

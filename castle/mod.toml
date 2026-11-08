@@ -1,0 +1,12 @@
+# Castle date: a showcase mod for Breathalyzer, by giruka (docs/castle-date.md).
+# This folder is a recipe, not a mod you add as it is: it holds no game files. tools/castle_build.py builds the mod
+# on your PC from your own game files (Zelda's actor, the castle map unit, the texts...) and adds it to your mod
+# library with this mod.toml:
+#   python tools/castle_build.py build
+
+[mod]
+id = "giruka.castle-date"
+name = "Castle date"
+version = "0.1.0"
+authors = ["giruka"]
+description = "Beat the game, find the right door in Zelda's room, and Zelda greets you in her study."

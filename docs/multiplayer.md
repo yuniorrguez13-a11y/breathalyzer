@@ -59,7 +59,7 @@ Client options:
 | `--ghost` / `--ghost-peer NAME` / `--ghost-actor ACTOR` | off | Show the nearest (or that) player in your game; needs the ghost mod, see below |
 | `--ghost-sync` | off | Also share animations (attacks too) and say what the other player holds. Both PCs, ghost mod 0.5.0. Checked in the game on one PC with the bot; not yet between two PCs |
 | `--ghost-link` | off | Show them with the Link body (build it, pass the in-game check, then deploy it: docs/ghost.md). Implies `--ghost-sync`. Checked in the game on one PC with the bot; not yet between two PCs |
-| `--ghost-items` | off | The ghost also holds what they hold (weapon, shield, bow; in the hands or on the back). Needs `--ghost-link` and ghost mod 0.6.0. Checked in the game on one PC with the bot; not yet between two PCs |
+| `--ghost-items` | off | The ghost also holds what they hold (weapon, shield, bow; in the hands or on the back). Needs `--ghost-link` and ghost mod 0.6.1. Only weapons, shields and bows are ever spawned (see below). Checked in the game on one PC with the bot; not yet between two PCs |
 
 The relay takes `--port`, `--host`, `--room-cap`, `--rate` and `--max-clients`. Ctrl+C stops any of the three
 tools; the relay tells its clients it stopped.
@@ -115,7 +115,12 @@ jumps). Keep recordings in `out\`: they come from your game, and `out\` is never
   has equipped, as actor names). With ghost mod 0.6.0 it also carries `on_back` (0-7: bit 0 weapon, 1 shield, 2 bow
   are on his back, not in his hands; read from Link's own equipment). Same rules: optional, protocol version 1, a bad
   one is dropped on its own; a receiver with `--ghost-items` and no `on_back` from an older sender puts the bow on
-  the back (and the weapon and shield while the sender aims the bow). An attack that a network stall hid (all its lines arrived after their moment was drawn) is shown for 0.3 s right
+  the back (and the weapon and shield while the sender aims the bow). A line without an item key (the sender's
+  game didn't answer in time: a hitch, a menu, a load) changes nothing on the receiver; only `""` means "none", so
+  a gap never makes the ghost drop its items and spawn them again. The receiver sends the mod only a name that is a
+  weapon for the right hand (`Weapon_Sword_`, `Weapon_Lsword_`, `Weapon_Spear_`), a shield (`Weapon_Shield_`) or a
+  bow (`Weapon_Bow_`), and none of the special ones never tried (the Master Sword family and `Weapon_Bow_071`); the
+  mod checks the same again, so another player's data can never make your game spawn anything else. An attack that a network stall hid (all its lines arrived after their moment was drawn) is shown for 0.3 s right
   after the stall.
 - The relay passes each line to the others in the same room. The protocol is described in `tools\mp\__init__.py`.
 - Others are drawn 0.1 s late, blended between the two samples around that moment (a jitter buffer), so packets
@@ -179,7 +184,7 @@ has only Wait, Walk and Run, so with him you still see those three. `--ghost-lin
 actor pack you build from your own game files (`python tools\mp\ghost_link_pack.py build`; see docs/ghost.md),
 which has Link's animations, mostly under the player's own names (two-handed and spear swings under its own, picked
 by the other player's weapon). Weapons, shields and bows are logged ("Ghost: Ana has weapon
-Weapon_Sword_001"); add `--ghost-items` (ghost mod 0.6.0, with `--ghost-link`) and the ghost holds them, in its hands
+Weapon_Sword_001"); add `--ghost-items` (ghost mod 0.6.1, with `--ghost-link`) and the ghost holds them, in its hands
 or on its back, and you can't take them (docs/ghost.md, "Held items"). The check (one game and the bot; PASS or FAIL per check; last run 16 PASS, 0 FAIL,
 with a sword attack and the sword's name read in the game):
 `python tools\mp\ghost_ingame_check.py --link --spot -1033.6 252.3 1809.3 132 --give-weapon`. While the Link body is deployed,

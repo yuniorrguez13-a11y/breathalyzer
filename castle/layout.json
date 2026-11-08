@@ -1,0 +1,22 @@
+{
+  "about": "Where the castle date puts things, in world metres (x, y, z) and degrees. Guessed from the two room models' bounds and the objects the game places in them (not walked in the game yet): walk them in the smoke run with basics_show_pos, then set measured to true.",
+  "measured": false,
+  "unit": "E-4",
+  "room": {"name": "Princess Zelda's Room", "origin": [-322.936, 256.464, -996.102]},
+  "study": {"name": "Princess Zelda's Study", "origin": [-383.995, 269.885, -995.857]},
+  "door_actor": "TwnObj_Village_Hatenodoor_A_01",
+  "doors": [
+    {"key": "door_west", "pos": [-325.186, 256.464, -1008.402], "yaw": 0},
+    {"key": "door_middle", "pos": [-322.186, 256.464, -1008.402], "yaw": 0},
+    {"key": "door_east", "pos": [-319.186, 256.464, -1008.402], "yaw": 0, "warp": "ToStudy",
+     "trigger": {"pos": [-319.936, 257.664, -1009.2], "half": [0.7, 1.2, 0.45], "yaw": 0}},
+    {"key": "door_back", "pos": [-377.995, 269.885, -996.607], "yaw": 90, "warp": "ToRoom",
+     "trigger": {"pos": [-377.145, 271.085, -995.857], "half": [0.45, 1.2, 0.7], "yaw": 0}}
+  ],
+  "zelda": {"pos": [-384.795, 269.885, -993.857], "yaw": 110.7},
+  "warps": {
+    "ToStudy": {"pos": [-379.495, 269.935, -995.857], "dir": -90},
+    "ToRoom": {"pos": [-319.936, 256.514, -1006.402], "dir": 0}
+  },
+  "tags": {"room": [-322.936, 258.464, -1006.102], "study": [-383.995, 271.885, -995.857]}
+}

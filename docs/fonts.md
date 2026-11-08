@@ -1,0 +1,124 @@
+# Fonts in the menus
+
+`tools/font.py` fixes the symbols the game's menu font is missing, adds an easy-to-read font, and builds font mods.
+It works at deploy, on your PC, with the released Savage Wind 0.4.1-alpha.4.
+
+## What you get
+
+- **Missing symbols fixed.** The Options and Mods pages can't show `{ } # $ % @ ^` `` ` `` `| ~` (Japanese also misses
+  `" & ' * ; = \`). With the fix on, they show. They are drawn from Fira Sans to match the game's letters.
+- **Easy-read font.** Fira Sans SemiBold in the menus: wider, bolder letters.
+- **Font mods.** A mod can bring its own font for the menus (English, European languages and Japanese).
+- **One place to choose.** You pick the font: the game's, easy-read, or a font mod's. Nothing is hidden.
+
+Checked offline on the game's own font files (US, EU and JP): the archive keeps its exact size, the button icons
+(External_00) stay byte for byte, and every letter that isn't redrawn keeps its exact pixels. Not yet checked in the
+game: see [What is tested](#what-is-tested).
+
+## Quick start
+
+```powershell
+python tools\font.py status                 # the font in use and what you can choose
+python tools\font.py fix-symbols on         # draw the missing symbols
+python tools\font.py choose easy-read       # or: game, auto, or a font mod's id
+python tools\modman.py deploy               # (Play deploys too)
+```
+
+Every change applies at your next start. `--library <folder>` picks the mod library (as for `modman.py`).
+
+## Choosing the font
+
+| Choice | What the menus use |
+|---|---|
+| `auto` (the default) | The last font mod that is on, in your mod order. Else the game's font. |
+| `game` | The game's font. |
+| `easy-read` | Fira Sans SemiBold. |
+| a font mod's id | That mod's font. The mod must be on. |
+
+Your choice wins over the mod order. When the chosen mod is off or removed, `auto` is used and deploy says so.
+The font choice and the symbol fix are saved in `font.json` in the library.
+
+The fix for missing symbols is off by default until it is checked in the game. A font (easy-read or a mod's) adds
+the missing symbols it has by itself.
+
+## Making a font mod
+
+```toml
+[mod]
+id = "yourname.my-font"
+name = "My Font"
+version = "1.0"
+
+[font]
+file = "fonts/MyFont.ttf"      # inside the mod, next to mod.toml or below it
+for = "menu"                   # the Options, Mods, dialogue and button texts
+languages = ["US", "EU", "JP"] # the default: all three
+license = "OFL-1.1"            # optional
+```
+
+| Key | Needed | What it is |
+|---|---|---|
+| `file` | yes | A TrueType font (`.ttf`) inside the mod. Fonts with CFF outlines (most `.otf`) and collections (`.ttc`) are refused with a clear line: use the `.ttf` version. |
+| `for` | no (`"menu"`) | `"menu"` redraws Caption_00, NormalS_00 and Normal_00: everything the Options and Mods pages draw. `"all"` (also place names, Special_00) comes later; it works as `"menu"` for now. |
+| `languages` | no (all three) | `"US"`, `"EU"`, `"JP"`. Korean, Chinese and Thai use other fonts and come later. |
+| `license` | no | Shown to the player. Without it, the font's own licence words are read. |
+
+How the font is drawn:
+- Every character the font has is redrawn in the game's own grid, at the size that gives its `H` the game's height.
+  Characters the font lacks (kana and kanji, say) keep the game's drawing.
+- Letters too wide for a cell are narrowed. Accents and tails too tall for a cell are pressed flat a little.
+- NormalS_00 gets the game's dark ring around each letter (2 pixels).
+- Licences: `python tools\font.py check <font.ttf>` shows what the font says about itself. A font that isn't free
+  (Arial, Segoe UI) is fine on your own PC: deploy warns, and never blocks. Don't share what it builds.
+
+## What happens at deploy
+
+modman's deploy asks `font.deploy_files(lib, plan)` for the font archives. It reads the archive in use: a RomFS
+mod's `Font/Font_xx.sbfarc` when one ships it, else the game's own (both only read). It writes edited copies into
+the overlay, for US, EU and JP:
+
+- The missing printable ASCII characters go into free cells, in 4x4 blocks no other letter uses. The rest of each
+  sheet keeps its bytes.
+- The edited fonts are a few bytes longer. The padding between files takes them, so the archive keeps its size
+  (Font_US: 3,641,808 bytes before and after) and **no size-table entry is needed**. If an archive ever grows,
+  deploy names the entry it needs.
+- External_00 (the button icons Savage Wind redraws) is never changed.
+- Built archives are cached in `fonts\cache\` in the library, so a deploy with the same mods and settings only reads.
+- Deploy also tells the Mods page whether every menu font now has all of ASCII. Then the Mods page stops writing
+  `%` as "percent" and `@` as "at" (`symbols full` in menu.txt, docs/mod-menu.md).
+
+The edited archives hold the game's own glyphs: they stay in your library and are never shared.
+
+Fira Sans comes from Savage Wind's folder (`FiraSans-Medium.ttf`, `FiraSans-SemiBold.ttf`, next to
+`savagewind.exe`), else from `assets\fonts\` in this repo. Both are the SIL Open Font License 1.1
+(`assets\fonts\FiraSans-OFL.txt`).
+
+## Checking offline
+
+```powershell
+python tools\font.py build "<Savage Wind folder>\extracted\romfs\Font\Font_US.sbfarc" `
+    --out out\Font_US.sbfarc --fix-symbols
+python tools\font.py preview out\Font_US.sbfarc --out out\caption.png --text "Mods {beta} 50% @you"
+```
+
+`build` writes one edited archive and says what changed: characters added, letters redrawn, the size before and
+after. `preview` draws text with one font of an archive (`--font-name`, default Caption_00), 3 times bigger, white
+on black. Write them in `out\`: they hold game data. `build` refuses to write into Savage Wind's game files.
+
+## Good to know
+
+- Savage Wind's "Sharper text" isn't in 0.4.1-alpha.4. A later release that has it may not sharpen edited fonts
+  (it looks for the game's own sheets). The text then looks as sharp as the game's at 1080p.
+- Every menu font change applies at the next start (the game loads fonts once).
+- Korean, Chinese, Thai and Traditional Chinese text uses outline fonts, which this tool doesn't edit yet.
+
+## What is tested
+
+Offline (tests/test_font.py, with made-up fonts and archives; and on the game's own US, EU and JP archives):
+- the 10 symbols (US, EU) and 17 (JP) are added; nothing else changes; the archive keeps its size;
+- the easy-read font redraws 130 (US), 199 (EU) and 82 (JP) caption characters, about 335 in each other menu font,
+  with no letter cut off;
+- External_00 stays byte for byte; the cache is used on the second deploy.
+
+Not yet checked in the game (the final game check): that the symbols show on the Mods page, that other texts look
+the same, the look of the easy-read font and of NormalS_00's ring.

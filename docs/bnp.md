@@ -160,6 +160,14 @@ table) and `bnp.json` (what was installed, its packs, the files each data log ch
   each one's game data, map, quest, shop, event and parameter changes and own files kept, sizes above either's. The
   merge rules themselves: `tests/test_bcml_data.py`, `test_bcml_texts.py`, `test_bcml_maps.py`, and read-only round
   trips of the game's own files (every file these logs change: BYML, game and save data, all 16 languages' texts).
+- 2026-11-07, on the game's own files (read only; scripts and output in `out\bcml-logs-check`, never in the repo): a
+  made-up package with 12 small made-up logs built from the game's data (a new flag, save entry, event, resident,
+  start point, map object, quest, text and drop item; a moved shrine entrance, a changed actor size and shop count)
+  installed in 26 seconds: every change read back from its file, `Bootup.pack`'s other 138 files byte-identical to
+  the game's, 16 language packs written, sizes above the game's (286 MB in all). Then `deploy_hook(files=True)` with
+  that package and the real character mod below, which both ship `TitleBG.pack`: one `TitleBG.pack` in 15 seconds
+  with the mod's 11 own files (10 byte-identical, 1 rebuilt with the same contents), its animation list, and the
+  made-up map object and quest. No real package with data logs tried yet, nothing in the game.
 - 2026-11-07, a real Switch package (a character and armor mod, 293 MB, 3 options) added to a scratch library from
   the user's own download, then `deploy --dry-run` and a deploy into that library: 40 seconds to add; 308 RomFS files,
   132 packs filled with 1846 files from the game, 201 parameter files merged, 382 size table entries;
@@ -178,3 +186,6 @@ table) and `bnp.json` (what was installed, its packs, the files each data log ch
   merge, worked out, not re-installed); `GameROMPlayer` unchanged at 3083328 (the 40 bytes fit its alignment). Nothing
   is left under *Needs attention* but the usual size table note. Only `TitleBG.pack`, the size table and `.bnp\`
   differ from the earlier install. Not tried in the game yet.
+- 2026-11-07, the same package added to a new scratch library with the data log merging in place (it has no data
+  logs): all 320 of its files byte-identical to an install made just before the change; only `.bnp\bnp.json`
+  differs (it now lists the files each data log changed: none).

@@ -19,7 +19,8 @@ Files:
     <deploy>\\native\\settings.txt         every library mod's settings, compiled (tab text); modhost reads it at start
 
 The deploy hooks modman calls (each import is lazy there):
-    option_romfs(lib, mods)              -> [(mod, folder)]: option folders, each right after its mod's own RomFS
+    option_romfs(lib, mods)              -> [(mod, folder) or (mod, folder, True) for DLC files]: option folders,
+                                            each right after its mod's own RomFS (romfs_mods' Layer)
     deploy_values(lib, mods)             -> {mod id: {key: value}} of the `deploy` settings (launch.json, deploy hash)
     write_settings_txt(lib, mods, deploy) -> the path written (or None: no library mod has settings)
 """
@@ -92,6 +93,7 @@ class Choice:
     label: str
     sets: dict = field(default_factory=dict)   # other settings of the mod -> value (a preset)
     romfs: str | None = None                   # option folder (applies = "deploy"), relative to mod.toml's folder
+    dlc_romfs: str | None = None               # the same for DLC files
 
 
 @dataclass
@@ -112,6 +114,7 @@ class Setting:
     max_length: int = 32
     button: str = "Do it"
     romfs: str | None = None                   # toggle: option folder used while it is on
+    dlc_romfs: str | None = None               # toggle: the same for DLC files
     show_if: str | None = None
     enable_if: str | None = None
     show_rpn: list[str] | None = None
@@ -470,45 +473,46 @@ def _decimals(*xs: float) -> int:
     return min(d, MAX_DECIMALS)
 
 
-def _folder_problems(where: str, folder, root: str | None, data_folders: list[str], errs: list[str]) -> str | None:
-    """An option folder: a path inside the mod (relative to mod.toml's folder), outside its [data] folders, holding
-    RomFS folders directly (Actor/, Pack/, ...; DLC files in aoc/0010/)."""
+def _folder_problems(where: str, folder, root: str | None, data_folders: list[str], errs: list[str],
+                     key: str = "romfs") -> str | None:
+    """An option folder (key: romfs, or dlc_romfs for DLC files): a path inside the mod (relative to mod.toml's
+    folder), outside its [data] folders, holding RomFS folders directly (Actor/, Pack/, ...: romfs_mods' Layer)."""
     if not isinstance(folder, str) or not folder.strip():
-        errs.append(f"{where}: romfs must be a folder in quotes, like romfs = \"options/gold\"")
+        errs.append(f"{where}: {key} must be a folder in quotes, like {key} = \"options/gold\"")
         return None
     v = folder.replace("\\", "/").strip().strip("/")
     parts = [p for p in v.split("/") if p not in ("", ".")]
     if (folder.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", folder) or not parts or ".." in parts
             or any(c in p for p in parts for c in '<>:"|?*')):
-        errs.append(f'{where}: romfs = "{folder}" must be a folder inside the mod, like "options/gold"')
+        errs.append(f'{where}: {key} = "{folder}" must be a folder inside the mod, like "options/gold"')
         return None
     rel = "/".join(parts)
     low = rel.lower()
     for d in data_folders:
         dl = d.lower().strip("/")
         if dl in ("", ".") or low == dl or low.startswith(dl + "/") or dl.startswith(low + "/"):
-            errs.append(f'{where}: romfs = "{rel}" is inside (or holds) the mod\'s own [data] folder "{d}": put '
+            errs.append(f'{where}: {key} = "{rel}" is inside (or holds) the mod\'s own [data] folder "{d}": put '
                         "option folders next to it, like options/gold")
             return None
     if any(p.lower() in FOLDER_NOT for p in parts):
-        errs.append(f'{where}: romfs = "{rel}": an option folder holds the RomFS folders (Actor, Pack, ...) itself, '
+        errs.append(f'{where}: {key} = "{rel}": an option folder holds the RomFS folders (Actor, Pack, ...) itself, '
                     "so its path can't have a romfs or content folder in it")
         return None
     if root is not None:
         full = os.path.join(root, *parts)
         if not os.path.isdir(full):
-            errs.append(f'{where}: romfs = "{rel}": no such folder in the mod')
+            errs.append(f'{where}: {key} = "{rel}": no such folder in the mod')
             return rel
         found = False
         for dirpath, dirnames, filenames in os.walk(full):
             bad = [d for d in dirnames if d.lower() in FOLDER_NOT]
             if bad:
-                errs.append(f'{where}: romfs = "{rel}" has a {bad[0]} folder in it: put the RomFS folders (Actor, '
+                errs.append(f'{where}: {key} = "{rel}" has a {bad[0]} folder in it: put the RomFS folders (Actor, '
                             f'Pack, ...) in {rel} itself')
                 return rel
             found = found or bool(filenames)
         if not found:
-            errs.append(f'{where}: romfs = "{rel}" has no files')
+            errs.append(f'{where}: {key} = "{rel}" has no files')
     return rel
 
 
@@ -563,7 +567,7 @@ def check(data: dict, root: str | None = None, *, native: bool | None = None,
     page_keys = {p.key for p in pages}
 
     known = {"key", "type", "label", "description", "applies", "page", "default", "show_if", "enable_if", "min",
-             "max", "step", "unit", "choices", "max_length", "button", "romfs"}
+             "max", "step", "unit", "choices", "max_length", "button", "romfs", "dlc_romfs"}
     sets: list[Setting] = []
     for i, r in enumerate(raw_sets):
         k = r.get("key")
@@ -613,11 +617,12 @@ def check(data: dict, root: str | None = None, *, native: bool | None = None,
             if d is not None and not isinstance(d, bool):
                 errs.append(f"{where}: default must be true or false")
             s.default = bool(d) if isinstance(d, bool) else False
-            if r.get("romfs") is not None:
-                if app != "deploy":
-                    errs.append(f"{where}: romfs (an option folder) needs applies = 'deploy'")
-                s.romfs = _folder_problems(where, r["romfs"], root, data_folders, errs)
-            elif app == "deploy":
+            for fk in ("romfs", "dlc_romfs"):
+                if r.get(fk) is not None:
+                    if app != "deploy":
+                        errs.append(f"{where}: {fk} (an option folder) needs applies = 'deploy'")
+                    setattr(s, fk, _folder_problems(where, r[fk], root, data_folders, errs, fk))
+            if app == "deploy" and r.get("romfs") is None and r.get("dlc_romfs") is None:
                 errs.append(f"{where}: applies = 'deploy' needs romfs = \"<folder used while it is on>\"")
         elif ty == "slider":
             nums = {x: r.get(x) for x in ("min", "max", "step")}
@@ -663,7 +668,7 @@ def check(data: dict, root: str | None = None, *, native: bool | None = None,
                     errs.append(f"{where}: choice value {v!r} is there twice")
                     continue
                 for x in c:
-                    if x not in ("value", "label", "sets", "romfs"):
+                    if x not in ("value", "label", "sets", "romfs", "dlc_romfs"):
                         warns.append(f"{where}: choice {v}: {x} isn't something modman knows; ignored")
                 ch = Choice(v, _text_problems(f"{where} choice {v} label", c.get("label"), LIMITS["choice label"],
                                               errs, warns, True))
@@ -672,12 +677,14 @@ def check(data: dict, root: str | None = None, *, native: bool | None = None,
                     errs.append(f"{where}: choice {v}: sets must be a table, like sets = {{ speed = 150 }}")
                 elif st:
                     ch.sets = dict(st)
-                if c.get("romfs") is not None:
-                    if app != "deploy":
-                        errs.append(f"{where}: choice {v} has romfs (an option folder), so applies must be 'deploy'")
-                    ch.romfs = _folder_problems(f"{where} choice {v}", c["romfs"], root, data_folders, errs)
+                for fk in ("romfs", "dlc_romfs"):
+                    if c.get(fk) is not None:
+                        if app != "deploy":
+                            errs.append(f"{where}: choice {v} has {fk} (an option folder), so applies must be "
+                                        "'deploy'")
+                        setattr(ch, fk, _folder_problems(f"{where} choice {v}", c[fk], root, data_folders, errs, fk))
                 s.choices.append(ch)
-            if app == "deploy" and s.choices and not any(c.romfs for c in s.choices):
+            if app == "deploy" and s.choices and not any(c.romfs or c.dlc_romfs for c in s.choices):
                 errs.append(f"{where}: applies = 'deploy' needs romfs = \"<folder>\" on the choices that use files")
             if d is None and s.choices:
                 d = s.choices[0].value
@@ -776,7 +783,8 @@ def check(data: dict, root: str | None = None, *, native: bool | None = None,
             warns.append(f"mod.toml: [[pages]] {p.key} has no settings")
     # Option folders sit next to the mod's own RomFS folder, which romfs_mods maps first: the mod needs one, and a
     # bare one (Actor/, Pack/, ... in a folder not named romfs) must be shallower, or the option would be taken as it.
-    folders = [f for s in sets for f in [s.romfs, *(c.romfs for c in s.choices)] if f]
+    folders = [f for s in sets for f in [s.romfs, s.dlc_romfs, *(x for c in s.choices for x in (c.romfs, c.dlc_romfs))]
+               if f]
     if folders:
         own = dat.get("romfs")
         own_parts = [p for p in own.replace("\\", "/").split("/") if p not in ("", ".")] if isinstance(own, str) else []
@@ -1102,11 +1110,12 @@ def mods_on(lib, mods, schemas: list[tuple[dict, Schema]] | None = None) -> dict
     return out
 
 
-def option_romfs(lib, mods) -> list[tuple[dict, str]]:
-    """The option folders of the enabled mods' `deploy` settings, as they are now: [(mod, folder)], in the order
-    modman puts them in the RomFS plan, each right after its mod's own RomFS (settings in mod.toml order; a later
-    one wins a file). mods: the enabled library entries, in deploy order."""
-    out: list[tuple[dict, str]] = []
+def option_romfs(lib, mods) -> list[tuple]:
+    """The option folders of the enabled mods' `deploy` settings, as they are now: (mod, folder) for RomFS files and
+    (mod, folder, True) for DLC files, in the order modman puts them in the RomFS plan (romfs_mods' Layer), each right
+    after its mod's own RomFS (settings in mod.toml order; a later one wins a file). mods: the enabled library
+    entries, in deploy order."""
+    out: list[tuple] = []
     for m in mods:
         d = os.path.join(lib.mods_dir, m["id"])
         sch = load_schema(d) if os.path.isdir(d) else None
@@ -1116,14 +1125,13 @@ def option_romfs(lib, mods) -> list[tuple[dict, str]]:
         for s in sch.settings:
             if s.applies != "deploy":
                 continue
-            folder = s.romfs if s.type == "toggle" and vals.get(s.key) else None
+            src = s if s.type == "toggle" and vals.get(s.key) else None
             if s.type == "choice":
-                c = s.choice(vals.get(s.key))
-                folder = c.romfs if c else None
-            if folder:
-                full = os.path.join(sch.root, *folder.split("/"))
-                if os.path.isdir(full):
-                    out.append((m, full))
+                src = s.choice(vals.get(s.key))
+            for folder, dlc in ((getattr(src, "romfs", None), False), (getattr(src, "dlc_romfs", None), True)):
+                full = os.path.join(sch.root, *folder.split("/")) if folder else None
+                if full and os.path.isdir(full):
+                    out.append((m, full, True) if dlc else (m, full))
     return out
 
 

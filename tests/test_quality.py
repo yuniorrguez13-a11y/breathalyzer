@@ -190,7 +190,6 @@ class Presets(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertEqual(man.id, mod_id)
 
-
     def test_presets_ship_only_what_was_measured(self):
         # High is the game's look with no mod; no preset uses the unverified shadow mod or a shorter object
         # distance (a gap in forests, enemies only nearer: docs/performance.md); only Low replaces Bootup.pack.

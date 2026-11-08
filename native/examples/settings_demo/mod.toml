@@ -19,7 +19,8 @@ loader_api = 3          # reads its settings through the mod API (version 3)
 windows = "settings_demo.dll"
 
 [data]
-romfs = "romfs"         # one harmless text file; the option folder below adds a second one
+romfs = "files"         # one harmless text file (Actor/, Pack/, System/... directly inside); the option folder
+                        # below adds a second one. (Not named romfs: the repo's .gitignore leaves romfs/ folders out.)
 
 [[pages]]
 key = "advanced"

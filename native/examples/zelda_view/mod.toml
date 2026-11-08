@@ -1,0 +1,94 @@
+# zelda_view: a hidden easter egg (docs/easter-eggs.md). Not shown in any help list on purpose.
+# Install it with the mod manager (docs/mod-manager.md):
+#   python tools/build_native.py build
+#   python tools/modman.py add native/examples/zelda_view
+#   python tools/zelda_view.py install      (optional: Zelda's pack, built on your PC from your own game files)
+#   python tools/modman.py deploy           (rebuilds the game code with 4 hook slots: 10-15 minutes the first time)
+# zelda_view.dll isn't in this folder: for the examples in this repo, modman takes it from build\native\hook-mods,
+# where build_native.py puts it (docs/mod-format.md). Add the example again after you rebuild it.
+# Turn it off: type the word again; or set Secret word OFF (the game then says Unknown command); or
+#   python tools/modman.py disable botw-mod-loader.zelda-view
+
+[mod]
+id = "botw-mod-loader.zelda-view"
+name = "Link from Zelda's view (easter egg)"
+version = "1.0.0"
+authors = ["giruka"]
+description = "A hidden easter egg for the in-game console. The word is in docs/easter-eggs.md. Not tested in game yet."
+game_versions = ["1.9.0"]   # it calls and hooks game functions by their 1.9.0 addresses
+loader_api = 3              # hooks (API 2) and live settings (API 3)
+
+[code]
+windows = "zelda_view.dll"
+hooks = ["0x7000045d60", "0x7000045d0c", "0x70014a1d04", "0x7001129af8"]   # as in hooks.txt
+
+[[settings]]
+key = "secret_word"
+type = "toggle"
+label = "Secret word"
+description = "The console word works. OFF: the game answers Unknown command."
+default = true
+applies = "live"
+
+[[settings]]
+key = "buff"
+type = "choice"
+label = "Muscles"
+description = "How buff Link gets while the egg is on."
+default = "extreme"
+applies = "live"
+choices = [
+  { value = "extreme", label = "Extreme" },
+  { value = "buff", label = "Buff" },
+  { value = "off", label = "Off" },
+]
+
+[[settings]]
+key = "shoulders"
+type = "toggle"
+label = "Wider shoulders"
+description = "Also moves his shoulders out a little (his hands sit 3 cm further out)."
+default = true
+applies = "live"
+
+[[settings]]
+key = "heavy_fast"
+type = "toggle"
+label = "Fast heavy swings"
+description = "Two-handed weapons swing like one-handed ones while the egg is on."
+default = true
+applies = "live"
+
+[[settings]]
+key = "zelda"
+type = "toggle"
+label = "Zelda on his back"
+description = "Needs her pack: python tools/zelda_view.py install, then deploy."
+default = true
+applies = "live"
+
+[[settings]]
+key = "seat_back"
+type = "slider"
+label = "Zelda further back"
+description = "Moves her back (or forward) on his back."
+min = -10
+max = 10
+step = 1
+default = 0
+unit = " cm"
+applies = "live"
+show_if = "zelda"
+
+[[settings]]
+key = "seat_side"
+type = "slider"
+label = "Zelda to the left"
+description = "Moves her head away from the bow-aim camera."
+min = 0
+max = 15
+step = 1
+default = 0
+unit = " cm"
+applies = "live"
+show_if = "zelda"

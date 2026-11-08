@@ -9,7 +9,7 @@
 [mod]
 id = "botw-mod-loader.ghost"
 name = "Ghost (example, experimental)"
-version = "0.6.0"
+version = "0.6.1"
 authors = ["giruka"]
 description = "Adds the control command ghost: spawn, move (smoothly), animate and remove a stand-in (a Sheikah man, or the Link body pack) for another player; ghost self reads your own Link (animation, weapon) for animation sync. The sync is opt-in; tested in game on one PC, not yet over two."
 game_versions = ["1.9.0"]   # it calls game functions by their 1.9.0 addresses

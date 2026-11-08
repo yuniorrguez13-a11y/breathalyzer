@@ -120,9 +120,9 @@ HISTORY_KEEP = 300             # lines kept once it grows past twice that
 DEFAULT_PROFILE = "Default"
 TITLE_PICK, MODS_PAGE_PICK = "_title", "_mods-page"   # (not mod ids: those start with a letter or digit)
 PICTURE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
-FONT_EXTS = (".ttf", ".otf")
-FONT_FOR = ("menu",)           # later: "all"
-FONT_LANGUAGES = ("US", "EU", "JP")   # later: KR, CN, TW, TH
+FONT_EXTS = (".ttf",)          # TrueType outlines (tools/font.py draws them itself)
+FONT_FOR, FONT_FOR_LATER = ("menu",), ("all",)                                  # "all": a note, used as "menu"
+FONT_LANGUAGES, FONT_LANGUAGES_LATER = ("US", "EU", "JP"), ("KR", "CN", "TW", "TH")   # later ones: a note
 MENU_SYMBOLS = set("{}#$%@^`|~")      # the game's menu font has none of these (until font.py fix-symbols is on)
 # The Mods page v2 parts live in their own tools, imported only when used (`feature`): a tool that isn't there, or
 # doesn't load, turns its part off. Called in this order: docs/mod-format.md, "What deploy does with them".
@@ -715,6 +715,7 @@ class Manifest:
     font: dict | None = None                 # [font]: {"file", "for", "languages", "license"} (checked here)
     settings: list[dict] = field(default_factory=list)   # [[settings]] as written (tools/mod_settings.py checks)
     pages: list[dict] = field(default_factory=list)      # [[pages]] as written
+    raw: dict = field(default_factory=dict, repr=False)  # the whole parsed mod.toml (for the parts' own checks)
 
     def rel(self, path: str) -> str:
         """A path mod.toml names, relative to the mod's root folder."""
@@ -919,18 +920,29 @@ def parse_manifest(text: str, base_rel: str = "") -> tuple[Manifest | None, list
         if "file" not in ft:
             errs.append('mod.toml: [font] needs file, the font in the mod, like file = "fonts/MyFont.ttf"')
         elif f_file is not None and not f_file.lower().endswith(FONT_EXTS):
-            errs.append(f'mod.toml: [font] file = "{clip(f_file)}" must be a .ttf or .otf font')
+            errs.append(f'mod.toml: [font] file = "{clip(f_file)}" must be a .ttf font (TrueType outlines)')
             f_file = None
         f_for = ft.get("for", "menu")
-        if f_for not in FONT_FOR:
+        if f_for in FONT_FOR_LATER:
+            notes.append(f'mod.toml: [font] for = "{f_for}" comes later: used as "menu" for now')
+            f_for = "menu"
+        elif f_for not in FONT_FOR:
             errs.append(f"mod.toml: [font] for = {clip(repr(f_for))}: write \"menu\" (the menus and the game's "
-                        "texts; other kinds come later)")
+                        "texts)")
         langs = ft.get("languages", list(FONT_LANGUAGES))
-        if not isinstance(langs, list) or not langs or any(x not in FONT_LANGUAGES for x in langs) \
-                or len(set(langs)) != len(langs):
-            errs.append(f"mod.toml: [font] languages must be a list of {', '.join(FONT_LANGUAGES)} (each once), like "
+        if not isinstance(langs, list) or not langs or not all(isinstance(x, str) for x in langs) \
+                or any(x.upper() not in FONT_LANGUAGES + FONT_LANGUAGES_LATER for x in langs):
+            errs.append(f"mod.toml: [font] languages must be a list of {', '.join(FONT_LANGUAGES)}, like "
                         'languages = ["US", "EU"]')
             langs = list(FONT_LANGUAGES)
+        later = [x.upper() for x in langs if x.upper() in FONT_LANGUAGES_LATER]
+        if later:
+            notes.append(f"mod.toml: [font] languages {', '.join(later)} come later; ignored for now")
+        langs = [x for x in FONT_LANGUAGES if x in {y.upper() for y in langs}]
+        if not langs and not later:
+            langs = list(FONT_LANGUAGES)
+        elif not langs:
+            errs.append(f"mod.toml: [font] languages has none of {', '.join(FONT_LANGUAGES)} yet")
         lic = text_of(ft, "font", "license", example="OFL-1.1")
         font = {"file": f_file, "for": f_for, "languages": list(langs), "license": lic}
     lists: dict[str, list[dict]] = {}
@@ -957,7 +969,7 @@ def parse_manifest(text: str, base_rel: str = "") -> tuple[Manifest | None, list
                     romfs=romfs, dlc_romfs=dlc_romfs, dependencies=dependencies, notes=notes,
                     icon=pics["icon"], background=pics["background"], title_picture=pics["title_picture"],
                     url=links["url"], update_url=links["update_url"], font=font, settings=lists["settings"],
-                    pages=lists["pages"]), []
+                    pages=lists["pages"], raw=data), []
 
 
 def _manifest_files(files: list[str]) -> list[str]:
@@ -1103,9 +1115,10 @@ def manifest_file_problems(man: Manifest, root: str, s: ModScan, real: list, rom
 
 def manifest_v2_problems(man: Manifest, root: str) -> tuple[list[str], list[str]]:
     """(problems, notes) of a mod.toml's Mods page v2 keys against the mod's files: the pictures and the font it
-    names must be there, and the tools of those parts check the rest (tools/mod_settings.py the [[settings]] and
-    [[pages]], tools/font.py the [font], tools/mod_pictures.py the pictures: each one's check(manifest, folder)).
-    A part whose tool isn't there isn't checked, and a note says so when the mod uses it."""
+    names must be there, tools/mod_settings.py checks the [[settings]] and [[pages]] (manifest_problems(mod.toml as
+    parsed, the folder mod.toml is in)), and tools/mod_pictures.py the pictures (check(manifest, mod folder)). Both
+    return (problems, notes). A part whose tool isn't there isn't checked, and a note says so when the mod uses it.
+    A check that fails itself is a note, never a refusal: that part is just off."""
     problems: list[str] = []
     notes: list[str] = []
     named = [(f"[mod] {k}", getattr(man, k)) for k in ("icon", "background", "title_picture")]
@@ -1113,22 +1126,23 @@ def manifest_v2_problems(man: Manifest, root: str) -> tuple[list[str], list[str]
     for key, rel in named:
         if rel and not os.path.isfile(os.path.join(root, *man.rel(rel).split("/"))):
             problems.append(f'{key} = "{rel}": no such file in the mod')
-    uses = {"mod_settings": bool(man.settings or man.pages), "font": man.font is not None,
-            "mod_pictures": bool(man.icon or man.background)}
-    what = {"mod_settings": "settings pages", "font": "font", "mod_pictures": "pictures"}
-    for module, used in uses.items():
-        if not used:
+    if man.font is not None and feature("font") is None:
+        notes.append("its font isn't used: this botw-mod-loader has no tools/font.py yet")
+    checks = []
+    if man.settings or man.pages:
+        here = os.path.join(root, *man.base_rel.split("/")) if man.base_rel else root
+        checks.append(("mod_settings", "manifest_problems", (man.raw, here), "settings pages"))
+    if man.icon or man.background:
+        checks.append(("mod_pictures", "check", (man, root), "pictures"))
+    for module, func, args, what in checks:
+        if feature(module, func) is None:
+            notes.append(f"its {what} aren't used: this botw-mod-loader has no tools/{module}.py yet")
             continue
-        if feature(module, "check") is None:
-            notes.append(f"its {what[module]} aren't used: this botw-mod-loader has no tools/{module}.py yet"
-                         if module != "font" else "its font isn't used: this botw-mod-loader has no tools/font.py yet")
-            continue
-        # (a check that fails itself is a note, never a refusal: that part is just off)
-        res = _feature_call(module, "check", man, root, problems=notes, what=f"checking its {what[module]}")
+        res = _feature_call(module, func, *args, problems=notes, what=f"checking its {what}")
         if res:
             p, n = res
-            problems += list(p)
-            notes += list(n)
+            problems += [str(x) for x in p]
+            notes += [str(x) for x in n]
     return problems, notes
 
 
@@ -2184,35 +2198,18 @@ def inputs_hash(lib: Library) -> str:
     return h.hexdigest()
 
 
-def settings_mods(lib: Library, rels: dict[str, list[str]] | None = None, *, enabled_only: bool = True
-                  ) -> list[tuple[dict, str, Manifest]]:
-    """(config entry, library folder, mod.toml) of each enabled mod (with enabled_only=False: each library mod;
-    entry["enabled"] says which are on) whose mod.toml has [[settings]], in library order."""
-    out = []
-    for m in (lib.enabled() if enabled_only else lib.mods):
-        root = os.path.join(lib.mods_dir, m["id"])
-        files = (rels or {}).get(m["id"])
-        if files is not None and not _manifest_files(files):
-            continue
-        if not os.path.isdir(root):
-            continue
-        man = read_manifest(root, files)[0]
-        if man and man.settings:
-            out.append((m, root, man))
-    return out
-
-
 def deploy_setting_values(lib: Library, rels: dict[str, list[str]] | None = None) -> dict:
     """The values of the enabled mods' `applies = "deploy"` settings that deploy uses ({mod id: {key: value}}), from
-    tools/mod_settings.py's deploy_values(lib, mods). {} without that tool or such settings."""
-    f = feature("mod_settings", "deploy_values")
-    if f is None:
+    tools/mod_settings.py's deploy_values(lib, mods) (mods: the enabled library entries). {} without that tool, or
+    when no enabled mod has a mod.toml (`rels`: the files of each enabled mod, when known: saves a look)."""
+    if feature("mod_settings", "deploy_values") is None:
         return {}
-    mods = settings_mods(lib, rels)
-    if not mods:
+    mods = lib.enabled()
+    if rels is not None and not any(_manifest_files(rels.get(m["id"], [])) for m in mods):
         return {}
     res = _feature_call("mod_settings", "deploy_values", lib, mods)
-    return {k: dict(v) for k, v in (res or {}).items() if isinstance(v, dict) and v}
+    return {str(k): dict(v) for k, v in (res or {}).items() if isinstance(v, dict) and v} \
+        if isinstance(res, dict) else {}
 
 
 def _with_hooks(key: str, hooks) -> str:
@@ -2692,9 +2689,6 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False) -> 
             rebuild = "reuse" if kept else "pending" if no_rebuild else "build"
             if rebuild != "pending":
                 game_lib = out_lib
-        if makers:
-            notes.append("Not made in a dry run: " + ", ".join(GENERATED_OWNER[m].split(":")[1] for m in makers)
-                         + " (deploy makes them).")
         launch = _launch(lib, h, exe, pre, rep, root_dir, game_lib, rebuild if code_patches else "none", native, d,
                          merged, game, attention, notes, patch_files, hooks=hooks,
                          hook_rebuild=rebuild, hooks_file=d.abs(HOOKS_FILE), settings=deploy_values)
@@ -2707,12 +2701,13 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False) -> 
     d.clear(keep={LIB, LIB + ".id"})
     man = None
     p = None
+    made: dict = {}
     try:
         if sources or makers:  # (the plan, then the files made at deploy over it: fonts, title picture, pictures)
             if gindex is None and os.path.isdir(os.path.join(extracted, "romfs")):
                 gindex = rm.GameIndex.scan(extracted)
             p = rm.plan(sources, gindex, rstb)
-            for rel, data in run_makers(lib, p, scans, makers, attention, notes):
+            for rel, data in run_makers(lib, p, scans, makers, attention, notes, made):
                 with open(d.add_file(rel), "wb") as f:
                     f.write(data)
         if p is not None and p.winners:
@@ -2823,17 +2818,21 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False) -> 
         with open(d.add_file(f"cheats/{game.main_bid16}.txt"), "w", encoding="utf-8", newline="\n") as f:
             f.write(merged.text)
 
-    if native:  # (the settings pages: tools/mod_settings.py settings_txt, read by modhost at game start)
-        smods = settings_mods(lib, enabled_only=False) if feature("mod_settings", "settings_txt") else []
-        txt = _feature_call("mod_settings", "settings_txt", lib, smods, problems=attention,
-                            what="Mod settings") if smods else None
-        if txt:
-            with open(d.add_file("native/settings.txt"), "w", encoding="utf-8", newline="\n") as f:
-                f.write(txt)
+    if native:  # (the settings pages: read by modhost at game start; mods: the enabled library entries)
+        on = [m for m, _, _ in scans]
+        if feature("mod_settings", "write_settings_txt"):  # (it writes deploy\native\settings.txt through d)
+            _feature_call("mod_settings", "write_settings_txt", lib, on, d, problems=attention, what="Mod settings")
+        elif feature("mod_settings", "settings_txt"):
+            txt = _feature_call("mod_settings", "settings_txt", lib, on, problems=attention, what="Mod settings")
+            if txt:
+                with open(d.add_file("native/settings.txt"), "w", encoding="utf-8", newline="\n") as f:
+                    f.write(txt)
 
     launch = _launch(lib, h, exe, man, rep, root_dir, game_lib, rebuild if code_patches else "none", native, d,
                      merged, game, attention, notes, patch_files, hooks=hooks, hook_rebuild=rebuild,
                      hooks_file=hooks_file, settings=deploy_values)
+    if made:  # (what the makers say about what they made: font.py's symbols_full and font name, for modmenu.sync)
+        launch["made"] = made
     write_json(d.add_file(LAUNCH), launch)
     d.save(complete=True)
     history_append(lib, {"type": "deploy", "hash": h, "profile": lib.profile,
@@ -2848,20 +2847,28 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False) -> 
 def option_layers(lib: Library, scans: list[tuple[dict, str, ModScan]], attention: list[str]
                   ) -> list[tuple[str, str, bool]]:
     """The option folders the enabled mods' `applies = "deploy"` settings chose, as (mod id, folder, dlc), from
-    tools/mod_settings.py's option_romfs(lib, mods). A folder outside its mod's library folder is left out."""
-    mods = [(m, root, s.manifest) for m, root, s in scans if s.manifest and s.manifest.settings]
-    if not mods or feature("mod_settings", "option_romfs") is None:
+    tools/mod_settings.py's option_romfs(lib, mods): mods are the enabled library entries in deploy order, and it
+    returns (entry or mod id, folder) or (entry or mod id, folder, dlc) items, in order. A folder outside its mod's
+    library folder is left out."""
+    if not any(s.manifest and s.manifest.settings for _, _, s in scans) \
+            or feature("mod_settings", "option_romfs") is None:
         return []
-    roots = {m["id"]: root for m, root, _ in mods}
+    roots = {m["id"]: root for m, root, _ in scans}
     out = []
-    for item in _feature_call("mod_settings", "option_romfs", lib, mods, problems=attention,
+    for item in _feature_call("mod_settings", "option_romfs", lib, [m for m, _, _ in scans], problems=attention,
                               what="Mod settings option folders") or []:
-        mod_id, folder, dlc = item
+        try:
+            who, folder, *rest = item
+            mod_id = who["id"] if isinstance(who, dict) else str(who)
+            folder = str(folder)
+        except (TypeError, ValueError, KeyError):
+            attention.append(f"Mod settings: an option folder came as {clip(repr(item))}: left out")
+            continue
         root = roots.get(mod_id)
         if not root or not _inside(folder, root) or not os.path.isdir(folder) or _is_link(folder):
             attention.append(f"{mod_id}: option folder {folder} isn't a folder inside the mod: left out")
             continue
-        out.append((mod_id, os.path.abspath(folder), bool(dlc)))
+        out.append((mod_id, os.path.abspath(folder), bool(rest and rest[0])))
     return out
 
 
@@ -2891,19 +2898,27 @@ DEPLOY_FILE_TOPS = ("pictures", "fonts")   # where a maker's files for deploy\ m
 
 
 def run_makers(lib: Library, plan: "rm.Plan", scans: list[tuple[dict, str, ModScan]], makers: list[str],
-               attention: list[str], notes: list[str]) -> list[tuple[str, bytes]]:
+               attention: list[str], notes: list[str], made: dict | None = None) -> list[tuple[str, bytes]]:
     """Run each maker's deploy_files over the plan, in order: tools/font.py (lib, plan), tools/menu_bg.py (lib, plan,
     title picture) and tools/mod_pictures.py (lib, plan) last, so it builds on the final winning files. Each returns
-    a list of (RomFS path, bytes, size-table entry or None), which go into the overlay as "generated:<what>" files
-    (romfs_mods.add_generated), ("deploy/<pictures or fonts>/...", bytes, None) for a file in deploy\\, and strings,
-    which are notes. A maker that fails is off for this deploy (one line under Needs attention). Returns the deploy\\
-    files as (path in deploy\\, bytes)."""
+    a list of (RomFS path, bytes, size-table entry or None) items, which go into the overlay as "generated:<what>"
+    files (romfs_mods.add_generated; the entry is (name in the size table, size)); ("deploy/<pictures or
+    fonts>/...", bytes, None) for a file in deploy\\; and strings, which are notes. The list may carry `notes` and
+    `attention` lists, and other plain values (font.py: symbols_full, font), which go into `made`["<what>"] and
+    launch.json's "made" (modmenu.sync reads them). A maker that fails is off for this deploy (one line under Needs
+    attention). Returns the deploy\\ files as (path in deploy\\, bytes)."""
     out: list[tuple[str, bytes]] = []
     for module in makers:
         owner = GENERATED_OWNER[module]
         what = owner.split(":")[1].capitalize()
         args = (lib, plan, title_picture_choice(lib, scans)) if module == "menu_bg" else (lib, plan)
         res = _feature_call(module, "deploy_files", *args, problems=attention, what=what)
+        extra = dict(getattr(res, "__dict__", None) or {})
+        notes += [f"{what}: {n}" for n in extra.pop("notes", None) or []]
+        attention += [f"{what}: {a}" for a in extra.pop("attention", None) or []]
+        if made is not None and extra:
+            made[owner.split(":")[1]] = {k: v for k, v in extra.items()
+                                         if isinstance(v, (str, int, float, bool)) or v is None}
         files = []
         for item in res or []:
             if isinstance(item, str):

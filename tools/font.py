@@ -11,9 +11,9 @@
 
 The game draws its English, European and Japanese menus from bitmap fonts in Font/Font_US, Font_EU and
 Font_JP.sbfarc (Yaz0, then SARC): Caption_00 (Options row names and the description line), NormalS_00 (values,
-buttons; outlined) and Normal_00 (titles, dialogue). Caption_00 lacks { } # $ % @ ^ ` | ~ (Japanese also " & ' * ; = \\),
-so those show as gaps. This tool edits those archives at deploy, on this PC, from the archive that is in use (a
-RomFS mod's, else the game's own; both only read):
+buttons; outlined) and Normal_00 (titles, dialogue). Caption_00 lacks { } # $ % @ ^ ` | ~ (Japanese also
+" & ' * ; = \\), so those show as gaps. This tool edits those archives at deploy, on this PC, from the archive
+that is in use (a RomFS mod's, else the game's own; both only read):
 
   fix-symbols  draws every printable ASCII character a menu font lacks into free cells, from Fira Sans (the copy
                Savage Wind ships next to savagewind.exe, else assets/fonts/), sized and thinned to match the font.
@@ -61,7 +61,7 @@ FIRA_SEMIBOLD = "FiraSans-SemiBold.ttf"  # the easy-read font
 FIRA_LICENSE = "FiraSans-OFL.txt"
 SETTINGS = "font.json"
 CACHE_DIR = os.path.join("fonts", "cache")
-CACHE_KEEP = 9               # cached archives kept (3 languages x 3 recent recipes)
+CACHE_KEEP = 6               # cached archives kept (3 languages x the last 2 recipes)
 FIX_SYMBOLS_DEFAULT = False  # turned on by default only after the game check (docs/fonts.md)
 CHOICES = ("auto", "game", "easy-read")
 EASY_READ = "Easy-read"
@@ -465,7 +465,8 @@ class Bffnt:
     def _blocks_of(self, gi: int) -> set[tuple[int, int, int]]:
         s, x0, y0 = self.cell_of(gi)
         r0, r1 = self.sh - (y0 + self.ch), self.sh - 1 - y0  # raw rows the cell covers
-        return {(s, bx, by) for bx in range(x0 >> 2, (x0 + self.cw - 1 >> 2) + 1) for by in range(r0 >> 2, (r1 >> 2) + 1)}
+        return {(s, bx, by) for bx in range(x0 >> 2, ((x0 + self.cw - 1) >> 2) + 1)
+                for by in range(r0 >> 2, (r1 >> 2) + 1)}
 
     def cell_is_free(self, gi: int, taken: set[int]) -> bool:
         """True when a cell no glyph uses has no ink, and the 4x4 blocks it shares hold no ink of a glyph that stays
@@ -716,7 +717,8 @@ class TrueType:
                 deltas, ranges = starts + seg2, starts + 2 * seg2
                 out = {}
                 for s in range(seg2 // 2):
-                    end, start = struct.unpack_from(">H", d, ends + 2 * s)[0], struct.unpack_from(">H", d, starts + 2 * s)[0]
+                    end = struct.unpack_from(">H", d, ends + 2 * s)[0]
+                    start = struct.unpack_from(">H", d, starts + 2 * s)[0]
                     delta = struct.unpack_from(">h", d, deltas + 2 * s)[0]
                     ro = struct.unpack_from(">H", d, ranges + 2 * s)[0]
                     for c in range(start, end + 1):
@@ -860,14 +862,18 @@ def load_truetype(path: str) -> TrueType:
 
 FREE_WORDS = ("open font license", "scripts.sil.org/ofl", "openfontlicense", "apache license", "ubuntu font licence",
               "public domain", "cc0", "font exception", "bitstream vera", "mit license")
+NOT_FREE_WORDS = ("microsoft supplied font", "any other use is prohibited", "all rights reserved")
 
 
 def license_info(tt: TrueType) -> dict:
     """The font's own words about its licence (name IDs 0, 13, 14) and embedding flags. A warning, never a block."""
     names = tt.names()
     fst = tt.fstype()
-    text = " ".join(names.get(k, "") for k in (0, 13, 14)).lower()
-    free = any(w in text for w in FREE_WORDS)
+    # (the start of the licence field and its address, else the copyright line: further down, a licence text can
+    # name another licence for a part, as Arial's does for its Hebrew layout code)
+    lic = names.get(13, "")
+    head = (lic[:200] + " " + names.get(14, "")).lower() if lic or names.get(14) else names.get(0, "").lower()
+    free = any(w in head for w in FREE_WORDS) and not any(w in lic.lower() for w in NOT_FREE_WORDS)
     warn = []
     if not free:
         warn.append("its licence isn't one this tool knows as free: use it on your own PC, and don't share game "
@@ -902,7 +908,8 @@ def _flatten(contour: list[tuple[float, float, bool]], s: float) -> list[tuple[f
         for i in range(1, n + 1):
             t = i / n
             u = 1 - t
-            out.append((u * u * p0[0] + 2 * u * t * c[0] + t * t * p2[0], u * u * p0[1] + 2 * u * t * c[1] + t * t * p2[1]))
+            out.append((u * u * p0[0] + 2 * u * t * c[0] + t * t * p2[0],
+                        u * u * p0[1] + 2 * u * t * c[1] + t * t * p2[1]))
     for p in seq[1:] + [seq[0]]:
         if p[2]:
             if ctrl is None:
@@ -1323,7 +1330,7 @@ def check_font_table(t, files: set[str] | None = None, base_rel: str = "") -> tu
         parts = [x for x in p.split("/") if x not in ("", ".")]
         if p.startswith("/") or (len(p) > 1 and p[1] == ":") or not parts or ".." in parts:
             probs.append(f'mod.toml: [font] file = "{v[:60]}" must be a path inside the mod folder')
-        elif not parts[-1].lower().endswith((".ttf", ".otf")):
+        elif not parts[-1].lower().endswith(".ttf"):
             probs.append(f'mod.toml: [font] file = "{v[:60]}" must be a .ttf font (TrueType outlines)')
         else:
             clean["file"] = "/".join(parts)
@@ -1398,6 +1405,22 @@ def font_mods(lib) -> list[FontMod]:
     return out
 
 
+def on_add(lib, entry: dict, folder: str, man) -> list[str]:
+    """modman add (after the mod is in the library): a font mod's font is read once, so a font this tool can't draw
+    (CFF outlines, a collection) or a licence that isn't free is said at once. Never refuses the mod."""
+    ft = getattr(man, "font", None)
+    if not isinstance(ft, dict) or not ft.get("file"):
+        return []
+    rel = man.rel(ft["file"]) if hasattr(man, "rel") else ft["file"]
+    try:
+        tt = load_truetype(os.path.join(folder, *rel.split("/")))
+    except FontError as e:
+        return [f"Its font can't be used: {e}"]
+    info = license_info(tt)
+    out = [f"Its font ({info['family']}) can be chosen: python tools/font.py choose {entry.get('id', '<id>')}"]
+    return out + [f"Its font: {w}." for w in info["warnings"]]
+
+
 class Choice(NamedTuple):
     key: str       # "game", "easy-read" or "mod:<id>"
     label: str     # ASCII, at most 28 characters (the game's chooser row)
@@ -1457,30 +1480,36 @@ class Generated(list):
         self.attention = attention if attention is not None else []
 
 
+def _read(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read(MAX_ARCHIVE + 1)
+
+
 def _entry_bytes(plan, hit) -> bytes | None:
-    """Bytes of what a plan names as the winner of a path: bytes, a file path, an entry, or (mod index, entry)."""
+    """Bytes of what a plan names as the winner of a path: romfs_mods' Winner (a mod's entry, or the game's file),
+    or (mod index, entry) from plan.winners."""
     if hit is None:
         return None
-    if isinstance(hit, (bytes, bytearray)):
-        return bytes(hit)
-    if isinstance(hit, str):
-        with open(hit, "rb") as f:
-            return f.read(MAX_ARCHIVE + 1)
-    idx, e = hit if isinstance(hit, tuple) else (None, hit)
+    if hasattr(hit, "game_path"):  # romfs_mods.Winner
+        e, z, idx = hit.entry, getattr(hit, "zip", None), None
+        if e is None:
+            return _read(hit.game_path) if hit.game_path else None
+    else:
+        idx, e = hit
+        z = getattr(plan.mods[idx], "zip", None)
     if getattr(e, "data", None) is not None:
         return bytes(e.data)
     if getattr(e, "src", ""):
-        with open(e.src, "rb") as f:
-            return f.read(MAX_ARCHIVE + 1)
+        return _read(e.src)
     zname = getattr(e, "zname", "")
-    if zname and idx is not None:
-        import zipfile
-        mod = plan.mods[idx]
-        z = getattr(mod, "zip", None)
+    if zname:
         try:
             return z.read(zname)
-        except (AttributeError, ValueError):
-            with zipfile.ZipFile(mod.path) as z2:
+        except (AttributeError, ValueError):  # (no zip, or the plan closed it: open the mod's .zip again)
+            if idx is None:
+                return None
+            import zipfile
+            with zipfile.ZipFile(plan.mods[idx].path) as z2:
                 return z2.read(zname)
     return None
 
@@ -1490,12 +1519,10 @@ def winner(plan, rel: str, game_romfs: str | None) -> tuple[bytes | None, str]:
     if plan is not None:
         fn = getattr(plan, "winner", None)
         if callable(fn):
-            try:
-                got = _entry_bytes(plan, fn(rel))
-            except NotImplementedError:
-                got = None
+            w = fn(rel)
+            got = _entry_bytes(plan, w)
             if got is not None:
-                return got, "a mod"
+                return got, getattr(w, "mod", None) or "the game"
         for target, hit in (getattr(plan, "winners", None) or {}).items():
             if target.lower() == rel.lower():
                 got = _entry_bytes(plan, hit)
@@ -1531,9 +1558,9 @@ def deploy_files(lib, plan=None, *, game_romfs: str | None = None) -> Generated:
             font_tt = load_truetype(pick.file)
             lic = license_info(font_tt)
             if pick.key.startswith("mod:"):
-                notes += [f"Font {pick.label}: {w}." for w in lic["warnings"]]
+                notes += [f"{pick.label}: {w}." for w in lic["warnings"]]
         except FontError as e:
-            attention.append(f"Font {pick.label}: {e}; the game's font is used")
+            attention.append(f"{pick.label}: {e}; the game's font is used")
             pick, font_tt = Choice("game", GAME_FONT, None, LANGS), None
     fix_tt = None
     if st["fix_symbols"]:

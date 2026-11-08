@@ -1461,6 +1461,21 @@ def log_mergers() -> dict:
     return {name: mod for mod in (bcml_data, bcml_maps, bcml_texts) for name in mod.LOGS}
 
 
+def fixed_targets(mergers: dict | None = None) -> dict[str, str]:
+    """Log name -> the one game file (target) it changes, for the kinds that change one fixed file (game data, event
+    info, the statics, quests...; not texts, drops, shops or map units)."""
+    mergers = log_mergers() if mergers is None else mergers
+    out = {}
+    for name, m in mergers.items():
+        kinds = getattr(m, "KINDS", None)
+        if isinstance(kinds, dict) and name in kinds:
+            out[name] = kinds[name][0]
+    m = mergers.get("quests.yml")
+    if m is not None:
+        out.update({"mainstatic.yml": m.MAINSTATIC, "dstatic.yml": m.DSTATIC, "quests.yml": m.QUESTS})
+    return out
+
+
 def _log_error(where: str, name: str, e: Exception) -> str:
     """A log a merger can't read, for "needs attention" (the merger's message starts with the log's name)."""
     msg = str(e).strip()
@@ -1478,12 +1493,12 @@ class Targets:
 
     def __init__(self, stage: str, game: str, blobs: dict, game_blobs: dict, sizes: Sizes):
         self.stage, self.game, self.blobs, self.game_blobs, self.sizes = stage, game, blobs, game_blobs, sizes
-        self.files_now = {r.lower(): r for r in _walk(stage)}
+        self.files_now = {r.lower(): r for r in _walk(stage)} if os.path.isdir(stage) else {}
         self.opened: dict[str, Blob] = {}      # rel -> a pack of the mod read but not changed (yet)
         self.loose: dict[str, bytes] = {}      # rel -> a whole file's new bytes
 
     def rel(self, top: str) -> str:
-        rel = f"{BASE_TID}/romfs/{top}"
+        rel = f"{BASE_TID}/romfs/{'/'.join(check_name(top, 'a log'))}"   # (a name from a log: checked like any)
         return self.files_now.get(rel.lower(), rel)
 
     def _game_top(self, rel: str) -> Blob | None:
@@ -1509,7 +1524,10 @@ class Targets:
 
     def read(self, target: str) -> bytes | None:
         parts = target.split("//")
-        rel = self.rel(parts[0])
+        try:
+            rel = self.rel(parts[0])
+        except BnpError:
+            return None    # (put names it)
         if len(parts) == 1:
             if rel in self.loose:
                 return self.loose[rel]
@@ -1521,7 +1539,10 @@ class Targets:
     def put(self, target: str, data: bytes) -> str | None:
         """Set a target's bytes in the mod. Returns why it can't be, or None."""
         parts = target.split("//")
-        rel = self.rel(parts[0])
+        try:
+            rel = self.rel(parts[0])
+        except BnpError:
+            return "its path isn't a safe game file path"
         if len(parts) == 1:
             self.loose[rel] = data
             return None

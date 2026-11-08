@@ -1,0 +1,21 @@
+{
+  "about": "Zelda's lines (ours, plain text, no voice). talk: what she says when you talk to her, Link's choices and her replies. mood is kept for the date (stage 2); stage 1 plays anim only.",
+  "actor": "SwZelda",
+  "name": "Zelda",
+  "talk": {
+    "label": "Talk00",
+    "anim": "Hello",
+    "mood": "Pleasure",
+    "text": "Link! You found the right door. The other two are... decorative. I read too many castle mystery books.",
+    "choices": [
+      {"text": "I'd find you anywhere.",
+       "reply": {"label": "Talk01", "mood": "Pleasure",
+                 "text": "That's sweet. And a little alarming, given the Moblin outside."}},
+      {"text": "Lucky guess.",
+       "reply": {"label": "Talk02", "text": "Luck is just research nobody wrote down yet."}},
+      {"text": "There were other doors?",
+       "reply": {"label": "Talk03", "mood": "Surprise",
+                 "text": "Please don't open them. I haven't catalogued what's behind them."}}
+    ]
+  }
+}

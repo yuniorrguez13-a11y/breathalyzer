@@ -96,7 +96,8 @@ LEVERS: dict[str, Lever] = {lv.id: lv for lv in (
 )}
 
 # The presets. Values are the levers' (numbers: shares of the game's, or metres; True: the game's effect on).
-# Only levers with a measured gain or no game file replaced are in them (docs/performance.md, round 3).
+# No preset uses the unverified shadow mod or a shorter object distance; only Low replaces a game file (Bootup.pack,
+# with its cost noted). The fps gains are not proven yet (docs/performance.md: measured on a busy laptop).
 PRESETS: dict[str, dict[str, object]] = {
     "original": {"grass": 1.0, "objects": 1.0, "shadow_range": 3000.0, "ssao": True, "bloom": True, "dof": True,
                  "no_grass": False},
@@ -109,8 +110,8 @@ PRESETS: dict[str, dict[str, object]] = {
 }
 LABELS = {"low": "Low", "medium": "Medium", "high": "High", "original": "Original", CUSTOM: "Custom"}
 BLURBS = {
-    "low": "Most fps: short grass, no glow, no ambient occlusion, no far blur. Replaces Pack/Bootup.pack, so "
-           "Savage Wind's HUD button letters and voice size fix are off.",
+    "low": "Short grass, no glow, no ambient occlusion, no far blur (fps gain not proven yet). Replaces "
+           "Pack/Bootup.pack, so Savage Wind's HUD button letters and voice size fix are off.",
     "medium": "Shorter grass only; no game file replaced. Not measured on its own.",
     "high": "The game's look, no mods; only Savage Wind's upscaler (Ultra performance) differs from Original.",
     "original": "The game as it is: no quality mods, no start-up values.",

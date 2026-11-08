@@ -1224,6 +1224,12 @@ class DataLogs(Base):
         self.assertEqual(res.logs_merged, {"drops.json": []})
         self.assertTrue(any("Nobody.sbactorpack//Actor/DropTable/N.bdrop not merged (neither the mod nor the game "
                             "has its pack)" in x for x in res.not_merged), res.not_merged)
+        # a name Windows treats specially, from a log, is refused like an archive's (nothing written)
+        targets = bnp.Targets(str(self.tmp / "t"), str(self.game), {}, {}, bnp.Sizes(None))
+        self.assertEqual(targets.put("Actor/Pack/CON.sbactorpack//Actor/DropTable/N.bdrop", b"x"),
+                         "its path isn't a safe game file path")
+        self.assertIsNone(targets.read("Actor/../X//Y"))
+        self.assertFalse((self.tmp / "t").exists())
 
     def test_deploy_names_merged_logs_a_later_package_replaces(self):
         info = {"version": "1", "platform": "switch"}
@@ -1248,8 +1254,11 @@ class DataLogs(Base):
         as lost. (modman doesn't pass these files to the overlay yet.)"""
         info = {"version": "1", "platform": "switch"}
         hero = f"{R}/Actor/Pack/Hero.sbactorpack//Actor/Physics/Hero.bphysics"
+        events = byml({"Ev<A>": {"mode": "Seamless"}, "Ev<C>": {"mode": "One"}})   # (shipped, as BCML does)
         one = {"info.json": json.dumps({**info, "name": "One"}),
-               f"{R}/Pack/Bootup.pack": sarc({"Other/Untouched.txt": "one's own"}),
+               f"{R}/Pack/Bootup.pack": sarc({"Other/Untouched.txt": "one's own",
+                                              "Event/EventInfo.product.sbyml": events}),
+               "logs/eventinfo.yml": "Ev<C>: {mode: One}\n",
                "logs/gamedata.yml": f"bool_data:\n  add:\n    FlagOne: {flag_yaml('FlagOne')}\n",
                "logs/map.yml": "A-1_Static:\n  Objs:\n    add:\n    - {HashId: !u 0x7, UnitConfigName: One}\n",
                "logs/shop.aamp": shop_log(),
@@ -1271,7 +1280,8 @@ class DataLogs(Base):
         gd = bd.byml_load(dict(wc.sarc_files(wc.yaz0_decompress(boot["GameData/gamedata.ssarc"])[0]))[
             "/bool_data_0.bgdata"])
         self.assertEqual([e["DataName"] for e in gd["bool_data"]], ["FlagA", "FlagOne", "FlagTwo"])
-        self.assertEqual(bd.byml_load(boot["Event/EventInfo.product.sbyml"])["Ev<B>"], {"mode": "Two"})
+        self.assertEqual(bd.byml_load(boot["Event/EventInfo.product.sbyml"]),
+                         {"Ev<A>": {"mode": "Seamless"}, "Ev<B>": {"mode": "Two"}, "Ev<C>": {"mode": "One"}})
         self.assertEqual(boot["Other/Untouched.txt"], b"one's own")          # (One's own file, Two had the game's)
         title = dict(wc.sarc_files(hook.files["Pack/TitleBG.pack"]))
         self.assertEqual([int(o["HashId"]) for o in bm.byml_load(title["Map/MainField/A-1/A-1_Static.smubin"])["Objs"]],

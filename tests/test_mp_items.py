@@ -33,7 +33,7 @@ def session(**extra):
 
 
 MOD_060 = {"state": "live", "last": "", "takes_speed": True, "takes_anim": True, "has_self": True, "has_items": True,
-           "version": "0.6.0"}
+           "version": "0.6.1"}
 MOD_051 = {"state": "live", "last": "", "takes_speed": True, "takes_anim": True, "has_self": True, "version": "0.5.1"}
 
 
@@ -125,6 +125,40 @@ class GhostItemsTests(unittest.TestCase):
         self.g.has_items = True
         v = {"weapon": "x" * 64, "shield": "Bad name", "bow": 5, "anim": "Wait"}
         self.assertEqual(client.items_command(v), ["ghost", "items", "-", "-", "-", "4"])
+
+    def test_only_weapons_shields_and_bows_each_in_its_hand(self):
+        """0.6.1 (review): the other player's data can't make your game spawn anything else."""
+        for bad in ({"weapon": "Enemy_Bokoblin_Junior"}, {"weapon": "GameROMPlayer"}, {"weapon": "Weapon_Shield_001"},
+                    {"shield": "Weapon_Sword_001"}, {"bow": "Weapon_Lsword_001"}, {"weapon": "Weapon_Sword_070"},
+                    {"weapon": "Weapon_Sword_080"}, {"bow": "Weapon_Bow_071"}, {"weapon": "Weapon_Sword_"}):
+            with self.subTest(v=bad):
+                self.assertEqual(client.items_command(bad)[2:5], ["-", "-", "-"])
+        good = {"weapon": "Weapon_Spear_001", "shield": "Weapon_Shield_002", "bow": "Weapon_Bow_002"}
+        self.assertEqual(client.items_command(good)[2:5], ["Weapon_Spear_001", "Weapon_Shield_002", "Weapon_Bow_002"])
+        self.assertTrue(client.item_name_ok(0, "Weapon_Lsword_001"))
+
+    def test_a_missing_key_leaves_it_as_it_was(self):
+        """0.6.1 (review): a state without item keys (their ghost self didn't answer in time) changes nothing; only
+        an explicit "" clears."""
+        s = session(weapon=ITEMS[0], shield=ITEMS[1], bow=ITEMS[2], on_back=4)
+        self.tick(s, 10.0)
+        self.assertEqual(self.items_of(self.tick(s, 10.05)), [["ghost", "items", *ITEMS, "4"]])
+        s.handle(dict(state(x=3.0, z=0.0, t=2.0), id=1, name="Bo"), now=10.1)         # (no item keys at all)
+        s.handle(dict(state(x=3.0, z=0.0, t=2.1), id=1, name="Bo"), now=10.2)
+        self.assertEqual(self.items_of(self.tick(s, 10.3)), [])                       # (no change: nothing sent)
+        self.assertEqual(self.g.held({})["weapon"], ITEMS[0])
+        s.handle(dict(state(x=3.0, z=0.0, t=2.2), id=1, name="Bo", weapon="", on_back=0), now=10.4)
+        s.handle(dict(state(x=3.0, z=0.0, t=2.3), id=1, name="Bo", weapon="", on_back=0), now=10.5)
+        self.assertEqual(self.items_of(self.tick(s, 10.6)), [["ghost", "items", "-", ITEMS[1], ITEMS[2], "0"]])
+
+    def test_a_new_player_starts_empty(self):
+        s = session(weapon=ITEMS[0], on_back=0)
+        self.tick(s, 10.0)
+        self.tick(s, 10.05)
+        s.handle({"type": "leave", "id": 1}, now=10.1)
+        self.tick(s, 10.1)
+        s.handle(dict(state(x=3.0, z=0.0, t=3.0), id=2, name="Cy"), now=10.2)     # (Cy sends no items)
+        self.assertEqual(self.items_of(self.tick(s, 10.25)), [["ghost", "items", "-", "-", "-", "4"]])
 
     def test_mask_of_an_older_sender(self):
         self.assertEqual(client.item_mask({}), 4)                         # (the bow on the back)
@@ -230,6 +264,37 @@ class BotItemsTests(unittest.TestCase):
         self.assertEqual({(m["weapon"], m["shield"], m["bow"], m["on_back"]) for m in sent}, {("W_1", "", "B_1", 4)})
         self.assertIsNotNone(mp.clean_state(sent[0]).get("on_back"))
 
+    def test_steps_logged_and_an_older_sender(self):
+        import asyncio
+        sent, logged = [], []
+
+        class Link:
+            def __init__(self, *a, **k):
+                self.connected, self.room = True, "default"
+
+            async def run(self, stop):
+                await stop.wait()
+
+            def send(self, msg):
+                sent.append(msg)
+                if len(sent) >= 3:
+                    stop.set()
+                return True
+
+        stop = asyncio.Event()
+        orig = bot.RelayLink
+        bot.RelayLink = Link
+        try:
+            asyncio.run(bot.run_bot(("h", 1), center=(0.0, 0.0, 0.0), stop=stop, hz=1000, log=logged.append,
+                                    items=bot.ItemScript.parse(gi.BOT_ITEMS), send_on_back=False))
+        finally:
+            bot.RelayLink = orig
+        self.assertTrue(sent)
+        self.assertTrue(all("on_back" not in m and m["weapon"] == ITEMS[0] for m in sent))
+        changes = gi.bot_changes(logged)
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0][1:], (ITEMS, 0))
+
     def test_command_line(self):
         for bad in (["--on-back", "9"], ["--shield", "a b"], ["--items", "A/-/-/0", "--weapon", "W_1"]):
             with self.subTest(argv=bad), self.assertRaises(SystemExit):
@@ -302,22 +367,71 @@ class JudgeTests(unittest.TestCase):
     def test_cost(self):
         self.assertEqual(gi.judge_cost(30.0, 29.2, 20.0)[0], "PASS")
         self.assertEqual(gi.judge_cost(30.0, 28.5, 20.0)[0], "FAIL")
-        self.assertEqual(gi.judge_cost(30.0, 29.5, 80.0)[0], "FAIL")
+        self.assertEqual(gi.judge_cost(30.0, 29.5, 80.0)[0], "FAIL")     # (the plan's rule: the mean, under 50)
         self.assertEqual(gi.judge_cost(None, 29.5, 10.0)[0], "SKIP")
+        rows = [{"items.us_mean": 10.0, "items.us_max": 30.0, "tick_us_max": 40.0, "frame_ms_max": 34.0,
+                 "frames_slow": 1, "items.slow_parts": 0, "slow_calls": 2},
+                {"items.us_mean": 12.0, "items.us_max": 50.0, "tick_us_max": 60.0, "frame_ms_max": 36.0,
+                 "frames_slow": 3, "items.slow_parts": 1, "items.slow_part": "60.0 ms wall, 9000 cycles, 0 game calls",
+                 "slow_calls": 2}]
+        text = gi.cost_text(rows)
+        for part in ("items mean 11.0", "most 50 us", "the whole tick most 60 us", "frames over 50 ms 2",
+                     "slow item parts 1 (last: 60.0 ms wall, 9000 cycles", "slow game calls 0"):
+            self.assertIn(part, text)
 
     def test_network(self):
-        sc = bot.ItemScript.parse(gi.BOT_ITEMS)
+        """Every change of every cycle, timed from the bot's own time for it (0.6.1)."""
         a = reply()
         b_named = reply(names=("Weapon_Lsword_001", "", "Weapon_Bow_001"), states=("grab", "none", "held"))
         b = reply(names=("Weapon_Lsword_001", "", "Weapon_Bow_001"), places=("back", "", "hand"))
         c = reply(names=("", "", ""))
-        good = [(0.0, a), (5.0, b_named), (5.6, b), (10.0, c)]
-        self.assertEqual(gi.judge_network(good, sc)[0], "PASS")
-        slow = [(0.0, a), (5.0, b_named), (7.0, b), (10.0, c)]
-        self.assertEqual(gi.judge_network(slow, sc)[0], "FAIL")
-        self.assertEqual(gi.judge_network([(0.0, a), (10.0, c)], sc)[0], "FAIL")
-        wrong_place = [(0.0, a), (5.0, reply(names=("Weapon_Lsword_001", "", "Weapon_Bow_001"))), (10.0, c)]
-        self.assertEqual(gi.judge_network(wrong_place, sc)[0], "FAIL")
+        changes = gi.bot_changes([
+            "items step: Weapon_Sword_001 Weapon_Shield_001 Weapon_Bow_001 mask 0 at 0.000",
+            "items step: Weapon_Lsword_001 - Weapon_Bow_001 mask 1 at 5.000",
+            "noise", "items step: - - - mask 0 at 10.000",
+            "items step: Weapon_Sword_001 Weapon_Shield_001 Weapon_Bow_001 mask 0 at 13.000"])
+        self.assertEqual(len(changes), 4)
+        good = [(0.5, a), (5.3, b_named), (5.7, b), (10.4, c), (13.8, a), (14.0, a)]
+        status, text = gi.judge_network(good, changes)
+        self.assertEqual(status, "PASS", text)
+        self.assertIn("3 changes", text)
+        self.assertIn("0.80 s", text)                                          # (the slowest: 13.0 -> 13.8)
+        slow = [(0.5, a), (5.3, b_named), (6.2, b), (10.4, c), (13.8, a)]
+        self.assertEqual(gi.judge_network(slow, changes)[0], "FAIL")
+        never = [(0.5, a), (5.3, b_named), (10.4, c), (13.8, a)]              # (the step never shown in place)
+        self.assertEqual(gi.judge_network(never, changes)[0], "FAIL")
+        old = [(0.5, a), (5.6, reply(names=("Weapon_Lsword_001", "", "Weapon_Bow_001"), places=("hand", "", "back"))),
+               (10.4, c), (13.8, reply(places=("hand", "hand", "back")))]
+        self.assertEqual(gi.judge_network(old, changes, mask_for=lambda m: 4)[0], "PASS")
+
+    def test_like_link(self):
+        eye = [1, 0, 0, 0.1, 0, 1, 0, 0.2, 0, 0, 1, 0.0]
+        turned = [0, -1, 0, 0.1, 1, 0, 0, 0.2, 0, 0, 1, 0.0]                   # (90 degrees about z)
+        self.assertEqual(gi.rel_compare(eye, eye), (0.0, 0.0))
+        d, ang = gi.rel_compare(eye, turned)
+        self.assertAlmostEqual(ang, 90.0, places=3)
+        text = " ".join(str(x) for x in eye)
+        ghost = reply(places=("back",) * 3)
+        for i in range(3):
+            ghost[f"items.{i}.rel"] = text
+        rows = {f"{k}_back": {k: n, f"{k}_back": True, f"{k}_rel": text, f"{k}_pods": "0.1 0.3 0.4"}
+                for k, n in zip(("weapon", "shield", "bow"), ITEMS)}
+        self.assertEqual(gi.judge_like_link(ghost, rows)[0], "PASS")
+        rows["shield_back"]["shield_rel"] = " ".join(str(x) for x in turned)
+        self.assertEqual(gi.judge_like_link(ghost, rows)[0], "FAIL")
+        self.assertEqual(gi.judge_like_link(ghost, {})[0], "SKIP")
+        self.assertIsNone(gi.rel_matrix(""))
+        self.assertIsNone(gi.rel_matrix("1 2 x"))
+
+    def test_sender(self):
+        me = {"weapon": ITEMS[0], "shield": ITEMS[1], "bow": ITEMS[2], "on_back": 7}
+        self.assertIsNone(gi.link_shows(reply(places=("back",) * 3), me))
+        self.assertIsNotNone(gi.link_shows(reply(), me))
+        self.assertIsNone(gi.link_shows(reply(names=("", ITEMS[1], ITEMS[2]), places=("", "back", "back")),
+                                        dict(me, weapon="")))
+        self.assertEqual(gi.judge_sender([("sprint", 0.8, None), ("throw", 1.1, None)])[0], "PASS")
+        self.assertEqual(gi.judge_sender([("sprint", 0.8, None), ("throw", None, "late")])[0], "FAIL")
+        self.assertEqual(gi.judge_sender([])[0], "FAIL")
 
     def test_back_bytes(self):
         rows = {"weapon_out": {"weapon": "W", "weapon_back": False}, "weapon_back": {"weapon": "W", "weapon_back": True}}
@@ -352,6 +466,18 @@ class AgreementTests(unittest.TestCase):
     def test_self_reply_keys(self):
         for key in ("weapon_back", "shield_back", "bow_back", "on_back"):
             self.assertIn(f'"{key}"', GHOST_C)
+        for key in ('"%s_rel"', '"%s_pods"', '"items.dying"', '"items.us_mean"', '"frame_ms_max"', '"frames_slow"',
+                    '"items.slow_part"', '"slow_call"', 'ITEM_KEY("rel")', 'ITEM_KEY("refusals")', '"refused"'):
+            self.assertIn(key, GHOST_C)
+
+    def test_the_same_item_rule(self):
+        """The mod's item_name_ok and the client's: the same prefixes per hand and the same blocked names."""
+        prefixes = re.search(r"ITEM_PREFIX\[\] = \{([^}]*)\}", GHOST_C).group(1)
+        slots_c = re.search(r"ITEM_PREFIX_SLOT\[\] = \{([^}]*)\}", GHOST_C).group(1)
+        blocked = re.search(r"ITEM_BLOCKED\[\] = \{([^}]*)\}", GHOST_C).group(1)
+        pairs = tuple(zip(re.findall(r'"([^"]+)"', prefixes), (int(x) for x in re.findall(r"\d", slots_c))))
+        self.assertEqual(pairs, client.ITEM_PREFIXES)
+        self.assertEqual(set(re.findall(r'"([^"]+)"', blocked)), set(client.ITEM_BLOCKED))
 
     def test_slot_names_the_judges_read(self):
         names = re.search(r"IS_NAMES\[\] = \{([^}]*)\}", GHOST_C).group(1)

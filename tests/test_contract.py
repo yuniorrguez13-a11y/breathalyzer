@@ -164,14 +164,22 @@ class ModToml(unittest.TestCase):
     def test_bad_keys(self):
         for extra, want in (('icon = "icon.gif"', "[mod] icon"), ('background = "../bg.png"', "[mod] background"),
                             ('url = "http://example.org"', "[mod] url"), ('update_url = "https://a b"', "update_url"),
-                            ('[font]\nlicense = "x"', "[font] needs file"), ('[font]\nfile = "f.woff"', ".ttf or .otf"),
-                            ('[font]\nfile = "f.ttf"\nfor = "all"', "[font] for"),
-                            ('[font]\nfile = "f.ttf"\nlanguages = ["KR"]', "[font] languages"),
+                            ('[font]\nlicense = "x"', "[font] needs file"), ('[font]\nfile = "f.otf"', ".ttf font"),
+                            ('[font]\nfile = "f.ttf"\nfor = "some"', "[font] for"),
+                            ('[font]\nfile = "f.ttf"\nlanguages = ["KR"]', "[font] languages has none"),
+                            ('[font]\nfile = "f.ttf"\nlanguages = ["XX"]', "[font] languages must be"),
                             ('[settings]\nkey = "x"', "[[settings]]"), ("[pages]\nx = 1", "[[pages]]")):
             with self.subTest(extra=extra):
                 man, errs = self.parse(extra)
                 self.assertIsNone(man)
                 self.assertTrue(any(want in e for e in errs), errs)
+
+    def test_later_font_kinds_are_notes(self):
+        man, errs = self.parse('[font]\nfile = "f.ttf"\nfor = "all"\nlanguages = ["us", "KR"]')
+        self.assertEqual(errs, [])
+        self.assertEqual((man.font["for"], man.font["languages"]), ("menu", ["US"]))
+        self.assertTrue(any('for = "all" comes later' in n for n in man.notes))
+        self.assertTrue(any("languages KR come later" in n for n in man.notes))
 
     def test_named_files_must_be_there(self):
         man, _ = self.parse('icon = "icon.png"\n[font]\nfile = "f.ttf"\n[[settings]]\nkey = "a"\n')
@@ -186,7 +194,7 @@ class ModToml(unittest.TestCase):
 
     def test_a_tool_that_is_missing_or_broken_is_off(self):
         self.assertIsNone(mm.feature("no_such_tool_here"))
-        broken = types.SimpleNamespace(check=lambda man, root: 1 / 0)
+        broken = types.SimpleNamespace(manifest_problems=lambda data, root: 1 / 0)
         man, _ = self.parse('[[settings]]\nkey = "a"\n')
         with mock.patch.dict(mm._FEATURE_CACHE, {"mod_settings": broken}), tempfile.TemporaryDirectory() as d:
             problems, notes = mm.manifest_v2_problems(man, d)
@@ -225,29 +233,39 @@ class Hooks(Tmp):
     def make_fakes(self) -> dict:
         t = self
 
-        def check(man, root):
-            t.calls.append(f"check {man.id}")
-            return [], [f"{len(man.settings)} setting(s)"]
+        def manifest_problems(data, root):
+            t.calls.append(f"check {data['mod']['id']}")
+            assert os.path.isfile(os.path.join(root, "mod.toml"))
+            return [], [f"{len(data['settings'])} setting(s)"]
 
-        def option_romfs(lib, mods):
+        def has_options(lib, m):
+            return os.path.isdir(os.path.join(lib.mods_dir, m["id"], "options"))
+
+        def option_romfs(lib, mods):  # (mods: the enabled library entries; items (entry, folder) as mod_settings.py)
             t.calls.append("option_romfs")
-            return [(m["id"], os.path.join(root, "options", t.mode), False) for m, root, man in mods
-                    if os.path.isdir(os.path.join(root, "options"))]
+            return [(m, os.path.join(lib.mods_dir, m["id"], "options", t.mode)) for m in mods if has_options(lib, m)]
 
         def deploy_values(lib, mods):
-            return {m["id"]: {"mode": t.mode} for m, root, man in mods if os.path.isdir(os.path.join(root, "options"))}
+            return {m["id"]: {"mode": t.mode} for m in mods if has_options(lib, m)}
 
-        def settings_txt(lib, mods):
+        def write_settings_txt(lib, mods, deploy):
             t.calls.append("settings_txt")
-            return "".join(f"mod\t{m['id']}\t{'on' if m['enabled'] else 'off'}\n" for m, _, _ in mods) \
-                + f"library\t{lib.root}\n"
+            text = "".join(f"mod\t{m['id']}\ton\n" for m in mods) + f"library\t{lib.root}\n"
+            with open(deploy.add_file("native/settings.txt"), "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+
+        class Generated(list):
+            pass
 
         def font_files(lib, plan):
             t.calls.append("font")
             if t.fail_font:
                 raise RuntimeError("made-up failure")
             w = plan.winner("Pack/Title.txt")
-            return [("Pack/Title.txt", w.read() + b" +font", None), "symbols added"]
+            gen = Generated([("Pack/Title.txt", w.read() + b" +font", None),
+                             ("Font/Font_US.sbfarc", b"grew", ("Font/Font_US.bfarc", 4096))])
+            gen.notes, gen.attention, gen.symbols_full, gen.font = ["symbols added"], [], True, "Easy-read"
+            return gen
 
         def title_files(lib, plan, picture):
             t.calls.append(f"menu_bg {os.path.basename(picture) if picture else None}")
@@ -265,8 +283,9 @@ class Hooks(Tmp):
             t.calls.append(f"on_add {entry['id']}")
             return ["picture cache made"]
 
-        return {"mod_settings": types.SimpleNamespace(check=check, option_romfs=option_romfs,
-                                                      deploy_values=deploy_values, settings_txt=settings_txt),
+        return {"mod_settings": types.SimpleNamespace(manifest_problems=manifest_problems, option_romfs=option_romfs,
+                                                      deploy_values=deploy_values,
+                                                      write_settings_txt=write_settings_txt),
                 "font": types.SimpleNamespace(deploy_files=font_files),
                 "menu_bg": types.SimpleNamespace(deploy_files=title_files),
                 "mod_pictures": types.SimpleNamespace(deploy_files=picture_files, on_add=on_add)}
@@ -315,6 +334,9 @@ class Hooks(Tmp):
         self.assertIn("mod\ttest.opts\ton\n", txt)
         self.assertIn(f"library\t{self.libdir}\n", txt)
         self.assertIn("Fonts: symbols added", launch["notes"])
+        self.assertEqual(launch["made"], {"fonts": {"symbols_full": True, "font": "Easy-read"}})
+        self.assertFalse((ov / "Font" / "Font_US.sbfarc").exists())  # (it needs a size-table entry: not yet)
+        self.assertTrue(any("Font/Font_US.sbfarc needs a bigger size-table" in a for a in launch["attention"]))
         self.assertTrue(any("deploy\\../launch.json" in a for a in launch["attention"]), launch["attention"])
         self.assertIn(mm.ENV_LIBRARY, launch["clear_env"])
         hist = mm.read_history(self.lib)
@@ -344,8 +366,8 @@ class Hooks(Tmp):
         self.add_all()
         self.calls.clear()
         launch, _ = quiet(mm.deploy, self.lib, dry_run=True)
-        self.assertNotIn("font", self.calls)
-        self.assertTrue(any(n.startswith("Not made in a dry run: fonts, title, pictures") for n in launch["notes"]))
+        self.assertNotIn("font", self.calls)   # (nothing is made in a dry run)
+        self.assertEqual(launch["settings"], {"test.opts": {"mode": "fast"}})
         self.assertFalse((self.libdir / "deploy" / mm.HISTORY).exists())
 
     def test_without_the_parts_nothing_changes(self):

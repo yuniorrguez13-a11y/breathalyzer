@@ -847,13 +847,27 @@ def item_mask(v: dict) -> int:
     return 3 if str(v.get("anim") or "").startswith("Bow") else 4
 
 
+# --ghost-items (ghost mod 0.6.1): the only names sent for the ghost to hold, as the mod's own rule (ghost.c
+# item_name_ok): the other player's network data must never make your game spawn anything else. Slot 0 (weapon) a
+# one-handed sword, two-hander or spear, slot 1 a shield, slot 2 a bow, by the game's name prefixes; none of the special
+# ones never tried (Weapon_Sword_070 and the four with its sort key in the game's data, Weapon_Sword_500, Weapon_Bow_071).
+ITEM_PREFIXES = (("Weapon_Sword_", 0), ("Weapon_Lsword_", 0), ("Weapon_Spear_", 0), ("Weapon_Shield_", 1),
+                 ("Weapon_Bow_", 2))
+ITEM_BLOCKED = frozenset({"Weapon_Sword_070", "Weapon_Sword_071", "Weapon_Sword_072", "Weapon_Sword_080",
+                          "Weapon_Sword_081", "Weapon_Sword_500", "Weapon_Bow_071"})
+
+
+def item_name_ok(slot: int, name) -> bool:
+    """A name the ghost may hold in slot (0 weapon, 1 shield, 2 bow): see ITEM_PREFIXES."""
+    if valid_actor(name) is None or name in ITEM_BLOCKED:
+        return False
+    return any(s == slot and name.startswith(p) and len(name) > len(p) for p, s in ITEM_PREFIXES)
+
+
 def items_command(v: dict) -> list[str]:
-    """--ghost-items: `ghost items weapon shield bow mask` for the shown player ("-": none, or a name the mod would
-    refuse)."""
-    names = []
-    for k in ITEM_KEYS:
-        n = v.get(k)
-        names.append(n if isinstance(n, str) and valid_actor(n) else "-")
+    """--ghost-items: `ghost items weapon shield bow mask` for the shown player ("-": none, or a name the ghost may not
+    hold: item_name_ok)."""
+    names = [v.get(k) if item_name_ok(i, v.get(k)) else "-" for i, k in enumerate(ITEM_KEYS)]
     return ["ghost", "items", *names, str(item_mask(v))]
 
 
@@ -952,6 +966,7 @@ class Ghost:
         self.has_self = False        # ... and `ghost self` (0.5.0: has_self)
         self.own: dict = {}          # sync: your own Link (from `ghost self`), for the state you send
         self._items: dict[str, str] = {}      # sync: the shown player's items, as last logged
+        self._held: dict = {}                 # --ghost-items: what the shown player holds, as last sent to us (0.6.1)
         self._old_mod_said = False
         self.state = ""              # the mod's own state ("live", "pending", ...), from `ghost`
         self.mod_note = ""           # ... and what last happened there
@@ -1004,7 +1019,7 @@ class Ghost:
             if v["id"] != self.shown:
                 self.shown, self.shown_name = v["id"], v["name"]
                 self.heading.reset()
-                self._items = {}
+                self._items, self._held = {}, {}
                 self.log(f"Ghost: showing {v['name']} in your game.")
             yaw = self.heading.update(v["x"], v["z"], now, v.get("yaw"))
             pos = ["ghost", "pos", f"{v['x']:.3f}", f"{v['y']:.3f}", f"{v['z']:.3f}", f"{yaw:.1f}"]
@@ -1016,7 +1031,7 @@ class Ghost:
                 pos.append(anim)
             out.append(pos)
             if self.items and self.has_items:
-                cmd = items_command(v)
+                cmd = items_command(self.held(v))
                 if cmd != self._items_sent or now >= self._items_at:
                     out.append(cmd)
                     self._items_sent, self._items_at = cmd, now + GHOST_ITEMS_EVERY
@@ -1027,6 +1042,17 @@ class Ghost:
             out.append(["ghost"])
         self._sent = out
         return out
+
+    def held(self, v: dict) -> dict:
+        """--ghost-items: what the shown player holds. A state without an item key (their game didn't answer `ghost
+        self` in time: a hitch, a menu, a load) leaves it as it was; only an explicit "" means none. So a gap in
+        their data never deletes the ghost's items and spawns them again. The same for on_back."""
+        for k in ITEM_KEYS:
+            if isinstance(v.get(k), str):
+                self._held[k] = v[k]
+        if valid_on_back(v.get("on_back")) is not None:
+            self._held["on_back"] = v["on_back"]
+        return dict(self._held, anim=v.get("anim"))
 
     def _log_items(self, v: dict) -> None:
         """--ghost-sync: say what the shown player has equipped, once and then on each change (not drawn yet)."""

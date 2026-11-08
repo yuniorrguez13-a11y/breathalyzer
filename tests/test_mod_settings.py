@@ -109,7 +109,8 @@ type = "choice"
 label = "Wheel look"
 default = "green"
 applies = "deploy"
-choices = [{ value = "green", label = "Green" }, { value = "gold", label = "Gold", romfs = "options/gold" }]
+choices = [{ value = "green", label = "Green" },
+           { value = "gold", label = "Gold", romfs = "options/gold", dlc_romfs = "options/gold-dlc" }]
 show_if = "numbers || on('giruka.hud-pack')"
 [[settings]]
 key = "hd"
@@ -155,8 +156,8 @@ default = 7.5
 """
 
 
-def make_mod(root: Path, toml: str, files=("romfs/System/x.txt", "options/gold/UI/y.txt", "options/hd/Pack/z.txt")
-             ) -> Path:
+def make_mod(root: Path, toml: str, files=("romfs/System/x.txt", "options/gold/UI/y.txt", "options/hd/Pack/z.txt",
+                                           "options/gold-dlc/Map/w.txt")) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "mod.toml").write_text(toml, encoding="utf-8")
     for f in files:
@@ -283,7 +284,7 @@ class Schema(unittest.TestCase):
         self.assertEqual(sum(1 for s in sch.settings if s.page == "many"), 30)
         with contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(ms.main(["check", str(DEMO)]), 0)
-        self.assertIn("set	botw-mod-loader.settings-demo	numbers	toggle	live", out.getvalue())
+        self.assertIn("set\tbotw-mod-loader.settings-demo\tnumbers\ttoggle\tlive", out.getvalue())
 
 
 class Conditions(unittest.TestCase):
@@ -396,7 +397,8 @@ class Values(unittest.TestCase):
 
     def test_refused_while_the_game_runs(self):
         import sw_rebuild as swr
-        with mock.patch.object(ms, "_check_game", CHECK_GAME),                 mock.patch.object(swr, "game_running", return_value=True), self.assertRaises(ms.SettingsError) as cm:
+        with mock.patch.object(ms, "_check_game", CHECK_GAME), \
+                mock.patch.object(swr, "game_running", return_value=True), self.assertRaises(ms.SettingsError) as cm:
             ms.set_value(self.lib, self.sch, "mode", "fast")
         self.assertIn("Savage Wind is running", str(cm.exception))
         self.assertFalse(self.path.exists())
@@ -433,9 +435,10 @@ class Deploy(unittest.TestCase):
         ms.set_value(self.lib.root, self.sch, "look", "gold")
         ms.set_value(self.lib.root, self.sch, "hd", "on")
         got = ms.option_romfs(self.lib, self.lib.enabled())
-        mod_root = Path(self.lib.root) / "mods" / "better-sprint"
-        self.assertEqual([(m["id"], Path(f)) for m, f in got],
-                         [("better-sprint", mod_root / "options" / "gold"), ("better-sprint", mod_root / "options" / "hd")])
+        opt = Path(self.lib.root) / "mods" / "better-sprint" / "options"
+        self.assertEqual([(m["id"], Path(f), *rest) for m, f, *rest in got],
+                         [("better-sprint", opt / "gold"), ("better-sprint", opt / "gold-dlc", True),
+                          ("better-sprint", opt / "hd")])
         self.lib.mods[1]["enabled"] = False
         self.assertEqual(ms.option_romfs(self.lib, self.lib.enabled()), [])
 
@@ -499,6 +502,7 @@ class KeysMatchC(unittest.TestCase):
 
 ST = REPO / "native" / "modhost" / "selftest"
 OUT = REPO / "build" / "native" / "settings-selftest"
+ENV = {"FAKE_MAX_CMDS": "32"}  # (the fake Savage Wind's command table is tiny by default)
 PROBE_ID = "giruka.probe"
 # The probe mod: base settings of every value type, and one hidden-or-shown toggle per condition (Python and C must
 # agree on each, for every assignment below).
@@ -526,10 +530,11 @@ def probe_toml() -> str:
            '[[settings]]\nkey = "r"\ntype = "toggle"\nlabel = "R"\napplies = "restart"\n',
            '[[settings]]\nkey = "locked"\ntype = "toggle"\nlabel = "Locked row"\napplies = "live"\n'
            'enable_if = "t && c == \'b\'"\n',
-           '[[pages]]\nkey = "conds"\nlabel = "Conditions"\n']
-    for i, src in enumerate(CONDITIONS):
+           '[[pages]]\nkey = "conds"\nlabel = "Conditions"\n',
+           '[[pages]]\nkey = "conds2"\nlabel = "More conditions"\n']
+    for i, src in enumerate(CONDITIONS):  # (20 a page: a page holds 30 rows)
         out.append(f'[[settings]]\nkey = "q{i:02d}"\ntype = "toggle"\nlabel = "Q{i}"\napplies = "live"\n'
-                   f'page = "conds"\nshow_if = "{src}"\n')
+                   f'page = "{"conds" if i < 20 else "conds2"}"\nshow_if = "{src}"\n')
     return "".join(out)
 
 
@@ -611,7 +616,7 @@ class Native(unittest.TestCase):
             cls.agree.append((f"a{i}", {"t": bool(tv), "n": nv, "c": cv, "k": kv, "tx": txv}))
         steps += [("st1", "modsettings"), ("sleep", "!sleep 400"), ("st2", "modsettings")]
         result, cls.log = bn._run_fake_game(OUT, OUT / "selftest" / "fake_swgame.dll", run / "mods",
-                                            [ln for _, ln in steps])
+                                            [ln for _, ln in steps], ENV)
         cls.s = dict(zip((k for k, _ in steps), result.get("steps", [])))
         # a mod loaded while the game runs: its watcher goes at modunload
         hot = root / "hot" / "native"
@@ -623,14 +628,14 @@ class Native(unittest.TestCase):
                   ("unload", "modunload settings_probe"), ("set_after", "modset probe-lib t 0"),
                   ("list", "modsettings")]
         hres, cls.hot_log = bn._run_fake_game(OUT, OUT / "selftest" / "fake_swgame.dll", hot / "mods",
-                                              [ln for _, ln in hsteps], {"SWMOD_UNLOAD_WAIT_MS": "300"})
+                                              [ln for _, ln in hsteps], {**ENV, "SWMOD_UNLOAD_WAIT_MS": "300"})
         cls.h = dict(zip((k for k, _ in hsteps), hres.get("steps", [])))
         # no settings.txt: every getter gives its default
         bare = root / "bare" / "native" / "mods"
         bare.mkdir(parents=True)
         shutil.copy2(OUT / "dlls" / "settings_demo.dll", bare / "settings_demo.dll")
         bres, cls.bare_log = bn._run_fake_game(OUT, OUT / "selftest" / "fake_swgame.dll", bare,
-                                               ["settings_demo", "modsettings"])
+                                               ["settings_demo", "modsettings"], ENV)
         cls.b = bres.get("steps", [])
 
     @classmethod
@@ -653,7 +658,7 @@ class Native(unittest.TestCase):
         h = self.d("has")
         self.assertEqual(h, {"has_settings": True, "older_has": False, "api3": True, "ui_has_reset": True,
                              "small_has_reset": False, "mods": 2, "lib_id": "probe-lib", "mod_on": True,
-                             "pages": 1})
+                             "pages": 2})
 
     def test_info_respects_the_callers_size(self):
         i = self.d("info")

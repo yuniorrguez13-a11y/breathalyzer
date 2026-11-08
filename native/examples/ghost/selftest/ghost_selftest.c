@@ -299,7 +299,8 @@ static struct {
     float world[8][16];
 } g_gh;                                // the ghost: Root, Weapon_R, Weapon_L, Pod_A, Spine_2
 static int g_calls, g_deletes, g_releases, g_requests, g_follow_zero, g_follow_sets, g_ctors, g_lets_go;
-static const char *g_refuse_name = "Weapon_Nope_001";  // the request is refused for this name
+static const char *g_refuse_name = "Weapon_Sword_999";  // the request is refused for this name
+static float g_set_y;                  // SET_MTX: the y of the last matrix set
 static int g_not_weapon;               // the next request makes an actor of another class
 
 static void ld_new(FakeLinkData *ld, uint64_t proc) { ld->id = g_next_id++, ld->proc = proc; }
@@ -402,6 +403,7 @@ static FakeItem *fake_item_new(const char *name, uint64_t handle) {
     g_not_weapon = 0;
     W64(f->mem, ITEM_HOLDER, 0);
     W32(f->mem, ITEM_HOLDER + 8, 0xffffffffu);
+    W32(f->mem, ITEM_HOLD_ASK + 8, 0xffffffffu);
     int kind = strstr(name, "Shield") ? 3 : strstr(name, "Bow") ? 4 : strstr(name, "Lsword") ? 1
                : strstr(name, "Spear") ? 2 : 0;
     W32(f->mem, ITEM_KIND, kind);
@@ -428,7 +430,10 @@ static int items_call(struct Cpu *c, uint64_t fn) {
         return 1;
     case PACK_CLEAR:
     case PACK_ADD:
+    case PHYS_SET_MTX:
+        return 1;
     case SET_MTX:
+        g_set_y = ((const float *)(uintptr_t)r->x[1])[7];
         return 1;
     case REQUEST_CREATE:
         g_requests++;
@@ -491,14 +496,20 @@ static int items_call(struct Cpu *c, uint64_t fn) {
         }
         f->grabs_ok++, f->grab_pending = 1, f->holder = r->x[2], f->slot = (int)r->x[1];
         f->mem[ITEM_STATE] = 0;
+        {  // (the grab links the holder it asked for at once: +0x880)
+            FakeLinkData *hl = ld_of(f->holder);
+            W64(f->mem, ITEM_HOLD_ASK, hl);
+            W32(f->mem, ITEM_HOLD_ASK + 8, hl ? hl->id : 0xffffffffu);
+        }
         snprintf(f->hand, sizeof f->hand, "%s", (const char *)(uintptr_t)r->x[3]);
         snprintf(f->pod, sizeof f->pod, "%s", (const char *)(uintptr_t)r->x[4]);
         r->x[0] = 1;
         return 1;
-    case FOLLOW_SET:
+    case FOLLOW_SET:  // (refused while the actor's FLAG_OWNS_FOLLOW is set, as in the game)
         g_follow_sets++;
         if (!r->x[1]) g_follow_zero++;
-        if ((f = fi_of(a0))) W64(f->mem, ACTOR_FOLLOW, r->x[1]);
+        if ((f = fi_of(a0)) && !(*(uint32_t *)(void *)(f->mem + ACTOR_FLAGS) & FLAG_OWNS_FOLLOW))
+            W64(f->mem, ACTOR_FOLLOW, r->x[1]);
         return 1;
     case FOLLOW_CTOR:
         g_ctors++;
@@ -534,6 +545,7 @@ static void items_fresh(int with_hands) {
     memset(g_trash, 0, sizeof g_trash);
     memset(t_trash_t, 0, sizeof t_trash_t);
     memset(g_item_handle, 0, sizeof g_item_handle);
+    memset(t_item_orphan, 0, sizeof t_item_orphan);
     for (int i = 0; i < ITEM_SLOTS; i++) item_zero_link(i);
     t_items_ghost = 0;
     memset(&g_irq, 0, sizeof g_irq);
@@ -666,11 +678,88 @@ static void check_items(void) {
           IS_NAMES[t_status.items.slot[0].state], (unsigned long long)t_status.items.slot[0].actor);
     items_run(ghost, 1.5);
     check("items", "ghost_back", held_count() == 1, "held %d", held_count());
-    // a stage change: forgotten without a single game call
+    // a stage change: forgotten without a single game call, but watched (0.6.1): one the stage change didn't take
+    // along (the game kept the old ghost) shows as a stray
     int calls = g_calls;
-    items_forget();
-    check("items", "stage_change", g_calls == calls && t_items_ghost == 0 && g_item_link[0].data == 0, "%d calls",
-          g_calls - calls);
+    uint64_t kept_actor = t_status.items.slot[0].actor;
+    items_forget(g_it);
+    int watched = 0;
+    for (int k = 0; k < TRASH_MAX; k++) watched += t_trash_t[k] != 0;
+    check("items", "stage_change", g_calls == calls && t_items_ghost == 0 && g_item_link[0].data == 0 && watched == 1,
+          "%d calls, %d watched", g_calls - calls, watched);
+    items_run(0, 1.5);
+    int stray_seen = t_status.items.stray;
+    FakeItem *kf = fi_of(kept_actor);
+    if (kf) kf->dead = 1, ld_kill(&kf->ld);
+    items_run(0, 0.2);
+    check("items", "stage_change_stray", stray_seen == 1 && t_status.items.stray == 0 && t_status.items.dying == 0,
+          "stray %d, then %d (dying %d)", stray_seen, t_status.items.stray, t_status.items.dying);
+    // 0.6.1: a request still pending at a stage change: released by the next items part (its unit still ours)
+    items_fresh(1);
+    items_want("Weapon_Sword_001", "", "", 0);
+    for (int k = 0; k < 40 && t_items[0].state != IS_PENDING; k++) items_run(ghost, 1.0 / 30.0);
+    int was_pending = t_items[0].state == IS_PENDING;
+    items_forget(g_it);
+    int rel0 = g_releases;
+    items_run(0, 0.2);
+    check("items", "orphan_released", was_pending && g_releases == rel0 + 1 && live_items() == 0 &&
+          !t_item_orphan[0] && g_item_handle[0].unit == 0, "pending %d, releases +%d, live %d", was_pending,
+          g_releases - rel0, live_items());
+    // 0.6.1: spawned over the ghost (out of Link's reach) and kept there until the grab took it
+    items_fresh(1);
+    items_want("Weapon_Sword_001", "Weapon_Shield_001", "Weapon_Bow_001", 0);
+    items_run(ghost, 1.5);
+    check("items", "parked", held_count() == 3 && t_status.items.parks >= 3 && g_item_mtx[0][7] > 5.99f &&
+          g_item_mtx[0][7] < 6.01f && g_set_y > 5.99f && t_status.items.slot[0].refusals == 1,
+          "held %d, parks %lld, y %.2f (set %.2f), refusals %d", held_count(), (long long)t_status.items.parks,
+          g_item_mtx[0][7], g_set_y, t_status.items.slot[0].refusals);
+    // 0.6.1: Link takes the new item in the moment before the ghost's grab: it is his now, never deleted
+    items_fresh(1);
+    FakeItem *lk = fake_item_new("GameROMPlayer", 0);  // (made up: an actor with a link of its own)
+    lk->ready_in = 0;
+    items_want("Weapon_Sword_001", "", "", 0);
+    for (int k = 0; k < 40 && !(t_items[0].state == IS_GRAB && !t_items[0].grabbed); k++) items_run(ghost, 1.0 / 30.0);
+    FakeItem *gap = g_item_link[0].data ? fi_of(((FakeLinkData *)(uintptr_t)g_item_link[0].data)->proc) : NULL;
+    int in_gap = gap && t_items[0].state == IS_GRAB && !t_items[0].grabbed;
+    if (gap) {  // (his grab settled: his holder link)
+        W64(gap->mem, ITEM_HOLDER, &lk->ld);
+        W32(gap->mem, ITEM_HOLDER + 8, lk->ld.id);
+        gap->mem[ITEM_STATE] = 0xff;
+    }
+    int del0 = g_deletes;
+    items_run(ghost, 1.0 / 30.0);
+    check("items", "taken_in_gap", in_gap && g_deletes == del0 && gap && !gap->deleting && !gap->dead &&
+          t_status.items.taken == 1 && t_items[0].state == IS_WAIT && g_item_link[0].data == 0,
+          "in gap %d, deletes +%d, taken %lld, state %s, why '%s'", in_gap, g_deletes - del0,
+          (long long)t_status.items.taken, IS_NAMES[t_items[0].state], t_status.items.slot[0].why);
+    // 0.6.1: an item on our follow gets its own back before it is deleted; one whose follow the game won't change
+    // (FLAG_OWNS_FOLLOW) is not deleted
+    items_fresh(1);
+    items_want("Weapon_Sword_001", "Weapon_Shield_001", "Weapon_Bow_001", 7);
+    items_run(ghost, 2.0);
+    int on_back = !strcmp(t_status.items.slot[0].place, "back") && !strcmp(t_status.items.slot[1].place, "back");
+    FakeItem *stuck = fi_of(t_status.items.slot[2].actor);
+    if (stuck) *(uint32_t *)(void *)(stuck->mem + ACTOR_FLAGS) |= FLAG_OWNS_FOLLOW;
+    items_want("", "", "", 0);
+    items_run(ghost, 1.0);
+    int own_back = 0;
+    for (int k = 0; k < g_nfi; k++)
+        own_back += g_fi[k].dead && R64(g_fi[k].mem, ACTOR_FOLLOW) == P(g_fi[k].mem + ITEM_FOLLOW);
+    check("items", "own_follow_first", on_back && own_back == 2 && g_follow_zero == 0,
+          "on back %d, %d deleted with their own follow", on_back, own_back);
+    check("items", "owns_follow_kept", stuck && !stuck->deleting && !stuck->dead && t_status.items.kept == 1,
+          "deleting %d, kept %lld", stuck ? stuck->deleting : -1, (long long)t_status.items.kept);
+    // 0.6.1: only weapons, shields and bows by the game's prefixes, each in its own hand, and no special one
+    int names_ok = item_name_ok(0, "Weapon_Sword_001") && item_name_ok(0, "Weapon_Lsword_001") &&
+                   item_name_ok(0, "Weapon_Spear_001") && item_name_ok(1, "Weapon_Shield_001") &&
+                   item_name_ok(2, "Weapon_Bow_001") && !item_name_ok(0, "Weapon_Shield_001") &&
+                   !item_name_ok(2, "Weapon_Sword_001") && !item_name_ok(0, "Weapon_Sword_070") &&
+                   !item_name_ok(2, "Weapon_Bow_071") && !item_name_ok(0, "Enemy_Bokoblin_Junior") &&
+                   !item_name_ok(0, "GameROMPlayer") && !item_name_ok(0, "Weapon_Sword_");
+    items_fresh(1);
+    items_want("Enemy_Bokoblin_Junior", "Npc_Hylia", "Weapon_Sword_070", 0);
+    items_run(ghost, 2.0);
+    check("items", "names", names_ok && g_requests == 0, "rule %d, %d requests", names_ok, g_requests);
     // a name the game refuses: 3 tries, then given up (no more requests)
     items_fresh(1);
     items_want(g_refuse_name, "", "", 0);
@@ -682,7 +771,7 @@ static void check_items(void) {
     // not of the Weapon class: released, no retry
     items_fresh(1);
     g_not_weapon = 1;
-    items_want("Dm_Not_A_Weapon", "", "", 0);
+    items_want("Weapon_Sword_998", "", "", 0);
     items_run(ghost, 8.0);
     check("items", "not_a_weapon", t_status.items.slot[0].state == IS_FAILED && g_requests == 1 && g_releases == 1 &&
           live_items() == 0, "state %s, requests %d, releases %d", IS_NAMES[t_status.items.slot[0].state], g_requests,

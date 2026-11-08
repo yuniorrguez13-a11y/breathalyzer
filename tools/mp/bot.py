@@ -294,10 +294,12 @@ async def run_bot(relay: tuple[str, int], name: str = "bot", room: str = DEFAULT
                   center: tuple[float, float, float] | None = None, absolute: bool = False, hz: float = DEFAULT_HZ,
                   stop: asyncio.Event | None = None, clock=time.monotonic, log=print, anims: AnimScript | None = None,
                   weapon: str | None = None, shield: str | None = None, bow: str | None = None,
-                  on_back: int | None = None, items: ItemScript | None = None) -> int:
+                  on_back: int | None = None, items: ItemScript | None = None, send_on_back: bool = True) -> int:
     """Send states until `stop` is set. Returns how many were sent. anims: names to send (--anim); weapon, shield,
     bow: item names to send (--weapon, --shield, --bow); on_back: the mask to send (--on-back); items: what it holds,
-    changing in a loop (--items: replaces weapon, shield, bow and on_back)."""
+    changing in a loop (--items: replaces weapon, shield, bow and on_back; each change is logged with the clock's
+    time: "items step K: W S B mask M at T"); send_on_back False: never send on_back (a client older than 0.6.0,
+    --no-on-back)."""
     path = path or CirclePath()
     stop = stop or asyncio.Event()
     session = Session(name, room)
@@ -311,6 +313,7 @@ async def run_bot(relay: tuple[str, int], name: str = "bot", room: str = DEFAULT
     sent = 0
     meter = SpeedMeter()   # its speed, as client.py measures a player's
     arc, last = 0.0, None  # (an --anim script with speeds: the distance walked so far, and when)
+    step_was = None        # (an --items script: the step last sent, for the log)
     try:
         while not stop.is_set():
             now = clock()
@@ -361,6 +364,11 @@ async def run_bot(relay: tuple[str, int], name: str = "bot", room: str = DEFAULT
                 if items is not None:
                     w, sh, b, m = items.at(now - t0)
                     held = {"weapon": w, "shield": sh, "bow": b, "on_back": m}
+                    if (w, sh, b, m) != step_was:
+                        step_was = (w, sh, b, m)
+                        log(f"items step: {w or '-'} {sh or '-'} {b or '-'} mask {m} at {now:.3f}")
+                if not send_on_back:
+                    held["on_back"] = None
                 msg.update((k, v) for k, v in held.items() if v is not None)
                 if link.send(msg):
                     sent += 1
@@ -396,6 +404,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--items", metavar="SCRIPT",
                     help='what it holds, changing in a loop: "W/S/B/MASK:seconds,..." (- for none), e.g. '
                          '"Weapon_Sword_001/Weapon_Shield_001/Weapon_Bow_001/0:5,-/-/-/0:3"')
+    ap.add_argument("--no-on-back", action="store_true",
+                    help="never send on_back (acts as a client older than 0.6.0: the receiver guesses the mask)")
     args = ap.parse_args(argv)
     safe_console()
     if valid_name(args.name) is None:
@@ -428,7 +438,7 @@ def main(argv: list[str] | None = None) -> int:
         asyncio.run(run_bot(relay, valid_name(args.name), args.room, path=path,
                             center=tuple(args.at) if args.at else None, absolute=args.absolute, hz=args.hz,
                             anims=anims, weapon=args.weapon, shield=args.shield, bow=args.bow,
-                            on_back=args.on_back, items=items))
+                            on_back=args.on_back, items=items, send_on_back=not args.no_on_back))
     except KeyboardInterrupt:
         pass
     print("Bot stopped.")
