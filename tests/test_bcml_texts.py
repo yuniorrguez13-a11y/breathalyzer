@@ -4,6 +4,7 @@ import json
 import struct
 import sys
 import tempfile
+import time
 import unittest
 import zlib
 from pathlib import Path
@@ -334,6 +335,41 @@ class Drops(unittest.TestCase):
     def log(self, d: dict) -> bt.Log:
         return bt.read_log("drops.json", json.dumps(d).encode())
 
+    def test_a_column_count_the_table_cant_hold_is_refused_at_once(self):
+        """ColumnNum is checked against the table's parameters before any loop (a 152-byte file once asked for 2^31)."""
+        root = aamp.PList()
+        head = aamp.PObject()
+        head.set("TableNum", aamp.INT, 1)
+        head.set("Table01", aamp.STRING64, "Normal")
+        root.objects[crc("Header")] = head
+        o = aamp.PObject()
+        o.set("ColumnNum", aamp.INT, 2 ** 31 - 1)
+        root.objects[crc("Normal")] = o
+        t = time.perf_counter()
+        with self.assertRaises(bt.TextError):
+            bt._read_drop(aamp.dump(root))
+        self.assertLess(time.perf_counter() - t, 1)
+
+    def test_lists_that_share_their_children_are_refused(self):
+        """An AAMP whose lists point at the same lists again: refused by aamp.load's work budget, not walked 2^n."""
+        levels, root_at = 40, 0x34
+        base = root_at + 12
+        body = bytearray(struct.pack("<IHHHH", crc("param_root"), (base - root_at) // 4, 2, 0, 0))
+        for i in range(levels):
+            p, last = base + 24 * i, i == levels - 1
+            nxt = base + 24 * (i + 1)
+            body += struct.pack("<IHHHH", 0x1000 + i, 0 if last else (nxt - p) // 4, 0 if last else 2, 0, 0)
+            body += struct.pack("<IHHHH", 0x2000 + i, 0 if last else (nxt - p - 12) // 4, 0 if last else 2, 0, 0)
+        data = bytearray(b"AAMP" + struct.pack("<IIIII", 2, 3, 0, 0, 4) + bytes(0x30 - 24)) + b"xml\0" + body
+        struct.pack_into("<I", data, 12, len(data))
+        t = time.perf_counter()
+        with self.assertRaises(aamp.AampError):
+            aamp.load(bytes(data))
+        with self.assertRaises(bt.LogError):
+            bt.read_log("shop.aamp", bytes(data), "logs/")
+        self.assertLess(time.perf_counter() - t, 1)
+        self.assertTrue(aamp.load(self.game()).objects)            # (a real file is well within the budget)
+
     def test_spec_case(self):
         log = self.log({self.PATH: {"Normal": drop_entry((1, 2, 0, 0), {"Item_A": bt.UNDERRIDE, "Item_New": 70.0})}})
         tables = log.value["Actor/Pack/Enemy_T.sbactorpack//Actor/DropTable/T.bdrop"]
@@ -359,6 +395,17 @@ class Drops(unittest.TestCase):
         self.assertEqual(list(got), ["Normal", "Rare"])
         self.assertEqual(got["Normal"]["items"], {"Item_C": 1.0})
         self.assertEqual(got["Normal"]["repeat_num_min"], 3)
+
+    def test_options_merge_into_the_base_and_mods_replace_whole(self):
+        base = self.log({self.PATH: {"Normal": drop_entry((1, 2, 0, 0), {"Item_A": 10.0, "Item_B": 20.0})}})
+        opt = self.log({self.PATH: {"Normal": drop_entry((1, 3, 0, 0), {"Item_C": 30.0, "Item_A": 15.0})}})
+        later = self.log({self.PATH: {"Normal": drop_entry((1, 1, 0, 0), {"Item_Z": 1.0})}})
+        key = "Actor/Pack/Enemy_T.sbactorpack//Actor/DropTable/T.bdrop"
+        one = bt.combine("drops.json", [[base, opt]]).value[key]["Normal"]   # (one package: base, then its option)
+        self.assertEqual(one["items"], {"Item_A": 15.0, "Item_B": 20.0, "Item_C": 30.0})
+        self.assertEqual(one["repeat_num_max"], 3)
+        two = bt.combine("drops.json", [[base, opt], [later]]).value[key]["Normal"]   # (a later mod: its table whole)
+        self.assertEqual(two["items"], {"Item_Z": 1.0})
 
     def test_underride_in_a_count_keeps_the_game_value(self):
         log = self.log({self.PATH: {"Normal": {**drop_entry((5, bt.UNDERRIDE, 0, 0)), "items": {"Item_A": 1.0}}}})
@@ -610,7 +657,7 @@ class Contract(unittest.TestCase):
         for name, data in (("texts.json", b"{}"), ("drops.json", b"{}"), ("shop.aamp", shop_log({}))):
             with self.subTest(name):
                 res = bt.apply(name, bt.combine(name, [bt.read_log(name, data)]), self.game)
-                self.assertEqual(res, {"files": {}, "sizes": {}, "notes": []})
+                self.assertEqual({k: v for k, v in res.items() if k != "targets"}, {"files": {}, "sizes": {}, "notes": []})
 
 
 if __name__ == "__main__":

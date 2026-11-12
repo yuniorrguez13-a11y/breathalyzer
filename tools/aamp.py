@@ -142,6 +142,14 @@ def load(data: bytes) -> PList:
     if size > len(data):
         raise AampError("the file is cut short")
     depth = [0]
+    # Work budget: each list, object and parameter header takes 8 bytes or more of the file, so a file whose lists
+    # point at the same children again (read again each time: exponential) runs out of it and is refused.
+    budget = [size // 8 + 64]
+
+    def spend(n: int) -> None:
+        budget[0] -= n
+        if budget[0] < 0:
+            raise AampError("the file's lists point at the same entries again and again (damaged or made to hang)")
 
     def read_list(at: int) -> PList:
         if not 0 <= at <= size - 12:
@@ -149,21 +157,27 @@ def load(data: bytes) -> PList:
         depth[0] += 1
         if depth[0] > 64:
             raise AampError("lists nested too deep")
+        spend(1)
         _h, loff, ln, ooff, on = struct.unpack_from("<IHHHH", data, at)
         out = PList()
         for k in range(ln):
             c = at + loff * 4 + k * 12
             out.lists[struct.unpack_from("<I", data, c)[0]] = read_list(c)
+        spend(on)
         for k in range(on):
             o = at + ooff * 4 + k * 8
             oh, poff, pn = struct.unpack_from("<IHH", data, o)
             obj = PObject()
+            spend(pn)
             for j in range(pn):
                 p = o + poff * 4 + j * 8
                 if p + 8 > size:
                     raise AampError("parameter outside the file")
                 ph, word = struct.unpack_from("<II", data, p)
-                obj[ph] = Param(word >> 24, _value(data, p + (word & 0xFFFFFF) * 4, word >> 24, size))
+                value = _value(data, p + (word & 0xFFFFFF) * 4, word >> 24, size)
+                if isinstance(value, (str, bytes, list)):
+                    spend(len(value) // 8)          # (texts and buffers read count too)
+                obj[ph] = Param(word >> 24, value)
             out.objects[oh] = obj
         depth[0] -= 1
         return out

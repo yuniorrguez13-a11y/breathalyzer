@@ -4,6 +4,7 @@ import os
 import struct
 import sys
 import tempfile
+import time
 import unittest
 import zlib
 from pathlib import Path
@@ -209,8 +210,29 @@ class MapLog(unittest.TestCase):
         self.assertEqual(root["Objs"][1]["Translate"][0], 99.0)                 # mod 1's change
         self.assertEqual(root["LocationSize"], 1000.0)
         self.assertEqual(out["A-1_Static"][:4], b"Yaz0")
-        self.assertEqual(len(notes), 1)
+        self.assertEqual(len(notes), 2)
         self.assertIn("0x00000005", notes[0])                                   # 5 was the game's: skipped
+        self.assertIn("0x00000007", notes[1])                                   # both add 7: named
+        self.assertIn("only the later mod's is kept", notes[1])
+
+    def test_a_hashid_added_to_two_units_or_used_by_the_other_half_is_named(self):
+        """The game's HashIds are unique across its units (an object's save flags are named by it)."""
+        game = {"A-1_Static": yaz(unit([obj(5)])), "B-1_Static": yaz(unit([obj(6)])),
+                "A-1_Dynamic": bm.byml_dump({"Objs": [obj(8), obj(12)], "Rails": []})}
+        text = ("A-1_Static:\n  Objs:\n    add:\n    - {HashId: !u 0x7, UnitConfigName: One}\n"
+                "    - {HashId: !u 0x8, UnitConfigName: Two}\n    - {HashId: !u 0xc, UnitConfigName: Moved}\n"
+                "B-1_Static:\n  Objs:\n    add:\n    - {HashId: !u 0x7, UnitConfigName: Three}\n"
+                "A-1_Dynamic:\n  Objs:\n    del: [!u 0xc]\n")
+        out, notes = bm.merge_map(game, [log("map.yml", text)])
+        self.assertEqual(ids(load(out["B-1_Static"])), [6, 7])
+        self.assertEqual(len(notes), 2, notes)
+        self.assertIn("A-1_Static and B-1_Static both get new objects with the same HashId (0x00000007)", notes[0])
+        self.assertIn("A-1_Static gets new objects whose HashId the game's A-1_Dynamic already uses (0x00000008)",
+                      notes[1])                                 # (0xc moved from the Dynamic: no clash)
+        # the other half read through `sibling` when the logs don't change it
+        out, notes = bm.merge_map({"A-1_Static": game["A-1_Static"]}, [log("map.yml", text.split("B-1")[0])],
+                                  sibling=lambda u: game.get(u))
+        self.assertTrue(any("A-1_Dynamic already uses (0x00000008, 0x0000000c)" in n for n in notes), notes)
 
     def test_empty_logs_change_nothing(self):
         for text in ("", "{}", "A-1_Static: {Objs: {add: [], mod: {}, del: []}, Rails: {add: [], mod: {}, del: []}}"):
@@ -230,7 +252,8 @@ class MapLog(unittest.TestCase):
         dyn = load(out["A-1_Dynamic"])
         self.assertEqual(ids(dyn), [3])                         # a change of an object the game lacks: added
         self.assertNotEqual(out["A-1_Dynamic"][:4], b"Yaz0")   # compressed only when the game's was
-        self.assertEqual(notes, [])
+        self.assertEqual(len(notes), 1)                         # (that addition is named: made with the DLC?)
+        self.assertIn("A-1_Dynamic: 1 changed object your map doesn't have added as new (0x00000003)", notes[0])
 
     def test_adding_the_games_own_object_again_is_no_change(self):
         text = ("A-1_Static:\n  Objs:\n    add:\n    - {HashId: !u 0x9, SRTHash: 0, Translate: [0.0, 1.5, -2.0], "
@@ -420,6 +443,14 @@ class QuestLog(unittest.TestCase):
         root = load(bm.merge_quests(self.game, [one, two])[0])
         self.assertEqual([len(q["Steps"]) for q in root], [3, 2])
 
+    def test_a_mods_copy_keeps_its_change_when_another_log_lists_that_quest_unchanged(self):
+        # (merged into mod two's copy, Q2 changed there: mod one's log lists Q2 as the game has it, which is no change)
+        copy = yaz([quest("Q1"), {**quest("Q2"), "Orderer": "Two"}])
+        one = log("quests.yml", quests_yaml(mod=[("Q1", "--index_zero", 1, "One"), ("Q2", "Q1")]))
+        two = log("quests.yml", quests_yaml(mod=[("Q1", "--index_zero"), ("Q2", "Q1", 1, "Two")]))
+        root = load(bm.merge_quests(copy, [one, two], vanilla=self.game)[0])
+        self.assertEqual([q["Orderer"] for q in root], ["One", "Two"])
+
     def test_the_later_change_wins(self):
         one = log("quests.yml", quests_yaml(mod=[("Q1", None, 3)]))
         two = log("quests.yml", quests_yaml(mod=[("Q1", None, 1, "Other")]))
@@ -430,6 +461,23 @@ class QuestLog(unittest.TestCase):
         text = quests_yaml(add=[("Q4", "Q3"), ("Q3", "Q1"), ("Q0", "--index_zero"), ("Q9", "Gone")])
         new, _ = bm.merge_quests(self.game, [log("quests.yml", text)])
         self.assertEqual(self.names(new), ["Q0", "Q1", "Q3", "Q4", "Q2", "Q9"])
+
+    def test_a_long_backward_chain_is_placed_in_order_quickly(self):
+        """Each added quest names the next one in the log as its prev_quest: placed in one walk, not a pass each."""
+        n = 3000
+        adds = [(f"N{k}", f"N{k - 1}" if k else "Q1") for k in reversed(range(n))]
+        data = quests_yaml(add=adds)
+        t = time.perf_counter()
+        new, notes = bm.merge_quests(self.game, [log("quests.yml", data)])
+        self.assertLess(time.perf_counter() - t, 5)
+        self.assertEqual(self.names(new), ["Q1", *[f"N{k}" for k in range(n)], "Q2"])
+        self.assertEqual(notes, [])
+
+    def test_two_new_quests_after_one_and_a_loop(self):
+        text = quests_yaml(add=[("A", "Q1"), ("B", "Q1"), ("L1", "L2"), ("L2", "L1"), ("A1", "A")])
+        new, _ = bm.merge_quests(self.game, [log("quests.yml", text)])
+        # (the later one closest to Q1, each with its own followers; a loop of prev_quests at the end, in order)
+        self.assertEqual(self.names(new), ["Q1", "B", "A", "A1", "Q2", "L1", "L2"])
 
     def test_a_change_of_a_quest_the_game_lacks_is_added_after_its_prev(self):
         new, _ = bm.merge_quests(self.game, [log("quests.yml", quests_yaml(mod=[("Q5", "Q1")]))])
@@ -540,7 +588,7 @@ class Interface(unittest.TestCase):
         for name, text in (("map.yml", ""), ("quests.yml", quests_yaml(mod=[("Q1", "--index_zero")])),
                            ("mainstatic.yml", ""), ("dstatic.yml", "{}")):
             with self.subTest(name=name):
-                self.assertEqual(self.run_log(name, text), {"files": {}, "sizes": {}, "notes": []})
+                self.assertEqual({k: v for k, v in self.run_log(name, text).items() if k != "targets"}, {"files": {}, "sizes": {}, "notes": []})
 
     def test_a_mods_own_copy_is_merged_into(self):
         own = wc.yaz0_compress(bm.byml_dump([quest("Q1"), quest("Mine"), quest("Q2")]))

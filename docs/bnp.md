@@ -33,7 +33,9 @@ on its own is missing most of its files: the game would crash on it.
    afterwards (`add` says so when it can't). A work folder or library copy left by an add that was cut short
    (`.adding-*`, untouched for an hour) is deleted by the next `add`. The extractor runs at a lower priority. Nothing
    in the package is run: the tool that listed the archive is the only one that reads it, a file is read by the name
-   the archive spells it, after `--`, so no name is ever taken for an option.
+   the archive spells it, after `--`, so no name is ever taken for an option. A package that lists more than 20 GB
+   (more than the whole game) or one file over 4 GB is refused, and extracting needs its size plus 2 GB (or 1% of
+   the drive, if more) free, so the drive never fills up.
 2. **Options:** the ones the package turns on by default. `--bnp-option NAME` (its name or folder, any case; repeat
    it) adds one; for a choose-one group it replaces the group's default. `--bnp-no-options` leaves the defaults out,
    so `--bnp-no-options --bnp-option X` installs only X. A required group with nothing chosen gets its first option,
@@ -81,11 +83,17 @@ on its own is missing most of its files: the game would crash on it.
    | `mainstatic.yml`, `dstatic.yml` | `Bootup.pack` `Map/MainField/Static.smubin`, `Map/CDungeon/Static.smubin` | Start points, korok spots and the like added, changed or removed |
    | `map.yml` | `TitleBG.pack` `Map/MainField/<unit>/<unit>_Static.smubin`, `Map/MainField/<unit>/<unit>_Dynamic.smubin` (a whole file) | Objects and rails added, changed or deleted by `HashId`, sorted. Statics go into `TitleBG.pack` (BCML writes them loose) |
    | `quests.yml` | `TitleBG.pack` `Quest/QuestProduct.sbquestpack` | Quests added after the one they follow, changed or deleted |
-   | `drops.json`, `shop.aamp` | the `.bdrop` / `.bshop` in the actor's pack (in `TitleBG.pack` for title actors) | Drop tables as logged (`UNDERRIDE_CONST`: the game's value); shop items removed, then added or changed |
+   | `drops.json`, `shop.aamp` | the `.bdrop` / `.bshop` in the actor's pack (in `TitleBG.pack` for title actors) | Drop tables as logged (`UNDERRIDE_CONST`: the game's value; an option's table merges into the base's, a later mod's replaces an earlier one's whole); shop items removed, then added or changed |
    | `texts.json` | `Pack/Bootup_XXxx.pack` `Message/Msg_XXxx.product.ssarc`, every language your game has | Texts added or changed by label. A language the mod has no texts for gets its new texts, but keeps its own wording where the mod changed one (BCML copies the English over it) |
 
    A log that is the same as the game's (or as the mod's own copy) changes nothing and adds no file. `add` prints a
-   `logs merged:` line with each log and how many files it changed.
+   `logs merged:` line with each log and how many files it changed. A save data delete of a flag that a later game
+   data change keeps is dropped, so the flag is still saved. `map.yml` also names an object it adds with a `HashId`
+   another unit gets too, or the other half of its section (Static/Dynamic) already has (the game's `HashId`s are
+   unique: an object's save flags are named by it), and a changed object your map doesn't have, which is added as new
+   (usually made on a map with the DLC). Damaged or hostile files are refused, not followed: a Yaz0 file that says it
+   unpacks to more than 256 MB (or more than it could), a log over 64 MB, a parameter file whose lists point at the
+   same entries again, a drop table with more items than it holds.
 7. **Everything else is named.** BCML 2's logs (`savedata.sarc`, `deepmerge.yml`, `texts_*`: BCML 3 refuses such
    packages too), logs this loader doesn't know, damaged logs, and the parts of a log a merger leaves out (a flag of a
    type the game lacks, a texts language your game doesn't have...) are not merged: the game's own data is used, so
@@ -94,7 +102,8 @@ on its own is missing most of its files: the game would crash on it.
 
 The library copy (`modloader\mods\<id>`) is then a normal Switch mod plus `.bnp\` (never deployed: its name starts
 with a dot), which keeps `info.json`, the logs, `rstb.json` (the size changes: only the ones that change the game's
-table) and `bnp.json` (what was installed, its packs, the files each data log changed, and what wasn't merged).
+table) and `bnp.json` (what was installed, its packs, the files each data log changed or names, and what wasn't
+merged). A damaged `bnp.json` is named under *Needs attention* (add the mod again), never a crash.
 `list` shows the package's version. To change the options, `remove` the mod and add it again.
 
 ## Several mods
@@ -110,23 +119,44 @@ table) and `bnp.json` (what was installed, its packs, the files each data log ch
   `ActorInfo`) that a BCML package also has, the later one wins as for any file, and *Needs attention* says that
   package's changes in it are lost, naming the data logs merged into it (`its merged gamedata.yml too`). Nearly
   every package with game data, texts or map logs ships `Bootup.pack`, `Bootup_XXxx.pack` or `TitleBG.pack`, so two
-  such packages clash there. Merge such mods in UKMM (Switch mode) and add its output instead, for now. (The merge
-  itself is built: `bnp.deploy_hook(..., files=True)` gives those files merged as BCML merges mods, each mod's own
-  files over the game's, then every package's logs again in order, with their sizes; `deploy` doesn't use it yet.)
+  such packages clash there. Merge such mods in UKMM (Switch mode) and add its output instead, for now.
+- **The merge itself is built, `deploy` doesn't use it yet.** `bnp.deploy_hook(..., files=True)` gives those files
+  merged as BCML merges mods: the game's copy, then each mod's own files over it in order (only the ones that differ
+  from the game's, packs inside packs the same way), leaving out a package's files that its logs made (and the files
+  BCML ships changed and logs too, such as event info and quests, when the log can be read); then every package's
+  `deepmerge.aamp`, `aslist.aamp` and data logs again, in order, onto that. So a mod that isn't a package keeps its
+  own changes to the same files (a text inside `Bootup_USen.pack`, a game data flag, an event) next to the
+  packages', in either order. A shop or drop table a package ships already changed (BCML keeps its log too, which
+  then changes nothing at `add`) is still replayed: `bnp.json` lists every file a log names. Where a mod that isn't a
+  package comes later in the order and changes a file a package's logs change, the package's logs still come last,
+  so for an entry both change (the same text, flag, actor...) the package's wins, where BCML (which logs every mod)
+  would keep the later mod's: *Needs attention* names each such file. A whole file such as `ActorInfo` starts from
+  the last mod's copy that no package's logs made, else the game's. The merged files get size table entries, and a size table is made for them even when no mod
+  ships one. For `deploy` to use it, `tools/modman.py` has to call it with `files=True` and put `hook.files` into the
+  overlay over every mod's copy (`romfs_mods.add_generated`, which today leaves out a file that needs a size entry:
+  the merged table from the hook already holds them).
 
 ## Limits
 
 - Wii U packages are refused (install them in UKMM, Switch mode, and add its output).
 - BCML 2 logs (`savedata.sarc`, `deepmerge.yml`, `texts_*`) aren't merged (named, see above).
-- None of the data logs has been tried with a real package yet (the one real package here has none of them), nor
-  in the game: each was checked on the game's own files and on made-up logs only.
+- None of the data logs has been tried with a real package yet (the one real package here has none of them). In the
+  game, a made-up package's texts, map, game data, save data and actor info logs work (2026-11-12, below); the other
+  kinds (event info, effects, area data, residents, statics, quests, drops, shops) were checked on the game's own
+  files and on made-up logs only.
 - DLC: data logs for DLC files (DLC drop tables and shops, DLC maps) aren't merged; when your game has the DLC set
   up, the map logs are named instead of merged.
 - Where the rules differ from BCML's, on purpose: game data deletes of several logs are joined (BCML keeps the
   last list) and the game's game data files are kept as they are; the save data revision is the game's; an option's
   logs merge in the package's order (BCML: no fixed order); quests: a change equal to the game's quest is no change
-  and the later one wins; a texts language without the mod's own texts keeps its wording (see above); drops, shops,
-  map additions and other entries a log can't place are named, not guessed.
+  (compared with the game's own list, also when merging into a mod's copy) and the later one wins; a texts language
+  without the mod's own texts keeps its wording (see above); drops, shops, map additions and other entries a log
+  can't place are named, not guessed. An `ActorInfo` copy whose `Hashes` don't line up with its actors (a tool
+  appended one unsorted) is rebuilt from the actors' names.
+- Drop tables: an option's table merging into the base's and a later mod's replacing an earlier one's whole are read
+  from BCML's rules as described, not checked against BCML itself.
+- Two mods (or options) adding different map objects with the same new `HashId`: the later one is kept and the clash
+  is named (BCML keeps the later one too, silently).
 - Rebuilt game files are bigger than the game's: big ones (game data, the language archives) are stored Yaz0, not
   compressed again, as compressing in Python is too slow. Each of the 16 language packs is rewritten when a package
   has texts (about 110 MB in the library copy).
@@ -189,3 +219,18 @@ table) and `bnp.json` (what was installed, its packs, the files each data log ch
 - 2026-11-07, the same package added to a new scratch library with the data log merging in place (it has no data
   logs): all 320 of its files byte-identical to an install made just before the change; only `.bnp\bnp.json`
   differs (it now lists the files each data log changed: none).
+- 2026-11-12, after the deploy merge fixes: `DataLogs` in `tests/test_bnp.py` adds a mod that isn't a package next
+  to a package (its own English text inside a nested pack, game data flag, actor and event kept with the package's,
+  in both orders), two packages each changing a different quest (both kept), and a size table made for the merged
+  files alone. The same package added again to the scratch library (`out\bcml-logs-lib`, 70 seconds at low
+  priority): all 321 files, `.bnp\` included, byte-identical to the 2026-11-07 copy. The real-file checks in
+  `out\bcml-logs-check` again: the made-up package from the game's data installed with every change read back
+  (39 seconds), and `deploy_hook(files=True)` with it and the character mod: one `TitleBG.pack` in 15 seconds, 10 of
+  the mod's 11 own files byte-identical and the 11th the same inside. Not tried in the game.
+- 2026-11-12, in the game (Savage Wind 0.4.1-alpha.4, a scratch library and the test save, backed up and put back;
+  files in `out\bcml-ingame-1112`, never in the repo): a made-up `.bnp` with only logs (the title screen's Continue
+  and the pause menu's Save in all 16 languages, one barrel in `D-6_Dynamic` next to the save's start, a new game
+  data flag and its save entry, the apple's sell price) added with `modman add` next to the character mod, deployed
+  and played for 10 minutes: no crash; "Continue BNP" and "Save BNP" shown; the barrel stands where it was placed
+  (it isn't in the save's own picture); a save wrote the new flag (the save file 8 bytes longer, the flag's hash in
+  it) and loaded back; the game's log has no size or resource errors. The sell price wasn't looked at in a shop.

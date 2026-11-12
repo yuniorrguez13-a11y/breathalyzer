@@ -193,6 +193,14 @@ with a sword attack and the sword's name read in the game):
 `python tools\mp\ghost_ingame_check.py --link --spot -1033.6 252.3 1809.3 132 --give-weapon`. While the Link body is deployed,
 every ghost uses it, and if it ever crashes the game, every use of the ghost does (no crash so far).
 
+## Co-op: story together, shared time, host-only control (not yet run in the game)
+
+[docs/coop.md](coop.md): the host owns the story and a friend's co-op save gets it **added** (backup first, only 0 to 1,
+asked every session), the host's hour is everyone's, hosts on your home network are found without typing
+(`python tools/mp/coop_agent.py find`), and only the host can change time, the story, kick, ban or end the session
+(room code, limits per message kind). The relay keeps working for older clients: they join as visitors and see the
+ghosts only. Built and tested without the game (2026-11-12); the game checks are listed there.
+
 ## Limits
 
 - Radar only, unless you use the ghost mod (above): a copy of a Sheikah man stands in for the other player.

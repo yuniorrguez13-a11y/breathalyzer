@@ -45,7 +45,7 @@ LOGS = {
     "dstatic.yml": "shrine entrances",
     "quests.yml": "quests",
 }
-MAX_LOG = 256 << 20                  # a log bigger than this is refused (BCML's biggest map logs are a few MB)
+MAX_LOG = 64 << 20                  # a log bigger than this is refused (BCML's biggest map logs are a few MB)
 DEPTH = 64                           # BYML text nests about 8 deep; deeper is refused, not followed
 TITLE = "Pack/TitleBG.pack"
 BOOTUP = "Pack/Bootup.pack"
@@ -81,7 +81,7 @@ def f32(x: float) -> float:
 
 
 def unyaz0(data: bytes) -> bytes:
-    return wc.yaz0_decompress(data)[0] if data[:4] == b"Yaz0" else data
+    return bnp.unyaz0(data)[0] if data[:4] == b"Yaz0" else data
 
 
 def byml_load(data: bytes):
@@ -270,17 +270,19 @@ def _map_combine(logs) -> dict:
     out: dict = {}
     for diff in _flat(logs):
         for unit, u in diff.items():
-            dst = out.setdefault(unit, {sec: {"add": {}, "mod": {}, "del": {}} for sec in SECTIONS})
+            dst = out.setdefault(unit, {sec: {"add": {}, "mod": {}, "del": {}, "clash": {}} for sec in SECTIONS})
             for sec in SECTIONS:
                 s, d = u.get(sec) or {}, dst[sec]
                 d["mod"].update(s.get("mod") or {})
                 d["del"].update(dict.fromkeys(s.get("del") or ()))
                 for obj in s.get("add") or ():
                     h = _hid(obj)
-                    d["add"].pop(h, None)
+                    old = d["add"].pop(h, None)
+                    if old is not None and h is not None and not byml_same(old, obj):
+                        d["clash"][h] = None             # (two adds of one new HashId: the later wins, as in BCML)
                     d["add"][h] = obj
-    return {unit: {sec: {"add": list(d["add"].values()), "mod": d["mod"], "del": list(d["del"])}
-                   for sec, d in u.items()} for unit, u in out.items()}
+    return {unit: {sec: {"add": list(d["add"].values()), "mod": d["mod"], "del": list(d["del"]),
+                         "clash": list(d["clash"])} for sec, d in u.items()} for unit, u in out.items()}
 
 
 def _sort_key(obj) -> int:
@@ -288,8 +290,10 @@ def _sort_key(obj) -> int:
     return 0 if h is None else h
 
 
-def _merge_section(stock: list, s: dict) -> tuple[list, list[int]]:
-    """One section (Objs or Rails) of a unit with its combined change; also the HashIds of additions skipped."""
+def _merge_section(stock: list, s: dict, added_ids: set | None = None,
+                   orphaned: list | None = None) -> tuple[list, list[int]]:
+    """One section (Objs or Rails) of a unit with its combined change; also the HashIds of additions skipped.
+    added_ids gets the HashIds added (new objects and changes of objects the map lacks), orphaned the latter's."""
     game_ids = [_hid(o) for o in stock]
     known = set(game_ids) - {None}
     rows = list(zip(game_ids, stock))
@@ -316,11 +320,15 @@ def _merge_section(stock: list, s: dict) -> tuple[list, list[int]]:
         elif h not in added:
             added.add(h)
             kept.append(obj)
+    if added_ids is not None:
+        added_ids |= added
+    if orphaned is not None:
+        orphaned += [h for h in (_hid(o) for o in orphans) if h in added]
     kept.sort(key=_sort_key)
     return kept, skipped
 
 
-def _merge_unit(root, d: dict, unit: str) -> tuple[object, list[str]]:
+def _merge_unit(root, d: dict, unit: str, added_ids: set | None = None) -> tuple[object, list[str]]:
     if not isinstance(root, dict):
         return root, [f"map.yml: the game's {unit} isn't a map unit, so its changes were skipped"]
     out, notes = dict(root), []
@@ -332,11 +340,22 @@ def _merge_unit(root, d: dict, unit: str) -> tuple[object, list[str]]:
         if not isinstance(stock, list):
             notes.append(f"map.yml: the game's {unit} has no {sec} list, so its {sec} changes were skipped")
             continue
-        out[sec], skipped = _merge_section(stock, s)
+        orphaned: list[int] = []
+        out[sec], skipped = _merge_section(stock, s, added_ids, orphaned)
+        if orphaned:
+            # (mostly from an author who has the DLC: BCML diffs against the DLC's maps; such an object may be a DLC
+            # actor your game lacks)
+            kind = "changed object" if sec == "Objs" else "changed rail"
+            notes.append(f"map.yml: {unit}: {_plural(len(orphaned), kind)} your map doesn't "
+                         f"have added as new ({_some(f'0x{h:08x}' for h in orphaned)}): made for a map with the DLC?")
+        what = "added object" if sec == "Objs" else "added rail"
         if skipped:
-            what = "added object" if sec == "Objs" else "added rail"
             notes.append(f"map.yml: {unit}: {_plural(len(skipped), what)} skipped: the "
                          f"game's map already has the HashId ({_some(f'0x{h:08x}' for h in skipped)})")
+        clash = [h for h in s.get("clash") or () if h not in skipped]
+        if clash:
+            notes.append(f"map.yml: {unit}: two mods or options add different objects with the same HashId "
+                         f"({_some(f'0x{h:08x}' for h in clash)}): only the later mod's is kept")
     return out, notes
 
 
@@ -356,14 +375,37 @@ def map_target(unit: str) -> str:
     return f"{TITLE}//{rel}" if m.group(2) == "Static" else rel
 
 
-def merge_map(units: dict[str, bytes], logs) -> tuple[dict[str, bytes], list[str]]:
+def merge_map(units: dict[str, bytes], logs, sibling=None) -> tuple[dict[str, bytes], list[str]]:
     """units: the game's files of the units the logs change ("A-1_Static" -> its .smubin, Yaz0 or not; map_units
-    lists them). Returns the units that changed (new bytes, compressed as the game's were) and notes."""
-    return _merge_map(units, _map_combine(logs))
+    lists them). Returns the units that changed (new bytes, compressed as the game's were) and notes. sibling: an
+    optional function unit -> the game's file of it or None, for the HashId check (see _merge_map)."""
+    return _merge_map(units, _map_combine(logs), sibling)
 
 
-def _merge_map(units: dict[str, bytes], diff: dict) -> tuple[dict[str, bytes], list[str]]:
+def sibling_unit(unit: str) -> str:
+    """A-1_Static <-> A-1_Dynamic: the other half of a map section."""
+    m = UNIT_RE.fullmatch(unit)
+    return f"{m.group(1)}_{'Dynamic' if m.group(2) == 'Static' else 'Static'}" if m else unit
+
+
+def unit_ids(data: bytes | None) -> set[int]:
+    """The HashIds of a unit's objects and rails (empty for a file that can't be read)."""
+    try:
+        root = _load_game(data, "unit") if data is not None else None
+    except LogError:
+        return set()
+    if not isinstance(root, dict):
+        return set()
+    return {h for sec in SECTIONS if isinstance(root.get(sec), list) for h in map(_hid, root[sec]) if h is not None}
+
+
+def _merge_map(units: dict[str, bytes], diff: dict, sibling=None) -> tuple[dict[str, bytes], list[str]]:
+    """Also checks the HashIds added: the game's are unique across all its map units (an object's save flags are
+    named by it), so one added to two units, or one the other half of its section (Static/Dynamic) already has, is
+    named (BCML doesn't check). sibling: unit -> the game's file of that unit or None (units not given are read
+    through it)."""
     out, notes = {}, []
+    added_in: dict[str, set[int]] = {}
     for unit in sorted(diff):
         if not any(s.get(k) for s in diff[unit].values() for k in ("add", "mod", "del")):
             continue
@@ -372,10 +414,38 @@ def _merge_map(units: dict[str, bytes], diff: dict) -> tuple[dict[str, bytes], l
             notes.append(f"map.yml: your game has no map unit {unit}, so its changes were skipped")
             continue
         root = _load_game(data, unit)
-        merged, n = _merge_unit(root, diff[unit], unit)
+        ids: set[int] = set()
+        merged, n = _merge_unit(root, diff[unit], unit, ids)
         notes += n
+        added_in[unit] = ids
         if not byml_same(root, merged):
             out[unit] = _encode(merged, data)
+    owner: dict[int, str] = {}
+    twice: dict[tuple[str, str], list[int]] = {}
+    for unit in sorted(added_in):
+        for h in sorted(added_in[unit]):
+            if h in owner:
+                twice.setdefault((owner[h], unit), []).append(h)
+            else:
+                owner[h] = unit
+    for (a, b), hs in sorted(twice.items()):
+        notes.append(f"map.yml: {a} and {b} both get new objects with the same HashId "
+                     f"({_some(f'0x{h:08x}' for h in hs)}): they would share save flags and links")
+    for unit, ids in sorted(added_in.items()):
+        other = sibling_unit(unit)
+        if not ids or other == unit:
+            continue
+        got = units.get(other)
+        if got is None and sibling is not None:
+            try:
+                got = sibling(other)
+            except (LogError, OSError, wc.FormatError):
+                got = None
+        moved = {h for s in (diff.get(other) or {}).values() for h in (s.get("del") or ())}   # (moved across)
+        clash = sorted((ids & unit_ids(got)) - moved)
+        if clash:
+            notes.append(f"map.yml: {unit} gets new objects whose HashId the game's {other} already uses "
+                         f"({_some(f'0x{h:08x}' for h in clash)}): they would share save flags and links")
     return out, notes
 
 
@@ -561,20 +631,25 @@ def _quests_read(root, where: str) -> dict:
             "mod": {str(k): _quest(q, f"{where} mod") for k, q in mod.items()}, "del": list(dele)}
 
 
-def merge_quests(game: bytes, logs) -> tuple[bytes, list[str]]:
-    """game: Quest/QuestProduct.sbquestpack (from TitleBG.pack). Returns the merged file and notes."""
-    return _merge_bytes(game, "QuestProduct.sbquestpack", _quests_apply, _flat(logs), share=False)
+def merge_quests(game: bytes, logs, vanilla: bytes | None = None) -> tuple[bytes, list[str]]:
+    """game: Quest/QuestProduct.sbquestpack (from TitleBG.pack, or a mod's copy of it: then vanilla is the game's own,
+    which the logs' entries are compared with). Returns the merged file and notes."""
+    stock = _load_game(vanilla, "QuestProduct.sbquestpack") if vanilla is not None else None
+    return _merge_bytes(game, "QuestProduct.sbquestpack", lambda r, d: _quests_apply(r, d, stock), _flat(logs),
+                        share=False)
 
 
-def _quests_apply(root, diffs: list) -> tuple[object, list[str]]:
+def _quests_apply(root, diffs: list, vanilla=None) -> tuple[object, list[str]]:
     """Safer than BCML: a "mod" entry equal to the game's quest is no change (BCML's prev_quest makes every quest look
     changed, so one mod's log would undo another's edits); a later change wins (BCML: the earliest); positions are
     looked up again after every step; an addition of a quest the list already has is skipped (BCML adds it twice);
-    prev_quest never reaches the game's file."""
+    prev_quest never reaches the game's file. vanilla: the game's own list when root is a mod's copy (an entry is
+    compared with the game's quest, so a log listing a quest unchanged never undoes the copy's change to it)."""
     if not isinstance(root, list) or not all(isinstance(q, dict) and isinstance(q.get("Name"), str) for q in root):
         return root, ["quests.yml: the game's quest list can't be read, so it was skipped"]
     game = {}
-    for q in root:
+    ok = isinstance(vanilla, list) and all(isinstance(q, dict) and isinstance(q.get("Name"), str) for q in vanilla)
+    for q in (vanilla if ok else root):
         game.setdefault(q["Name"], q)
     mods: dict[str, tuple[dict, str | None]] = {}
     adds: dict[str, tuple[dict, str | None]] = {}
@@ -588,42 +663,63 @@ def _quests_apply(root, diffs: list) -> tuple[object, list[str]]:
             adds[q["Name"]] = (q, prev)
         dels.update(dict.fromkeys(d["del"]))
     rows = list(root)
+    first: dict[str, int] = {}
+    for i, r in enumerate(rows):
+        first.setdefault(r["Name"], i)
     for name, (q, prev) in mods.items():
-        i = next((i for i, r in enumerate(rows) if r["Name"] == name), None)
+        i = first.get(name)
         if i is None:
             adds.setdefault(name, (q, prev))
         else:
             rows[i] = q
     rows = [r for r in rows if r["Name"] not in dels]
-    names = [r["Name"] for r in rows]
-    pending, twice = list(adds.items()), []
-    while pending:
-        later = []
-        for name, (q, prev) in pending:
-            if name in names:
-                if not byml_same(rows[names.index(name)], q):    # (the same quest again is no change)
-                    twice.append(name)
-            elif prev == INDEX_ZERO:
-                rows.insert(0, q)
-                names.insert(0, name)
-            elif prev in names:
-                i = names.index(prev) + 1
-                rows.insert(i, q)
-                names.insert(i, name)
-            elif prev is not None and prev in adds and prev not in twice:
-                later.append((name, (q, prev)))              # after another new quest: once that one is in
-            else:
-                rows.append(q)
-                names.append(name)
-        if len(later) == len(pending):                       # a loop of prev_quests: at the end, in order
-            for name, (q, _) in later:
-                rows.append(q)
-                names.append(name)
-            later = []
-        pending = later
+    have = {}
+    for r in rows:
+        have.setdefault(r["Name"], r)
+    # Each new quest goes right after its prev_quest (a quest of the list, or another new one: then after that one,
+    # once it is in), the latest one closest to it; "--index_zero" ones first; one whose prev_quest is nowhere at the
+    # end. Built as a tree of "comes right after" and walked once (a long chain is linear, not a pass per quest).
+    twice: list[str] = []
+    after: dict[str, list[str]] = {}       # a quest -> the new quests right after it, in the order they came
+    front: list[str] = []
+    tail: list[str] = []
+    for name, (q, prev) in adds.items():
+        if name in have:
+            if not byml_same(have[name], q):                 # (the same quest again is no change)
+                twice.append(name)
+        elif prev == INDEX_ZERO:
+            front.append(name)
+        elif prev is not None and (prev in have or prev in adds):
+            after.setdefault(prev, []).append(name)
+        else:
+            tail.append(name)
+    out: list = []
+    placed: set[str] = set()
+
+    def walk(start: str, row) -> None:
+        stack = [(start, row)]
+        while stack:
+            name, r = stack.pop()
+            if r is None:
+                if name in placed:
+                    continue                                 # (a loop of prev_quests)
+                placed.add(name)
+                r = adds[name][0]
+            out.append(r)
+            stack.extend((n, None) for n in after.get(name, ()))   # (popped last first: the latest is closest)
+    for name in reversed(front):
+        walk(name, None)
+    for r in rows:
+        walk(r["Name"], r)
+        after.pop(r["Name"], None)                           # (a name twice in the list: its new ones once)
+    for name in tail:
+        walk(name, None)
+    for name in adds:                                        # a loop of prev_quests: at the end, in order
+        if name not in have and name not in placed:
+            walk(name, None)
     notes = [f"quests.yml: {_plural(len(twice), 'added quest')} skipped: the quest list already has "
              f"{'it' if len(twice) == 1 else 'them'} ({_some(twice)})"] if twice else []
-    return rows, notes
+    return out, notes
 
 
 # ---------------------------------------------------------------------------------------------------- interface
@@ -724,6 +820,7 @@ def apply(name: str, diff, game: str, read=None) -> dict:
     files: dict[str, bytes] = {}
     sizes: dict[str, int] = {}
     notes: list[str] = []
+    targets: list[str] = []      # (every file the logs name, changed or not: see bnp.merge_logs)
     empty = not diff if name != "map.yml" else not any(
         any(s.get(k) for s in u.values() for k in ("add", "mod", "del")) for u in diff.values())
     if empty:
@@ -753,20 +850,26 @@ def apply(name: str, diff, game: str, read=None) -> dict:
         units, vanillas = {}, {}
         for unit in diff:
             units[unit], vanillas[unit] = base(map_target(unit))
-        out, notes = _merge_map({u: d for u, d in units.items() if d is not None}, diff)
+            targets.append(map_target(unit))
+        out, notes = _merge_map({u: d for u, d in units.items() if d is not None}, diff,
+                                lambda u: gf.get(map_target(u)))
         for unit, data in out.items():
             put(map_target(unit), data, vanillas[unit], True)
     else:
         target, fn, pack = {"mainstatic.yml": (MAINSTATIC, _mainstatic_apply, False),
                             "dstatic.yml": (DSTATIC, _dstatic_apply, False),
                             "quests.yml": (QUESTS, _quests_apply, True)}[name]
+        targets.append(target)
         data, vanilla = base(target)
         if data is None:
             notes.append(f"{name} ({LOGS[name]}) not merged: your game has no {target}")
         else:
+            if name == "quests.yml" and vanilla is not None and data is not vanilla:
+                game_list = _load_game(vanilla, target.split("//")[-1])   # (compared with the game's, see there)
+                fn = lambda root, d: _quests_apply(root, d, game_list)    # noqa: E731
             new, notes = _merge_bytes(data, target.split("//")[-1], fn, diff, share=name != "quests.yml")
             if new is not data:
                 put(target, new, vanilla, pack)
     if files and rstb is None:
         notes.append(f"{name}: the game's size table wasn't found, so no sizes were set for the merged files")
-    return {"files": files, "sizes": sizes, "notes": notes}
+    return {"files": files, "sizes": sizes, "notes": notes, "targets": targets}

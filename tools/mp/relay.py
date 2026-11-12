@@ -8,7 +8,18 @@ JSON lines over TCP (see tools/mp/__init__.py). A state is passed on with its kn
 t x y z yaw stamina place, and the optional speed, anim, attack, weapon, shield and bow; a bad optional field is
 dropped on its own). Nothing is saved; Ctrl+C stops it and tells every client.
 Limits per client: 10 s to say hello, 30 messages a second (more are dropped; much more gets the client cut off), 4 KB per line,
-8 players per room. Names and rooms are checked. There are no passwords: anyone who can reach the port can join.
+8 players per room. Names and rooms are checked.
+
+Co-op and base security (docs/coop.md; tools/mp/session.py, security.py), used when the host's agent runs the relay:
+- `host_secret`: only the connection on 127.0.0.1 whose hello carries the matching `host_proof` is the room's host.
+  time, weather, story, rules, kick, ban, end and code are host-only: from anyone else they are dropped, and 3 in
+  10 s get that player kicked. Every relayed co-op line carries "from" (the sender's id), written by the relay.
+- `room_code`: 3 words; wrong ones are refused, 5 a minute from one address make it wait 10 minutes.
+- `bans` (security.BanList): banned or kicked keys and addresses can't join. `lan_only`: home-network addresses only.
+- Per kind: state 25/s (new clients), story 2/s, time 2/s, weather 1/s, story_offer 1/s; 4 not-yet-hello connections
+  per address. A friend's `story_offer` reaches the host only if the host's rules allow it (off by default).
+- A client without "features" in its hello is a visitor: states, join and leave only, never time or story.
+Without host_secret and room_code it works as before: anyone who can reach the port can join.
 """
 from __future__ import annotations
 
@@ -22,6 +33,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mp import (DEFAULT_RELAY_PORT, MAX_LINE, PROTOCOL_VERSION, clean_state, decode, encode, finite,  # noqa: E402
                 safe_console, valid_name, valid_room)
+from mp import security, session  # noqa: E402
 
 DEFAULT_RATE = 30          # messages per second per client
 DEFAULT_ROOM_CAP = 8
@@ -32,7 +44,7 @@ MAX_BUFFER = 256 * 1024    # bytes waiting to go to one client before it counts 
 
 class _Conn:
     __slots__ = ("id", "name", "room", "bot", "writer", "peer", "tokens", "stamp", "flood", "warned",
-                 "state", "state_at", "closing", "joined", "hello_by")
+                 "state", "state_at", "closing", "joined", "hello_by", "features", "host", "key", "kinds", "ip")
 
     def __init__(self, writer, rate, now, hello_by=float("inf")):
         self.writer = writer
@@ -49,12 +61,22 @@ class _Conn:
         self.closing = False
         self.joined = False
         self.hello_by = hello_by   # (event loop time) the hello must have arrived by then
+        self.features = None       # None: a visitor (an older client); else the known features of its hello
+        self.host = False          # the room's host (proved with the host secret over 127.0.0.1)
+        self.key = None            # player key fingerprint (bans)
+        self.kinds = None          # security.KindLimiter (per message kind)
+        self.ip = self.peer[0] if isinstance(self.peer, tuple) and self.peer else None
+
+    def has(self, feature: str) -> bool:
+        return self.features is not None and feature in self.features
 
 
 class Relay:
     def __init__(self, host: str = "0.0.0.0", port: int = DEFAULT_RELAY_PORT, *, rate: float = DEFAULT_RATE,
                  max_line: int = MAX_LINE, room_cap: int = DEFAULT_ROOM_CAP, max_clients: int = DEFAULT_MAX_CLIENTS,
-                 hello_timeout: float = 10.0, idle_timeout: float = 30.0, clock=time.monotonic, log=print):
+                 hello_timeout: float = 10.0, idle_timeout: float = 30.0, clock=time.monotonic, log=print,
+                 host_secret: str | None = None, room_code: str | None = None, bans=None,
+                 friends_story: bool = False, lan_only: bool = False):
         self.host, self.port = host, port
         self.rate = float(rate)
         self.max_line = max_line
@@ -70,6 +92,16 @@ class Relay:
         self._server = None
         self._done: asyncio.Event | None = None
         self._closed = False
+        self.host_secret = host_secret
+        self.room_code = security.normalize_code(room_code) if room_code else None
+        if room_code and self.room_code is None:
+            raise ValueError("a room code is 3 words from the word list")
+        self.bans = bans if bans is not None else security.BanList(clock=clock)
+        self.lan_only = lan_only
+        self.default_rules = {"friends_story": bool(friends_story)}
+        self.room_info: dict[str, dict] = {}   # room -> {"host": _Conn|None, "time", "weather", "story", "rules"}
+        self._wrong_codes = security.WrongCodeGuard(clock)
+        self._host_only = security.Strikes(security.HOST_ONLY_STRIKES, security.HOST_ONLY_WINDOW, clock)
 
     # -- life cycle --
 
@@ -229,6 +261,16 @@ class Relay:
         if self._closed or len(self._conns) >= self.max_clients:
             self._fail(conn, "relay full" if not self._closed else "relay stopped")
             return
+        if self.lan_only and not security.address_allowed(conn.ip):
+            self._fail(conn, "this session is for your home network only (internet play comes with the next update)")
+            return
+        if self.bans.blocked(None, conn.ip):
+            self._fail(conn, "you can't join this session")
+            return
+        if conn.ip is not None and sum(1 for c in self._conns if c.ip == conn.ip and not c.joined) \
+                >= security.MAX_PENDING_PER_ADDRESS:
+            self._fail(conn, "too many connections from your address")
+            return
         self._conns.add(conn)
         lines = self._lines(reader, conn)
         try:
@@ -279,26 +321,71 @@ class Relay:
         if len(members) >= self.room_cap:
             self._fail(conn, f"room {room} is full ({self.room_cap} players)")
             return
+        key = security.valid_fingerprint(msg.get("key"))
+        if self.bans.blocked(key, conn.ip):
+            self._fail(conn, "you can't join this session")
+            return
+        info = self.room_info.get(room)
+        is_host = (self.host_secret is not None and conn.ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+                   and security.host_proof_matches(self.host_secret, room, msg.get("host_proof"))
+                   and (info is None or info.get("host") is None))
+        if self.room_code and not is_host:
+            if self._wrong_codes.blocked(conn.ip):
+                self._fail(conn, "too many wrong room codes; try again in 10 minutes")
+                return
+            if not security.code_matches(self.room_code, msg.get("code")):
+                self._wrong_codes.wrong(conn.ip)
+                self._fail(conn, "wrong room code")
+                return
         self.rooms[room] = members
+        if info is None:
+            info = self.room_info[room] = {"host": None, "time": None, "weather": None, "story": None,
+                                           "rules": dict(self.default_rules)}
         conn.id = self._next_id
         self._next_id += 1
         conn.name, conn.room, conn.bot, conn.joined = name, room, bool(msg.get("bot")), True
+        conn.features = session.clean_features(msg.get("features"))
+        conn.key = key
+        conn.kinds = security.KindLimiter(clock=self.clock)
+        if is_host:
+            conn.host = True
+            info["host"] = conn
         now = self.clock()
         peers = []
         for other in members.values():
             p = {"id": other.id, "name": other.name, "bot": other.bot}
+            if conn.features is not None:
+                p["features"] = other.features
+                p["host"] = other.host
             if other.state is not None:
                 p["state"] = dict(other.state, age=round(max(0.0, now - other.state_at), 3))
             peers.append(p)
         members[conn.id] = conn
-        self._send(conn, {"type": "welcome", "id": conn.id, "name": name, "room": room,
-                          "version": PROTOCOL_VERSION, "room_cap": self.room_cap, "peers": peers})
-        self._broadcast(conn, {"type": "join", "id": conn.id, "name": name, "bot": conn.bot})
+        welcome = {"type": "welcome", "id": conn.id, "name": name, "room": room,
+                   "version": PROTOCOL_VERSION, "room_cap": self.room_cap, "peers": peers}
+        if conn.features is not None:
+            host = info.get("host")
+            welcome.update(features=list(session.FEATURES), host=host.id if host is not None else None,
+                           rules=dict(info["rules"]), you_host=conn.host, code=bool(self.room_code))
+            for kind in ("time", "weather", "story"):
+                if info.get(kind) is not None and conn.has(session.FEATURE_OF[kind]):
+                    welcome[kind] = info[kind]
+        self._send(conn, welcome)
+        join = {"type": "join", "id": conn.id, "name": name, "bot": conn.bot}
+        for other in list(members.values()):
+            if other is not conn:
+                self._send(other, dict(join, features=conn.features, host=conn.host) if other.features is not None
+                           else join)
         self._say(f"{name} joined room {room} ({len(members)} player{'s' if len(members) != 1 else ''})")
 
     def _message(self, conn: _Conn, msg: dict) -> None:
         kind = msg["type"]
+        if kind in security.HOST_ONLY or kind == "story_offer":
+            self._coop(conn, kind, msg)
+            return
         if kind == "state":
+            if conn.features is not None and conn.kinds is not None and not conn.kinds.allow("state"):
+                return
             state = clean_state(msg)
             if state is None:
                 self._send(conn, {"type": "error", "error": "bad state (needs finite t, x, y, z)"})
@@ -313,10 +400,92 @@ class Relay:
         else:
             self._send(conn, {"type": "error", "error": f"unknown message type {kind[:20]!r}"})
 
+    # -- co-op (host-only kinds and story offers) --
+
+    def _coop(self, conn: _Conn, kind: str, msg: dict) -> None:
+        info = self.room_info.get(conn.room)
+        if info is None:
+            return
+        if kind in security.HOST_ONLY and not conn.host:
+            if self._host_only.hit(conn):
+                self._say(f"{conn.name} sent host-only messages; disconnecting")
+                self._fail(conn, "sent host-only messages; disconnected")
+            else:
+                self._send(conn, {"type": "error", "error": f"only the host can send {kind!r}"})
+            return
+        if conn.kinds is not None and not conn.kinds.allow(kind):
+            return
+        sender = {"from": conn.id, "id": conn.id, "name": conn.name}
+        if kind in ("time", "weather", "story", "story_offer"):
+            if kind == "time":
+                clean = session.clean_time(msg)
+            elif kind == "weather":
+                clean = session.clean_weather(msg)
+            else:
+                clean = session.clean_story(msg, offer=kind == "story_offer")
+            if clean is None:
+                self._send(conn, {"type": "error", "error": f"bad {kind}"})
+                return
+            line = dict(clean, type=kind, **sender)
+            if kind == "story_offer":
+                host = info.get("host")
+                if not conn.has("story1") or host is None or host is conn:
+                    return
+                if not info["rules"].get("friends_story"):
+                    self._send(conn, {"type": "error", "error": "the host doesn't take friends' story progress"})
+                    return
+                self._send(host, line)
+                return
+            info[kind] = line
+            self._broadcast_feature(conn, session.FEATURE_OF[kind], line)
+        elif kind == "rules":
+            clean = session.clean_rules(msg)
+            if clean is None:
+                self._send(conn, {"type": "error", "error": "bad rules"})
+                return
+            info["rules"].update(clean)
+            self._broadcast_feature(conn, "coop1", dict(info["rules"], type="rules", **sender))
+        elif kind in ("kick", "ban"):
+            target = self.rooms.get(conn.room, {}).get(session.clean_target(msg) or 0)
+            if target is None or target is conn:
+                self._send(conn, {"type": "error", "error": f"no such player to {kind}"})
+                return
+            done = "banned" if kind == "ban" else "kicked"
+            if kind == "ban":
+                self.bans.ban(target.key, target.ip, target.name or "")
+            else:
+                self.bans.kick(target.key, target.ip)
+            self._say(f"{conn.name} {done} {target.name}")
+            self._send(target, {"type": "bye", "reason": f"{done} by the host"})
+            self._kick(target)
+        elif kind == "code":
+            code = msg.get("code")
+            norm = security.normalize_code(code) if code else None
+            if code and norm is None:
+                self._send(conn, {"type": "error", "error": "a room code is 3 words from the word list"})
+                return
+            self.room_code = norm
+        elif kind == "end":
+            self._say(f"{conn.name} ended the session")
+            for other in list(self.rooms.get(conn.room, {}).values()):
+                if other is not conn:
+                    self._send(other, {"type": "end", **sender})
+                    self._send(other, {"type": "bye", "reason": f"{conn.name} ended the session"})
+                    self._kick(other)
+
+    def _broadcast_feature(self, conn: _Conn, feature: str, msg: dict) -> None:
+        """Send to the others in the room that speak `feature` (never to visitors)."""
+        for other in list(self.rooms.get(conn.room, {}).values()):
+            if other is not conn and other.has(feature):
+                self._send(other, msg)
+
     def _leave(self, conn: _Conn) -> None:
         if not conn.joined:
             return
         conn.joined = False
+        info = self.room_info.get(conn.room)
+        if info is not None and info.get("host") is conn:
+            info["host"] = None
         members = self.rooms.get(conn.room)
         if members is None or members.get(conn.id) is not conn:
             return
@@ -325,6 +494,7 @@ class Relay:
             self._send(other, {"type": "leave", "id": conn.id, "name": conn.name})
         if not members:
             del self.rooms[conn.room]
+            self.room_info.pop(conn.room, None)
         self._say(f"{conn.name} left room {conn.room} ({len(members)} left)")
 
 

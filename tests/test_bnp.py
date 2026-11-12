@@ -443,6 +443,25 @@ class Packs(unittest.TestCase):
         self.assertEqual(bnp._yaz0_head(yaz0(raw)), b"SARC")
         self.assertTrue(bnp.Blob(yaz0(raw)).magic == b"SARC")
 
+    def test_a_yaz0_claiming_too_much_is_refused_before_unpacking(self):
+        ok = yaz0(b"SARC" + bytes(1000))
+        self.assertEqual(bnp.unyaz0(ok)[0], b"SARC" + bytes(1000))
+        for claim in (bnp.YAZ0_MAX + 1, 0xFFFFFFFF, len(ok) * bnp.YAZ0_RATIO + 8192):
+            bomb = ok[:4] + struct.pack(">I", claim) + ok[8:]
+            with self.subTest(claim=claim), mock.patch.object(wc, "yaz0_decompress", side_effect=AssertionError):
+                with self.assertRaises(wc.FormatError):
+                    bnp.unyaz0(bomb)
+                with self.assertRaises(wc.FormatError):
+                    bnp.Blob(bomb).raw
+
+    def test_a_big_pack_is_stored_not_compressed(self):
+        """Blob.data compresses small packs only: pure-Python Yaz0 of a big pack takes seconds (ukmm.yaz0)."""
+        blob = bnp.Blob(yaz0(sarc({"a": "x"})))
+        blob.set("big", os.urandom(64 << 10))
+        with mock.patch.object(wc, "yaz0_compress", side_effect=AssertionError):
+            out = blob.data()
+        self.assertEqual(dict(wc.sarc_files(wc.yaz0_decompress(out)[0]))["a"], b"x")
+
 
 # ---------------------------------------------------------------- package, options, names
 
@@ -541,6 +560,28 @@ class Names(unittest.TestCase):
             members, _ = bnp.list_archive("x.bnp")
         self.assertEqual([(m.name, m.is_dir, m.raw) for m in members], [("sub", True, "sub"),
                                                                         ("sub/a.txt", False, "sub\\a.txt")])
+
+    def test_extract_keeps_room_on_the_drive_and_refuses_huge_listings(self):
+        """Nothing is extracted (the tool isn't run) when the listing is too big or would leave the drive full."""
+        gb = 1 << 30
+        usage = type("U", (), {"total": 237 * gb, "free": 10 * gb})()
+        with tempfile.TemporaryDirectory() as tmp:
+            for sizes, why in (([25 * gb], "unpacks to 25 GB"), ([gb, 5 * gb], "holds a file of 5 GB"),
+                               ([3 * gb, 3 * gb, 3 * gb], "kept free"), ([gb], None)):
+                members = [bnp.Member(f"f{i}", s, False, f"f{i}") for i, s in enumerate(sizes)]
+                dest = os.path.join(tmp, f"x{len(sizes)}{sizes[0]}")
+                with self.subTest(sizes=sizes), \
+                        mock.patch.object(bnp, "list_archive", return_value=(members, "7z")), \
+                        mock.patch.object(bnp, "archive_tools", return_value=[("7z", "7z.exe")]), \
+                        mock.patch.object(bnp.shutil, "disk_usage", return_value=usage), \
+                        mock.patch.object(bnp, "_run", return_value=done(b"", 2)) as run:
+                    with self.assertRaises(bnp.BnpError) as cm:
+                        bnp.extract("x.bnp", dest)
+                    if why:
+                        self.assertIn(why, str(cm.exception))
+                        run.assert_not_called()
+                    else:
+                        self.assertIn("Couldn't extract", str(cm.exception))   # (the check passed; the tool ran)
 
     @unittest.skipUnless(os.name == "nt", "tar.exe's ANSI code page output is Windows'")
     def test_tar_names_beyond_ascii_say_to_install_7zip(self):
@@ -1304,6 +1345,160 @@ class DataLogs(Base):
         self.assertGreater(need, max(one_t.get("GameData/gamedata.sarc"), two_t.get("GameData/gamedata.sarc")))
         # without files=True (what modman asks today) the same mods are named as losing their changes
         self.assertTrue(bnp.deploy_hook(mods, str(self.game)).attention)
+
+    def hand_made(self, events: dict | None = None) -> Path:
+        """A mod that isn't a package: its own English text, game data flag and actor; and its own events."""
+        boot = dict(wc.sarc_files(self.vanilla["Pack/Bootup.pack"]))
+        gd = dict(wc.sarc_files(wc.yaz0_decompress(boot["GameData/gamedata.ssarc"])[0]))
+        gd["/bool_data_0.bgdata"] = byml({"bool_data": [flag("FlagA"), flag("FlagPlain")]}, False)
+        boot["GameData/gamedata.ssarc"] = yaz0(sarc(gd))
+        if events is not None:
+            boot["Event/EventInfo.product.sbyml"] = byml(events)
+        actors = sorted([{"name": "Hero", "instSize": 100}, {"name": "PlainActor", "instSize": 7}],
+                        key=lambda a: crc(a["name"]))
+        return write(self.tmp / "plain", {
+            f"{R}/Pack/Bootup_USen.pack": sarc({"Message/Msg_USen.product.ssarc": yaz0(sarc({
+                ARMOR: msbt({"A_Name": "PlainTunic"})}))}),
+            f"{R}/Pack/Bootup.pack": sarc(boot),
+            f"{R}/Actor/ActorInfo.product.sbyml": byml({"Actors": actors, "Hashes": [
+                bd.U32(crc(a["name"])) if crc(a["name"]) >> 31 else crc(a["name"]) for a in actors]})})
+
+    def test_deploy_keeps_a_hand_made_mods_changes_next_to_a_packages_logs(self):
+        """A package's log-made files (texts inside a nested pack, game data, actor info) and a file BCML ships
+        changed and logs (event info) start from the other mod's copy, in either order, so both mods' changes stay."""
+        texts = {"USen": {"ActorType/ArmorUpper.msyt": {"B_Name": {"contents": [{"text": "Hood"}]}}}}
+        game_events = {"Ev<A>": {"mode": "Seamless"}}
+        pkg = {"info.json": json.dumps({"name": "Pkg", "version": "1", "platform": "switch"}),
+               f"{R}/Pack/Bootup.pack": sarc({"Event/EventInfo.product.sbyml": byml({**game_events,
+                                                                                     "Ev<C>": {"mode": "Pkg"}})}),
+               "logs/eventinfo.yml": "Ev<C>: {mode: Pkg}\n",
+               "logs/texts.json": json.dumps(texts),
+               "logs/gamedata.yml": f"bool_data:\n  add:\n    FlagPkg: {flag_yaml('FlagPkg')}\n",
+               "logs/actorinfo.yml": f'"{crc("PkgActor")}": {{name: PkgActor, instSize: 5}}\n'}
+        _, a, _ = self.install(pkg, "pkg")
+        plain = self.hand_made({**game_events, "Ev<P>": {"mode": "Plain"}})
+        for order in ([("Pkg", str(a)), ("Plain", str(plain))], [("Plain", str(plain)), ("Pkg", str(a))]):
+            with self.subTest(order=" < ".join(n for n, _ in order)):
+                hook = bnp.deploy_hook(order, str(self.game), files=True)
+                if order[-1][0] == "Plain":
+                    # (the later hand-made mod changes files Pkg's logs change: named, since an entry both changed
+                    # would keep Pkg's change; here they change different entries, so both stay)
+                    self.assertEqual(sorted(x.split(" both change ")[0].split("'s ")[-1] for x in hook.attention),
+                                     ["actorinfo.yml (actor info)", "eventinfo.yml (event info)",
+                                      "gamedata.yml (game data flags)", "texts.json (texts)"])
+                else:
+                    self.assertEqual(hook.attention, [])
+                self.assertEqual(sorted(hook.files), ["Actor/ActorInfo.product.sbyml", "Pack/Bootup.pack",
+                                                      "Pack/Bootup_USen.pack"])
+                usen = dict(wc.sarc_files(hook.files["Pack/Bootup_USen.pack"]))["Message/Msg_USen.product.ssarc"]
+                self.assertEqual(msbt_texts(usen), {"A_Name": "PlainTunic", "B_Name": "Hood"})
+                boot = dict(wc.sarc_files(hook.files["Pack/Bootup.pack"]))
+                gd = dict(wc.sarc_files(wc.yaz0_decompress(boot["GameData/gamedata.ssarc"])[0]))
+                self.assertEqual([e["DataName"] for e in bd.byml_load(gd["/bool_data_0.bgdata"])["bool_data"]],
+                                 ["FlagA", "FlagPlain", "FlagPkg"])
+                self.assertEqual(bd.byml_load(boot["Event/EventInfo.product.sbyml"]),
+                                 {**game_events, "Ev<C>": {"mode": "Pkg"}, "Ev<P>": {"mode": "Plain"}})
+                info = bd.byml_load(hook.files["Actor/ActorInfo.product.sbyml"])
+                self.assertEqual(sorted(x["name"] for x in info["Actors"]), ["Hero", "PkgActor", "PlainActor"])
+                self.assertEqual([int(h) & 0xFFFFFFFF for h in info["Hashes"]], [crc(x["name"]) for x in info["Actors"]])
+
+    def test_deploy_merges_two_packages_changing_different_quests(self):
+        """BCML lists every quest under "mod" and ships its changed quest list: each package's own change stays."""
+        libs = []
+        for name, changed in (("One", "Q1"), ("Two", "Q2")):
+            qs = [quest("Q1"), quest("Q2")]
+            for q in qs:
+                if q["Name"] == changed:
+                    q["Orderer"] = name
+            mod = {q["Name"]: {**q, "prev_quest": qs[i - 1]["Name"] if i else "--index_zero"} for i, q in enumerate(qs)}
+            pkg = {"info.json": json.dumps({"name": name, "version": "1", "platform": "switch"}),
+                   f"{R}/Pack/TitleBG.pack": sarc({"Quest/QuestProduct.sbquestpack": yaz0(bm.byml_dump(qs, share=False))}),
+                   "logs/quests.yml": bd.to_text({"add": [], "mod": mod, "del": []})}
+            _, stage, _ = self.install(pkg, name)
+            libs.append((name, str(stage)))
+        hook = bnp.deploy_hook(libs, str(self.game), files=True)
+        self.assertEqual(hook.attention, [])
+        title = dict(wc.sarc_files(hook.files["Pack/TitleBG.pack"]))
+        self.assertEqual({q["Name"]: q["Orderer"] for q in bm.byml_load(title["Quest/QuestProduct.sbquestpack"])},
+                         {"Q1": "One", "Q2": "Two"})
+
+    def test_deploy_makes_a_size_table_for_the_merged_files_alone(self):
+        """Neither mod changes the size table, but the merged event info is bigger than the game's entry."""
+        game_events = {"Ev<A>": {"mode": "Seamless"}}
+        pkg = {"info.json": json.dumps({"name": "Pkg", "version": "1", "platform": "switch"}),
+               f"{R}/Pack/Bootup.pack": sarc({"Event/EventInfo.product.sbyml": byml({**game_events,
+                                                                                     "Ev<C>": {"mode": "Pkg"}})}),
+               "logs/eventinfo.yml": "Ev<C>: {mode: Pkg}\n"}
+        _, a, _ = self.install(pkg, "pkg")
+        self.assertFalse((a / R / rm.RSTB).exists())
+        boot = dict(wc.sarc_files(self.vanilla["Pack/Bootup.pack"]))
+        boot["Event/EventInfo.product.sbyml"] = byml({**game_events, "Ev<P>": {"mode": "Plain"}})
+        plain = write(self.tmp / "plain", {f"{R}/Pack/Bootup.pack": sarc(boot)})
+        hook = bnp.deploy_hook([("Plain", str(plain)), ("Pkg", str(a))], str(self.game), files=True)
+        self.assertIsNotNone(hook.rstb)
+        self.assertGreater(bnp.Rstb(hook.rstb.data).get("Event/EventInfo.product.byml"),
+                           self.sizes["Event/EventInfo.product.byml"])
+        self.assertIn("Size table (RSTB): the merged files' sizes merged into one", " | ".join(hook.notes))
+
+    def test_deploy_replays_a_shop_log_whose_shop_ships_changed(self):
+        """BCML ships the changed .bshop and keeps shop.aamp: the log changes nothing at install, but its shop is
+        still named (log_targets), so deploy merges both packages' items (BCML unions the shop logs)."""
+        def log_for(item: str, num: int) -> bytes:
+            o = aamp.PObject()
+            o.set("ItemNum", aamp.INT, num)
+            diff = aamp.PList(lists={crc("Additions"): aamp.PList(lists={crc("Normal"): aamp.PList(
+                objects={crc(item): o})})})
+            names = aamp.PObject()
+            names.set("File0", aamp.STRING_REF, f"{R}/Pack/TitleBG.pack//{SHOP_PATH}")
+            return aamp.dump(aamp.PList(lists={crc(f"{R}/Pack/TitleBG.pack//{SHOP_PATH}"): diff},
+                                        objects={crc("Filenames"): names}))
+        libs = []
+        for name, rows, item, num in (("One", [("Item_A", 7, 0, False, 0), ("Item_B", 2, 5, True, 1)], "Item_A", 7),
+                                      ("Two", [("Item_A", 1, 0, False, 0), ("Item_B", 9, 5, True, 1)], "Item_B", 9)):
+            pkg = {"info.json": json.dumps({"name": name, "version": "1", "platform": "switch"}),
+                   f"{R}/Pack/TitleBG.pack": sarc({"Actor/Pack/Npc_T.sbactorpack": yaz0(sarc(
+                       {"Actor/ShopData/T.bshop": bshop(rows)}))}),
+                   "logs/shop.aamp": log_for(item, num)}
+            res, stage, _ = self.install(pkg, name)
+            self.assertEqual(res.logs_merged, {"shop.aamp": []})            # (no change at install)
+            self.assertEqual(res.log_targets, {"shop.aamp": [f"Pack/TitleBG.pack//{SHOP_PATH}"]})
+            libs.append((name, str(stage)))
+        hook = bnp.deploy_hook(libs, str(self.game), files=True)
+        title = dict(wc.sarc_files(hook.files["Pack/TitleBG.pack"]))
+        npc = dict(wc.sarc_files(wc.yaz0_decompress(title["Actor/Pack/Npc_T.sbactorpack"])[0]))
+        self.assertEqual([r[:2] for r in shop_rows(npc["Actor/ShopData/T.bshop"])], [("Item_A", 7), ("Item_B", 9)])
+
+    def test_deploy_names_a_later_hand_made_mod_changing_what_a_packages_log_changes(self):
+        """The package's logs are applied after every mod's own files, so where a later mod that isn't a package
+        changes the same text, the package's wins: named (BCML would keep the later mod's)."""
+        texts = {"USen": {"ActorType/ArmorUpper.msyt": {"A_Name": {"contents": [{"text": "PkgTunic"}]}}}}
+        pkg = {"info.json": json.dumps({"name": "Pkg", "version": "1", "platform": "switch"}),
+               "logs/texts.json": json.dumps(texts)}
+        _, a, _ = self.install(pkg, "pkg")
+        plain = write(self.tmp / "plain", {f"{R}/Pack/Bootup_USen.pack": sarc({
+            "Message/Msg_USen.product.ssarc": yaz0(sarc({ARMOR: msbt({"A_Name": "PlainTunic"})}))})})
+        hook = bnp.deploy_hook([("Pkg", str(a)), ("Plain", str(plain))], str(self.game), files=True)
+        self.assertEqual(len(hook.attention), 1)
+        self.assertIn("Plain (later in the order, not a BCML package) and Pkg's texts.json", hook.attention[0])
+        hook = bnp.deploy_hook([("Plain", str(plain)), ("Pkg", str(a))], str(self.game), files=True)
+        self.assertEqual(hook.attention, [])                               # (Pkg later: its text wins, as in BCML)
+
+    def test_a_damaged_library_copy_is_named_not_a_crash(self):
+        _, a, _ = self.install({"info.json": json.dumps({"name": "Pkg", "version": "1", "platform": "switch"}),
+                                "logs/eventinfo.yml": "Ev<C>: {mode: Pkg}\n"}, "pkg")
+        meta = a / ".bnp" / "bnp.json"
+        good = json.loads(meta.read_text(encoding="utf-8"))
+        for key, bad in (("packs", None), ("packs", 5), ("generated", 5), ("not_merged", None),
+                         ("logs_merged", [1]), ("option_folders", 5), ("log_targets", "x")):
+            with self.subTest(key=key, bad=bad):
+                meta.write_text(json.dumps({**good, key: bad}), encoding="utf-8")
+                for files in (False, True):
+                    bnp.deploy_hook([("Pkg", str(a)), ("Pkg2", str(a))], str(self.game), files=files)
+                problems = bnp.stored_problems(str(a))
+                if bad is None:
+                    self.assertFalse(any("damaged" in p for p in problems))
+                else:
+                    self.assertIn(f"bnp.json is damaged ({key})", problems[-1])
 
 
 # ---------------------------------------------------------------- modman

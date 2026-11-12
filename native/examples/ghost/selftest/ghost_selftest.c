@@ -63,9 +63,11 @@ static int fa_has(const FakeActor *fa, const char *name) {
 }
 
 static int items_call(struct Cpu *c, uint64_t fn);  // (the held items' fake game calls, below)
+static int coop_call(struct Cpu *c, uint64_t fn);   // (the fake flag manager, below)
 
 static void fake_guest_call(struct Cpu *c, uint64_t fn) {
     SwModRegs *r = SWMOD_REGS(c);
+    if (coop_call(c, fn)) return;
     if (items_call(c, fn)) return;
     if (fn == AS_PLAY) {
         uint64_t actor = rd64(r->x[0] + 8);
@@ -924,6 +926,161 @@ static void items_setup(void) {
     g_items_world_ok = 1;
 }
 
+// ------------------------------------------------------------------ co-op: a fake flag manager (coop_story.c)
+//
+// The manager is a made-up block (its busy byte at COOP_BUSY_OFF); the getter and setter look the name up in a small
+// table by the string object's char*. Every set is logged: a set to 0, or of a name the list doesn't have, fails.
+
+#define FF_N 6
+static const char *const FF_NAMES[FF_N] = {"FirstTower_Activated", "MapTower_01", "Clear_Dungeon000",
+                                            "IsGet_PlayerStole2", "IsGet_Obj_Camera", "Outside_The_List"};
+static int g_ff_val[FF_N];
+static int64_t g_ff_sets, g_ff_set_zero, g_ff_set_unlisted, g_ff_gets, g_ff_refuse_next;
+static _Alignas(16) uint8_t g_ff_mgr[0x1000];
+static _Alignas(16) uint64_t g_ff_slot;
+static int g_ff_world = 1;
+static int ff_world(void) { return g_ff_world; }
+
+static int ff_find(uint64_t obj) {
+    const StrObj *o = (const StrObj *)(uintptr_t)obj;
+    if (!o || o->vptr != STRING_OBJ_VPTR || !o->str) return -1;
+    for (int i = 0; i < FF_N; i++)
+        if (!strcmp(FF_NAMES[i], (const char *)(uintptr_t)o->str)) return i;
+    return -1;
+}
+
+static int coop_call(struct Cpu *c, uint64_t fn) {
+    SwModRegs *r = SWMOD_REGS(c);
+    if (fn != COOP_GET_BOOL && fn != COOP_SET_BOOL) return 0;
+    int busy = r->x[0] != P(g_ff_mgr) || (g_ff_mgr[COOP_BUSY_OFF] & COOP_BUSY_BIT);
+    int i = ff_find(r->x[2]);
+    if (fn == COOP_GET_BOOL) {
+        g_ff_gets++;
+        if (busy || i < 0) {
+            r->x[0] = 0;
+            return 1;
+        }
+        *(uint8_t *)(uintptr_t)r->x[1] = (uint8_t)g_ff_val[i];
+        r->x[0] = 1;
+        return 1;
+    }
+    if (busy || i < 0 || g_ff_refuse_next > 0) {
+        if (g_ff_refuse_next > 0) g_ff_refuse_next--;
+        r->x[0] = 0;
+        return 1;
+    }
+    g_ff_sets++;
+    if (!(r->x[1] & 1)) g_ff_set_zero++;
+    if (i == FF_N - 1) g_ff_set_unlisted++;
+    g_ff_val[i] = (int)(r->x[1] & 1);
+    r->x[0] = 1;
+    return 1;
+}
+
+static void coop_ticks(int n) {
+    for (int k = 0; k < n; k++) coop_tick((struct Cpu *)(void *)g_cpu);
+}
+
+static void check_coop(void) {
+    g_coop_mgr_slot = P(&g_ff_slot);
+    g_ff_slot = P(g_ff_mgr);
+    g_coop_world = ff_world;
+    memset(g_ff_val, 0, sizeof g_ff_val);
+    g_ff_val[0] = 1;  // FirstTower_Activated already set
+    g_ff_val[5] = 0;
+    const char *list = "# Story list (names only), built from this PC's own game files by tools/mp/story.py\n"
+                       "base FirstTower_Activated\r\nbase MapTower_01\nbase Clear_Dungeon000\n"
+                       "base IsGet_PlayerStole2\ndlc IsGet_Obj_Camera\n";
+    int n = coop_load_text(list, 0);
+    check("coop", "load", n == 4, "n %d (the dlc line left out)", n);
+    check("coop", "bad_list", coop_load_text("base Bad-Name\n", 0) < 0, "a bad name refused");
+    n = coop_load_text(list, 1);
+    check("coop", "load_dlc", n == 5, "n %d", n);
+    coop_ticks(1);
+    CoopPub pub;
+    lock();
+    pub = g_coop_pub;
+    unlock();
+    char hex[2 * COOP_BYTES + 1];
+    coop_bits_hex(pub.bits, pub.n, hex);
+    check("coop", "reads", pub.ready && pub.seq == 1 && !strcmp(hex, "01"), "ready %d seq %lld bits %s", pub.ready,
+          (long long)pub.seq, hex);
+    coop_ticks(3);
+    lock();
+    pub = g_coop_pub;
+    unlock();
+    check("coop", "seq_steady", pub.seq == 1, "seq %lld after passes with no change", (long long)pub.seq);
+
+    check("coop", "bad_hex", coop_add_hex("20") < 0 && coop_add_hex("0") < 0 && coop_add_hex("0A") < 0 &&
+          coop_add_hex("0001") < 0, "a bit past the list, odd, upper case, too long: refused");
+    int64_t sets0 = g_ff_sets;
+    int q = coop_add_hex("1f");  // all five; FirstTower is already 1
+    coop_ticks(2);
+    check("coop", "adds_only", q == 5 && g_ff_val[1] && g_ff_val[2] && g_ff_val[3] && g_ff_val[4] &&
+          g_ff_sets - sets0 == 4 && !g_ff_set_zero && !g_ff_set_unlisted && !g_ff_val[5],
+          "queued %d, sets %lld, set to 0 %lld, unlisted %lld", q, (long long)(g_ff_sets - sets0),
+          (long long)g_ff_set_zero, (long long)g_ff_set_unlisted);
+    coop_ticks(2);
+    lock();
+    pub = g_coop_pub;
+    unlock();
+    coop_bits_hex(pub.bits, pub.n, hex);
+    check("coop", "get_hex", !strcmp(hex, "1f") && pub.seq == 2 && pub.pending == 0, "bits %s seq %lld pending %lld",
+          hex, (long long)pub.seq, (long long)pub.pending);
+
+    // busy: nothing read or set while the busy bit is up; done once it is down
+    coop_load_text(list, 1);
+    coop_ticks(1);
+    memset(g_ff_val, 0, sizeof g_ff_val);
+    coop_ticks(1);
+    g_ff_mgr[COOP_BUSY_OFF] |= COOP_BUSY_BIT;
+    int64_t gets0 = g_ff_gets;
+    sets0 = g_ff_sets;
+    coop_add_hex("04");
+    coop_ticks(3);
+    lock();
+    pub = g_coop_pub;
+    unlock();
+    check("coop", "busy_waits", g_ff_gets == gets0 && g_ff_sets == sets0 && pub.busy_waits >= 3 && pub.pending == 1,
+          "gets %lld sets %lld busy waits %lld pending %lld", (long long)(g_ff_gets - gets0),
+          (long long)(g_ff_sets - sets0), (long long)pub.busy_waits, (long long)pub.pending);
+    g_ff_mgr[COOP_BUSY_OFF] &= (uint8_t)~COOP_BUSY_BIT;
+    g_ff_refuse_next = 1;  // the setter says no once: tried again next frame
+    coop_ticks(1);
+    int after_refuse = g_ff_val[2];
+    coop_ticks(1);
+    lock();
+    pub = g_coop_pub;
+    unlock();
+    check("coop", "retry", !after_refuse && g_ff_val[2] == 1 && pub.set_refused == 1, "after refuse %d, now %d, "
+          "refused %lld", after_refuse, g_ff_val[2], (long long)pub.set_refused);
+
+    // no world: nothing at all
+    g_ff_world = 0;
+    gets0 = g_ff_gets;
+    coop_add_hex("08");
+    coop_ticks(2);
+    check("coop", "no_world", g_ff_gets == gets0 && g_ff_val[3] == 0, "gets %lld", (long long)(g_ff_gets - gets0));
+    g_ff_world = 1;
+    coop_ticks(2);
+    check("coop", "world_back", g_ff_val[3] == 1, "set after the world is back");
+
+    // the developer probe: one read on the next tick
+    lock();
+    memset(&g_coop_probe, 0, sizeof g_coop_probe);
+    strcpy(g_coop_probe.name, "Outside_The_List");
+    g_coop_probe.want = 1;
+    unlock();
+    g_ff_val[5] = 1;
+    coop_ticks(1);
+    check("coop", "probe_read", g_coop_probe.done && g_coop_probe.ok && g_coop_probe.value == 1 && !g_ff_set_unlisted,
+          "done %d ok %lld value %lld", g_coop_probe.done, (long long)g_coop_probe.ok, (long long)g_coop_probe.value);
+    g_coop_world = coop_world_real;
+    g_coop_mgr_slot = COOP_FLAG_MGR;
+    coop_load_text("", 0);
+    coop_ticks(1);
+}
+
 SWMOD_EXPORT int ghost_selftest(char *out, int cap) {
     g_out = out, g_cap = cap, g_len = 0, g_fails = 0;
     if (out && cap > 0) out[0] = 0;
@@ -933,5 +1090,6 @@ SWMOD_EXPORT int ghost_selftest(char *out, int cap) {
     check_late();
     items_setup();
     check_items();
+    check_coop();
     return g_fails;
 }

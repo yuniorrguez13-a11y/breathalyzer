@@ -82,7 +82,7 @@
 #include "swmod.h"
 #include "botw.h"  // (only BOTW_ADDR_MAIN and BOTW_ADDR_GUEST_END: the guest window for `ghost self`'s pointer check)
 
-#define GHOST_VERSION "0.6.2"  // (the same as mod.toml)
+#define GHOST_VERSION "0.7.0"  // (the same as mod.toml)
 
 // ---- Win32 / C runtime (declared here: the zig that ships with Savage Wind has no windows.h or stdio.h)
 __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
@@ -2960,6 +2960,8 @@ static void ghost_tick_body(struct Cpu *c, double t) {
     is->mem_big = big;
 }
 
+static void coop_tick(struct Cpu *c);  // (coop_story.c: story flags through the game's flag manager)
+
 static void job_wrapper(struct Cpu *c) {
     g_orig_job(c);  // the game's frame job first, as if nothing changed
     if (__atomic_exchange_n(&g_in_tick, 1, __ATOMIC_ACQUIRE)) {  // (never seen: the job doesn't overlap itself)
@@ -2971,6 +2973,7 @@ static void job_wrapper(struct Cpu *c) {
     SavedRegs saved;
     save_regs(c, &saved);
     ghost_tick(c);
+    coop_tick(c);
     restore_regs(c, &saved);
     lock();
     int64_t overlaps = g_status.overlaps;
@@ -3492,7 +3495,12 @@ static void cmd_ghost(int argc, char **argv, SwModReply *r) {
     api->reply_fail(r, USAGE);
 }
 
+// 0.7.0: co-op story flags (docs/coop.md). In this DLL because modhost runs one frame job per game.
+#include "coop_story.c"
+
 static const SwModCommand commands[] = {
+    {"coop", COOP_USAGE, "Co-op (example mod, not yet run in the game): the story list's flags read and added "
+     "through the game's flag manager (only 0 -> 1)", cmd_coop, 0},
     {"ghost",
      "[spawn [name|link] [dx dy dz] | pos x y z [yaw [speed [anim]]] | follow dx dy dz | stop | despawn"
      " | anim auto|off|name | far m [m] | self | items w|- s|- b|- [mask] | items off | items back on|off"

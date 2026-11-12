@@ -673,8 +673,10 @@ class RelayLink:
     """Connection to the relay: says hello, hands every message to on_message, pings, reconnects."""
 
     def __init__(self, host: str, port: int, name: str, room: str = DEFAULT_ROOM, *, bot: bool = False,
-                 on_message=None, log=print, retry: float = 2.0, ping_every: float = 5.0, clock=time.monotonic):
+                 on_message=None, log=print, retry: float = 2.0, ping_every: float = 5.0, clock=time.monotonic,
+                 code: str | None = None):
         self.host, self.port, self.name, self.room, self.bot = host, port, name, room, bot
+        self.code = code   # a co-op host's room code (docs/coop.md), sent in the hello
         self.on_message = on_message
         self.log, self.retry, self.ping_every, self.clock = log, retry, ping_every, clock
         self.connected = False
@@ -751,6 +753,8 @@ class RelayLink:
         hello = {"type": "hello", "name": self.name, "room": self.room, "version": PROTOCOL_VERSION}
         if self.bot:
             hello["bot"] = True
+        if self.code:
+            hello["code"] = self.code
         writer.write(encode(hello))
         await writer.drain()
         line = await asyncio.wait_for(reader.readline(), 10.0)
@@ -1220,12 +1224,13 @@ class Runner:
     def __init__(self, relay: tuple[str, int], name: str, room: str = DEFAULT_ROOM, *, game_port: int = GAME_PORT,
                  hz: float = DEFAULT_HZ, delay: float = DEFAULT_DELAY, record: str | None = None,
                  control_factory=None, clock=time.monotonic, log=print, print_every: float | None = None, out=print,
-                 ghost: Ghost | None = None):
+                 ghost: Ghost | None = None, code: str | None = None):
         self.clock, self.log, self.out = clock, log, out
         self.ghost = ghost
         self.session = Session(name, room, delay)
         self.game = GameLink(game_port, connect=control_factory, clock=clock, log=log)
-        self.relay = RelayLink(relay[0], relay[1], name, room, on_message=self._on_message, log=log, clock=clock)
+        self.relay = RelayLink(relay[0], relay[1], name, room, on_message=self._on_message, log=log, clock=clock,
+                               code=code)
         self.period = 1.0 / hz
         self.record = record
         self.print_every = print_every
@@ -1514,6 +1519,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--relay", default="127.0.0.1", help=f"relay address, HOST or HOST:PORT (default port {DEFAULT_RELAY_PORT})")
     ap.add_argument("--name", default=None, help="your name (1-20 letters, digits, space, _ . ' -)")
     ap.add_argument("--room", default=DEFAULT_ROOM, help="room to join (default: default)")
+    ap.add_argument("--code", help="the host's room code, 3 words (a co-op host's relay; docs/coop.md)")
     ap.add_argument("--game-port", type=int, default=GAME_PORT, help=f"the game's control port (default {GAME_PORT})")
     ap.add_argument("--hz", type=float, default=DEFAULT_HZ, help="updates per second (default 20, max 25)")
     ap.add_argument("--delay", type=float, default=DEFAULT_DELAY, help="draw others this many seconds late (default 0.1)")
@@ -1574,7 +1580,7 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError:
             print("No tkinter in this Python; printing instead of a window.")
             ui = False
-    runner = Runner(relay, name, args.room, game_port=args.game_port, hz=args.hz, delay=args.delay,
+    runner = Runner(relay, name, args.room, code=args.code, game_port=args.game_port, hz=args.hz, delay=args.delay,
                     record=args.record, print_every=None if ui else 1.0, ghost=ghost)
     try:
         runner.open_record()

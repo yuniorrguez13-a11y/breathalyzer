@@ -2005,8 +2005,13 @@ def stored(root: str) -> dict | None:
 
 
 def stored_problems(root: str) -> list[str]:
-    """What the package's install couldn't merge (modman lists it under "Needs attention")."""
-    return [x for x in (stored(root) or {}).get("not_merged", []) if isinstance(x, str)]
+    """What the package's install couldn't merge (modman lists it under "Needs attention"); a damaged copy's list
+    (not a list) is named, not a crash."""
+    info = stored(root) or {}
+    v = info.get("not_merged") or []
+    if not isinstance(v, list):
+        return [f"its library copy's {META}/ukmm.json is damaged (not_merged): remove the mod and add it again"]
+    return [x for x in v if isinstance(x, str)]
 
 
 # ---------------------------------------------------------------------------------------------------- command line

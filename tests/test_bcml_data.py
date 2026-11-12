@@ -4,6 +4,7 @@ import os
 import struct
 import sys
 import tempfile
+import time
 import unittest
 import zlib
 from pathlib import Path
@@ -143,6 +144,19 @@ class TextTest(unittest.TestCase):
         self.assertEqual((v["t"], v["n"], v["s"], v["q"], v["w"], v["b"]), (True, None, "12", "true", "word",
                                                                             b"\x01\x02\x03"))
 
+    def test_quoted_text_over_many_lines_in_a_flow_value_is_linear(self):
+        """The search for the closing quote goes on where it stopped (it was quadratic: 35 KB took 20 s)."""
+        lines = 20000
+        text = "k: {a: \"" + "\n".join("word" for _ in range(lines)) + "\", b: 'x\n''y''\n z', c: \"p\\\n q\"}\n"
+        t = time.perf_counter()
+        v = bd.from_text(text)
+        self.assertLess(time.perf_counter() - t, 5)
+        self.assertEqual(v["k"]["a"], " ".join(["word"] * lines))
+        self.assertEqual(v["k"]["b"], "x 'y' z")
+        self.assertEqual(v["k"]["c"], "pq")                    # (an escaped line break joins without a space)
+        with self.assertRaises(LogError):
+            bd.from_text("k: [\"never closed\n" + "more\n" * 10 + "]\n")
+
     def test_keys_are_text_quoted_or_not(self):
         v = bd.from_text("\"2214432981\": 1\n'12': 2\n34: 3\n100enemy<Active_Talk>: 4\n")
         self.assertEqual(list(v), ["2214432981", "12", "34", "100enemy<Active_Talk>"])
@@ -275,6 +289,19 @@ class ActorInfoTest(unittest.TestCase):
         self.assertIn("12345", notes[0])
         self.assertEqual(len(bd.byml_load(new)["Actors"]), 2)
 
+    def test_a_copy_whose_hashes_dont_line_up_is_keyed_by_name(self):
+        # (a mod tool appended an actor without sorting: Hashes sorted, Actors not, so they no longer match up)
+        names = ["MadeUp_Amy", "MadeUp_Zed"]
+        hashes = sorted(crc(n) for n in names)
+        self.assertNotEqual([crc(n) for n in names], hashes)   # (the precondition: the order really is wrong)
+        copy = bd.byml_dump({"Actors": [{"name": n, "instSize": 1} for n in names],
+                             "Hashes": [h if h < 1 << 31 else U32(h) for h in hashes]})
+        new, notes = bd.merge_actorinfo(copy, [{str(crc("MadeUp_New")): {"name": "MadeUp_New", "instSize": 2}}])
+        v = bd.byml_load(new)
+        self.assertEqual(notes, [])
+        self.assertEqual(sorted(a["name"] for a in v["Actors"]), ["MadeUp_Amy", "MadeUp_New", "MadeUp_Zed"])
+        self.assertEqual([int(h) & 0xFFFFFFFF for h in v["Hashes"]], [crc(a["name"]) for a in v["Actors"]])
+
     def test_empty_log_returns_the_game_file(self):
         self.assertEqual(bd.merge_actorinfo(self.game, [[{}]]), (self.game, []))
         same_value = {str(crc(self.b)): {"instSize": 10}}
@@ -383,6 +410,23 @@ class SaveDataTest(unittest.TestCase):
     def test_empty_log_returns_the_game_file(self):
         self.assertEqual(bd.merge_savedata(self.game, [{}]), (self.game, []))
 
+    def test_a_save_delete_of_a_flag_a_later_mod_keeps_is_dropped(self):
+        """Mod A deletes F in both kinds; mod B changes F (game data only: BCML logs save data for new flags only).
+        The game data keeps F, so its save entry stays too (keep_saved; bnp._combine uses it)."""
+        h = bd._signed(crc("F"))
+        a_gd = log("gamedata.yml", "bool_data:\n  add: {}\n  del: [F]\n")
+        b_gd = log("gamedata.yml", "bool_data:\n  add:\n    F: {DataName: F, InitValue: 1}\n  del: []\n")
+        a_sd = log("savedata.yml", f"add: []\ndel: [{h}, 3]\n")
+        games = bd.combine("gamedata.yml", [[a_gd], [b_gd]])
+        self.assertIn("F", games["bool_data"]["add"])
+        saves, dropped = bd.keep_saved(bd.combine("savedata.yml", [[a_sd]]), games)
+        self.assertEqual((saves["del"], dropped), ([3], 1))
+        # the other way round (A changes, B deletes later) the delete stays in both
+        games = bd.combine("gamedata.yml", [[b_gd], [a_gd]])
+        self.assertEqual(bd.keep_saved(bd.combine("savedata.yml", [[a_sd]]), games)[1], 0)
+        mergers = {"gamedata.yml": [[a_gd], [b_gd]], "savedata.yml": [[a_sd]]}
+        self.assertEqual(bnp._combine(bd, "savedata.yml", mergers)["del"], [3])
+
 
 # ---------------------------------------------------------------------------------------------------- the rest
 
@@ -482,7 +526,7 @@ class ContractTest(unittest.TestCase):
 
     def test_apply_unchanged_or_missing(self):
         r = bd.apply("residents.yml", {"A": {"name": "A", "only_res": False}}, str(self.game))
-        self.assertEqual(r, {"files": {}, "sizes": {}, "notes": []})
+        self.assertEqual({k: v for k, v in r.items() if k != "targets"}, {"files": {}, "sizes": {}, "notes": []})
         r = bd.apply("residents.yml", {"B": {"name": "B", "only_res": False}}, str(self.game))
         self.assertEqual(list(r["files"]), ["Pack/Bootup.pack//Actor/ResidentActors.byml"])
         self.assertEqual(r["sizes"], {})                   # (no entry in this made-up table: none written)

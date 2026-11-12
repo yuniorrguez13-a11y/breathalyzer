@@ -52,7 +52,7 @@ LOGS = {
     "residents.yml": "resident actors",
 }
 MAX_DEPTH = 64                        # BotW's BYML files nest at most ~8 deep; more is refused, not followed
-MAX_LOG = 256 << 20                   # a log's size (the game's whole game data is 6.5 MB)
+MAX_LOG = 64 << 20                   # a log's size (the game's whole game data is 6.5 MB)
 MAX_FLOW = 1 << 20                    # one flow collection ([..] / {..}) in a log
 GAMEDATA_CHUNK = 4096                 # flags per game data file (the game's own files hold at most this many)
 SAVEDATA_CHUNK = 8192                 # entries per game_data.sav format file (the game's own files)
@@ -160,7 +160,7 @@ def _enc(s: str) -> bytes:
 def byml_load(data: bytes):
     """A BYML document (Yaz0 or not) as typed Python values (see U32...). wc.FormatError when it is damaged."""
     if data[:4] == b"Yaz0":
-        data = wc.yaz0_decompress(data)[0]
+        data = bnp.unyaz0(data)[0]
     data = bytes(data)
     n = len(data)
     if n < 16 or data[:2] not in (b"YB", b"BY"):
@@ -551,22 +551,61 @@ def _join_quoted(parts: list[str], q: str) -> str:
     return ukmm._unquote_double(text)
 
 
+_DQ_STOP = re.compile(r'[\\"]')
+
+
+def _quote_scan(s: str, j: int, q: str) -> tuple[int, int]:
+    """ukmm._quote_end's rules from s[j] on, at C speed: (the closing quote's index or -1, where a search in more
+    text joined after s goes on: len(s), or len(s) + 1 when s ends in a backslash that escapes what follows)."""
+    if q == "'":
+        while True:
+            k = s.find("'", j)
+            if k < 0:
+                return -1, max(j, len(s))
+            if s[k + 1:k + 2] == "'":
+                j = k + 2
+                continue
+            return k, k
+    while True:
+        m = _DQ_STOP.search(s, j)
+        if m is None:
+            return -1, max(j, len(s))
+        k = m.start()
+        if s[k] == "\\":
+            j = k + 2
+            continue
+        return k, k
+
+
 class _Flow:
     """A flow collection starting at `first` (the rest of a line); more lines are taken from ls as it needs them."""
 
     def __init__(self, first: str, ls, line: int):
         self.s, self.i, self.ls, self.line = first, 0, ls, line
+        self.total = len(first)      # (characters taken in all: self.s keeps only what isn't read yet)
+        self.cut = 0                 # how far the last more() moved self.s to the left
 
     def err(self, msg: str) -> LogError:
         return LogError(f"line {self.line}: {msg}")
 
-    def more(self) -> bool:
+    def _take(self) -> str | None:
+        """The next line ("\\n" first), counted against MAX_FLOW, or None at the end."""
         if self.ls.i >= len(self.ls.lines):
-            return False
-        self.s += "\n" + self.ls.lines[self.ls.i].strip()
+            return None
+        piece = "\n" + self.ls.lines[self.ls.i].strip()
         self.ls.i += 1
-        if len(self.s) > MAX_FLOW:
+        self.total += len(piece)
+        if self.total > MAX_FLOW:
             raise self.err("a [..] or {..} value runs on for too long")
+        return piece
+
+    def more(self) -> bool:
+        """One more line. The text already read is dropped first (self.i becomes 0; self.cut says by how much it
+        moved), so a long value over many lines isn't copied again with every line."""
+        piece = self._take()
+        if piece is None:
+            return False
+        self.cut, self.s, self.i = self.i, self.s[self.i:] + piece, 0
         return True
 
     def peek(self) -> str:
@@ -586,19 +625,32 @@ class _Flow:
                 j += 1
             if j < len(self.s) or not self.more():
                 break
+            j -= self.cut
         text, self.i = self.s[self.i:j], j
         return ukmm._fold([p.strip() for p in text.split("\n")]).strip()
 
     def quoted(self) -> str:
+        """A quoted text from self.i (at its opening quote). The lines it takes are searched once each (the search
+        goes on where it stopped) and joined once at the end: a quote over many lines isn't quadratic."""
         q = self.s[self.i]
-        while True:
-            end = ukmm._quote_end(self.s[self.i + 1:], q)
-            if end >= 0:
-                break
-            if not self.more():
-                raise self.err("quoted text without its closing quote")
-        body = self.s[self.i + 1:self.i + 1 + end]
-        self.i += end + 2
+        k, resume = _quote_scan(self.s, self.i + 1, q)
+        if k < 0:
+            # (pos: where the search goes on in the next line: 1 after an escaped line break, else 0)
+            parts, length, pos = [self.s], len(self.s), resume - len(self.s)
+            while k < 0:
+                piece = self._take()
+                if piece is None:
+                    raise self.err("quoted text without its closing quote")
+                k, resume = _quote_scan(piece, pos, q)
+                parts.append(piece)
+                if k >= 0:
+                    k += length
+                else:
+                    pos = resume - len(piece)
+                length += len(piece)
+            self.s = "".join(parts)
+        body = self.s[self.i + 1:k]
+        self.i = k + 1
         return _join_quoted(body.split("\n"), q)
 
     def key(self) -> str:
@@ -1095,11 +1147,22 @@ def combine(name: str, logs) -> object:
     return _dict_merged(flat)
 
 
+def keep_saved(save_diff: dict, game_diff: dict) -> tuple[dict, int]:
+    """A combined savedata.yml change without the deletes of flags the combined gamedata.yml change keeps (adds or
+    changes): a later mod's change of a flag undoes an earlier mod's delete of it in the game data (see combine), and
+    BCML logs save data only for new flags, so the flag's save entry must stay too, or it would exist and never be
+    saved. Returns (the change, how many deletes were dropped)."""
+    kept = {_signed(zlib.crc32(_enc(n))) for part in game_diff.values() if isinstance(part, dict)
+            for n in (part.get("add") or {}) if isinstance(n, str)}
+    dels = [h for h in save_diff.get("del", []) if _signed(h) not in kept]
+    return {**save_diff, "del": dels}, len(save_diff.get("del", [])) - len(dels)
+
+
 # ---------------------------------------------------------------------------------------------------- merging
 
 def _open(stored: bytes) -> tuple[bytes, int, bool]:
     if stored[:4] == b"Yaz0":
-        raw, align = wc.yaz0_decompress(stored)
+        raw, align = bnp.unyaz0(stored)
         return raw, align, True
     return stored, 0, False
 
@@ -1121,14 +1184,15 @@ def _actorinfo(stored: bytes, diff: dict) -> tuple[bytes | None, list[str]]:
         raise wc.FormatError("ActorInfo has no Actors list")
     actors, hashes = root["Actors"], root.get("Hashes")
     table: dict[int, object] = {}
-    if isinstance(hashes, list) and len(hashes) == len(actors) and all(isinstance(h, int) for h in hashes):
-        for h, a in zip(hashes, actors):
-            table[h & 0xFFFFFFFF] = a
-    else:
-        for a in actors:
-            name = a.get("name") if isinstance(a, dict) else None
-            if isinstance(name, str):
-                table[zlib.crc32(_enc(name))] = a
+    # (each actor keyed by its name's hash, not by its place in Hashes: a mod's copy whose tool appended an actor
+    # without sorting has Hashes that no longer line up with Actors; the hash at its place only for one without a name)
+    by_place = isinstance(hashes, list) and len(hashes) == len(actors) and all(isinstance(h, int) for h in hashes)
+    for k, a in enumerate(actors):
+        name = a.get("name") if isinstance(a, dict) else None
+        if isinstance(name, str):
+            table[zlib.crc32(_enc(name))] = a
+        elif by_place:
+            table[hashes[k] & 0xFFFFFFFF] = a
     wrong, changed = [], False
     for h, e in diff.items():
         cur = table.get(h)
@@ -1504,7 +1568,7 @@ def apply(name: str, diff, game: str, read=None) -> dict:
     name = name.lower()
     target, fn, sized = KINDS[name]
     what = f"{name} ({LOGS[name]})"
-    done: dict = {"files": {}, "sizes": {}, "notes": []}
+    done: dict = {"files": {}, "sizes": {}, "notes": [], "targets": [target]}
     try:
         data = game_file(game, target)
     except (OSError, *_GAME_ERRORS) as e:

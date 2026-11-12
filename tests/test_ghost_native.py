@@ -76,6 +76,14 @@ class GhostNative(unittest.TestCase):
                              "own_follow_first", "owns_follow_kept", "names", "gave_up", "not_a_weapon", "no_hand_bones",
                              "off_costs_nothing", "give", "size_player", "size_unnamed", "leftovers", "back_copied", "leftovers_gone"])
 
+    def test_coop_story_flags(self):
+        """0.7.0 (coop_story.c, a fake flag manager): the story list loads (dlc lines only when asked; a bad name is
+        refused), every name is read and published with a seq that only moves on a change, a story line adds only
+        0 -> 1 and only listed names, a bad line is refused, nothing is read or set while the busy bit is up or
+        there is no world, a refused set is tried again, and the developer probe reads one flag."""
+        self.group("coop", ["load", "bad_list", "load_dlc", "reads", "seq_steady", "bad_hex", "adds_only", "get_hex",
+                            "busy_waits", "retry", "no_world", "world_back", "probe_read"])
+
     def test_nothing_else_failed(self):
         self.assertEqual(self.fails, 0, self.report)
 

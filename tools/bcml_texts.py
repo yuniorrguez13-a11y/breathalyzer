@@ -56,7 +56,7 @@ UNDERRIDE = "UNDERRIDE_CONST"              # BCML's "use the game's value" in a 
 CONTENT_PREFIXES = ("01007EF00011E000/romfs/", "content/")
 DLC_PREFIXES = ("01007EF00011F001/romfs/", "aoc/0010/", "aoc/")
 TITLE_PACK = "Pack/TitleBG.pack"
-MAX_LOG = 256 << 20
+MAX_LOG = 64 << 20
 
 
 class LogError(Exception):
@@ -780,7 +780,7 @@ def merge_texts(msg: bytes, lang: str, logs: list, stats: dict | None = None) ->
     notes: list[str] = []
     yaz0 = msg[:4] == b"Yaz0"
     try:
-        raw, align = wc.yaz0_decompress(msg) if yaz0 else (msg, 0)
+        raw, align = bnp.unyaz0(msg) if yaz0 else (msg, 0)
         arc = bnp.Blob(raw)
         files = arc.open()
     except (wc.FormatError, struct.error, IndexError) as e:
@@ -1046,7 +1046,11 @@ def _read_drop(data: bytes) -> tuple[dict, str, int]:
             obj = root.objects[aamp.name_hash(name)]
             t = {k: obj.get_value(p) for k, p in DROP_KEYS}
             t["items"] = {}
-            for j in range(1, obj.get_value("ColumnNum", 0) + 1):
+            columns = obj.get_value("ColumnNum", 0)
+            if not isinstance(columns, int) or not 0 <= columns <= len(obj) // 2:
+                # (each column is two parameters: a count the object can't hold is damaged, not looped over)
+                raise TextError(f"table {name} says it has {columns} items")
+            for j in range(1, columns + 1):
                 t["items"][obj.get_value(f"ItemName{j:02}")] = obj.get_value(f"ItemProbability{j:02}")
             if None in t.values() or None in t["items"] or None in t["items"].values():
                 raise TextError(f"table {name} lacks a value")
@@ -1310,14 +1314,24 @@ def combine(name: str, logs: list) -> Log:
     """Several logs of one kind as one, in order: a package's base, its chosen options, then the next package. A list
     inside `logs` is one package's logs (base, options), as the other BCML log modules take them."""
     n = name.lower()
-    logs = [x for item in logs for x in (item if isinstance(item, (list, tuple)) else [item])]
+    packages = [list(item) if isinstance(item, (list, tuple)) else [item] for item in logs]
+    logs = [x for p in packages for x in p]
     notes = [x for log in logs for x in log.notes]
     if n == "texts.json":
         return Log(n, _texts_values(logs), notes)        # (each log picks its own language per game language)
     if n == "drops.json":
+        # (inside one package an option's table merges into the base's, items added or changed, as BCML merges a
+        # package's diffs; across mods a later table replaces an earlier one whole)
         out: dict[str, dict] = {}
-        for log in logs:
-            for path, tables in log.value.items():
+        for p in packages:
+            mine: dict[str, dict] = {}
+            for log in p:
+                for path, tables in log.value.items():
+                    have = mine.setdefault(path, {})
+                    for t, tab in tables.items():
+                        old = have.get(t)
+                        have[t] = tab if old is None else {**old, **tab, "items": {**old["items"], **tab["items"]}}
+            for path, tables in mine.items():
                 out.setdefault(path, {}).update(tables)
         return Log(n, out, notes)
     if n == "shop.aamp":
@@ -1332,7 +1346,9 @@ def combine(name: str, logs: list) -> Log:
 
 
 def _result() -> dict:
-    return {"files": {}, "sizes": {}, "notes": []}
+    # (targets: every file the log names, changed or not: a package that ships the file already changed keeps the log,
+    # which then changes nothing at install; deploy still has to merge that file between mods)
+    return {"files": {}, "sizes": {}, "notes": [], "targets": []}
 
 
 def _apply_texts(log: Log, game: str, read=None) -> dict:
@@ -1364,6 +1380,7 @@ def _apply_texts(log: Log, game: str, read=None) -> dict:
             if entry is None:
                 raise TextError(f"its pack has no {inner}")
             vanilla = entry[0]
+            res["targets"].append(f"Pack/Bootup_{lang}.pack//{inner}")
             own = read(f"Pack/Bootup_{lang}.pack//{inner}") if read else None
             old = vanilla if own is None else own
             new, notes = merge_texts(old, lang, logs, stats)
@@ -1409,11 +1426,12 @@ def _apply_aamp(log: Log, game: str, kind: str, read=None) -> dict:
         parts = path.split("//")
         try:
             vanilla, target = g.nested(parts)
+            res["targets"].append(target)   # (named even when merging changes nothing: see bnp.merge_logs)
             own = read(target) if read else None
             old = vanilla if own is None else own
             plain = old
             if old is not None and old[:4] == b"Yaz0":
-                plain = wc.yaz0_decompress(old)[0]
+                plain = bnp.unyaz0(old)[0]
             new, notes = merge(plain, [diff])
         except (TextError, wc.FormatError, struct.error, IndexError, OSError) as e:
             failed.append(f"{parts[-1]}: {e}")
