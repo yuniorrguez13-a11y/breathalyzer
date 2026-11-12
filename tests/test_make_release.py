@@ -1092,8 +1092,26 @@ class PlayerZips(PlayerBase):
         doc = json.loads(next(i.data for i in plan.items if i.rel == "app/bundled-mods.json"))
         self.assertEqual((doc["mods"][0]["egg"], doc["mods"][0]["default"]), (True, "off"))
         self.assertNotIn("egg", doc["mods"][1])
+        # (its folder in the zip has a plain name: the folder names are what players see)
+        self.assertEqual(doc["mods"][0]["folder"], "bundled-mods/egg-1")
+        self.assertIn("app/bundled-mods/egg-1/mod.toml", {i.rel for i in plan.items})
+        self.assertFalse([i.rel for i in plan.items if i.rel.startswith("app/bundled-mods/show/")])
         self.put("tools/packaging/bundled-mods.toml", BUNDLED.replace('kind = "code"', 'kind = "code"\negg = "yes"', 1))
         self.assertIn("egg must be", " ".join(w for _, w in self.plan(edition="plus").refused))
+
+    def test_after_on_reaches_the_picker_list(self):
+        on = 'kind = "code"\nafter_on = [["quality.py", "set", "low"]]\nafter_on_makes = "giruka.bonus"'
+        self.put("tools/packaging/bundled-mods.toml", BUNDLED.replace('kind = "code"', on, 1))
+        plan = self.plan(edition="plus")
+        self.assertEqual(plan.refused, [])
+        doc = json.loads(next(i.data for i in plan.items if i.rel == "app/bundled-mods.json"))
+        self.assertEqual((doc["mods"][0]["after_on"], doc["mods"][0]["after_on_makes"]),
+                         ([["quality.py", "set", "low"]], "giruka.bonus"))
+        self.assertNotIn("after_on", doc["mods"][1])
+        for bad, why in (('after_on_makes = "someone.else"', "after_on_makes must be"),
+                         ('after_on_makes = "giruka.bonus"\nafter_on = [["nope.py"]]', "isn't one of our tools")):
+            self.put("tools/packaging/bundled-mods.toml", BUNDLED.replace('kind = "code"', f'kind = "code"\n{bad}', 1))
+            self.assertIn(why, " ".join(w for _, w in self.plan(edition="plus").refused))
 
 
 class PlayerSnapshot(PlayerBase):

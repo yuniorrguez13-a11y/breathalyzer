@@ -974,7 +974,7 @@ class Base(unittest.TestCase):
         os.environ.pop(mm.ENV_LIBRARY, None)
         self.pic = write_pic(self.tmp / "pics" / "linkle.png", gradient(640, 400))
 
-    def fake_deploy(self, lib, *, no_rebuild=False, dry_run=False):
+    def fake_deploy(self, lib, *, no_rebuild=False, dry_run=False, merge=True):
         self.deploys.append(dry_run)
         parts = {"exefs": {"rebuild": self.rebuild_plan}} if self.rebuild_plan != "none" else {}
         return {"parts": parts, "attention": [], "mods": [{"id": m["id"]} for m in lib.enabled()]}

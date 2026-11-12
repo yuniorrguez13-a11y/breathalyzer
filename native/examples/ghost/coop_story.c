@@ -16,7 +16,8 @@
 //   is found: not loading, no cutscene, not riding; no pause menu) for COOP_SETTLE_TICKS frames in a row;
 // - after any time that wasn't safe (a load, a death, a cutscene...) it sets again what it added (a load can bring
 //   back the save's 0): setting a 1 to 1 changes nothing;
-// - waits (and tries again next frame) when the setter says no.
+// - tries again next frame when the setter says no, without holding up the other names; a name refused
+//   COOP_REFUSE_MAX times in a row is dropped (`dropped`: the game refuses MapTower_* in the 2026-11-12 check).
 // Commands only fill buffers under the lock; the tick does every game call. A list load bumps a generation number;
 // an add parsed for an older list is refused (its bits would mean other names).
 
@@ -41,6 +42,8 @@ static uint64_t g_coop_get_fn = COOP_GET_BOOL;  // (the selftest points it at it
 #define COOP_READS_PER_TICK 48         // 1,075 names in 23 frames (under a second at 30 fps)
 #define COOP_ADDS_PER_TICK 8
 #define COOP_SETTLE_TICKS 60           // Link free this many frames in a row (2 s at 30 fps) before an add
+#define COOP_REFUSE_MAX 30             // a name the setter refuses this often in a row at safe points is dropped
+                                       // (game check 2026-11-12: it always refuses MapTower_*; memories are set)
 #define COOP_BYTES (COOP_MAX / 8)
 
 typedef struct {
@@ -59,6 +62,7 @@ static uint8_t g_coop_pass[COOP_BYTES];        // (tick) this pass's reads
 static uint8_t g_coop_want[COOP_BYTES];        // (tick) bits to add
 static uint8_t g_coop_ours[COOP_BYTES];        // (tick) bits this list's adds set (set again after an unsafe time)
 static uint8_t g_coop_live[COOP_BYTES];        // (tick) names that may be added live (towers, memories)
+static uint8_t g_coop_refused[COOP_MAX];       // (tick) refusals in a row per name (dropped at COOP_REFUSE_MAX)
 static uint8_t g_coop_req[COOP_BYTES];         // (under the lock) bits a command asked to add
 static int g_coop_req_new;
 static uint32_t g_coop_gen;                    // (under the lock) +1 on every list load
@@ -75,6 +79,7 @@ static int (*g_coop_free)(void) = coop_free_real;
 typedef struct {
     int n, ready, safe;
     int64_t seq, reads, read_fails, sets, set_refused, busy_waits, no_world_waits, pending, held, unsafe_waits;
+    int64_t dropped;                           // names given up after COOP_REFUSE_MAX refusals in a row
     uint8_t bits[COOP_BYTES];
 } CoopPub;
 static CoopPub g_coop_pub;                     // (under the lock) what `coop story get|status` shows
@@ -132,6 +137,7 @@ static void coop_tick(struct Cpu *c) {
         memset(g_coop_pass, 0, sizeof g_coop_pass);
         memset(g_coop_want, 0, sizeof g_coop_want);
         memset(g_coop_ours, 0, sizeof g_coop_ours);
+        memset(g_coop_refused, 0, sizeof g_coop_refused);
         g_coop_cursor = 0, g_coop_seen_pass = 0, g_coop_pass_fails = 0;
         g_coop_stable = 0, g_coop_was_unsafe = 0;
         memset(&t_coop, 0, sizeof t_coop);
@@ -215,12 +221,13 @@ static void coop_tick(struct Cpu *c) {
                     added++;
                     if (gcall(c, COOP_SET_BOOL, mgr, 1, P(&g_coop_obj[i]), 0, 0, 0, 0) & 1) {
                         t_coop.sets++;
+                        g_coop_refused[i] = 0;
                         BIT_SET(g_coop_have, i);
                         BIT_SET(g_coop_ours, i);
                         BIT_CLR(g_coop_want, i);
-                    } else {
+                    } else {  // tried again next frame; the others go on (one refused name never blocks the rest)
                         t_coop.set_refused++;
-                        break;  // (busy after all: next frame)
+                        if (++g_coop_refused[i] >= COOP_REFUSE_MAX) BIT_CLR(g_coop_want, i), t_coop.dropped++;
                     }
                 }
             }
@@ -373,6 +380,7 @@ static void cmd_coop(int argc, char **argv, SwModReply *r) {
             api->reply_int(r, "read_fails", pub.read_fails);
             api->reply_int(r, "sets", pub.sets);
             api->reply_int(r, "set_refused", pub.set_refused);
+            api->reply_int(r, "dropped", pub.dropped);
             api->reply_int(r, "busy_waits", pub.busy_waits);
             api->reply_int(r, "no_world_waits", pub.no_world_waits);
             api->reply_int(r, "unsafe_waits", pub.unsafe_waits);

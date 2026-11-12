@@ -16,6 +16,13 @@ its own game files; only the character's id goes over the network.
     python tools/charsel.py wheel                     the Who am I wheel in a window (arrow keys or a controller)
     python tools/charsel.py pick ID                   the same choice without a window
     python tools/charsel.py where                     your choice and where it is kept
+    python tools/charsel.py playas daruk              play as Daruk yourself from the next start: builds a mod from your
+                                                      own files (the body on Link's skeleton, his rolling sprint) and
+                                                      adds it to your mods; turns The Linkle Mod off while it is on
+        --no-own-moves   Link's moves only        --retarget   fit Link's clips to the body [G]
+        --no-add         build and check only     --library DIR / --out DIR / --romfs DIR
+    python tools/charsel.py playas off                back to Link (and Linkle back on) from the next start
+    python tools/charsel.py playas check              read the built play-as mod back, no game
 
 A character pack is a tiny actor pack (14-19 KB unpacked, 6-8 KB packed) that names the game's own model and
 animation files: the donor's
@@ -1242,6 +1249,795 @@ def check(out=DEFAULT_OUT) -> dict:
     return res
 
 
+# ------------------------------------------------------------------------------------------------ play as (tier 2)
+#
+# Your own Link becomes the character at the next start, the way The Linkle Mod does it (out/research/
+# charsel-play-as.md, option 1): Model/Link.sbfres in your TitleBG.pack becomes Link's model with every one of Link's
+# shapes shrunk to one point (his 11 materials and their hide groups stay, so the armor code and his face animations
+# still find them) plus the character's body put on Link's exact skeleton (Link's 121 bones first, in Link's order,
+# with Link's parents; the body's own bones after them; the body's own bone lengths). Link's 1167 clips turn bones
+# only, so they drive the body. Model/Link.Tex.sbfres gets the body's textures beside Link's, and the default hair,
+# belt, trousers and pouches (Model/Armor_Default.sbfres) shrink to a point too. With own moves (on unless
+# --no-own-moves), the player's sprint, glide or swim plays the character's own clip where the recipe has one
+# (Daruk's rolling ball): the player's animation list gets the character's animation file and those animation sets
+# point at that clip. Everything is built here from your own files into a BCML-style package (only the changed files
+# of TitleBG.pack, and logs/rstb.json); modman add fills the pack from your game, as for any BCML mod.
+
+PLAYAS_ID = "botw-mod-loader.playas"
+PLAYAS_VERSION = "0.1.0"
+PLAYAS_OUT = REPO / "out" / "charsel-playas"
+PLAYAS_INFO = "playas.json"            # in the built folder: what it is (and what playas check reads)
+BASE_TID = "01007EF00011E000"
+TITLEBG = "Pack/TitleBG.pack"
+LINK_MODEL, LINK_TEX, DEFAULT_ARMOR = "Model/Link.sbfres", "Model/Link.Tex.sbfres", "Model/Armor_Default.sbfres"
+PLAYER_ACTOR = "GameROMPlayer"
+PLAYER_PACK = f"Actor/Pack/{PLAYER_ACTOR}.sbactorpack"
+BODY_PREFIX = "SwBody_"     # the body's material names (and any texture name Link's has too) in Link's model
+REST_TOL = 1e-4             # metres: a body bone's rest pose may move this much in model space (float rounding)
+# The people on Link's skeleton (the study: the 21 main bones with Link's names, parents and rest rotations).
+# Monsters are left out: their spine, neck and toes start 20-60 degrees off Link's.
+PLAYAS_PEOPLE = ("goron", "zelda", "zora", "gerudo", "rito", "sheikah", "hylian")
+# The player's moves the character's own clip takes over (ghost name -> the player's animation sets that play it,
+# Link's clip there): only the ones that are the character's own thing. Walk, run and stand stay Link's (the
+# player's speed and foot timing are tuned to them).
+PLAYER_MOVES = {
+    "RunGear2": (("Actor/AS/Player_Move.bas",), "Nml_Move_Dash"),
+    "ParashawlGlide": (("Actor/AS/Player_ParashawlGlide.bas",), "Float_Float"),
+    "SwimWait": (("Actor/AS/Player_SwimWait.bas", "Actor/AS/Player_SwimMove.bas", "Actor/AS/Player_SwimAtnMove.bas"),
+                 "Swim_Wait"),
+    "SwimMove": (("Actor/AS/Player_SwimMove.bas",), "Swim_Move_Slow_F"),
+    "SwimDash": (("Actor/AS/Player_SwimMove.bas",), "Swim_Move_Fast_F"),
+}
+PLAYAS_TOML = '''# Play as {name} ("Who am I", docs/charsel.md). Built on your PC from your own game files by tools/charsel.py
+# playas: never share or commit this folder. Your friend builds their own.
+[mod]
+id = "{id}"
+name = "Play as {name} (Who am I)"
+version = "{version}"
+authors = ["giruka"]
+description = "Your own Link looks like {name} after a restart: the body on Link's skeleton, Link's moves{own}. Armor shows on top. Turns The Linkle Mod off while it is on. Built from your own game files."
+game_versions = ["1.9.0"]
+'''
+
+
+# 4x4 bone math (pure Python: 100-200 bones, no numpy needed). A bone's local transform is T * Rz * Ry * Rx * S.
+
+def _rot3(r) -> list[list[float]]:
+    import math
+    cx, sx, cy, sy = math.cos(r[0]), math.sin(r[0]), math.cos(r[1]), math.sin(r[1])
+    cz, sz = math.cos(r[2]), math.sin(r[2])
+    return [[cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+            [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+            [-sy, cy * sx, cy * cx]]
+
+
+def _local(b) -> list[list[float]]:
+    r = _rot3(b.rotation)
+    s, t = b.scale, b.translation
+    return [[r[i][0] * s[0], r[i][1] * s[1], r[i][2] * s[2], t[i]] for i in range(3)] + [[0.0, 0.0, 0.0, 1.0]]
+
+
+def _mul(a, b) -> list[list[float]]:
+    return [[sum(a[i][k] * b[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+
+
+def _inv(m) -> list[list[float]]:
+    """Inverse of an affine 4x4 (3x3 part by cofactors)."""
+    a = [row[:3] for row in m[:3]]
+    c00 = a[1][1] * a[2][2] - a[1][2] * a[2][1]
+    c01 = a[1][2] * a[2][0] - a[1][0] * a[2][2]
+    c02 = a[1][0] * a[2][1] - a[1][1] * a[2][0]
+    det = a[0][0] * c00 + a[0][1] * c01 + a[0][2] * c02
+    if abs(det) < 1e-12:
+        raise CharselError("a bone has no size (its transform can't be inverted)")
+    inv = [[c00 / det, (a[0][2] * a[2][1] - a[0][1] * a[2][2]) / det, (a[0][1] * a[1][2] - a[0][2] * a[1][1]) / det],
+           [c01 / det, (a[0][0] * a[2][2] - a[0][2] * a[2][0]) / det, (a[0][2] * a[1][0] - a[0][0] * a[1][2]) / det],
+           [c02 / det, (a[0][1] * a[2][0] - a[0][0] * a[2][1]) / det, (a[0][0] * a[1][1] - a[0][1] * a[1][0]) / det]]
+    t = [m[i][3] for i in range(3)]
+    return [[inv[i][0], inv[i][1], inv[i][2], -sum(inv[i][k] * t[k] for k in range(3))] for i in range(3)] + \
+        [[0.0, 0.0, 0.0, 1.0]]
+
+
+def _worlds(bones) -> list:
+    out: list = []
+    for b in bones:
+        out.append(_local(b) if b.parent < 0 else _mul(out[b.parent], _local(b)))
+    return out
+
+
+def _decompose(m) -> tuple[tuple, tuple, tuple]:
+    """(scale, Euler rotation + 1.0, translation) of an affine 4x4 without shear."""
+    import math
+    sc = [math.sqrt(sum(m[i][j] ** 2 for i in range(3))) for j in range(3)]
+    sc = [1.0 if abs(s - 1.0) < 1e-5 else s for s in sc]
+    r = [[m[i][j] / sc[j] for j in range(3)] for i in range(3)]
+    y = math.asin(max(-1.0, min(1.0, -r[2][0])))
+    return tuple(sc), (math.atan2(r[2][1], r[2][2]), y, math.atan2(r[1][0], r[0][0]), 1.0), (m[0][3], m[1][3], m[2][3])
+
+
+def _gap(a, b) -> float:
+    return max(abs(a[i][j] - b[i][j]) for i in range(3) for j in range(4))
+
+
+def rerig(link_skel, body_skel) -> dict:
+    """The body's skeleton put on Link's: Link's bones first, in Link's order, with Link's parents (the body's own
+    bone where the name matches, with its own rest lengths, else Link's own rest), then the body's other bones in
+    their order. A body bone whose parent changes keeps its rest pose in model space. The body's skin matrices keep
+    their order (so its vertex data and inverse bind matrices stay as they are). Returns {"bones", "matrix_to_bone",
+    "index" (old body bone index -> new), "reparented", "link_only"}."""
+    from wiiu_model.neutral import Bone
+    if not (link_skel.flags & 0x1000 and body_skel.flags & 0x1000):
+        raise CharselError("only Euler skeletons can be put on Link's (the game's people all are)")
+    lnames = [b.name for b in link_skel.bones]
+    if len(set(lnames)) != len(lnames):
+        raise CharselError("Link's skeleton has a bone name twice")
+    src = {b.name: i for i, b in enumerate(body_skel.bones)}
+    if len(src) != len(body_skel.bones):
+        raise CharselError("the body's skeleton has a bone name twice")
+    src_w = _worlds(body_skel.bones)
+    order_ = lnames + [b.name for b in body_skel.bones if b.name not in set(lnames)]
+    index = {n: i for i, n in enumerate(order_)}
+    bones, new_w, reparented, link_only = [], [], [], []
+    for k, n in enumerate(order_):
+        if k < len(lnames):
+            parent = link_skel.bones[k].parent
+        else:
+            sb = body_skel.bones[src[n]]
+            parent = index[body_skel.bones[sb.parent].name] if sb.parent >= 0 else -1
+        if n in src:
+            sb = body_skel.bones[src[n]]
+            b = Bone(n, parent, -1, -1, sb.billboard_index, sb.flags, tuple(sb.scale), tuple(sb.rotation),
+                     tuple(sb.translation), list(sb.user_data), dict(sb.extra))
+            old_parent = body_skel.bones[sb.parent].name if sb.parent >= 0 else None
+            if old_parent != (order_[parent] if parent >= 0 else None):
+                rel = _mul(_inv(new_w[parent]), src_w[src[n]]) if parent >= 0 else src_w[src[n]]
+                b.scale, b.rotation, b.translation = _decompose(rel)
+                b.flags &= ~0x0F000000      # (the scale/rotate/translate shortcut hints: computed in full instead)
+                reparented.append(n)
+        else:                               # a Link-only bone (belt, sword helpers, face): Link's rest, no skin
+            lb = link_skel.bones[k]
+            b = Bone(n, parent, -1, -1, lb.billboard_index, lb.flags, tuple(lb.scale), tuple(lb.rotation),
+                     tuple(lb.translation), list(lb.user_data), dict(lb.extra))
+            link_only.append(n)
+        bones.append(b)
+        new_w.append(_local(b) if parent < 0 else _mul(new_w[parent], _local(b)))
+    old = {i: index[b.name] for i, b in enumerate(body_skel.bones)}
+    m2b = [old[bi] for bi in body_skel.matrix_to_bone]
+    for mi, bi in enumerate(m2b):
+        if mi < body_skel.smooth_count:
+            bones[bi].smooth_index = mi
+        else:
+            bones[bi].rigid_index = mi
+    return {"bones": bones, "matrix_to_bone": m2b, "index": old, "reparented": reparented, "link_only": link_only}
+
+
+def _shrink_model(model) -> int:
+    """Every shape of a model shrunk to one point (the Linkle trick): its vertex buffers keep one vertex (skin
+    matrix 0) and each mesh draws one empty triangle. Materials, bones and hide groups stay. Returns the shapes."""
+    from wiiu_model import formats
+    from wiiu_model.neutral import Mesh, VertexBuffer
+    from wiiu_model.nx_model import INDEX_SIZE
+    done = set()
+    for sh in model.shapes:
+        vi = sh.vertex_buffer
+        if vi not in done:
+            vb = model.vertex_buffers[vi]
+            bufs = [bytearray(b[:s]) for b, s in zip(vb.buffers, vb.strides)]
+            for a in vb.attributes:
+                if a.name.startswith("_i"):       # (skin matrix indices: matrix 0, which every skeleton has)
+                    n = sum(formats.attr_component_sizes(a.format))
+                    bufs[a.buffer][a.offset:a.offset + n] = bytes(n)
+            model.vertex_buffers[vi] = VertexBuffer(1, vb.skin_count, list(vb.attributes), list(vb.strides),
+                                                    [bytes(b) for b in bufs], dict(vb.extra))
+            done.add(vi)
+        sh.meshes = [Mesh("triangles", m.index_format, 3, bytes(3 * INDEX_SIZE[m.index_format]), 0,
+                          [(0, 3)] * len(m.submeshes), dict(m.extra)) for m in sh.meshes]
+    model.total_vertex_count = sum(vb.vertex_count for vb in model.vertex_buffers)
+    return len(model.shapes)
+
+
+def body_on_link(link_res, body_model, tex_count: int, tex_rename: dict | None = None) -> tuple[object, dict]:
+    """Link's model file with Link's shapes shrunk to a point and the body (its shapes, vertex buffers, materials
+    renamed SwBody_*, bones) on Link's skeleton. tex_count: the textures of the new Link.Tex (TexInfo.txt)."""
+    import copy
+    from wiiu_model.convert import set_texinfo
+    from wiiu_model.neutral import ResFile, Skeleton
+    if len(link_res.models) != 1:
+        raise CharselError(f"Link's model file has {len(link_res.models)} models, expected 1")
+    link = copy.deepcopy(link_res.models[0])
+    body = copy.deepcopy(body_model)
+    rig = rerig(link.skeleton, body.skeleton)
+    _shrink_model(link)
+    nv, nm = len(link.vertex_buffers), len(link.materials)
+    lmats = {m.name for m in link.materials}
+    ren = tex_rename or {}
+    for mat in body.materials:
+        mat.name = BODY_PREFIX + mat.name
+        if mat.name in lmats:
+            raise CharselError(f"the body's material {mat.name} clashes with Link's")
+        mat.textures = [ren.get(t, t) for t in mat.textures]
+    for sh in body.shapes:
+        sh.vertex_buffer += nv
+        sh.material += nm
+        sh.bone = rig["index"][sh.bone]
+        sh.skin_bones = [rig["index"][b] for b in sh.skin_bones]
+    names = [s.name for s in link.shapes]
+    for sh in body.shapes:
+        if sh.name in names:
+            sh.name = BODY_PREFIX + sh.name
+        names.append(sh.name)
+    bsk = body.skeleton
+    link.skeleton = Skeleton(link.skeleton.flags, rig["bones"], rig["matrix_to_bone"], bsk.smooth_count,
+                             bsk.rigid_count, bsk.inverse_matrices, dict(bsk.extra))
+    link.vertex_buffers += body.vertex_buffers
+    link.shapes += body.shapes
+    link.materials += body.materials
+    link.total_vertex_count = sum(vb.vertex_count for vb in link.vertex_buffers)
+    res = ResFile(link_res.name, [link], [], [], [copy.deepcopy(e) for e in link_res.external], dict(link_res.extra))
+    set_texinfo(res, tex_count)
+    info = {"bones": len(rig["bones"]), "link_bones": len(link_res.models[0].skeleton.bones),
+            "body_bones": len(body_model.skeleton.bones), "reparented": rig["reparented"],
+            "link_only": len(rig["link_only"]), "shapes": len(link.shapes), "materials": len(link.materials),
+            "vertices": link.total_vertex_count}
+    return res, info
+
+
+def merge_textures(link_tex: bytes, body_tex: bytes) -> tuple[bytes, list[str], dict[str, str]]:
+    """Link.Tex with the body's textures after Link's (a body texture named like one of Link's is renamed SwBody_*).
+    Returns (the file, its texture names, the renames)."""
+    from wiiu_model import nx_bfres
+    from wiiu_model.neutral import TextureSet
+    lt, bt = nx_bfres.read_textures(_unyaz(link_tex)), nx_bfres.read_textures(_unyaz(body_tex))
+    names = {t.name for t in lt.textures}
+    rename = {}
+    for t in bt.textures:
+        if t.name in names:
+            rename[t.name] = BODY_PREFIX + t.name
+            t.name = rename[t.name]
+        names.add(t.name)
+    ts = TextureSet(lt.name, lt.textures + bt.textures, "model", dict(lt.extra))
+    return nx_bfres.write_textures(ts), [t.name for t in ts.textures], rename
+
+
+def shrink_default_armor(data: bytes) -> tuple[bytes, int]:
+    """Armor_Default (the hair, belt, trousers and pouches Link wears with no armor) with every shape shrunk."""
+    from wiiu_model import nx_model
+    res = nx_model.read(_unyaz(data))
+    n = sum(_shrink_model(m) for m in res.models)
+    return nx_model.write(res), n
+
+
+def aamp_repoint(data: bytes, mapping: dict[str, str]) -> tuple[bytes, int]:
+    """An AAMP file with every text parameter whose text is a key of mapping pointing at its new text (added at the
+    end of the string section); every other byte stays. Returns (the file, how many parameters now point elsewhere).
+    For the player's big animation sets, which the parameter reader refuses (they share parts on purpose)."""
+    import struct
+    import aamp
+    if len(data) < 0x30 or data[:4] != b"AAMP":
+        raise CharselError("not an AAMP file")
+    _v, _f, size, _pv, pio, nl, no, npar, dsize, ssize, _u = struct.unpack_from("<11I", data, 4)
+    param_at = 0x30 + pio + 12 * nl + 8 * no
+    if size != len(data) or param_at + 8 * npar + dsize + ssize != len(data):
+        raise CharselError("an AAMP file laid out unlike the game's (its texts are not last)")
+    out = bytearray(data)
+    extra = bytearray()
+    spots: dict[str, int] = {}
+    changed = 0
+    for k in range(npar):
+        p = param_at + 8 * k
+        word = struct.unpack_from("<I", data, p + 4)[0]
+        t = word >> 24
+        if t not in aamp.STRING_TYPES:
+            continue
+        at = p + (word & 0xFFFFFF) * 4
+        end = data.find(b"\0", at)
+        new = mapping.get(data[at:end].decode("utf-8", "replace")) if 0 <= at < end else None
+        if new is None:
+            continue
+        cap = aamp.STRING_TYPES[t]
+        if cap is not None and len(new.encode()) >= cap:
+            raise CharselError(f"{new!r} is too long for its parameter")
+        if new not in spots:
+            spots[new] = len(data) + len(extra)
+            extra += new.encode() + b"\0"
+            extra += bytes(-len(extra) % 4)
+        struct.pack_into("<I", out, p + 4, ((spots[new] - p) // 4) | (t << 24))
+        changed += 1
+    out += extra
+    struct.pack_into("<I", out, 0x0C, len(out))
+    struct.pack_into("<I", out, 0x28, ssize + len(extra))
+    return bytes(out), changed
+
+
+def aslist_add(data: bytes, files: list[tuple[str, bool]], retarget_player: bool = False) -> bytes:
+    """The player's animation list with more animation files (after his own; RetargetModel "Skeleton" where asked:
+    the game then fits that file's clips to this body, as it does for people who share clips), and with
+    retarget_player, Link's own file retargeted too."""
+    import aamp
+    from aamp import STRING64, Param, PObject, name_hash
+    root = aamp.load(data)
+    add = root.list("AddReses")
+    if add is None or not add.objects:
+        raise CharselError("the player's animation list has no animation files")
+    have = {o.get_value("Anim"): o for o in add.objects.values()}
+    first = next(iter(add.objects.values()))
+    at = first.get(name_hash("Anim")).type
+    rt = next((o.get(name_hash("RetargetModel")).type for o in add.objects.values()
+               if o.get(name_hash("RetargetModel")) is not None), STRING64)
+    if retarget_player:
+        o = have.get(PLAYER_ANIM)
+        if o is None:
+            raise CharselError(f"the player's animation list has no {PLAYER_ANIM}")
+        o[name_hash("RetargetModel")] = Param(rt, "Skeleton")
+    i = len(add.objects)
+    for anim, retarget in files:
+        if anim in have:
+            continue
+        while name_hash(f"AddRes_{i}") in add.objects:
+            i += 1
+        o = PObject()
+        o[name_hash("Anim")] = Param(at, anim)
+        if retarget:
+            o[name_hash("RetargetModel")] = Param(rt, "Skeleton")
+        add.objects[name_hash(f"AddRes_{i}")] = o
+        have[anim] = o
+    return aamp.dump(root)
+
+
+def player_moves(r: Recipe, clips_of, flags: dict[str, bool] | None = None) -> tuple[dict, dict, list[str]]:
+    """The character's own clips for the player's special moves (PLAYER_MOVES): ({animation set: {Link's clip: the
+    character's}}, {the character's clip: (its animation file, retarget)}, notes). clips_of(file): its clip names
+    (None: unknown). flags: the donor's own retarget per file (else the recipe's)."""
+    own = dict(r.own)
+    edits: dict[str, dict[str, str]] = {}
+    where: dict[str, tuple[str, bool]] = {}
+    notes: list[str] = []
+    rt = dict(r.anims)
+    rt.update(flags or {})
+    for ghost, (sets, link_clip) in PLAYER_MOVES.items():
+        clip = own.get(ghost)
+        if not clip or clip == link_clip:
+            continue
+        hit = next((f for f, _ in r.anims if f != PLAYER_ANIM and clip in (clips_of(f) or ())), None)
+        if hit is None:
+            notes.append(f"{ghost}: {clip} isn't in {r.name}'s animation files here (Link's move stays)")
+            continue
+        for s in sets:
+            edits.setdefault(s, {})[link_clip] = clip
+        where[clip] = (hit, bool(rt.get(hit, True)))
+    return edits, where, notes
+
+
+def apply_moves(ppack: dict[str, bytes], edits: dict, where: dict, retarget: bool = False
+                ) -> tuple[dict[str, bytes], dict[str, str], list[str]]:
+    """The player's pack files that change ({name: bytes}), the moves that got the character's clip ({ghost name:
+    clip}) and notes. ppack: the files of the game's GameROMPlayer pack."""
+    from mp import ghost_link_pack as glp
+    _, plt = glp.link_target(ppack, PLAYER_ACTOR)
+    asl_name = f"Actor/ASList/{glp.user(plt, 'ASUser')}.baslist"
+    changed: dict[str, bytes] = {}
+    moves: dict[str, str] = {}
+    notes: list[str] = []
+    for set_name, mapping in sorted(edits.items()):
+        old = ppack.get(set_name)
+        short = set_name.rsplit("/", 1)[-1]
+        if old is None:
+            notes.append(f"the player has no {short}: that move stays Link's")
+            continue
+        for link_clip, clip in mapping.items():
+            new, n = aamp_repoint(old, {link_clip: clip})
+            if not n:
+                notes.append(f"{short} doesn't play {link_clip}: that move stays Link's there")
+                continue
+            old = new
+            changed[set_name] = new
+            for g, (sets, lc) in PLAYER_MOVES.items():
+                if lc == link_clip and set_name in sets:
+                    moves[g] = clip
+    want = list(dict.fromkeys(where[c] for c in moves.values()))
+    if want or retarget:
+        old = ppack.get(asl_name)
+        if old is None:
+            raise CharselError("the player's pack has no animation list")
+        changed[asl_name] = aslist_add(old, want, retarget)
+    return changed, moves, notes
+
+
+def body_of(romfs: Path, r: Recipe) -> tuple[str, str]:
+    """(model file, model name) of a character's body: its donor's model list (the game's own names)."""
+    import aamp
+    from mp import ghost_link_pack as glp
+    if r.id not in PLAYAS_PEOPLE:
+        why = ("monsters' skeletons start 20-60 degrees off Link's" if r.cat == "Monsters"
+               else "Link and Linkle are the player already: use playas off")
+        raise CharselError(f"{r.name} can't be played as yet ({why})")
+    donor = glp.read_pack(glp.find_pack(Path(romfs), r.donor))
+    _, lt = glp.link_target(donor, r.donor)
+    ml = donor.get(f"Actor/ModelList/{glp.user(lt, 'ModelUser')}.bmodellist")
+    md = aamp.load(ml).list("ModelData") if ml else None
+    if not (md and md.lists):
+        raise CharselError(f"{r.name}'s body is put together from Mii-style parts (no model file of its own): "
+                           "not yet")
+    d0 = next(iter(md.lists.values()))
+    folder = d0.object("Base").get_value("Folder")
+    units = d0.list("Unit")
+    unit = next(iter(units.objects.values())).get_value("UnitName") if units and units.objects else folder
+    if not isinstance(folder, str) or not folder:
+        raise CharselError(f"{r.donor}'s model list names no model file")
+    return folder, unit if isinstance(unit, str) and unit else folder
+
+
+def _donor_flags(romfs: Path, r: Recipe) -> dict[str, bool]:
+    """The donor's own animation files and whether its list retargets them (the same as make_pack copies)."""
+    import aamp
+    from mp import ghost_link_pack as glp
+    try:
+        donor = glp.read_pack(glp.find_pack(Path(romfs), r.donor))
+        _, lt = glp.link_target(donor, r.donor)
+        asl = donor.get(f"Actor/ASList/{lt.get_value('ASUser')}.baslist")
+        add = aamp.load(asl).list("AddReses") if asl else None
+    except Exception:   # (the recipe's own flags then)
+        return {}
+    out = {}
+    for o in (add.objects.values() if add else ()):
+        a = o.get_value("Anim")
+        if isinstance(a, str):
+            out[a] = o.get_value("RetargetModel") not in (None, "")
+    return out
+
+
+def _yaz(data: bytes) -> bytes:
+    from wiiu_convert import yaz0_compress
+    return yaz0_compress(data)
+
+
+def _game_entry(rstb, name: str) -> int | None:
+    try:
+        return rstb.get(name) if rstb is not None else None
+    except Exception:   # (a damaged table: no entry)
+        return None
+
+
+def build_playas(cid: str, romfs=DEFAULT_ROMFS, out=PLAYAS_OUT, *, own_moves: bool = True, retarget: bool = False,
+                 cache=DEFAULT_CACHE, say=print) -> dict:
+    """Build the play-as package for one character into `out` (a BCML-style folder: mod.toml, info.json, built.txt,
+    playas.json, logs/rstb.json and 01007EF00011E000/romfs/Pack/TitleBG.pack holding only the changed files). Reads
+    only the game's own files. Returns playas.json's contents."""
+    import bnp
+    from mp import ghost_link_pack as glp
+    from wiiu_model import checks, nx_model
+    from wiiu_model.convert import RSTB_TEX_EXTRA, rstb_model
+    romfs, out = Path(romfs).resolve(), Path(out).resolve()
+    if out == romfs or romfs in out.parents or out in romfs.parents:
+        raise CharselError("--out must be a folder of your own, not inside the game's files")
+    title = romfs / "Pack" / "TitleBG.pack"
+    if not title.is_file():
+        raise CharselError(f"{romfs} isn't the game's extracted romfs (no Pack\\TitleBG.pack)")
+    cid = find_id(cid) or cid
+    r = RECIPES.get(cid)
+    if r is None:
+        raise CharselError(f"no character {cid!r} (charsel list)")
+    folder, unit = body_of(romfs, r)
+    say(f"Play as {r.name}: building from {folder} (your game's files, read only)...")
+
+    def member(name: str) -> bytes:
+        d = glp._sarc_member(title, name)
+        if d is None:
+            raise CharselError(f"your TitleBG.pack has no {name}")
+        return d
+
+    link_raw = _unyaz(member(LINK_MODEL))
+    link_res = nx_model.read(link_raw)
+    body_file, body_tex = model_file(romfs, folder), model_file(romfs, folder + ".Tex")
+    if body_file is None or body_tex is None:
+        raise CharselError(f"{folder}'s model or textures aren't in your game files")
+    body_res = nx_model.read(_unyaz(body_file))
+    body = next((m for m in body_res.models if m.name == unit), body_res.models[0] if body_res.models else None)
+    if body is None:
+        raise CharselError(f"{folder} has no model")
+    say("  textures (Link's and the body's in one file)...")
+    tex_raw, tex_names, tex_ren = merge_textures(member(LINK_TEX), body_tex)
+    say("  the body on Link's skeleton...")
+    res, rinfo = body_on_link(link_res, body, len(tex_names), tex_ren)
+    model_raw = nx_model.write(res)
+    bad = checks.switch_model_problems(model_raw)
+    if bad:
+        raise CharselError(f"the new Link model fails the self-check: {bad[:3]}")
+    armor_old = _unyaz(member(DEFAULT_ARMOR))
+    armor_raw, armor_shapes = shrink_default_armor(armor_old)
+    bad = checks.switch_model_problems(armor_raw)
+    if bad:
+        raise CharselError(f"the default armor fails the self-check: {bad[:3]}")
+
+    # own moves: the player's animation list and sets, in his own pack (inside TitleBG.pack)
+    notes: list[str] = []
+    moves: dict[str, str] = {}
+    player_files: dict[str, bytes] = {}
+    sizes_in: dict[str, tuple[bytes, bytes]] = {}       # name in the player's pack -> (the game's, ours)
+    if own_moves or retarget:
+        edits, where = {}, {}
+        if own_moves:
+            edits, where, mnotes = player_moves(r, ClipCache(romfs, cache).clips, _donor_flags(romfs, r))
+            notes += mnotes
+        if edits or retarget:
+            ppack = glp.read_pack(member(PLAYER_PACK))
+            player_files, moves, mnotes = apply_moves(ppack, edits, where, retarget)
+            notes += mnotes
+            sizes_in = {n: (ppack[n], d) for n, d in player_files.items()}
+
+    # the package: only the changed files of TitleBG.pack (modman add fills the rest from your game)
+    say("  packing (Yaz0, a few seconds)...")
+    members = [(LINK_MODEL, _yaz(model_raw), 8), (LINK_TEX, _yaz(tex_raw), 8), (DEFAULT_ARMOR, _yaz(armor_raw), 8)]
+    if player_files:
+        inner = bnp.sarc_build([(n, d, 8) for n, d in sorted(player_files.items())])
+        members.append((PLAYER_PACK, _yaz(inner), 8))
+    pack = bnp.sarc_build(members)
+    # size table entries (logs/rstb.json), from the game's entries for the files they replace
+    rstb = bnp.load_game_rstb(str(romfs.parent))
+    sizes: dict[str, int] = {}
+    count = lambda m: len(m.shapes) + len(m.materials) + len(m.skeleton.bones)   # noqa: E731
+    e = _game_entry(rstb, "Model/Link.bfres")
+    if e:
+        sizes["Model/Link.bfres"] = rstb_model(len(model_raw), count(res.models[0]), e, len(link_raw),
+                                               count(link_res.models[0]))
+    e = _game_entry(rstb, "Model/Link.Tex.bfres")
+    sizes["Model/Link.Tex.bfres"] = max(e or 0, len(tex_raw) + RSTB_TEX_EXTRA)
+    for name, (old, new) in sizes_in.items():
+        canon_ = bnp.canon(name)
+        e = _game_entry(rstb, canon_)
+        if not e:
+            notes.append(f"the game's size table has no {canon_}")
+            continue
+        structs = None
+        if name.endswith(".baslist"):
+            structs = bnp.aslist_growth(bnp.aamp_read(old).root, bnp.aamp_read(new).root) + 0x100
+        sizes[canon_] = bnp.needed_size(e, len(old), len(new), False, structs)
+    if rstb is None:
+        notes.append("the game's size table isn't there: the new files have no size entries")
+
+    # write (our files only; the folder may hold an older build)
+    for rel in (f"{BASE_TID}/romfs/{TITLEBG}", "logs/rstb.json", "mod.toml", "info.json", BUILT_MARK, PLAYAS_INFO):
+        p = out.joinpath(*rel.split("/"))
+        if p.is_file():
+            p.unlink()
+    info = {"format": 1, "builder": VERSION, "mod": PLAYAS_ID, "version": PLAYAS_VERSION, "id": cid,
+            "name": r.name, "body": {"file": folder, "model": unit}, "rig": rinfo, "textures": len(tex_names),
+            "texture_renames": tex_ren, "default_armor_shapes": armor_shapes, "own_moves": moves,
+            "retarget": bool(retarget), "sizes": sizes,
+            "files": {LINK_MODEL: len(model_raw), LINK_TEX: len(tex_raw), DEFAULT_ARMOR: len(armor_raw),
+                      **({PLAYER_PACK: sorted(player_files)} if player_files else {})},
+            "titlebg_part": len(pack), "notes": notes}
+    files = {f"{BASE_TID}/romfs/{TITLEBG}": pack,
+             "logs/rstb.json": (json.dumps(dict(sorted(sizes.items())), indent=1) + "\n").encode(),
+             "mod.toml": PLAYAS_TOML.format(name=r.name.split(" (")[0], id=PLAYAS_ID, version=PLAYAS_VERSION,
+                                            own=(", its own " + ", ".join(sorted(moves))) if moves else "").encode(),
+             "info.json": (json.dumps({"name": f"Play as {r.name}", "version": PLAYAS_VERSION,
+                                       "desc": "Built on this PC by tools/charsel.py playas. Never share it.",
+                                       "platform": "switch", "options": {}}, indent=1) + "\n").encode(),
+             BUILT_MARK: BUILT_TEXT.encode(),
+             PLAYAS_INFO: (json.dumps(info, indent=1) + "\n").encode()}
+    for rel, data in files.items():
+        p = out.joinpath(*rel.split("/"))
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    return info
+
+
+def check_playas(out=PLAYAS_OUT, romfs=DEFAULT_ROMFS) -> list[str]:
+    """Read a built play-as package back, no game: the model reads and passes the model self-check; Link's 121
+    bones come first, in Link's order, with Link's parents; every body bone keeps its rest pose in model space and
+    every skin matrix its bone's name; Link's shapes and the default armor are shrunk; TexInfo.txt counts the
+    textures and every material's texture is there; the animation sets point at the character's clips; the size
+    entries cover the new files. [] = all good."""
+    import aamp
+    import bnp
+    from mp import ghost_link_pack as glp
+    from wiiu_model import checks, nx_bfres, nx_model
+    from wiiu_model.convert import TEXINFO
+    out, romfs = Path(out), Path(romfs)
+    try:
+        info = json.loads((out / PLAYAS_INFO).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [f"no {PLAYAS_INFO} in {out}: build first (charsel playas <name>)"]
+    bad: list[str] = []
+    pack_path = out / BASE_TID / "romfs" / "Pack" / "TitleBG.pack"
+    try:
+        part = bnp.Blob(pack_path.read_bytes()).open()
+    except Exception as e:   # (any read failure is the answer)
+        return [f"{pack_path.name} doesn't read: {e}"]
+    get = lambda n: _unyaz(part[n][0]) if n in part else None   # noqa: E731
+    model, tex, armor = get(LINK_MODEL), get(LINK_TEX), get(DEFAULT_ARMOR)
+    if model is None or tex is None or armor is None:
+        return ["the package lacks the model, its textures or the default armor"]
+    for what, data in (("model", model), ("default armor", armor)):
+        bad += [f"{what}: {p}" for p in checks.switch_model_problems(data)]
+    new = nx_model.read(model).models[0]
+    title = romfs / "Pack" / "TitleBG.pack"
+    link = nx_model.read(_unyaz(glp._sarc_member(title, LINK_MODEL))).models[0]
+    folder, unit = info["body"]["file"], info["body"]["model"]
+    bres = nx_model.read(_unyaz(model_file(romfs, folder)))
+    body = next((m for m in bres.models if m.name == unit), bres.models[0])
+    names = [b.name for b in new.skeleton.bones]
+    lnames = [b.name for b in link.skeleton.bones]
+    if names[:len(lnames)] != lnames:
+        bad.append(f"Link's {len(lnames)} bones are not first, in Link's order")
+    for i, lb in enumerate(link.skeleton.bones):
+        want = lnames[lb.parent] if lb.parent >= 0 else None
+        nb = new.skeleton.bones[i]
+        if (names[nb.parent] if nb.parent >= 0 else None) != want:
+            bad.append(f"{lb.name}: its parent isn't Link's")
+    bnames = [b.name for b in body.skeleton.bones]
+    if [names[b] for b in new.skeleton.matrix_to_bone] != [bnames[b] for b in body.skeleton.matrix_to_bone]:
+        bad.append("a skin matrix points at another bone")
+    if new.skeleton.inverse_matrices != body.skeleton.inverse_matrices:
+        bad.append("the inverse bind matrices changed")
+    bw, nw = _worlds(body.skeleton.bones), _worlds(new.skeleton.bones)
+    worst = max((_gap(nw[names.index(n)], bw[i]) for i, n in enumerate(bnames)), default=0.0)
+    if worst > REST_TOL:
+        bad.append(f"the body's rest pose moved by up to {worst:.6f} m")
+    nl = len(link.shapes)
+    if any(new.vertex_buffers[s.vertex_buffer].vertex_count != 1 for s in new.shapes[:nl]):
+        bad.append("one of Link's shapes isn't shrunk")
+    if [new.vertex_buffers[s.vertex_buffer].vertex_count for s in new.shapes[nl:]] != \
+            [body.vertex_buffers[s.vertex_buffer].vertex_count for s in body.shapes]:
+        bad.append("the body's shapes changed")
+    if [m.name for m in new.materials[:len(link.materials)]] != [m.name for m in link.materials]:
+        bad.append("Link's materials changed")
+    ts = nx_bfres.read_textures(tex)
+    tnames = {t.name for t in ts.textures}
+    texinfo = next((e.data for e in nx_model.read(model).external if e.name == TEXINFO), b"")
+    if texinfo != str(len(ts.textures)).encode():
+        bad.append(f"TexInfo.txt says {texinfo!r}, the textures are {len(ts.textures)}")
+    missing = sorted({t for m in new.materials for t in m.textures if t not in tnames})
+    if missing:
+        bad.append(f"textures missing: {missing[:4]}")
+    arm = nx_model.read(armor)
+    if any(arm_m.vertex_buffers[s.vertex_buffer].vertex_count != 1 for arm_m in arm.models for s in arm_m.shapes):
+        bad.append("the default armor isn't shrunk")
+    sizes = info.get("sizes") or {}
+    if sizes.get("Model/Link.bfres", 0) < len(model):
+        bad.append("no size entry big enough for the model")
+    if sizes.get("Model/Link.Tex.bfres", 0) < len(tex):
+        bad.append("no size entry big enough for the textures")
+    try:
+        logged = json.loads((out / "logs" / "rstb.json").read_text(encoding="utf-8"))
+        if logged != sizes:
+            bad.append("logs/rstb.json differs from playas.json")
+    except (OSError, ValueError):
+        bad.append("logs/rstb.json doesn't read")
+    if info.get("own_moves") or info.get("retarget"):
+        ppart = part.get(PLAYER_PACK)
+        pfiles = glp.read_pack(ppart[0]) if ppart else {}
+        aslists = [n for n in pfiles if n.startswith("Actor/ASList/")]
+        if len(aslists) != 1:
+            bad.append("the player's animation list isn't in the package")
+        else:
+            adds = {o.get_value("Anim"): o.get_value("RetargetModel")
+                    for o in aamp.load(pfiles[aslists[0]]).list("AddReses").objects.values()}
+            if PLAYER_ANIM not in adds:
+                bad.append(f"the player's animation list lost {PLAYER_ANIM}")
+            if info.get("retarget") and adds.get(PLAYER_ANIM) != "Skeleton":
+                bad.append(f"{PLAYER_ANIM} isn't retargeted")
+        for ghost, clip in (info.get("own_moves") or {}).items():
+            sets, _lc = PLAYER_MOVES[ghost]
+            if not any(clip.encode() + b"\0" in pfiles.get(s, b"") for s in sets):
+                bad.append(f"no animation set plays {clip} for {ghost}")
+    return bad
+
+
+# your play-as choice, next to the Who am I pick (charsel.json in the launcher's folder)
+
+def load_playas(path: Path | None = None) -> dict:
+    """{"id", "library", "turned_off": [...]} of the play-as mod this tool put in a library, or {}."""
+    path = Path(path) if path else state_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    pa = data.get("playas") if isinstance(data, dict) else None
+    if not isinstance(pa, dict) or find_id(pa.get("id")) != pa.get("id") or not isinstance(pa.get("library"), str):
+        return {}
+    off = pa.get("turned_off")
+    return {"id": pa["id"], "library": pa["library"],
+            "turned_off": [x for x in off if isinstance(x, str)] if isinstance(off, list) else []}
+
+
+def save_playas(pa: dict | None, path: Path | None = None) -> Path:
+    path = Path(path) if path else state_path()
+    try:
+        old = json.loads(path.read_text(encoding="utf-8"))
+        old = old if isinstance(old, dict) else {}
+    except (OSError, ValueError):
+        old = {}
+    old.setdefault("format", 1)
+    if pa:
+        old["playas"] = pa
+    else:
+        old.pop("playas", None)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(old, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def _open_library(library):
+    import modman as mm
+    root = mm.resolve_library(str(library) if library else None)
+    lib = mm.Library.load(root)
+    if lib is None:
+        raise CharselError(f"No mod library in {root} yet. Run: python tools\\modman.py init")
+    return lib
+
+
+def playas_on(cid: str, *, library=None, romfs=DEFAULT_ROMFS, out=PLAYAS_OUT, own_moves: bool = True,
+              retarget: bool = False, state: Path | None = None, add: bool = True, say=print) -> dict:
+    """Build the play-as mod for a character, put it in the library (last, on: it holds Link's model), turn off any
+    other mod that replaces Link's model (The Linkle Mod) and keep what was turned off, for playas off."""
+    import modman as mm
+    cid = find_id(cid) or cid
+    if cid in ("link", "linkle"):
+        raise CharselError("Link and Linkle are the player already: use playas off")
+    lib = _open_library(library) if add else None
+    info = build_playas(cid, romfs, out, own_moves=own_moves, retarget=retarget, say=say)
+    bad = check_playas(out, romfs)
+    if bad:
+        raise CharselError("the built mod fails its check: " + "; ".join(bad[:4]))
+    if lib is None:
+        return dict(info, added=False, turned_off=[])
+    old = load_playas(state)
+    turned = [x for x in old.get("turned_off", []) if old.get("library") == lib.root]
+    if any(m["id"] == PLAYAS_ID for m in lib.mods):
+        mm.remove_mod(lib, PLAYAS_ID)
+    say("  adding it to your mods (modman fills TitleBG.pack from your game: about a minute)...")
+    try:
+        entry, _scan, _notes = mm.add_mod(lib, str(out))
+    except mm.ModmanError as e:
+        raise CharselError(str(e)) from None
+    i = next(k for k, m in enumerate(lib.mods) if m["id"] == entry["id"])
+    m = lib.mods.pop(i)
+    m["enabled"] = True
+    lib.mods.append(m)
+    for other in lib.mods:   # (another body for Link: The Linkle Mod. Off while this is on; playas off turns it on)
+        if other["id"] != PLAYAS_ID and other.get("enabled") and _link_model_in(Path(lib.mods_dir) / other["id"]):
+            other["enabled"] = False
+            turned.append(other["id"])
+    lib.save()
+    names = {x["id"]: x["name"] for x in lib.mods}
+    save_playas({"id": cid, "library": lib.root, "turned_off": list(dict.fromkeys(turned))}, state)
+    return dict(info, added=True, turned_off=[names.get(x, x) for x in dict.fromkeys(turned)])
+
+
+def playas_off(*, library=None, state: Path | None = None) -> dict:
+    """Take the play-as mod out of the library and turn back on what playas turned off. {"removed", "turned_on"}."""
+    import modman as mm
+    old = load_playas(state)
+    lib = _open_library(library or old.get("library"))
+    removed = any(m["id"] == PLAYAS_ID for m in lib.mods)
+    if removed:
+        mm.remove_mod(lib, PLAYAS_ID)
+    on = []
+    if old.get("library") in (None, lib.root):
+        for m in lib.mods:
+            if m["id"] in old.get("turned_off", []) and not m.get("enabled"):
+                m["enabled"] = True
+                on.append(m["name"])
+    lib.save()
+    save_playas(None, state)
+    return {"removed": removed, "turned_on": on}
+
+
+def playas_hint(cid: str) -> str:
+    """What `iam` and the wheel say about seeing yourself as a character ("" for Link and Linkle)."""
+    r = RECIPES.get(cid)
+    if r is None or r.kind != "pack":
+        return ""
+    if cid not in PLAYAS_PEOPLE:
+        return f"You still play as Link ({r.name} can't be played as yet)."
+    word = (r.aliases or (cid,))[0]
+    return f"Restart the game to play as {r.name.split(' (')[0]} (charsel playas {word} first)."
+
+
 # ------------------------------------------------------------------------------------------------ command line
 
 def _print_list(cat: dict | None = None) -> None:
@@ -1252,6 +2048,59 @@ def _print_list(cat: dict | None = None) -> None:
             r = RECIPES[cid]
             st = "built" if cid in built else ("Link body" if r.kind == "link" else "")
             print(f"  {cid:9} {r.name:16} {st:9} {r.looks}")
+
+
+def _low_priority() -> None:
+    """Below normal priority while a big build runs (Windows), so the PC stays usable."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            k = ctypes.windll.kernel32
+            k.SetPriorityClass(k.GetCurrentProcess(), 0x4000)
+        except (OSError, AttributeError):
+            pass
+
+
+def _playas_cmd(args) -> int:
+    what = (args.what or "").strip().lower()
+    if not what:
+        pa = load_playas(args.state)
+        if not pa:
+            print("You play as Link. charsel playas <name> makes you a character from the next start.")
+        else:
+            print(f"You play as {RECIPES[pa['id']].name} (in {pa['library']}). charsel playas off: back to Link.")
+        return 0
+    if what == "check":
+        bad = check_playas(args.out, args.romfs)
+        print("OK" if not bad else "BAD: " + "; ".join(bad))
+        return 0 if not bad else 1
+    if what in ("off", "link", "linkle"):
+        res = playas_off(library=args.library, state=args.state)
+        print("Back to Link at the next start: restart the game." if res["removed"]
+              else "No play-as mod in your library: you play as Link.")
+        if res["turned_on"]:
+            print(f"{', '.join(res['turned_on'])}: on again.")
+        return 0
+    cid = find_id(what)
+    if cid is None:
+        print(f"No character {what!r}. Pick one of: {', '.join(i for i in order() if i in PLAYAS_PEOPLE)}")
+        return 1
+    _low_priority()
+    info = playas_on(cid, library=args.library, romfs=args.romfs, out=args.out, own_moves=not args.no_own_moves,
+                     retarget=args.retarget, state=args.state, add=not args.no_add)
+    short = RECIPES[cid].name.split(" (")[0]
+    if info["added"]:
+        print(f"Done. Restart the game to play as {short}.")
+    else:
+        print(f"Built and checked in {args.out} (not added: --no-add).")
+    if info["own_moves"]:
+        print("  Own moves: " + ", ".join(f"{g} -> {c}" for g, c in info["own_moves"].items()))
+    for name in info["turned_off"]:
+        print(f"  {name} is off while you play as {short}. charsel playas off turns it back on.")
+    print("  Armor you wear shows on top (it is cut for Link's body).")
+    for n in info["notes"]:
+        print(f"  note: {n}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1276,8 +2125,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("id")
     p.add_argument("--state", type=Path)
     sub.add_parser("where", help="your choice and where it is kept").add_argument("--state", type=Path)
+    pa = sub.add_parser("playas", help="play as a character yourself, from the next start (or off, or check)")
+    pa.add_argument("what", nargs="?", help="a character (daruk, zelda, mipha...), off, or check")
+    pa.add_argument("--romfs", type=Path, default=DEFAULT_ROMFS)
+    pa.add_argument("--library", type=Path, help="your mod library (default: modman's)")
+    pa.add_argument("--out", type=Path, default=PLAYAS_OUT)
+    pa.add_argument("--state", type=Path)
+    pa.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
+    pa.add_argument("--no-add", action="store_true", help="build only (and check); don't touch the library")
+    pa.add_argument("--no-own-moves", action="store_true", help="Link's moves only (no rolling sprint, wings...)")
+    pa.add_argument("--retarget", action="store_true",
+                    help="fit Link's clips to the body (the game's retarget; hips at the body's height) [G]")
     args = ap.parse_args(argv)
     try:
+        if args.cmd == "playas":
+            return _playas_cmd(args)
         if args.cmd == "list":
             _print_list(load_catalog(args.out))
             return 0

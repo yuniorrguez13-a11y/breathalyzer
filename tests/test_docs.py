@@ -505,11 +505,19 @@ class ReadmeAndNotice(unittest.TestCase):
     """clean-7, and the check_clean facts README states."""
 
     def test_layout_names_every_example(self):
+        """Every example but the secret ones ([mod] secret: an easter egg; README ships in app\\, and only
+        docs/easter-eggs.md, the spoilers doc, names them)."""
         row = next(r for r in table_rows(read("README.md")) if r[0] == "`native/`")
-        examples = sorted(p.parent.name for p in (REPO / "native" / "examples").glob("*/mod.toml"))
+        tomls = sorted((REPO / "native" / "examples").glob("*/mod.toml"))
+        secret = {p.parent.name for p in tomls if modman.read_manifest(str(p.parent))[0].secret}
+        examples = [p.parent.name for p in tomls if p.parent.name not in secret]
         self.assertTrue(examples)
+        self.assertIn("zelda_view", secret)
         for name in examples:
             self.assertIn(name, row[1])
+        for name in secret:
+            self.assertNotIn(name, row[1])
+            self.assertIn(f"native/examples/{name}", read("docs/easter-eggs.md"))
         self.assertNotIn("an example mod", row[1])
 
     def test_notice_link_exists(self):

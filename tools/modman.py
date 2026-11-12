@@ -128,7 +128,8 @@ MENU_SYMBOLS = set("{}#$%@^`|~")      # the game's menu font has none of these (
 # doesn't load, turns its part off. Called in this order: docs/mod-format.md, "What deploy does with them".
 FEATURES = ("mod_settings", "font", "menu_bg", "mod_pictures")
 GENERATED_OWNER = {"font": "generated:fonts", "menu_bg": "generated:title", "mod_pictures": "generated:pictures"}
-MERGED_OWNER = "generated:merged"   # packs two enabled mods change, one a BCML package: merged (bnp.deploy_hook)
+MERGED_OWNER = "generated:merged"   # packs two enabled mods change: merged file by file (bnp.deploy_hook)
+MERGE_CACHE = ("cache", "merged-packs")   # <library>\cache\merged-packs\: the last merges (bnp.merge_packages)
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 RESERVED_RE = re.compile(r"^(con|prn|aux|nul|com[0-9]|lpt[0-9])$")
 CHEAT_RE = re.compile(r"(^|/)cheats/([0-9a-f]{16})\.txt$", re.I)  # (any case: Windows and the SD card ignore it)
@@ -2721,8 +2722,9 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False, mer
     if romfs_paths:  # (BCML packages: one size table for every mod that changes it; their packs merged with the
         #             other mods' copies as BCML merges them, put in the overlay below (MERGED_OWNER))
         pairs = [(m["name"], root) for m, root, s in scans if s.romfs]
-        try:
-            hook = bnp.deploy_hook(pairs, extracted, files=merge)
+        try:   # (a merge nothing changed for is read back from the library's cache; a dry run never writes it)
+            hook = bnp.deploy_hook(pairs, extracted, files=merge, cache=os.path.join(lib.root, *MERGE_CACHE),
+                                   store=not dry_run)
         except Exception as e:  # noqa: BLE001 (a pack merge that fails never stops the deploy: each mod's own copy)
             hook = bnp.deploy_hook(pairs, extracted)
             hook.attention.append(f"The mods' packs can't be merged ({type(e).__name__}: {e}): the later mod's copy "

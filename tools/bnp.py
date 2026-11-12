@@ -43,6 +43,7 @@ refused, the others come after "--"); the game's files are only read.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -3272,6 +3273,7 @@ class PackMerge:
     sizes: dict[str, int] = field(default_factory=dict)     # size table entries the merged files need
     merged_from: dict[str, list[str]] = field(default_factory=dict)   # overlay path -> the mods merged into it
     attention: list[str] = field(default_factory=list)
+    cached: bool = False                                    # read back from merge_packages' cache
 
 
 def package_logs(root: str, info: dict, mergers: dict | None = None) -> tuple[dict[str, list], list, list, list[str]]:
@@ -3336,19 +3338,21 @@ def _overlay(dst: Blob, src: Blob, game: Blob, path: str, skip: set[str], sizes:
             hit.add(sub)
 
 
-def merge_packages(mods: list[tuple[str, str, dict | None, dict]], extracted: str) -> PackMerge:
-    """The files two or more enabled mods ship that a BCML package installed here also has (a pack, or a whole file
-    its data logs made), merged the way BCML merges several mods: the game's copy, then each mod's own files over it
-    in order (the files that differ from the game's; packs inside packs the same way; a package's files that its logs
-    made are left out); then every package's deepmerge.aamp and aslist.aamp, then its data logs, applied again in
-    order to that merged copy (so a change a mod made by hand, a mod that isn't a package say, stays next to them).
-    A whole file (ActorInfo...) starts from the last copy no package's logs made, else the game's. mods: (name,
-    library folder, bnp.json or None, {overlay path (lowercase): romfs_mods Entry}), lowest priority first. Reads
-    only."""
+def merge_packages(mods: list[tuple[str, str, dict | None, dict]], extracted: str,
+                   cache: str | None = None, store: bool = True) -> PackMerge:
+    """The packs two or more enabled mods ship (any mods: BCML packages or not), and the whole files two ship that a
+    BCML package installed here also has (a file its data logs made, ActorInfo...), merged the way BCML merges
+    several mods: the game's copy, then each mod's own files over it in order, file by file (the files that differ
+    from the game's, so the later mod wins a file, never a whole pack; packs inside packs the same way; a package's
+    files that its logs made are left out); then every package's deepmerge.aamp and aslist.aamp, then its data logs,
+    applied again in order to that merged copy (so a change a mod made by hand, a mod that isn't a package say, stays
+    next to them). A whole file starts from the last copy no package's logs made, else the game's. mods: (name,
+    library folder, bnp.json or None, {overlay path (lowercase): romfs_mods Entry}), lowest priority first.
+    cache: a folder of this module's own (modman: <library>\\cache\\merged-packs): a result whose inputs (the files
+    the mods ship there, their logs, the game's copies, these tools) haven't changed is read back from it instead of
+    merged again; store=False (a dry run) only reads it. Reads only, but the cache."""
     out = PackMerge()
     pkgs = [k for k, m in enumerate(mods) if m[2]]
-    if not pkgs:
-        return out
     owned: dict[int, set[str]] = {}
     done_by: dict[int, dict[str, set[str]]] = {}     # package -> log -> the targets it merged
     for k in pkgs:
@@ -3366,11 +3370,152 @@ def merge_packages(mods: list[tuple[str, str, dict | None, dict]], extracted: st
     for k, m in enumerate(mods):
         for t in m[3]:
             claims.setdefault(t, []).append(k)
+    # (a pack: whoever ships it; a whole file: only when a package has it, since a package's logs may have made it)
     contested = {t: ks for t, ks in claims.items()
-                 if len(ks) > 1 and not t.startswith(rm.DLC_PREFIX.lower()) and any(t in owned.get(k, ()) for k in ks)}
+                 if len(ks) > 1 and not t.startswith(rm.DLC_PREFIX.lower())
+                 and (is_packish(t) or any(t in owned.get(k, ()) for k in ks))}
     if not contested:
         return out
+    key = None
+    if cache:
+        key = merge_key(mods, extracted, contested, pkgs)
+        hit = cache_read(cache, key)
+        if hit is not None:
+            return hit
+    _merge_contested(mods, extracted, pkgs, owned, done_by, contested, out)
+    if cache and key and store:
+        cache_write(cache, key, out)
+    return out
 
+
+# ------------------------------------------------------------------------------------- merged-pack cache (deploy)
+# The merged files of one deploy, kept in <library>\cache\merged-packs\ (modman): index.json maps an inputs key to
+# the result (files by their content hash, sizes, notes); each file is <sha256>.bin, shared by the results that hold
+# it. The newest CACHE_KEEP results are kept, the files no kept result names are deleted.
+
+CACHE_VERSION = 1
+CACHE_KEEP = 2
+CACHE_INDEX = "index.json"
+# (these tools' own files are part of every key: a merge made by older code is never reused)
+CACHE_CODE = ("bnp.py", "bcml_data.py", "bcml_maps.py", "bcml_texts.py", "romfs_mods.py", "wiiu_convert.py",
+              "ukmm.py", "aamp.py")
+
+
+def _stat(path: str) -> list:
+    try:
+        st = os.stat(path)
+        return [st.st_size, st.st_mtime_ns]
+    except OSError:
+        return []
+
+
+def _tree_stats(folder: str) -> list:
+    return [[rel, *_stat(path)] for rel, path in sorted(_walk(folder).items())] if os.path.isdir(folder) else []
+
+
+def merge_key(mods: list[tuple[str, str, dict | None, dict]], extracted: str, contested: dict[str, list[int]],
+              pkgs: list[int]) -> str:
+    """What a pack merge is made from (sha256): for each merged file, the game's copy and each mod's copy in order
+    (path, size, time); every package's kept logs and bnp.json (its logs may change any merged file); the game's
+    size table, language packs and actor info (the log mergers read them); these tools' files."""
+    h = hashlib.sha256()
+    here = os.path.dirname(os.path.abspath(__file__))
+    romfs = os.path.join(extracted, "romfs")
+    h.update(json.dumps({"v": CACHE_VERSION, "code": [[n, *_stat(os.path.join(here, n))] for n in CACHE_CODE],
+                         "game": os.path.normcase(os.path.abspath(extracted))}).encode())
+    for t, ks in sorted(contested.items()):
+        last = mods[ks[-1]][3][t]
+        h.update(json.dumps([t, _stat(os.path.join(romfs, *last.rel.split("/"))),
+                             [[mods[k][0], os.path.normcase(mods[k][3][t].src), *_stat(mods[k][3][t].src)]
+                              for k in ks]]).encode())
+    for k in pkgs:
+        h.update(json.dumps([mods[k][0], os.path.normcase(os.path.abspath(mods[k][1])),
+                             _tree_stats(os.path.join(mods[k][1], META))]).encode())
+    pack_dir = os.path.join(romfs, "Pack")
+    try:
+        boot = sorted(n for n in os.listdir(pack_dir) if n.lower().startswith("bootup"))
+    except OSError:
+        boot = []
+    h.update(json.dumps([[n, *_stat(os.path.join(pack_dir, n))] for n in boot]
+                        + [_stat(os.path.join(romfs, *rm.RSTB.split("/"))),
+                           _stat(os.path.join(romfs, "Actor", "ActorInfo.product.sbyml"))]).encode())
+    return h.hexdigest()
+
+
+def _cache_index(cache: str) -> dict:
+    try:
+        with open(os.path.join(cache, CACHE_INDEX), encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get("v") == CACHE_VERSION and isinstance(data.get("results"), dict):
+            return data
+    except (OSError, ValueError, RecursionError):
+        pass
+    return {"v": CACHE_VERSION, "results": {}}
+
+
+def cache_read(cache: str, key: str) -> PackMerge | None:
+    """The cached merge for key, every file checked against its hash; None when there is none or a file is gone
+    or changed (the merge is made again)."""
+    res = _cache_index(cache)["results"].get(key)
+    if not isinstance(res, dict):
+        return None
+    out = PackMerge()
+    try:
+        for path, digest in res["files"].items():
+            data = _read(os.path.join(cache, f"{digest}.bin"))
+            if hashlib.sha256(data).hexdigest() != digest:
+                return None
+            out.files[path] = data
+        out.sizes = {str(k): int(v) for k, v in res["sizes"].items()}
+        out.merged_from = {str(k): [str(x) for x in v] for k, v in res["merged_from"].items()}
+        out.attention = [str(x) for x in res["attention"]]
+    except (OSError, KeyError, TypeError, ValueError, AttributeError):
+        return None
+    out.cached = True
+    return out
+
+
+def cache_write(cache: str, key: str, pm: PackMerge) -> None:
+    """Keep pm under key (the newest CACHE_KEEP results stay; files no kept result names are deleted). A cache that
+    can't be written is skipped: the next deploy merges again."""
+    try:
+        os.makedirs(cache, exist_ok=True)
+        index = _cache_index(cache)
+        files = {}
+        for path, data in pm.files.items():
+            digest = hashlib.sha256(data).hexdigest()
+            dst = os.path.join(cache, f"{digest}.bin")
+            if not os.path.isfile(dst) or os.path.getsize(dst) != len(data):
+                tmp = f"{dst}.{os.getpid()}.tmp"
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, dst)
+            files[path] = digest
+        results = index["results"]
+        results.pop(key, None)
+        results[key] = {"files": files, "sizes": pm.sizes, "merged_from": pm.merged_from,
+                        "attention": pm.attention, "made": time.time()}
+        for old in list(results)[:-CACHE_KEEP]:
+            del results[old]
+        tmp = os.path.join(cache, f"{CACHE_INDEX}.{os.getpid()}.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(index, f)
+        os.replace(tmp, os.path.join(cache, CACHE_INDEX))
+        keep = {d for r in results.values() if isinstance(r, dict) for d in (r.get("files") or {}).values()}
+        for n in os.listdir(cache):
+            if n.endswith((".bin", ".tmp")) and n.split(".")[0] not in keep and n != CACHE_INDEX:
+                try:
+                    os.unlink(os.path.join(cache, n))
+                except OSError:
+                    pass
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _merge_contested(mods: list[tuple[str, str, dict | None, dict]], extracted: str, pkgs: list[int],
+                     owned: dict[int, set[str]], done_by: dict[int, dict[str, set[str]]],
+                     contested: dict[str, list[int]], out: PackMerge) -> None:
+    """merge_packages' work, into out."""
     mergers = log_mergers()
     fixed_at = fixed_targets(mergers)
     logs = {}
@@ -3429,7 +3574,7 @@ def merge_packages(mods: list[tuple[str, str, dict | None, dict]], extracted: st
         sizes.add(size_name[t], len(game.raw), dst, True)
         out.merged_from[last.target] = names
     if not merged and not whole:
-        return out
+        return
 
     # parameter changes: every package's, in order, into the merged packs (which hold no package's own result)
     blobs = {f"{BASE_TID}/romfs/{mods[contested[t][-1]][3][t].rel}": merged[t] for t in merged}
@@ -3517,17 +3662,17 @@ def merge_packages(mods: list[tuple[str, str, dict | None, dict]], extracted: st
         out.files[spelled[t]] = blob.data()
     for k, v in sizes.final().items():
         out.sizes[k] = max(v, out.sizes.get(k, 0))
-    return out
 
 
-def deploy_hook(mods: list[tuple[str, str]], extracted: str, files: bool = False) -> DeployHook:
+def deploy_hook(mods: list[tuple[str, str]], extracted: str, files: bool = False,
+                cache: str | None = None, store: bool = True) -> DeployHook:
     """What modman deploy adds for the enabled RomFS mods ((name, library folder), lowest priority first): one size
     table merging every mod's size changes when two or more change it (a BCML package's from its rstb.json, another
     mod's by comparing the table it ships with the game's), and a line for each BCML package whose packs a later mod
-    replaces. files: also merge those packs (merge_packages) into hook.files (overlay path -> bytes, to deploy in
-    place of every mod's copy), their sizes in the table (made even when only they need it); modman deploy puts them
-    in the overlay with romfs_mods.add_generated (owner "generated:merged", no size entry of their own: hook.rstb
-    holds them). Reads only."""
+    replaces. files: also merge the packs two mods ship, file by file (merge_packages), into hook.files (overlay path
+    -> bytes, to deploy in place of every mod's copy), their sizes in the table (made even when only they need it);
+    modman deploy puts them in the overlay with romfs_mods.add_generated (owner "generated:merged", no size entry of
+    their own: hook.rstb holds them). cache/store: merge_packages' cache. Reads only, but the cache."""
     hook = DeployHook()
     # (name, a BCML package's entries or None, the size table a mod that isn't one ships or None, whether it ships one)
     pending: list[tuple[str, dict | None, str | None, bool]] = []
@@ -3555,12 +3700,15 @@ def deploy_hook(mods: list[tuple[str, str]], extracted: str, files: bool = False
             pending.append((name, None, ship.src, True))
     pm = PackMerge()
     if files:
-        pm = merge_packages(loaded, extracted)
+        pm = merge_packages(loaded, extracted, cache, store)
         hook.files = pm.files
         hook.attention += pm.attention
         for path in sorted(pm.files, key=str.lower):
-            hook.notes.append(f"{path}: merged from {', '.join(pm.merged_from.get(path, []))} (their own files, "
-                              "then their logs again, in order)")
+            hook.notes.append(f"{path}: merged from {', '.join(pm.merged_from.get(path, []))} (file by file, the "
+                              "later mod's file winning; then their logs again, in order)")
+        if pm.cached and pm.files:
+            hook.notes.append(f"The {len(pm.files)} merged file(s) are the last deploy's (nothing they're made from "
+                              "changed)")
     done = {p.lower() for p in pm.files}
     for k, (name, info, _) in enumerate(seen):
         if not info:
@@ -3582,7 +3730,8 @@ def deploy_hook(mods: list[tuple[str, str]], extracted: str, files: bool = False
                 hook.attention.append(f"{name}: {later} replaces {len(lost)} of its {what} ({_some(lost, 3)}), so "
                                       f"{name}'s changes in them are lost"
                                       + (f", its merged {', '.join(kinds)} too" if kinds else "")
-                                      + " (packs aren't merged between mods)")
+                                      + (" (packs aren't merged between mods)" if not files else
+                                         " (not merged: the game has no such file, or it can't be merged)"))
     if pm.sizes:
         pending.append(("", pm.sizes, None, False))   # (the merged files' own sizes, one more table)
     if len(pending) < 2 and not pm.sizes:

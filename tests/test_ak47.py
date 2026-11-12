@@ -845,6 +845,12 @@ class PartOfTests(unittest.TestCase):
         self.assertTrue(self.manifest('part_of = "Not An Id"\n')[1])
         self.assertTrue(self.manifest('part_of = "me.child"\n')[1])
 
+    def test_secret(self):
+        man, errs = self.manifest("secret = true\n")
+        self.assertEqual((errs, man.secret, man.notes), ([], True, []))
+        self.assertFalse(self.manifest("")[0].secret)
+        self.assertIn("secret must be true or false", " ".join(self.manifest('secret = "yes"\n')[1]))
+
     def test_enabled(self):
         mods = [{"id": "me.parent", "name": "P", "enabled": True, "kinds": []},
                 {"id": "me.child", "name": "C", "enabled": True, "kinds": [], "part_of": "me.parent"},
