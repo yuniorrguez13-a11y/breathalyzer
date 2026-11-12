@@ -1,18 +1,36 @@
 #!/usr/bin/env python3
-"""Build a clean release zip of Breathalyzer: the mod loader's tools, native sources, docs, examples and tests.
-Never game files, keys, saves, logs or anything made from the game.
+"""Build clean Breathalyzer release zips. Never game files, keys, saves, logs, anything made from the game, or mods by
+other people.
 
-    python tools/make_release.py                          out/release/breathalyzer-<VERSION>.zip
-    python tools/make_release.py --version 0.2.0         name another version
-    python tools/make_release.py --with-binaries         also the DLLs build_native.py built (only those that exist)
-    python tools/make_release.py --dry-run               only list what would go in; write nothing
+    python tools/make_release.py --edition players --version 0.2.0-beta.1   both player zips (see below)
+    python tools/make_release.py --edition core                         breathalyzer-<VERSION>.zip: launcher, no mods
+    python tools/make_release.py --edition plus                         breathalyzer-plus-<VERSION>.zip: + our own mods
+    python tools/make_release.py                                        breathalyzer-source-<VERSION>.zip (developers)
+    python tools/make_release.py --with-binaries                        source zip + the DLLs build_native.py built
+    python tools/make_release.py --dry-run                              only list what would go in; write nothing
 
-What goes in (an allow-list): files git tracks, and files git would commit under tools/, native/, docs/, tests/,
-.github/, plus README.md, LICENSE, NOTICE.md, .gitignore and .cleanallow. git is needed: without it (or when git
-fails) the tool refuses, because only git knows what .gitignore keeps out. Never out/, build/, upstream/ or
+The editions (docs/release.md):
+
+- core: what players download when they want no mods. "Start Breathalyzer.exe" (tools/packaging/build_starter.py),
+  "READ ME FIRST.txt" and app/: app/runtime (our own Python and Tk, tools/packaging/build_runtime.py: players need no
+  Python), app/tools, app/native, app/docs, app/assets, README, LICENSE, NOTICE, and modhost.dll (the loader, not a
+  mod). Not the tests or tools/packaging. No DLL but modhost.dll and the runtime's.
+- plus: the same, plus our own mods from tools/packaging/bundled-mods.toml (ready = true): each in
+  app/bundled-mods/<name>/ with a mod.toml carrying the player title and description, and app/bundled-mods.json, the
+  list the mod picker shows (title, description, on or off by default, why, tags). Only ids starting with
+  botw-mod-loader. or giruka., only files git tracks or DLLs from build/native; never anything from out/.
+- source: the repo as it is, for developers (what this tool made before the editions).
+
+The runtime must match tools/packaging/runtime.lock.json file for file (SHA-256), and the starter
+tools/packaging/starter.lock.json (built from today's start.c); a 64-bit window program that uses only kernel32 and
+user32.
+
+What goes in the source zip (an allow-list): files git tracks, and files git would commit under tools/, native/,
+docs/, tests/, .github/, plus README.md, LICENSE, NOTICE.md, .gitignore and .cleanallow. git is needed: without it (or
+when git fails) the tool refuses, because only git knows what .gitignore keeps out. Never out/, build/, upstream/ or
 __pycache__, in any letter case. With --with-binaries: modhost.dll and the example mods from build/native, each
 checked to be a 64-bit DLL with the export build_native.py gives it, never swgame.dll and never a file from the
-Savage Wind folder (not even through a hard link).
+Savage Wind folder (not even through a hard link). The player zips take their app/ files from the same list.
 
 Checks before writing: tools/check_clean.py's rules on every file, plus: no user name, home folder path, repo path,
 git e-mail or git name in any file or file name; no private keys, access tokens or key files; zip and gzip files are
@@ -21,8 +39,8 @@ not in a folder above the file); no earlier release; no file over 20 MB. If one 
 every failure is listed. Checks after writing: the zip is opened again and every entry checked: names (no absolute
 paths, no "..", only what was planned), content (same SHA-256 as planned, check_clean's rules again, the checks above).
 
-It writes out/release/breathalyzer-<version>.zip (everything in one folder of that name, with SHA256SUMS.txt)
-and out/release/breathalyzer-<version>.SHA256SUMS.txt next to it (the same list, plus the zip's own hash).
+It writes out/release/<name>-<version>.zip (everything in one folder of that name, with SHA256SUMS.txt) and
+out/release/<name>-<version>.SHA256SUMS.txt next to it (the same list, plus the zip's own hash).
 --out may be any folder outside the project, or one under out/ (never one the next release would pack).
 With the same Python version, the same files always give a byte-identical zip: sorted names, fixed dates, fixed file
 modes. (Python's zlib makes the compressed bytes, and Python 3.14 on Windows uses zlib-ng, so its zips differ.)
@@ -37,11 +55,14 @@ import getpass
 import gzip
 import hashlib
 import io
+import json
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
+import tomllib
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,6 +74,10 @@ import check_clean as cc  # noqa: E402 (tools/check_clean.py: the game-file rule
 REPO = Path(__file__).resolve().parent.parent
 VERSION = "0.1.0-dev"
 NAME = "breathalyzer"
+# The editions: source (developers), core (the player zip without mods) and plus (with our own mods).
+EDITIONS = ("source", "core", "plus")
+PLAYER_EDITIONS = ("core", "plus")
+EDITION_NAMES = {"source": f"{NAME}-source", "core": NAME, "plus": f"{NAME}-plus"}
 OLD_NAMES = ("botw-mod-loader",)  # releases made before the rename: never packed again either
 DEFAULT_OUT = REPO / "out" / "release"
 DEFAULT_BUILD = bn.DEFAULT_OUT  # build/native
@@ -114,6 +139,32 @@ GENERIC_LOGINS = {"root", "runner", "runneradmin", "user", "admin", "administrat
                   "tester", "ubuntu", "vagrant", "docker", "default", "public", "owner"}
 WIN_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)), *(f"lpt{i}" for i in range(10))}
 
+# ---- the player zips (core and plus)
+APP = "app"                                   # everything but the starter and READ ME FIRST.txt (modman's REPO)
+STARTER_NAME = "Start Breathalyzer.exe"
+README_NAME = "READ ME FIRST.txt"
+BACKUP_CMD = "Start Breathalyzer (backup).cmd"  # in app/: starts it without the starter (an antivirus holding it)
+PACKAGING = "tools/packaging"
+RUNTIME_LOCK = f"{PACKAGING}/runtime.lock.json"
+STARTER_LOCK = f"{PACKAGING}/starter.lock.json"
+STARTER_SOURCES = {"start.c": f"{PACKAGING}/starter/start.c", "breathalyzer.ico": "assets/breathalyzer.ico",
+                   "build_starter.py": f"{PACKAGING}/build_starter.py"}
+BUNDLED_TOML = f"{PACKAGING}/bundled-mods.toml"
+BUNDLED_DIR = "bundled-mods"                  # app/bundled-mods/<name>/: one folder per bundled code mod
+BUNDLED_JSON = "bundled-mods.json"            # app/bundled-mods.json: what the mod picker shows
+READ_ME = {"core": f"{PACKAGING}/read-me-first-core.txt", "plus": f"{PACKAGING}/read-me-first-plus.txt"}
+BACKUP_CMD_SRC = f"{PACKAGING}/start-backup.cmd"
+PLAYER_SKIP_TOP = {"tests", ".github"}        # repo folders that stay out of the player zips
+PLAYER_SKIP_FILES = {".gitignore", ".cleanallow"}
+PLAYER_SKIP_DIRS = {"selftest"}              # the native self-tests (made-up "game code" check_clean blocks)
+STARTER_IMPORTS = {"kernel32.dll", "user32.dll"}
+RUNTIME_NEEDS = ("python.exe", "pythonw.exe", "LICENSE.txt")
+OUR_IDS = ("botw-mod-loader.", "giruka.")     # bundled mods are ours: their ids start like this
+MAX_TITLE, MAX_DESCRIPTION, MAX_TAG = 40, 80, 80  # (the game's Mods page cuts a description at 80 characters)
+FONT_MISSING = set("{}|`^~%#")               # characters the game's menu font lacks (tools/modmenu.py)
+BUNDLED_KEYS = {"id", "title", "description", "default", "why", "tags", "ready", "kind", "manifest", "dll", "folder",
+                "build", "after_add"}
+
 
 class ReleaseError(RuntimeError):
     def __init__(self, message: str, problems: list[tuple[str, str]] | None = None):
@@ -131,6 +182,7 @@ class Item:
     data: bytes
     export: str = ""    # a DLL: the export it must have
     host: bool = False  # a DLL: modhost.dll
+    kind: str = ""      # player zips: "runtime", "starter", "bundled" or "made" (written by this tool)
 
     @property
     def sha256(self) -> str:
@@ -143,10 +195,12 @@ class Plan:
     items: list[Item] = field(default_factory=list)
     refused: list[tuple[str, str]] = field(default_factory=list)  # (path, why)
     not_built: list[str] = field(default_factory=list)            # DLLs asked for that aren't built
+    edition: str = "source"
+    bundled: list[dict] = field(default_factory=list)             # plus: the mods in bundled-mods.json
 
     @property
     def folder(self) -> str:
-        return f"{NAME}-{self.version}"
+        return f"{EDITION_NAMES[self.edition]}-{self.version}"
 
     @property
     def zip_name(self) -> str:
@@ -385,6 +439,10 @@ def _safe_parts(name: str) -> list[str]:
     return parts or ["unnamed"]
 
 
+_ARCHIVE_CHECKED: dict[tuple, list[str]] = {}  # (name, SHA-256, cleanallowed, terms) -> problems: the runtime's
+                                               # python3XX.zip is checked once per run, not once per zip and pass
+
+
 def archive_problems(rel: str, data: bytes, terms, cleanallowed: bool = False) -> list[str]:
     """An archive or compressed file can hide game files, keys or leaks from every other check. zip and gzip files
     are opened and each file in them checked like a file of the release (check_clean's rules are skipped only when
@@ -392,6 +450,13 @@ def archive_problems(rel: str, data: bytes, terms, cleanallowed: bool = False) -
     kind = archive_kind(rel, data)
     if not kind:
         return []
+    key = (rel, hashlib.sha256(data).hexdigest(), cleanallowed, tuple(terms))
+    if key not in _ARCHIVE_CHECKED:
+        _ARCHIVE_CHECKED[key] = _archive_problems(kind, rel, data, terms, cleanallowed)
+    return list(_ARCHIVE_CHECKED[key])
+
+
+def _archive_problems(kind: str, rel: str, data: bytes, terms, cleanallowed: bool) -> list[str]:
     if kind not in ("zip", "gzip"):
         return [f"a {kind} archive or compressed file: what's inside can't be checked"]
     found: dict[str, list[str]] = {}  # member name -> why (in order)
@@ -565,27 +630,61 @@ def _read(path: Path) -> tuple[bytes, list[str]]:
         return b"", [f"can't read it: {e.strerror or e}"]
 
 
+def _add_file(plan: Plan, root: Path, rel: str, dest: str, terms, allowed, markers) -> None:
+    """A project file (rel) into the plan at dest, after every check; else its reasons go to plan.refused."""
+    why = name_problems(f"{plan.folder}/{dest}", plan.folder, terms) + link_problems(root, rel)
+    data = b""
+    if not why and rel not in allowed:
+        why += cc.problems_for(root, rel, markers)
+    if not why:
+        data, why = _read(root / rel)
+    if not why:
+        why += content_problems(rel, data, terms, allowed)
+    if why:
+        plan.refused.append((dest, "; ".join(why)))
+    else:
+        plan.items.append(Item(dest, data))
+
+
+def _add_binary(plan: Plan, path: Path, dest: str, export: str, host: bool, build_dir: Path, forbidden, terms,
+                allowed, markers, kind: str = "") -> None:
+    """A DLL from the build folder into the plan at dest, after every check."""
+    why = name_problems(f"{plan.folder}/{dest}", plan.folder, terms) + binary_problems(path, build_dir, forbidden)
+    data = b""
+    if not why:
+        why += cc.problems_for(build_dir, path.relative_to(build_dir).as_posix(), markers)
+    if not why:
+        data, why = _read(path)
+    if not why:
+        why += pe_problems(data, export, host) + content_problems(dest, data, terms, allowed)
+    if why:
+        plan.refused.append((dest, "; ".join(why)))
+    else:
+        plan.items.append(Item(dest, data, export, host, kind))
+
+
+def _add_made(plan: Plan, dest: str, data: bytes, terms, kind: str = "made") -> None:
+    """A file this tool writes (READ ME FIRST.txt, a bundled mod.toml, bundled-mods.json), after the same checks."""
+    why = name_problems(f"{plan.folder}/{dest}", plan.folder, terms) + content_problems(dest, data, terms)
+    if why:
+        plan.refused.append((dest, "; ".join(why)))
+    else:
+        plan.items.append(Item(dest, data, kind=kind))
+
+
 def plan_release(root: Path = REPO, version: str = VERSION, with_binaries: bool = False,
-                 build_dir: Path | None = None, terms=None, forbidden=None) -> Plan:
+                 build_dir: Path | None = None, terms=None, forbidden=None, edition: str = "source",
+                 runtime_dir: Path | None = None, starter: Path | None = None, experimental: bool = False) -> Plan:
     """Everything that would go in, and everything that blocks the release (check_clean's rules and more).
     Raises ReleaseError when git can't list the files."""
+    if edition in PLAYER_EDITIONS:
+        return plan_player(root, version, edition, build_dir, terms, forbidden, runtime_dir, starter, experimental)
     plan = Plan(version)
     terms = leak_terms(root) if terms is None else terms
     allowed = cc.read_allow(root)
     markers: dict[str, str] = {}
     for rel in source_files(root):
-        why = name_problems(f"{plan.folder}/{rel}", plan.folder, terms) + link_problems(root, rel)
-        data = b""
-        if not why and rel not in allowed:
-            why += cc.problems_for(root, rel, markers)
-        if not why:
-            data, why = _read(root / rel)
-        if not why:
-            why += content_problems(rel, data, terms, allowed)
-        if why:
-            plan.refused.append((rel, "; ".join(why)))
-        else:
-            plan.items.append(Item(rel, data))
+        _add_file(plan, root, rel, rel, terms, allowed, markers)
     if with_binaries:
         build_dir = DEFAULT_BUILD if build_dir is None else build_dir
         forbidden = savage_wind_dirs() if forbidden is None else forbidden
@@ -594,21 +693,472 @@ def plan_release(root: Path = REPO, version: str = VERSION, with_binaries: bool 
             if not path.is_file():
                 plan.not_built.append(rel)
                 continue
-            why = (name_problems(f"{plan.folder}/{rel}", plan.folder, terms)
-                   + binary_problems(path, build_dir, forbidden))
-            data = b""
-            if not why:
-                why += cc.problems_for(build_dir, path.relative_to(build_dir).as_posix(), markers)
-            if not why:
-                data, why = _read(path)
-            if not why:
-                why += pe_problems(data, export, host) + content_problems(rel, data, terms, allowed)
-            if why:
-                plan.refused.append((rel, "; ".join(why)))
-            else:
-                plan.items.append(Item(rel, data, export, host))
+            _add_binary(plan, path, rel, export, host, build_dir, forbidden, terms, allowed, markers)
     plan.items.sort(key=lambda i: i.rel)
     plan.refused.sort()
+    return plan
+
+
+# ------------------------------------------------------------------ the player zips (core, plus)
+
+def player_file(rel: str) -> bool:
+    """A project file that goes into app/ of the player zips: not the tests, the self-tests, .github or
+    tools/packaging."""
+    low = rel.lower()
+    parts = low.split("/")
+    return not (parts[0] in PLAYER_SKIP_TOP or low in PLAYER_SKIP_FILES or low.startswith(PACKAGING + "/")
+                or PLAYER_SKIP_DIRS & set(parts[:-1]))
+
+
+def default_work(root: Path) -> Path:
+    return root / "out" / "packaging-work"
+
+
+def _read_json(path: Path) -> tuple[dict, str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}, "is missing"
+    except (OSError, ValueError) as e:
+        return {}, f"can't be read ({e})"
+    return (data, "") if isinstance(data, dict) else ({}, "isn't a JSON object")
+
+
+def _crlf(data: bytes) -> bytes:
+    """Windows line ends (Notepad and cmd.exe)."""
+    return data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+
+
+def runtime_files(runtime: Path, lock: dict) -> tuple[dict[str, bytes], list[tuple[str, str]]]:
+    """The runtime folder's files (path -> bytes), and every way it differs from runtime.lock.json: a file more or
+    less, another SHA-256, a link."""
+    files = lock.get("files") if isinstance(lock, dict) and lock.get("format") == 1 else None
+    if not isinstance(files, dict) or not files:
+        return {}, [(RUNTIME_LOCK, "isn't a runtime lock this tool knows (format 1, with its files)")]
+    if not runtime.is_dir():
+        return {}, [("(runtime)", f"no runtime folder at {runtime}: run python tools/packaging/build_runtime.py")]
+    found, unreadable = cc.walk_files(runtime, frozenset())
+    bad = list(unreadable)
+    for rel in sorted(set(found) - set(files)):
+        bad.append((rel, "not in runtime.lock.json: the runtime changed after it was built and checked"))
+    for rel in sorted(set(files) - set(found)):
+        bad.append((rel, "in runtime.lock.json but missing"))
+    out: dict[str, bytes] = {}
+    for rel in sorted(set(found) & set(files)):
+        why = link_problems(runtime, rel)
+        data = b""
+        if not why:
+            data, why = _read(runtime / rel)
+        want = files[rel].get("sha256") if isinstance(files[rel], dict) else None
+        if not why and hashlib.sha256(data).hexdigest() != want:
+            why = ["differs from runtime.lock.json: the runtime changed after it was built and checked"]
+        if why:
+            bad += [(rel, w) for w in why]
+        else:
+            out[rel] = data
+    return out, bad
+
+
+def runtime_shape_problems(files: dict[str, bytes]) -> list[tuple[str, str]]:
+    """What any runtime must be: python.exe and pythonw.exe, the standard library zip, a ._pth file that keeps it
+    apart from other Pythons (relative paths only, no 'import site'), no site-packages or .pth files, and only
+    64-bit Windows binaries."""
+    out = [(n, "missing: the runtime needs it") for n in RUNTIME_NEEDS if n not in files]
+    if not [n for n in files if re.fullmatch(r"python3\d+\.zip", n)]:
+        out.append(("python3XX.zip", "missing: the standard library"))
+    pths = [n for n in files if re.fullmatch(r"python3\d+\._pth", n)]
+    if len(pths) != 1:
+        out.append(("python3XX._pth", "missing (or more than one): without it the runtime could use the PC's own "
+                                      "Python and its packages"))
+    for n in pths:
+        for line in files[n].decode("utf-8", "replace").splitlines():
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            if s.startswith("import"):
+                out.append((n, f"'{s}': site-packages could come in"))
+            elif s.startswith(("\\", "/")) or re.match(r"[A-Za-z]:", s):
+                out.append((n, f"an absolute path ({s}): only folders of the runtime"))
+    for n, data in files.items():
+        low = n.lower()
+        if "site-packages" in low.split("/"):
+            out.append((n, "site-packages never goes in"))
+        elif low.endswith(".pth"):
+            out.append((n, ".pth files never go in"))
+        if low.endswith((".exe", ".dll", ".pyd")):
+            try:
+                if bn.pe_info(data).machine != 0x8664:
+                    out.append((n, "not a 64-bit Windows file"))
+            except bn.PeError as e:
+                out.append((n, f"not a Windows program or DLL ({e})"))
+    return out
+
+
+def runtime_lock_problems(runtime: Path, lock: dict) -> list[tuple[str, str]]:
+    """tools/packaging/build_runtime.py --check: the folder against the lock, and the runtime rules."""
+    files, bad = runtime_files(runtime, lock)
+    return bad + (runtime_shape_problems(files) if not bad else [])
+
+
+def pe_subsystem(data: bytes) -> int:
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    return struct.unpack_from("<H", data, pe + 24 + 68)[0]
+
+
+def starter_problems(data: bytes, terms) -> list[str]:
+    """Start Breathalyzer.exe: a 64-bit window program (not a DLL, no console) that uses only kernel32 and user32 and
+    exports nothing, with no leak or secret in it."""
+    try:
+        info = bn.pe_info(data)
+        sub = pe_subsystem(data)
+    except (bn.PeError, struct.error) as e:
+        return [f"not a Windows program ({e})"]
+    out = []
+    if info.dll:
+        out.append("a DLL, not a program")
+    if info.machine != 0x8664:
+        out.append(f"not a 64-bit program (machine {info.machine:#x})")
+    if sub != 2:
+        out.append(f"not a window program (subsystem {sub}, not 2)")
+    extra = sorted(d for d in info.imports if d.lower() not in STARTER_IMPORTS)
+    if extra:
+        out.append(f"uses {', '.join(extra)}: the starter may only use kernel32 and user32")
+    if info.exports:
+        out.append("exports functions, so it isn't our starter")
+    return out + leak_problems(data, terms) + secret_problems(STARTER_NAME, data)
+
+
+def _add_runtime(plan: Plan, root: Path, runtime_dir: Path, terms, markers) -> None:
+    lock, why = _read_json(root / RUNTIME_LOCK)
+    if why:
+        plan.refused.append((RUNTIME_LOCK, f"{why}: run python tools/packaging/build_runtime.py"))
+        return
+    files, bad = runtime_files(runtime_dir, lock)
+    plan.refused += [(f"{APP}/runtime/{rel}", w) for rel, w in bad + runtime_shape_problems(files)]
+    for rel, data in files.items():
+        dest = f"{APP}/runtime/{rel}"
+        why = (name_problems(f"{plan.folder}/{dest}", plan.folder, terms) + cc.problems_for(runtime_dir, rel, markers)
+               + content_problems(dest, data, terms))
+        if why:
+            plan.refused.append((dest, "; ".join(why)))
+        else:
+            plan.items.append(Item(dest, data, kind="runtime"))
+
+
+def _add_starter(plan: Plan, root: Path, starter: Path, terms) -> None:
+    lock, why_lock = _read_json(root / STARTER_LOCK)
+    why = name_problems(f"{plan.folder}/{STARTER_NAME}", plan.folder, terms)
+    data = b""
+    if why_lock:
+        why.append(f"{STARTER_LOCK} {why_lock}: run python tools/packaging/build_starter.py")
+    elif _is_link(starter):
+        why.append("a link (not followed)")
+    elif not starter.is_file():
+        why.append(f"not built yet ({starter}): run python tools/packaging/build_starter.py")
+    else:
+        data, read_why = _read(starter)
+        why += read_why
+    if data:
+        if hashlib.sha256(data).hexdigest() != lock.get("sha256"):
+            why.append(f"doesn't match {STARTER_LOCK}: build it again with python tools/packaging/build_starter.py")
+        sources = lock.get("sources") if isinstance(lock.get("sources"), dict) else {}
+        for name, rel in STARTER_SOURCES.items():
+            try:
+                have = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+            except OSError:
+                have = None
+            if sources.get(name) != have:
+                why.append(f"{rel} changed since the starter was built: run python tools/packaging/build_starter.py")
+        why += starter_problems(data, terms)
+    if why:
+        plan.refused.append((STARTER_NAME, "; ".join(why)))
+    else:
+        plan.items.append(Item(STARTER_NAME, data, kind="starter"))
+
+
+def _plain_text_problems(what: str, text, limit: int) -> list[str]:
+    if not isinstance(text, str) or not text.strip():
+        return [f"{what} is missing"]
+    out = []
+    if len(text) > limit:
+        out.append(f"{what} is {len(text)} characters, more than {limit}")
+    if any(not (" " <= c <= "~") for c in text) or FONT_MISSING & set(text):
+        out.append(f"{what} must be plain ASCII without {' '.join(sorted(FONT_MISSING))} (the game's font lacks them)")
+    return out
+
+
+def _bundled_path_problems(what: str, path, tracked: set[str], build_ok: bool) -> list[str]:
+    """A path in bundled-mods.toml: a file git tracks, or (build_ok) one under build/native. Never out/ or a path
+    that leaves the project."""
+    if not isinstance(path, str) or not path:
+        return [f"{what} is missing"]
+    parts = path.split("/")
+    if "\\" in path or path.startswith("/") or re.match(r"[A-Za-z]:", path) or any(p in ("", ".", "..") for p in parts):
+        return [f"{what} {path!r} must be a plain path inside the project, with /"]
+    if path.lower().startswith(BUILD_PREFIX + "/"):
+        return [] if build_ok else [f"{what} {path!r} must be a file git tracks, not one in build/"]
+    if parts[0].lower() in NEVER_TOP:
+        return [f"{what} {path!r} is in {parts[0]}/: never shipped (only our own tracked files and build/native)"]
+    if path not in tracked:
+        return [f"{what} {path!r} isn't a file git tracks"]
+    return []
+
+
+def _commands_problems(what: str, cmds, tracked: set[str]) -> list[str]:
+    if not isinstance(cmds, list) or not cmds or not all(
+            isinstance(c, list) and c and all(isinstance(x, str) and x for x in c) for c in cmds):
+        return [f"{what} must be a list of commands, each a list like [\"quality.py\", \"set\", \"low\"]"]
+    out = []
+    for c in cmds:
+        if "/" in c[0] or "\\" in c[0] or f"tools/{c[0]}" not in tracked:
+            out.append(f"{what}: {c[0]!r} isn't one of our tools (a file in tools/)")
+    return out
+
+
+def _manifest_id_problems(path: Path, mod_id: str) -> list[str]:
+    try:
+        man = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        return [f"its mod.toml can't be read ({e})"]
+    got = (man.get("mod") or {}).get("id")
+    return [] if got == mod_id else [f"its mod.toml says id {got!r}, not {mod_id!r}"]
+
+
+def read_bundled(root: Path, tracked: set[str]) -> tuple[list[dict], list[tuple[str, str]]]:
+    """bundled-mods.toml, checked: (the mods, the problems). Any problem refuses the whole list."""
+    try:
+        data = tomllib.loads((root / BUNDLED_TOML).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return [], [(BUNDLED_TOML, "is missing: the plus zip needs its list of mods")]
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        return [], [(BUNDLED_TOML, f"can't be read ({e})")]
+    mods = data.get("mod")
+    if not isinstance(mods, list) or not mods or not all(isinstance(m, dict) for m in mods):
+        return [], [(BUNDLED_TOML, "has no [[mod]] entries")]
+    bad: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for n, m in enumerate(mods, 1):
+        mid = m.get("id")
+        where = f"{BUNDLED_TOML} [{mid if isinstance(mid, str) else f'mod {n}'}]"
+        why = []
+        if not isinstance(mid, str) or not mid.startswith(OUR_IDS) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", mid):
+            why.append(f"id {mid!r} isn't one of ours (it must start with {' or '.join(OUR_IDS)})")
+        elif mid in seen:
+            why.append("listed twice")
+        seen.add(mid if isinstance(mid, str) else "")
+        unknown = sorted(set(m) - BUNDLED_KEYS)
+        if unknown:
+            why.append(f"unknown keys {', '.join(unknown)}")
+        why += _plain_text_problems("title", m.get("title"), MAX_TITLE)
+        why += _plain_text_problems("description", m.get("description"), MAX_DESCRIPTION)
+        if m.get("default") not in ("on", "off"):
+            why.append("default must be \"on\" or \"off\"")
+        if not isinstance(m.get("why"), str) or not m["why"].strip():
+            why.append("why is missing (why the default)")
+        tags = m.get("tags", [])
+        if not isinstance(tags, list):
+            why.append("tags must be a list")
+        else:
+            for t in tags:
+                why += _plain_text_problems("a tag", t, MAX_TAG)
+        if not isinstance(m.get("ready"), bool):
+            why.append("ready must be true or false")
+        kind = m.get("kind")
+        if kind == "code":
+            why += _bundled_path_problems("manifest", m.get("manifest"), tracked, True)
+            why += _bundled_path_problems("dll", m.get("dll"), set(), True)
+            dll, man = m.get("dll"), m.get("manifest")
+            if isinstance(dll, str) and not dll.lower().startswith(BUILD_PREFIX + "/"):
+                why.append("dll must be a DLL under build/native (built here by build_native.py or modmenu.py)")
+            if isinstance(dll, str) and not dll.lower().endswith(".dll"):
+                why.append("dll must name a .dll file")
+            if isinstance(man, str) and not man.endswith("/mod.toml"):
+                why.append("manifest must name a mod.toml")
+            if "folder" in m or "build" in m:
+                why.append("a code mod has manifest and dll, not folder or build")
+        elif kind == "recipe":
+            folder = m.get("folder")
+            why += _bundled_path_problems("folder's mod.toml", f"{folder}/mod.toml" if isinstance(folder, str)
+                                          else None, tracked, False)
+            why += _commands_problems("build", m.get("build"), tracked)
+            if "manifest" in m or "dll" in m:
+                why.append("a recipe has folder and build, not manifest or dll")
+        else:
+            why.append("kind must be \"code\" or \"recipe\"")
+        if "after_add" in m:
+            why += _commands_problems("after_add", m["after_add"], tracked)
+        if not why and kind == "recipe":
+            why += _manifest_id_problems(root / m["folder"] / "mod.toml", mid)
+        bad += [(where, w) for w in why]
+    return (mods if not bad else []), bad
+
+
+def player_manifest(text: str, mod: dict) -> tuple[str, list[str]]:
+    """The bundled copy of a mod.toml: the developer comments at the top replaced by one line, and [mod]'s name and
+    description set to the player text. Checked by reading it back. Returns (text, problems)."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    i = 0
+    while i < len(lines) and (not lines[i].strip() or lines[i].lstrip().startswith("#")):
+        i += 1
+    body = lines[i:]
+    table, done = "", set()
+    for j, line in enumerate(body):
+        s = line.strip()
+        if s.startswith("["):
+            table = s.split("#", 1)[0].strip()
+        elif table == "[mod]":
+            m = re.match(r"(name|description)\s*=", s)
+            if m and m.group(1) not in done:
+                key = m.group(1)
+                body[j] = f"{key} = {json.dumps(mod['title'] if key == 'name' else mod['description'])}"
+                done.add(key)
+    head = ["# Comes with Breathalyzer Plus: its name and description are the player text from bundled-mods.toml.", ""]
+    out = "\n".join(head + body).rstrip("\n") + "\n"
+    try:
+        man = tomllib.loads(out)
+    except tomllib.TOMLDecodeError as e:
+        return out, [f"the bundled mod.toml doesn't read back ({e})"]
+    info, code = man.get("mod") or {}, man.get("code") or {}
+    why = []
+    if info.get("id") != mod["id"]:
+        why.append(f"its mod.toml says id {info.get('id')!r}, not {mod['id']!r}")
+    if (info.get("name"), info.get("description")) != (mod["title"], mod["description"]):
+        why.append("its mod.toml has no name and description lines under [mod] to set")
+    if code.get("windows") != mod["dll"].rsplit("/", 1)[-1]:
+        why.append(f"its mod.toml's [code] windows is {code.get('windows')!r}, not the DLL listed "
+                   f"({mod['dll'].rsplit('/', 1)[-1]})")
+    return out, why
+
+
+def _add_bundled(plan: Plan, root: Path, tracked: set[str], build_dir: Path, forbidden, terms, allowed, markers,
+                 experimental: bool) -> None:
+    """plus: our own mods (bundled-mods.toml) into app/bundled-mods/, and the picker's list app/bundled-mods.json."""
+    mods, bad = read_bundled(root, tracked)
+    plan.refused += bad
+    if bad:
+        return
+    listed = []
+    for m in mods:
+        if not m["ready"] and not experimental:
+            continue
+        tags = list(m.get("tags", []))
+        if not m["ready"] and "Experimental" not in tags:
+            tags.insert(0, "Experimental")
+        entry = {"id": m["id"], "title": m["title"], "description": m["description"],
+                 "default": "on" if m["ready"] and m["default"] == "on" else "off", "why": m["why"], "tags": tags,
+                 "experimental": not m["ready"], "kind": m["kind"]}
+        if m["kind"] == "code":
+            folder = f"{BUNDLED_DIR}/{m['id'].split('.', 1)[1]}"
+            dll = build_dir.joinpath(*m["dll"].split("/")[2:])
+            dest_dll = f"{APP}/{folder}/{dll.name}"
+            if not dll.is_file():
+                if m["ready"]:
+                    plan.refused.append((dest_dll, f"not built ({m['dll']}): build it first (docs/release.md)"))
+                else:
+                    plan.not_built.append(m["dll"])
+                continue
+            man_path = (build_dir.joinpath(*m["manifest"].split("/")[2:])
+                        if m["manifest"].lower().startswith(BUILD_PREFIX + "/") else root / m["manifest"])
+            dest_toml = f"{APP}/{folder}/mod.toml"
+            if not man_path.is_file() or _is_link(man_path):
+                plan.refused.append((dest_toml, f"{m['manifest']} is missing (or a link)"))
+                continue
+            text, why = player_manifest(man_path.read_text(encoding="utf-8", errors="replace"), m)
+            if why:
+                plan.refused.append((dest_toml, "; ".join(why)))
+                continue
+            _add_made(plan, dest_toml, text.encode("utf-8"), terms, kind="bundled")
+            _add_binary(plan, dll, dest_dll, "swmod_init", False, build_dir, forbidden, terms, allowed, markers,
+                        kind="bundled")
+            entry["folder"] = folder
+        else:
+            entry["recipe"] = m["folder"]
+            entry["build"] = m["build"]
+        if m.get("after_add"):
+            entry["after_add"] = m["after_add"]
+        listed.append(entry)
+    plan.bundled = listed
+    doc = {"format": 1, "edition": "plus", "version": plan.version, "from": BUNDLED_TOML,
+           "about": "The mods that come with Breathalyzer Plus, for the mod picker. Paths are inside app/.",
+           "mods": listed}
+    _add_made(plan, f"{APP}/{BUNDLED_JSON}", (json.dumps(doc, indent=1) + "\n").encode("utf-8"), terms)
+
+
+def edition_problems(plan: Plan) -> list[tuple[str, str]]:
+    """What each player zip must and mustn't hold: the starter, READ ME FIRST.txt, the runtime, modhost.dll and the
+    window; no program or DLL but those, the runtime's and (plus) the bundled mods'; never tests or packaging files."""
+    rels = {i.rel: i for i in plan.items}
+    refused = {r for r, _ in plan.refused}
+    host = f"{APP}/{BUILD_PREFIX}/{bn.HOST_DLL}"
+    out = []
+    for need in (STARTER_NAME, README_NAME, f"{APP}/{BACKUP_CMD}", f"{APP}/runtime/python.exe",
+                 f"{APP}/runtime/pythonw.exe", host, f"{APP}/tools/modman_gui.py", f"{APP}/tools/modman.py",
+                 f"{APP}/LICENSE"):
+        if need not in rels and need not in refused and not plan.refused:
+            out.append((need, "missing: every player zip needs it"))
+    if plan.edition == "plus" and f"{APP}/{BUNDLED_JSON}" not in rels and not plan.refused:
+        out.append((f"{APP}/{BUNDLED_JSON}", "missing: the plus zip's mod list"))
+    for rel, item in rels.items():
+        low = rel.lower()
+        inner = low[len(APP) + 1:] if low.startswith(APP + "/") else ""
+        if low.endswith((".exe", ".dll", ".pyd", ".sys", ".scr", ".com", ".msi")) and item.kind != "runtime":
+            if not (rel in (STARTER_NAME, host) or (plan.edition == "plus" and item.kind == "bundled")):
+                extra = ", the runtime's and the bundled mods'" if plan.edition == "plus" else " and the runtime's"
+                out.append((rel, f"no program or DLL but the starter, modhost.dll{extra} goes in the "
+                                 f"{plan.edition} zip"))
+        if inner and (inner.split("/")[0] in PLAYER_SKIP_TOP or inner.startswith(PACKAGING + "/")):
+            out.append((rel, "tests and packaging files stay out of the player zips"))
+        if plan.edition == "core" and (inner.startswith(BUNDLED_DIR + "/") or inner == BUNDLED_JSON):
+            out.append((rel, "the core zip holds no mods"))
+        if not inner and rel not in (STARTER_NAME, README_NAME):
+            out.append((rel, f"only {STARTER_NAME} and {README_NAME} sit next to app/"))
+    return out
+
+
+def plan_player(root: Path, version: str, edition: str, build_dir: Path | None = None, terms=None, forbidden=None,
+                runtime_dir: Path | None = None, starter: Path | None = None, experimental: bool = False) -> Plan:
+    """A player zip (core or plus): the starter, READ ME FIRST.txt and app/ (see the top of this file)."""
+    plan = Plan(version, edition=edition)
+    terms = leak_terms(root) if terms is None else terms
+    build_dir = DEFAULT_BUILD if build_dir is None else build_dir
+    forbidden = savage_wind_dirs() if forbidden is None else forbidden
+    runtime_dir = default_work(root) / "runtime" if runtime_dir is None else runtime_dir
+    starter = default_work(root) / "starter" / STARTER_NAME if starter is None else starter
+    allowed = cc.read_allow(root)
+    markers: dict[str, str] = {}
+    rels = source_files(root)
+    for rel in rels:
+        if not player_file(rel):
+            continue
+        if rel in allowed:  # (.cleanallow isn't in the player zips: check_clean on the unpacked zip would block it)
+            plan.refused.append((f"{APP}/{rel}", "listed in .cleanallow, so check_clean blocks it in the unpacked "
+                                                 "zip: leave it out of the player zips (player_file)"))
+            continue
+        _add_file(plan, root, rel, f"{APP}/{rel}", terms, allowed, markers)
+    host = bn.HOST.output(build_dir)
+    host_rel = f"{APP}/{BUILD_PREFIX}/{host.relative_to(build_dir).as_posix()}"
+    if host.is_file():
+        _add_binary(plan, host, host_rel, bn.HOST.export, True, build_dir, forbidden, terms, allowed, markers)
+    else:
+        plan.refused.append((host_rel, "not built: run python tools/build_native.py build"))
+    _add_runtime(plan, root, runtime_dir, terms, markers)
+    _add_starter(plan, root, starter, terms)
+    for dest, src in ((README_NAME, READ_ME[edition]), (f"{APP}/{BACKUP_CMD}", BACKUP_CMD_SRC)):
+        try:
+            data = (root / src).read_bytes()
+        except OSError:
+            plan.refused.append((dest, f"{src} is missing"))
+            continue
+        _add_made(plan, dest, _crlf(data.replace(b"{version}", version.encode())), terms)
+    if edition == "plus":
+        _add_bundled(plan, root, set(rels), build_dir, forbidden, terms, allowed, markers, experimental)
+    plan.refused += edition_problems(plan)
+    plan.items.sort(key=lambda i: i.rel)
+    merged: dict[str, list[str]] = {}  # (one line per path, every reason in it)
+    for rel, why in plan.refused:
+        if why not in merged.setdefault(rel, []):
+            merged[rel].append(why)
+    plan.refused = sorted((rel, "; ".join(why)) for rel, why in merged.items())
     return plan
 
 
@@ -665,6 +1215,13 @@ def name_problems(name: str, folder: str, terms=()) -> list[str]:
     return out
 
 
+def _source_rel(plan: Plan, rel: str) -> str:
+    """A release path as the project names it: app/tools/x.py in a player zip is tools/x.py."""
+    if plan.edition in PLAYER_EDITIONS and rel.startswith(APP + "/"):
+        return rel[len(APP) + 1:]
+    return rel
+
+
 def verify_zip(zip_path: Path, plan: Plan, allowed: set[str], terms) -> list[tuple[str, str]]:
     """Open the written zip again and check every entry: names, contents (check_clean's rules, the planned hashes,
     leaks, secrets, archives, size) and the SHA256SUMS.txt inside. Returns the problems."""
@@ -700,13 +1257,16 @@ def verify_zip(zip_path: Path, plan: Plan, allowed: set[str], terms) -> list[tup
                 continue
             data = zf.read(info)
             rel = name.split("/", 1)[1]
-            why = content_problems(rel, data, terms, allowed)
+            src = _source_rel(plan, rel)
+            why = content_problems(src, data, terms, allowed)
             if hashlib.sha256(data).hexdigest() != expected[name]:
                 why.append("content differs from the file that was checked")
             if rel in binaries:
                 why += pe_problems(data, binaries[rel].export, binaries[rel].host)
-            elif rel.lower().startswith("build/") or rel.split("/")[0].lower() in NEVER_TOP:
+            elif src.lower().startswith("build/") or src.split("/")[0].lower() in NEVER_TOP:
                 why.append("build/ only holds the chosen DLLs")
+            if plan.edition in PLAYER_EDITIONS and rel == STARTER_NAME:
+                why += starter_problems(data, terms)
             if why:
                 bad.append((name, "; ".join(why)))
                 continue
@@ -717,7 +1277,7 @@ def verify_zip(zip_path: Path, plan: Plan, allowed: set[str], terms) -> list[tup
         # check_clean's rules on the files as they came out of the zip
         markers: dict[str, str] = {}
         for rel in on_disk:
-            if rel in allowed:
+            if _source_rel(plan, rel) in allowed:
                 continue
             why = cc.problems_for(out_root, rel, markers)
             if why:
@@ -810,14 +1370,59 @@ def out_problem(out_dir: Path, root: Path) -> str:
 
 
 def parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="make_release.py", description="Build a clean Breathalyzer release zip.")
+    ap = argparse.ArgumentParser(prog="make_release.py", description="Build clean Breathalyzer release zips.")
+    ap.add_argument("--edition", choices=(*EDITIONS, "players"), default="source",
+                    help="core: launcher, no mods; plus: with our own mods; players: both; source: the repo for "
+                         "developers (default)")
     ap.add_argument("--version", default=VERSION, help=f"version in the zip's name (default {VERSION})")
     ap.add_argument("--with-binaries", action="store_true",
-                    help="also modhost.dll and the example mods from build/native (only those that are built)")
+                    help="source zip: also modhost.dll and the example mods from build/native (only those that are "
+                         "built)")
+    ap.add_argument("--with-experimental", action="store_true",
+                    help="plus zip: also the mods bundled-mods.toml marks ready = false that are built (off, marked "
+                         "Experimental)")
+    ap.add_argument("--runtime", type=Path, default=None,
+                    help="player zips: the runtime folder (default out/packaging-work/runtime)")
+    ap.add_argument("--starter", type=Path, default=None,
+                    help="player zips: Start Breathalyzer.exe (default out/packaging-work/starter/)")
     ap.add_argument("--dry-run", action="store_true", help="only list what would go in; write nothing")
     ap.add_argument("--out", type=Path, default=None,
                     help="folder for the zip (default out/release; any folder outside the project, or under out/)")
     return ap
+
+
+def groups(items) -> list[tuple[str, int, int]]:
+    """(name, files, bytes) for a player zip's dry run: the files next to app/, and app/'s folders and files."""
+    out: dict[str, list[int]] = {}
+    for i in items:
+        parts = i.rel.split("/")
+        key = (f"{parts[0]}/{parts[1]}/" if parts[0] == APP and len(parts) > 2 else
+               f"{parts[0]}/" if len(parts) > 2 else i.rel)
+        n = out.setdefault(key, [0, 0])
+        n[0] += 1
+        n[1] += len(i.data)
+    return [(k, v[0], v[1]) for k, v in sorted(out.items())]
+
+
+def show_dry_run(plan: Plan) -> None:
+    total = sum(len(i.data) for i in plan.items)
+    if plan.edition in PLAYER_EDITIONS:
+        print(f"{plan.zip_name} ({plan.edition}):")
+        for name, n, size in groups(plan.items):
+            print(f"  {name}  ({human(size)}" + (f" in {n} files)" if n > 1 else ")"))
+        for m in plan.bundled:
+            print(f"  mod: {m['title']} ({m['default']}{', experimental' if m['experimental'] else ''})")
+    else:
+        for i in plan.items:
+            print(f"  {i.rel}  ({human(len(i.data))})")
+    for rel in plan.not_built:
+        print(f"  not built, left out: {rel}")
+    show_refused(plan.refused)
+    if plan.refused:
+        print(f"Would refuse {plan.zip_name}: {len(plan.refused)} file(s) blocked. Nothing written (dry run).")
+    else:
+        print(f"Would write {plan.zip_name}: {len(plan.items)} file(s) + {SUMS}, {human(total)} before"
+              f" compression. Nothing written (dry run).")
 
 
 def main(argv: list[str] | None = None, *, root: Path = REPO, build_dir: Path | None = None, terms=None,
@@ -830,6 +1435,14 @@ def main(argv: list[str] | None = None, *, root: Path = REPO, build_dir: Path | 
         print(f"Bad version {a.version!r}: use letters, digits, '.', '-', '+' or '_' (like 0.1.0-dev).",
               file=sys.stderr)
         return 2
+    editions = PLAYER_EDITIONS if a.edition == "players" else (a.edition,)
+    if a.with_binaries and a.edition != "source":
+        print("--with-binaries is for --edition source: the player zips always hold modhost.dll (and plus its mods).",
+              file=sys.stderr)
+        return 2
+    if a.with_experimental and "plus" not in editions:
+        print("--with-experimental is for the plus zip (--edition plus or players).", file=sys.stderr)
+        return 2
     out_dir = a.out if a.out is not None else (DEFAULT_OUT if root == REPO else root / "out" / "release")
     bad_out = out_problem(out_dir, root)
     if bad_out:
@@ -837,46 +1450,45 @@ def main(argv: list[str] | None = None, *, root: Path = REPO, build_dir: Path | 
         return 2
     terms = leak_terms(root) if terms is None else terms
     try:
-        plan = plan_release(root, a.version, a.with_binaries, build_dir, terms, forbidden)
+        plans = [plan_release(root, a.version, a.with_binaries, build_dir, terms, forbidden, edition=e,
+                              runtime_dir=a.runtime, starter=a.starter, experimental=a.with_experimental)
+                 for e in editions]
     except ReleaseError as e:
         print(f"Refused: {e}")
         print("Nothing written.")
         return 1
-    total = sum(len(i.data) for i in plan.items)
 
     if a.dry_run:
-        for i in plan.items:
-            print(f"  {i.rel}  ({human(len(i.data))})")
-        for rel in plan.not_built:
-            print(f"  not built, left out: {rel}")
-        show_refused(plan.refused)
-        if plan.refused:
-            print(f"Would refuse: {len(plan.refused)} file(s) blocked. Nothing written (dry run).")
-            return 1
-        print(f"Would write {plan.zip_name}: {len(plan.items)} file(s) + {SUMS}, {human(total)} before"
-              f" compression. Nothing written (dry run).")
-        return 0
+        for plan in plans:
+            show_dry_run(plan)
+        return 1 if any(p.refused for p in plans) else 0
 
-    if plan.refused:
-        print(f"Refused: {len(plan.refused)} file(s) blocked. Nothing written.")
-        show_refused(plan.refused)
+    if any(p.refused for p in plans):
+        for plan in plans:
+            if plan.refused:
+                print(f"Refused {plan.zip_name}: {len(plan.refused)} file(s) blocked.")
+                show_refused(plan.refused)
+        print("Nothing written.")
         return 1
-    try:
-        zip_path, sums_path = write_release(plan, out_dir, cc.read_allow(root), terms)
-    except WriteError as e:
-        print(f"Couldn't write the release: {e}")
-        return EXIT_WRITE_FAILED
-    except ReleaseError as e:
-        print(f"Refused: {e}. Nothing written.")
-        show_refused(e.problems)
-        return 1
-    size = zip_path.stat().st_size
-    dlls = len(plan.binaries())
-    print(f"Wrote {zip_path}: {len(plan.items)} file(s) + {SUMS}, {human(size)}."
-          + (f" {dlls} DLL(s) in it." if a.with_binaries else ""))
-    for rel in plan.not_built:
-        print(f"Not built, left out: {rel}")
-    print(f"SHA-256 list: {sums_path}")
+    for plan in plans:
+        try:
+            zip_path, sums_path = write_release(plan, out_dir, cc.read_allow(root), terms)
+        except WriteError as e:
+            print(f"Couldn't write the release: {e}")
+            return EXIT_WRITE_FAILED
+        except ReleaseError as e:
+            print(f"Refused {plan.zip_name}: {e}. Nothing written for it.")
+            show_refused(e.problems)
+            return 1
+        size = zip_path.stat().st_size
+        dlls = len(plan.binaries())
+        print(f"Wrote {zip_path}: {len(plan.items)} file(s) + {SUMS}, {human(size)}."
+              + (f" {dlls} DLL(s) in it." if a.with_binaries or plan.edition in PLAYER_EDITIONS else ""))
+        for m in plan.bundled:
+            print(f"  mod: {m['title']} ({m['default']}{', experimental' if m['experimental'] else ''})")
+        for rel in plan.not_built:
+            print(f"Not built, left out: {rel}")
+        print(f"SHA-256 list: {sums_path}")
     print("Checked again after writing: clean.")
     return 0
 

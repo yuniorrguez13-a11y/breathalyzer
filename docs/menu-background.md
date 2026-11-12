@@ -122,6 +122,20 @@ draws the menu as it is now. The PNG may not be written into the game folder or 
 menu" or "Whole screen", then runs `set` in a separate process inside a window with big text, and calls `done()` when
 the window is closed.
 
+## Title picture at deploy (Mods page v2)
+
+`modman deploy` also asks this tool for the **title picture**: the picture the player chose
+(`<library>\pictures\_title\chosen.png`, `.jpg` or `.webp`), else the `[mod] title_picture` of the last enabled mod
+that has one. `menu_bg.deploy_files(lib, plan, picture)` puts it into all 7 slideshow pictures (`art` look), over the
+menu file in use, and gives it back as a file made at deploy (`Pack/Title.pack`, same size, no size-table entry).
+
+- No title picture: nothing changes.
+- A picture it can't use (too small, wrong game version, ...) gives one line under "Needs attention", and the menu
+  stays as it is.
+- The first deploy with a new picture takes as long as `set` (about 30 s to 1 min). The result is kept in
+  `<library>\cache\menu-bg\` (the last 2), so later deploys with the same picture and menu file only read it.
+- A title picture wins over the menu-picture mod from `set` (files made at deploy come last).
+
 ## Not done yet
 
 - The boot picture before the menu (the tapestry).
@@ -134,7 +148,8 @@ the window is closed.
 
 - **With made-up files** (`tests/test_menu_bg.py`): PNG of every kind, the texture codec, picture fitting and soft
   edges, the layout and animation readers on a made-up menu, both modes, the library steps, every refusal, deploy,
-  preview, the window's command line, and that every command on this page parses.
+  preview, the window's command line, the title picture at deploy (cache, problems as one line), and that every
+  command on this page parses.
 - **On this PC's game files** (read only, results kept in `out\`): the tool finds 7 pictures in 10 textures, rebuilds
   the menu file at its exact size, and its preview of the game's own menu matches a real screenshot (pattern and
   side panels within 2 colour steps). Textures written and read back come out at 38-44 dB of what was meant.

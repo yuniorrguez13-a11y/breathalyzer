@@ -1048,6 +1048,68 @@ class Deploying(Base):
         self.assertEqual(self.deploys, [True, False])
 
 
+class MadeAtDeploy(Base):
+    """deploy_files: modman's deploy asks for the title picture (Mods page v2 contract)."""
+
+    class FakePlan:
+        def __init__(self, files: dict, rstb=None):
+            self.files, self.rstb = files, rstb
+
+        def winner(self, rel):
+            data = self.files.get(rel)
+            return None if data is None else mock.Mock(read=lambda: data, mod="Their Menu")
+
+    def test_no_picture(self):
+        gen = mb.deploy_files(self.lib, None, None)
+        self.assertEqual((list(gen), gen.notes, gen.attention), ([], [], []))
+        self.assertEqual(vars(gen), {"notes": [], "attention": []})   # (nothing for launch.json's "made")
+        self.assertIs(mm.feature("menu_bg", "deploy_files"), mb.deploy_files)
+
+    def test_over_the_game_and_cached(self):
+        gen = mb.deploy_files(self.lib, None, str(self.pic))
+        self.assertEqual(gen.attention, [])
+        [(rel, pack, rstb)] = gen
+        self.assertEqual((rel, rstb, gen.cached, gen.mode, gen.picture), ("Pack/Title.pack", None, False, "art",
+                                                                          "linkle.png"))
+        self.assertEqual(gen.notes, ["linkle.png is on the main menu (all 3 slideshow pictures)."])
+        new, old = mb.open_menu(pack), menu()
+        self.assertEqual(len(new.archive), len(old.archive))
+        changed = {t.name for t, o in zip(new.textures.textures, old.textures.textures) if t.levels != o.levels}
+        self.assertTrue({"Pic_Back^o", "Pic_A^q", "Pic_B^q"} <= changed <= set(SLOT_NAMES), changed)
+        again = mb.deploy_files(self.lib, None, str(self.pic))
+        self.assertTrue(again.cached)
+        self.assertEqual(again[0][1], pack)
+        self.assertEqual(len(os.listdir(self.libdir / "cache" / "menu-bg")), 1)
+        self.assertFalse((self.libdir / "mods").exists() and os.listdir(self.libdir / "mods"))   # (no mod added)
+
+    def test_over_the_winning_menu_file(self):
+        theirs = fake_pack(seed=5)
+        gen = mb.deploy_files(self.lib, self.FakePlan({"Pack/Title.pack": theirs}), str(self.pic))
+        self.assertIn("Made over the menu file of Their Menu.", gen.notes[0])
+        new, base = mb.open_menu(gen[0][1]), mb.open_menu(theirs)
+        keep = dict(base.arc_files)
+        self.assertTrue(all(keep[n] == d for n, d in new.arc_files if n != new.bntx_name))
+        small = self.FakePlan({"Pack/Title.pack": theirs,
+                               "System/Resource/ResourceSizeTable.product.srsizetable": fake_rstb(ARCHIVE_SIZE - 1)})
+        other = write_pic(self.tmp / "pics" / "other.png", gradient(500, 400))
+        gen = mb.deploy_files(self.lib, small, str(other))
+        self.assertEqual(list(gen), [])
+        self.assertIn("too big for the game's size table", gen.attention[0])
+
+    def test_problems_are_one_line(self):
+        small = write_pic(self.tmp / "small.png", gradient(200, 100))
+        gen = mb.deploy_files(self.lib, None, str(small))
+        self.assertEqual(list(gen), [])
+        self.assertEqual(gen.attention, ["the title picture small.png isn't used this time: small.png is too small: "
+                                         "200 x 100. Use at least 360 pixels on the short side."])
+        (self.install / "extracted" / "exefs" / "main").write_bytes(make_nso(bytes(32), tm.SEGS))
+        gen = mb.deploy_files(self.lib, None, str(self.pic))
+        self.assertIn("This tool works with BotW 1.9.0 only.", gen.attention[0])
+        gen = mb.deploy_files(self.lib, None, str(self.tmp / "missing.png"))
+        self.assertEqual(list(gen), [])
+        self.assertTrue(gen.attention)
+
+
 class Preview(Base):
     def test_preview(self):
         before = self.config()

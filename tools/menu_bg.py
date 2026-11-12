@@ -2512,6 +2512,109 @@ def deploy_now(lib: modman.Library, no_deploy: bool) -> tuple[bool, list[str]]:
     return True, lines
 
 
+# ------------------------------------------------------------------------------------------------ made at deploy
+# modman's deploy calls deploy_files(lib, plan, picture) (modman.run_makers): `picture` is the title picture the
+# player chose (<library>\pictures\_title\chosen.*), else the last enabled mod's [mod] title_picture, else None.
+# The menu file is made over the one in use (the RomFS plan's winner) and goes into the overlay as a generated file.
+
+DEPLOY_MODE = "art"
+DEPLOY_CACHE = os.path.join("cache", "menu-bg")   # in the library: the last menu files made at deploy
+DEPLOY_CACHE_KEEP = 2
+
+
+class Generated(list):
+    """deploy_files' result: a list of (RomFS path, bytes, size-table entry or None) with `notes`, `attention` and
+    plain values (picture, mode, cached: modman puts them in launch.json made["title"]; none without a picture)."""
+
+    def __init__(self, items=(), *, notes: list[str] | None = None, attention: list[str] | None = None, **values):
+        super().__init__(items)
+        self.notes = notes if notes is not None else []
+        self.attention = attention if attention is not None else []
+        self.__dict__.update(values)
+
+
+def _in_use(plan, rel: str, romfs: str) -> tuple[bytes | None, str]:
+    """(bytes, where from) of what the game reads at a RomFS path: the plan's winner, else the game's own file."""
+    w = plan.winner(rel) if plan is not None and callable(getattr(plan, "winner", None)) else None
+    if w is not None:
+        return w.read(), (getattr(w, "mod", None) or "the game")
+    p = os.path.join(romfs, *rel.split("/"))
+    return (_read(p), "the game") if os.path.isfile(p) else (None, "")
+
+
+def _deploy_limit(plan, game: Game, rstb_name: str) -> int | None:
+    """The smallest size-table entry of the menu archive: the table in use (a mod's, merged, or the game's)."""
+    tables = [_in_use(plan, RSTB_REL, game.romfs)[0], getattr(getattr(plan, "rstb", None), "data", None)]
+    values = [v for v in (rstb_value(t, rstb_name) for t in tables if t) if v is not None]
+    return min(values) if values else None
+
+
+def _cache_put(folder: str, key: str, pack: bytes) -> None:
+    os.makedirs(folder, exist_ok=True)
+    tmp = os.path.join(folder, key + ".tmp")
+    with open(tmp, "wb") as f:
+        f.write(pack)
+    os.replace(tmp, os.path.join(folder, key + ".pack"))
+    old = sorted((e for e in os.scandir(folder) if e.name.endswith(".pack")), key=lambda e: e.stat().st_mtime,
+                 reverse=True)
+    for e in old[DEPLOY_CACHE_KEEP:]:
+        try:
+            os.remove(e.path)
+        except OSError:
+            pass
+
+
+def deploy_files(lib, plan=None, picture: str | None = None) -> Generated:
+    """The menu file with `picture` in all slideshow pictures (art mode), made over the menu file in use, for modman's
+    deploy: [("Pack/Title.pack", bytes, None)] (same size, so no size-table entry). An empty list when there is no
+    picture. A problem (a picture it can't use, another game version) is one `attention` line, and the menu stays as
+    it is. Made files are cached in the library by (menu file, picture, recipe), so a deploy with the same ones only
+    reads."""
+    if not picture:
+        return Generated()
+    name = os.path.basename(picture)
+    try:
+        install = lib.require_install() if hasattr(lib, "require_install") else getattr(lib, "install", None)
+        game = check_game(install or "")
+        if dlc_menu_files(game.install):
+            raise MenuBgError("Your DLC has its own menu file. That isn't supported yet.")
+        data, source = _in_use(plan, PACK_REL, game.romfs)
+        if data is None:
+            raise MenuBgError(f"The menu file ({PACK_REL}) is missing. Set up the game files in Savage Wind again.")
+        raw = _read(picture)
+        key = hashlib.sha256(b"\0".join((TOOL_VERSION.encode(), DEPLOY_MODE.encode(), hashlib.sha256(data).digest(),
+                                         hashlib.sha256(raw).digest()))).hexdigest()[:32]
+        cache = os.path.join(getattr(lib, "root", lib), DEPLOY_CACHE)
+        hit = os.path.join(cache, key + ".pack")
+        cached = os.path.isfile(hit)
+        if cached:
+            pack = _read(hit)
+            total = None
+        else:
+            pic = load_picture(picture, DEPLOY_MODE)
+            menu = open_menu(data, source, source)
+            total = len(menu.model.sets)
+            limit = _deploy_limit(plan, game, wc.resource_path("", menu.archive_name))
+            images = make_slots(menu.model, [pic], DEPLOY_MODE, set(range(1, total + 1)), "center",
+                                menu.pattern_plane())
+            levels = encode_slots(menu.model, images)
+            pack, size = build_pack(menu, levels)
+            if limit is not None and size > limit:
+                raise MenuBgError("The new menu file would be too big for the game's size table.")
+            if self_check(menu, pack, levels, images) < MIN_SELF_CHECK_DB:
+                raise MenuBgError("Self-check failed: the new picture comes out too different.")
+            _cache_put(cache, key, pack)
+    except (MenuBgError, modman.ModmanError, rm.DeployError, wc.FormatError, ModelError, OSError) as e:
+        return Generated(attention=[f"the title picture {name} isn't used this time: {e}"], picture=name)
+    what = sets_text(list(range(1, total + 1)), total) if total else "all slideshow pictures"
+    note = f"{name} is on the main menu ({what}" + (", made earlier" if cached else "") + ")."
+    if source == MOD_ID:
+        note += " It is used instead of the menu picture made with set."
+    elif source != "the game":
+        note += f" Made over the menu file of {source}."
+    return Generated([(PACK_REL, pack, None)], notes=[note], picture=name, mode=DEPLOY_MODE, cached=cached)
+
+
 # ================================================================================================ preview renderer
 # A small renderer for the panes the menu uses: picture panes with their material colours, vertex colours, alpha and
 # blend mode, the projected pattern, the glow (capture groups drawn small, blurred, added) and plain bars where the

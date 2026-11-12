@@ -1,0 +1,13 @@
+{
+ "file": "Start Breathalyzer.exe",
+ "format": 1,
+ "sha256": "bf00ac6cbfa03cdbfca0489824693c8f0cdcf24d8b0e9cf7174280c6f40e0884",
+ "size": 28160,
+ "sources": {
+  "breathalyzer.ico": "022245487147df5ffd145a4dfe57b5f00ea6736d01d079c9e7ff424d792e3674",
+  "build_starter.py": "b5a8b7e68059a4baffb0457288b784c49178c3269e4d04bd9b5ce0965f950501",
+  "start.c": "e520d6a79abd2b3aec9a44bde2e06b231a71d920df134b098cb4e4b2363cf7d2"
+ },
+ "what": "Start Breathalyzer.exe (tools/packaging/build_starter.py). make_release.py ships only this file.",
+ "zig": "0.17.0"
+}

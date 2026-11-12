@@ -20,7 +20,23 @@ code Savage Wind generates and objects built from it, folders our tools fill fro
 Savage Wind logs, screenshots from Savage Wind's `shot` command, console keys, title keys and `.tik` files, and
 files over 10 MB. It can't spot links, so check those yourself.
 
-## Quick start (players)
+## Download and play (no Python needed)
+
+Breathalyzer is also the launcher for Savage Wind. There are two downloads:
+
+- **Breathalyzer** (`breathalyzer-<version>.zip`): the launcher and mod manager, no mods.
+- **Breathalyzer Plus** (`breathalyzer-plus-<version>.zip`): the same, plus our own mods. Before your first Play
+  you pick which ones are on; each has a title and a short description, and mods that change the game start off.
+
+Unpack the zip, open **Start Breathalyzer**, show it your Savage Wind folder once, and press **Play**. It brings its
+own Python, so you install nothing. Neither zip has game files or mods made by other people, and Breathalyzer never
+goes online by itself. See [launcher](docs/launcher.md); how the zips are made: [release](docs/release.md).
+
+From the repo, the same window: `python tools/launcher.py`. It finds Savage Wind (or asks once), checks it, and
+opens Home: a big **Play** that gets your mods ready and starts the game, and your mods with ON/OFF and what each
+does.
+
+## Quick start (command line)
 
 ```
 python tools/modman.py init                      # finds Savage Wind in Documents\SavageWind
@@ -39,6 +55,7 @@ proven on your own Switch files but not yet tried with a real Wii U model mod or
 | Tool | What it does | Docs |
 |---|---|---|
 | `tools/modman.py` | The mod manager: add, order, deploy and start mods (uses the tools below), and mod sets you switch between (`profile`) | [mod-manager](docs/mod-manager.md), [profiles](docs/profiles.md) |
+| `tools/launcher.py` | The launcher: finds and checks Savage Wind, one big Play button (deploys when needed, then starts the game), your mods with what each does, Settings, the Plus mod picker | [launcher](docs/launcher.md) |
 | `tools/modman_gui.py` | A large-print window for the mod manager (big text, every button works with the keyboard) | [mod-manager](docs/mod-manager.md#window) |
 | `tools/quality.py` | Quality presets Low, Medium, High and Original: more fps on a weak PC (grass, draw distance, shadows, effects) | [performance](docs/performance.md) |
 | `tools/wiiu_convert.py` | Converts a Wii U mod to a Switch mod on your PC: texts, maps, actor data, models and textures (audio not yet). `modman add` uses it | [wiiu-mods](docs/wiiu-mods.md), [wiiu-models](docs/wiiu-models.md) |

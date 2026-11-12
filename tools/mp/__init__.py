@@ -34,6 +34,10 @@ Also optional, same protocol version, sent only with client.py --ghost-sync (or 
     "on_back":4       (0.6.0, optional) which of them are on his back, not in his hands: bit 0 weapon, 1 shield,
                       2 bow (an int from 0 to 7; anything else is dropped). A receiver without it (an older sender)
                       puts the bow on the back, or weapon and shield while the sender's anim is a Bow... name.
+    "bow_rel":[12 numbers]   (0.6.2, optional; also "weapon_rel", "shield_rel") where that item sits on the sender's
+                      back: its matrix in the frame of his Link's Pod_A bone (3x4, row by row; the turn's entries
+                      within 1.01, the place within 2 m), sent only while it is on his back. The receiver's ghost puts
+                      its item exactly there (his armor moves the bow, so the item's own offsets are not enough).
 A bad one is dropped on its own, never the state. Older relays drop them all; older clients ignore them.
 """
 from __future__ import annotations
@@ -52,6 +56,7 @@ MAX_PLACE = 160          # the game's place line is at most 159 characters
 MAX_SPEED = 1000.0       # m/s: a `speed` above this (or below 0) is dropped
 ITEM_KEYS = ("weapon", "shield", "bow")   # optional item names (--ghost-sync)
 MAX_ON_BACK = 7                           # "on_back": bit 0 weapon, 1 shield, 2 bow (--ghost-items, ghost mod 0.6.0)
+REL_KEYS = ("weapon_rel", "shield_rel", "bow_rel")   # 0.6.2: each item's place on the sender's back (12 numbers)
 
 _NAME_RE = re.compile(r"\w[\w .'-]{0,19}")
 _ANIM_RE = re.compile(r"[A-Za-z0-9_]{1,31}")
@@ -127,6 +132,31 @@ def clean_state(msg: dict) -> dict | None:
     on_back = valid_on_back(msg.get("on_back"))
     if on_back is not None:
         out["on_back"] = on_back
+    for key in REL_KEYS:
+        rel = valid_rel(msg.get(key))
+        if rel is not None:
+            out[key] = rel
+    return out
+
+
+def valid_rel(v) -> list[float] | None:
+    """A back offset (`<item>_rel`, 0.6.2): 12 finite numbers, a 3x4 matrix row by row, the turn's entries within
+    1.01 and the place within 2 m (the ghost mod's own limits), rounded to 4 places; else None. A string of 12
+    numbers (as `ghost self` gives it) is read too."""
+    if isinstance(v, str):
+        try:
+            v = [float(x) for x in v.split()]
+        except ValueError:
+            return None
+    if not isinstance(v, (list, tuple)) or len(v) != 12:
+        return None
+    out = []
+    for k, x in enumerate(v):
+        if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x):
+            return None
+        if abs(x) > (2.0 if k % 4 == 3 else 1.01):
+            return None
+        out.append(round(float(x), 4))
     return out
 
 

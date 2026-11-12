@@ -11,12 +11,12 @@ PC, and prints PASS, FAIL or SKIP per check. About 3 minutes; the game is closed
     python tools/mp/ghost_ingame_check.py --give-weapon when Link has no weapon: at the end the ghost mod spawns a
                                                         sword in front of him and he takes it (S6, S9)
     python tools/mp/ghost_ingame_check.py --items --spot -1033.6 252.3 1809.3 132 --give-weapon --lib out\\ghost-items-lib
-                                                        the held items' checks instead (H1-H14, implies --link:
+                                                        the held items' checks instead (H1-H16, implies --link:
                                                         ghost_items_check.py); --lib: a scratch mod library (the
                                                         ghost.dll and the Link body are copied there, never to your
                                                         own library)
 
-Before: python tools\\build_native.py build (ghost.dll 0.6.0). The game starts with the test save in out\\test-save
+Before: python tools\\build_native.py build (ghost.dll 0.6.2). The game starts with the test save in out\\test-save
 when that folder exists (so your own save slot isn't touched), else with your saves. Results also go to
 out\\research\\ghost-ingame-results.txt and screenshots to out\\shots\\ghostcheck\\ (never committed).
 
@@ -58,7 +58,7 @@ OVERLAY = REPO / "out" / "ghost-check-overlay"
 SHOTS = REPO / "out" / "shots" / "ghostcheck"
 RESULTS = REPO / "out" / "research" / "ghost-ingame-results.txt"
 RELAY_PORT = 7790          # (not the usual 7788, so a relay you run for play doesn't clash)
-WANT_VERSION = "0.6.1"
+WANT_VERSION = "0.6.2"
 SHAPE = (2, 2, 1, 3, 1)
 LINK_NAMES = ("Wait", "Walk", "Run", "RunGear2", "CutS1", "CutSF", "Jump", "ParashawlGlide", "ClimbMove", "SwimMove")
 # The bot's names for R1 (NAME@m/s:seconds): stand, walk, run, three attacks, a jump, a glide, a climb, stand
@@ -582,7 +582,7 @@ def main(argv: list[str] | None = None) -> int:
                          "go that way, 2.4 s each). The test save loads by a rock face, so S4 climbs it without this. "
                          f"Tried: {' '.join(map(str, SPOT))} (about 22 m of meadow to the plateau's edge)")
     ap.add_argument("--items", action="store_true",
-                    help="the held items' checks H1-H14 instead of the others (ghost mod 0.6.0; implies --link; "
+                    help="the held items' checks H1-H16 instead of the others (ghost mod 0.6.2; implies --link; "
                          "tools/mp/ghost_items_check.py); --give-weapon adds H12 (`ghost give`)")
     ap.add_argument("--wait-max", type=float, default=120.0, metavar="MIN",
                     help="another program's game runs: wait at most this many minutes for it to close (asking every "

@@ -113,7 +113,10 @@ jumps). Keep recordings in `out\`: they come from your game, and `out\` is never
 - With `--ghost-sync` (opt-in, not yet tested in the game) a line also carries `anim` (the animation your Link
   plays, from the ghost mod's `ghost self`), `attack` (true during an attack) and `weapon`, `shield`, `bow` (what he
   has equipped, as actor names). With ghost mod 0.6.0 it also carries `on_back` (0-7: bit 0 weapon, 1 shield, 2 bow
-  are on his back, not in his hands; read from Link's own equipment). Same rules: optional, protocol version 1, a bad
+  are on his back, not in his hands; read from Link's own equipment), and with 0.6.2 `weapon_rel`, `shield_rel`,
+  `bow_rel` for the items on his back: 12 numbers each, where the item sits in the frame of his Link's `Pod_A` bone
+  (a 3x4 matrix row by row; the turn's entries within 1.01, the place within 2 m), so the receiver's ghost carries it
+  exactly there (his armor moves the bow: the item's own offsets put it 0.1 m off). Same rules: optional, protocol version 1, a bad
   one is dropped on its own; a receiver with `--ghost-items` and no `on_back` from an older sender puts the bow on
   the back (and the weapon and shield while the sender aims the bow). A line without an item key (the sender's
   game didn't answer in time: a hitch, a menu, a load) changes nothing on the receiver; only `""` means "none", so

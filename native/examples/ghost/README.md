@@ -26,7 +26,7 @@ learned per actor), `ghost self` (your own Link's animation and items: plain rea
 0.6.0 adds, opt-in: held items (`ghost items`: the ghost holds real item actors through the item's own grab
 call; see docs/ghost.md, "Held items"). 0.6.1 (review fixes): a new item waits 6 m over the ghost until the grab takes it (out of
 Link's reach), one Link took anyway is never deleted, items get their own bone follow back before they go, only
-weapons, shields and bows are spawned, and slow game calls and frames are timed. Load ghost.dll at game start only:
+weapons, shields and bows are spawned, and slow game calls and frames are timed. 0.6.2 (the first game round of the items, docs/ghost.md, fourteenth round): the ghost's items at Link's size (it wraps the Weapon class's per-frame update, which gives any holder but the player a bigger scale), the memory check no longer stalls a frame (big regions are kept, a low-priority helper thread re-checks them), and a ghost or items a reload left behind are removed. Load ghost.dll at game start only:
 never `modunload` or `modreload` it while it holds items (their bone follows and names live in the DLL). A ghost whose place is over 60 m from Link (the game removes it at about 75 m) is not spawned until it is within
 50 m again (state `far`), and one the game keeps removing is tried again less and less often.
 

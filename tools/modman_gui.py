@@ -19,6 +19,10 @@ modman doesn't know one that is there.
 Keys: Tab and the arrow keys move around, Space or Enter presses, Space in the list turns a mod on or off,
 Ctrl+Up/Down moves it, Delete removes it (after a question), Ctrl + and Ctrl - change the text size, F5 reads the
 list again.
+
+The launcher's window is here too (LauncherView, started by tools/launcher.py: docs/launcher.md): the first-run
+screens, Home with one big Play button that does everything (the game's Mods page changes, deploy, run) and the mods
+with what they do, and Settings. Its More button opens this Mod Manager window.
 """
 from __future__ import annotations
 
@@ -43,7 +47,10 @@ except ImportError:  # (the logic works without Tk; only the window needs it)
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOLS)
+import launcher as la  # noqa: E402 (tools/launcher.py: finding and checking Savage Wind, the launcher's settings)
+
 MODMAN_PY = os.path.join(TOOLS, "modman.py")
+MODMENU_PY = os.path.join(TOOLS, "modmenu.py")
 
 TITLE = "Breathalyzer - Mods"
 # The window icon, when it is there (the window works without it): .ico for Windows, .png elsewhere.
@@ -170,6 +177,8 @@ class Row:
     on: bool
     kinds: list[str]
     version: str | None = None
+    about: str = ""            # one line about the mod (the launcher's list; Backend.describe)
+    full: str = ""             # all of it
 
     def cells(self) -> tuple[str, str, str, str, str]:
         return (str(self.number), "On" if self.on else "Off", self.name, kind_text(self.kinds), self.version or "-")
@@ -197,6 +206,7 @@ class Job:
     mod_id: str = ""
     number: int = 0            # the mod's number when it started
     in_process: bool = False
+    script: str = ""           # the tool it runs (default tools/modman.py)
     lines: list[str] = field(default_factory=list)
     dropped: int = 0           # lines no longer kept (the oldest)
     code: int | None = None
@@ -204,6 +214,7 @@ class Job:
     ended: float | None = None
     game_started: bool = False
     proc: object = None
+    cancelled: bool = False
 
     @property
     def slot(self) -> str:
@@ -449,6 +460,7 @@ class Backend:
         self.python = python or console_python()
         # (config.json: Turn on/off replaces it, and Windows refuses that while another thread has it open)
         self.files = threading.Lock()
+        self.describe = None   # (library, entry) -> (about, full) for each row (the launcher sets it)
 
     def listing(self) -> Listing:
         try:
@@ -459,6 +471,10 @@ class Backend:
             return Listing(self.root, [], False)
         rows = [Row(k, m["id"], m.get("name") or m["id"], bool(m.get("enabled")), list(m.get("kinds") or []),
                     m.get("version")) for k, m in enumerate(lib.mods, 1)]
+        if self.describe is not None:
+            for row, m in zip(rows, lib.mods):
+                with contextlib.suppress(Exception):   # (a mod.toml that can't be read: no text, never a crash)
+                    row.about, row.full = self.describe(self.root, m)
         return Listing(self.root, rows)
 
     def install_problem(self) -> str | None:
@@ -517,12 +533,12 @@ class Backend:
         target = self._in_process if job.in_process else self._subprocess
         threading.Thread(target=target, args=(job, events), daemon=True, name=f"modman {job.action}").start()
 
-    def argv(self, args: list[str]) -> list[str]:
-        return [self.python, "-u", MODMAN_PY, *args, "--library", self.root]
+    def argv(self, args: list[str], script: str = "") -> list[str]:
+        return [self.python, "-u", script or MODMAN_PY, *args, "--library", self.root]
 
     def _subprocess(self, job: Job, events: queue.Queue) -> None:
         try:  # (UTF-8: a pipe would get the ANSI code page, and mod names outside it would turn into "?")
-            proc = self.spawn(self.argv(job.args), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            proc = self.spawn(self.argv(job.args, job.script), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, creationflags=NO_WINDOW,
                               env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         except OSError as e:
@@ -746,6 +762,11 @@ class Controller:
                 self._state_pending -= 1
                 if who == self._state_token:
                     self.state_text = value
+            else:
+                self.other_event(kind, who, value)
+
+    def other_event(self, kind: str, who, value) -> None:
+        """Events a subclass sends itself (the launcher's Play steps)."""
 
     def refresh_state(self) -> None:
         """Find out (in the background: it reads every enabled mod's file list) whether the deploy is up to date."""
@@ -858,10 +879,12 @@ class Controller:
 THEMES = {
     "light": {"bg": "#ffffff", "fg": "#000000", "button": "#e3e8ef", "active": "#c7d4e5", "line": "#6e6e6e",
               "focus": "#0045d0", "sel_bg": "#0045d0", "sel_fg": "#ffffff", "disabled": "#595959",
-              "ok": "#00661a", "warn": "#8a4b00", "error": "#b00000", "busy": "#0045d0", "info": "#0045d0"},
+              "ok": "#00661a", "warn": "#8a4b00", "error": "#b00000", "busy": "#0045d0", "info": "#0045d0",
+              "play": "#00661a", "play_fg": "#ffffff"},
     "dark": {"bg": "#000000", "fg": "#ffffff", "button": "#262626", "active": "#3d3d3d", "line": "#9a9a9a",
              "focus": "#ffd400", "sel_bg": "#ffd400", "sel_fg": "#000000", "disabled": "#a6a6a6",
-             "ok": "#5ee07a", "warn": "#ffb347", "error": "#ff7b7b", "busy": "#ffd400", "info": "#ffd400"},
+             "ok": "#5ee07a", "warn": "#ffb347", "error": "#ff7b7b", "busy": "#ffd400", "info": "#ffd400",
+             "play": "#5ee07a", "play_fg": "#000000"},
 }
 COLUMNS = (("num", "#", "e"), ("on", "On", "center"), ("name", "Name", "w"), ("kind", "Kind", "w"),
            ("version", "Version", "w"))
@@ -923,47 +946,10 @@ class Flow:
         return self.layout(width)[1]
 
 
-class View:
-    """The widgets. Everything they do goes through the Controller."""
-
-    def __init__(self, root, ctl: Controller, size: int = DEFAULT_SIZE, dark: bool = False):
-        self.root, self.ctl = root, ctl
-        self.size = self.start_size = max(MIN_SIZE, min(MAX_SIZE, size))
-        self.t = THEMES["dark" if dark else "light"]
-        self.closed = False
-        self.list_version = 0
-        self.details_shown = False
-        self.details_key = None
-        self.details_count = 0
-        self.progress_text = None
-        self.width = 0
-        self.minsize_pending = False
-        self.last_dir = next((d for d in (os.path.join(os.path.expanduser("~"), "Downloads"), os.path.expanduser("~"))
-                              if os.path.isdir(d)), "")
-        family = pick_family(root, ("Segoe UI", "Verdana", "DejaVu Sans", "Helvetica"), "TkDefaultFont")
-        mono = pick_family(root, ("Consolas", "Cascadia Mono", "DejaVu Sans Mono", "Courier New"), "TkFixedFont")
-        self.font = tkfont.Font(root, family=family, size=self.size)
-        self.bold = tkfont.Font(root, family=family, size=self.size, weight="bold")
-        self.head = tkfont.Font(root, family=family, size=self.size + 4, weight="bold")
-        self.mono = tkfont.Font(root, family=mono, size=self.size)
-        self.style = ttk.Style(root)
-        self.style.theme_use("clam")  # (the theme that takes colours and sizes)
-        self.buttons: list = []
-        self.by_action: dict[str, object] = {}
-        self.build()
-        self.render()
-        want = self.size
-        self.size = self.start_size = self.biggest_fit(want, MIN_SIZE)
-        if self.size < want:
-            st = self.ctl.status
-            self.ctl.status = Status(st.kind, [*st.lines[:2], f"The text is {self.size} pt: bigger doesn't fit on "
-                                                               "this screen."])
-            self.render()
-        self.tree.focus_set()
-        ctl.refresh_state()
-        root.after(POLL_MS, self.tick)
-
-    # --- building
+class BigText:
+    """What the big-text windows share (the Mod Manager window, View, and the launcher, LauncherView): labels,
+    buttons with a focus ring, arrow keys between buttons, questions in the same big text. The window sets self.root,
+    self.t (its colours), self.font, self.bold, self.head and self.closed."""
 
     def label(self, parent, font=None, **kw):
         opts = {"bg": self.t["bg"], "fg": self.t["fg"], "anchor": "w", "justify": "left", **kw}
@@ -1011,6 +997,114 @@ class View:
                 b.focus_set()
                 break
         return "break"
+
+    def one_line(self, text: str, width: int) -> str:
+        """text shortened in the middle to fit width."""
+        if self.font.measure(text) <= width:
+            return text
+        lo, hi = 0, len(text)  # (how many characters to keep)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self.font.measure(text[:mid // 2] + "..." + text[len(text) - (mid - mid // 2):]) <= width:
+                lo = mid
+            else:
+                hi = mid - 1
+        return text[:lo // 2] + "..." + text[len(text) - (lo - lo // 2):]
+
+    def key(self, fn) -> str:
+        fn()
+        return "break"
+
+    def ask(self, title: str, message: str, detail: str, choices: list, default: int = 0):
+        """A question in the same big text. Returns the value of the button pressed; Esc or closing it gives the
+        last button's."""
+        t = self.t
+        top = tk.Toplevel(self.root, bg=t["bg"], padx=24, pady=20)
+        top.title(title)
+        top.transient(self.root)
+        top.resizable(False, False)
+        result = {"value": choices[-1][1]}
+
+        def done(value):
+            result["value"] = value
+            top.destroy()
+
+        wrap = max(320, self.font.measure("0") * 36)
+        self.label(top, self.head, text=message, wraplength=wrap).pack(anchor="w")
+        if detail:
+            self.label(top, text=detail, wraplength=wrap).pack(anchor="w", pady=(10, 0))
+        row = tk.Frame(top, bg=t["bg"])
+        row.pack(anchor="w", pady=(20, 0))
+        group: list = []
+        for text, value in choices:
+            self.make_button(row, text, lambda v=value: done(v), group).ring.pack(side="left", padx=(0, 8))
+        top.bind("<Escape>", lambda e: done(choices[-1][1]))
+        top.protocol("WM_DELETE_WINDOW", lambda: done(choices[-1][1]))
+        top.update_idletasks()
+        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - top.winfo_reqwidth()) // 2)
+        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - top.winfo_reqheight()) // 3)
+        top.geometry(f"+{x}+{y}")
+        before = self.root.focus_get()
+
+        def grab():  # (only once the window is on screen)
+            try:
+                if top.winfo_exists():
+                    top.grab_set()
+                    group[default].focus_force()
+            except tk.TclError:
+                with contextlib.suppress(tk.TclError):
+                    top.after(50, grab)
+
+        group[default].focus_set()
+        top.after(20, grab)
+        self.root.wait_window(top)
+        if before is not None and not self.closed:
+            with contextlib.suppress(tk.TclError):
+                before.focus_set()
+        return result["value"]
+
+
+class View(BigText):
+    """The widgets. Everything they do goes through the Controller."""
+
+    def __init__(self, root, ctl: Controller, size: int = DEFAULT_SIZE, dark: bool = False):
+        self.root, self.ctl = root, ctl
+        self.size = self.start_size = max(MIN_SIZE, min(MAX_SIZE, size))
+        self.t = THEMES["dark" if dark else "light"]
+        self.closed = False
+        self.list_version = 0
+        self.details_shown = False
+        self.details_key = None
+        self.details_count = 0
+        self.progress_text = None
+        self.width = 0
+        self.minsize_pending = False
+        self.last_dir = next((d for d in (os.path.join(os.path.expanduser("~"), "Downloads"), os.path.expanduser("~"))
+                              if os.path.isdir(d)), "")
+        family = pick_family(root, ("Segoe UI", "Verdana", "DejaVu Sans", "Helvetica"), "TkDefaultFont")
+        mono = pick_family(root, ("Consolas", "Cascadia Mono", "DejaVu Sans Mono", "Courier New"), "TkFixedFont")
+        self.font = tkfont.Font(root, family=family, size=self.size)
+        self.bold = tkfont.Font(root, family=family, size=self.size, weight="bold")
+        self.head = tkfont.Font(root, family=family, size=self.size + 4, weight="bold")
+        self.mono = tkfont.Font(root, family=mono, size=self.size)
+        self.style = ttk.Style(root)
+        self.style.theme_use("clam")  # (the theme that takes colours and sizes)
+        self.buttons: list = []
+        self.by_action: dict[str, object] = {}
+        self.build()
+        self.render()
+        want = self.size
+        self.size = self.start_size = self.biggest_fit(want, MIN_SIZE)
+        if self.size < want:
+            st = self.ctl.status
+            self.ctl.status = Status(st.kind, [*st.lines[:2], f"The text is {self.size} pt: bigger doesn't fit on "
+                                                               "this screen."])
+            self.render()
+        self.tree.focus_set()
+        ctl.refresh_state()
+        root.after(POLL_MS, self.tick)
+
+    # --- building
 
     def build(self) -> None:
         t, r, pad = self.t, self.root, PAD
@@ -1260,19 +1354,6 @@ class View:
         """The library on one line, shortened in the middle when it is too long (Details has it in full)."""
         self.footer.configure(text=self.one_line(f"Library: {self.ctl.listing.root}", self.text_width(width)))
 
-    def one_line(self, text: str, width: int) -> str:
-        """text shortened in the middle to fit width."""
-        if self.font.measure(text) <= width:
-            return text
-        lo, hi = 0, len(text)  # (how many characters to keep)
-        while lo < hi:
-            mid = (lo + hi + 1) // 2
-            if self.font.measure(text[:mid // 2] + "..." + text[len(text) - (mid - mid // 2):]) <= width:
-                lo = mid
-            else:
-                hi = mid - 1
-        return text[:lo // 2] + "..." + text[len(text) - (lo - lo // 2):]
-
     # --- drawing what the controller holds
 
     def render(self) -> None:
@@ -1365,10 +1446,6 @@ class View:
     def update_toggle(self) -> None:
         row = self.ctl.row(self.selected_id())
         self.by_action["toggle"].configure(text="Turn on" if row and not row.on else "Turn off")
-
-    def key(self, fn) -> str:
-        fn()
-        return "break"
 
     # --- the buttons
 
@@ -1478,53 +1555,1584 @@ class View:
         self.closed = True
         self.root.destroy()
 
-    def ask(self, title: str, message: str, detail: str, choices: list, default: int = 0):
-        """A question in the same big text. Returns the value of the button pressed; Esc or closing it gives the
-        last button's."""
+
+# ---------------------------------------------------------------- the launcher: Play does everything
+
+LAUNCH_BUSY = {"prepare": "Getting ready", "apply": "Using your changes from the game's Mods page",
+               "deploy": "Getting your mods ready", "add": "Adding the mod", "remove": "Removing the mod",
+               "check": "Checking", "tool": "Building the mod from your game files", "enable": "Turning it on",
+               "disable": "Turning it off"}
+REBUILD_LINE = "Rebuilding the game code"      # (what modman deploy prints before the 10-20 minute rebuild)
+REBUILD_SAY = "Building the game code for your code mods: about 10-20 minutes, only this time."
+# The Mod Manager's words, as the launcher says them (it has no Deploy button: Play deploys)
+LAUNCH_WORDS = ((PRESS_DEPLOY, "Play uses the change."), ("Press Deploy to use it.", "Play uses it."),
+                ("Press Deploy to take it out of the game.", "Play leaves it out."),
+                ("Press Play to start the game.", "Press Play to start the game."))
+HOME_ROWS = 3          # the mod list always has room for this many
+ABOUT_LINES = 2        # the selected mod's text under the list: this many lines (longer text is cut with "...")
+GAME_POLL_TICKS = 25   # while the game is open, ask whether it still runs every this many ticks (2.5 s)
+
+
+def wrap_text(text: str, font, width: int) -> list[str]:
+    """text in lines no wider than width (as a Tk label wraps it, at spaces)."""
+    lines: list[str] = []
+    for para in text.split("\n"):
+        line = ""
+        for word in para.split(" "):
+            test = f"{line} {word}" if line else word
+            if line and font.measure(test) > width:
+                lines.append(line)
+                line = word
+            else:
+                line = test
+        lines.append(line)
+    return lines
+
+
+def cut_lines(text: str, font, width: int, n: int) -> str:
+    """text in at most n lines of this width; when it is longer the last line ends in "..."."""
+    lines = wrap_text(text, font, width)
+    if len(lines) <= n:
+        return "\n".join(lines)
+    last = lines[n - 1]
+    while last and font.measure(last + "...") > width:
+        last = last.rsplit(" ", 1)[0] if " " in last else last[:-1]
+    return "\n".join([*lines[:n - 1], last + "..."])
+
+
+def report_text(lines: list[str], home: str | None = None) -> str:
+    """Details as text to copy into a bug report: the home folder written as %USERPROFILE%."""
+    home = home or os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    text = "\n".join(lines)
+    if home and len(home) > 3:
+        text = re.sub(re.escape(home), "%USERPROFILE%", text, flags=re.I)
+    return text
+
+
+def launcher_words(st: Status) -> Status:
+    out = []
+    for line in st.lines:
+        for old, new in LAUNCH_WORDS:
+            line = line.replace(old, new)
+        out.append(re.sub(r"\bPress Deploy\b", "Press Play", line))
+    return Status(st.kind, out)
+
+
+def load_modmenu():
+    """tools/modmenu.py (the game's Mods page files), or False when it doesn't load: Play then skips that step."""
+    try:
+        import modmenu
+        return modmenu
+    except Exception:  # (a tool another job is still writing must not stop the launcher)
+        return False
+
+
+class LaunchBackend(Backend):
+    """The Backend of the launcher: one library and one Savage Wind folder, and what Play needs to know first.
+    running() says whether savagewind.exe runs (launcher.game_running: no console window flashes up); menu is
+    tools/modmenu.py (False: not used); popen starts the game for Play without mods. Fakes in tests."""
+
+    def __init__(self, library: str, install: str, mm=None, spawn=None, python: str | None = None, running=None,
+                 menu=None, popen=None):
+        super().__init__(library, mm=mm, spawn=spawn, python=python)
+        self.install = install
+        self.running = running or la.game_running
+        self.menu = (load_modmenu() if menu is None else menu) or None
+        self.popen = popen or subprocess.Popen
+        self.describe = la.describe_mod
+
+    def deploy_state(self) -> str:
+        """One line under Play: is the deploy up to date (Play then starts at once)?"""
+        mm = self.mm
+        try:
+            with self.files:
+                lib = mm.Library.load(self.root)
+                if lib is None:
+                    return ""
+                try:
+                    launch = mm.read_launch(lib)
+                except mm.ModmanError:
+                    return "Play gets your mods ready first."
+            if mm.missing_paths(launch) or mm.inputs_hash(lib) != launch.get("hash"):
+                return "Play gets your changes ready first."
+            return "Ready."
+        except (mm.ModmanError, OSError, ValueError, KeyError, TypeError):
+            return ""
+
+    def play_facts(self) -> dict:
+        """What Play has to do (a background thread runs it: it reads every enabled mod's files): running (the game
+        is open), pending (changes from the game's Mods page wait), deploy (why a deploy is needed: "first",
+        "broken", "changed"; None when the last one is up to date). It also writes the game's mod list again when it
+        is older than the library (what `modmenu play` does), so the Mods page shows what Play starts."""
+        if self.running():
+            return {"running": True}
+        mm = self.mm
+        with self.files:
+            lib = mm.Library.load(self.root)
+        if lib is None:
+            return {"error": f"No mod library in {self.root}."}
+        facts: dict = {"running": False, "pending": False, "deploy": None}
+        menu = self.menu
+        if menu is not None:
+            try:
+                facts["pending"] = bool(menu.has_pending(lib))
+                if not facts["pending"] and any(m["id"] == menu.MOD_ID for m in lib.mods):
+                    now = menu.read_menu(lib)
+                    if now is None or now.config != menu.config_stamp(lib):
+                        menu.sync(lib)
+            except Exception as e:  # (the Mods page's files: never a reason not to play)
+                facts["menu_note"] = f"{type(e).__name__}: {e}"
+        try:
+            launch = mm.read_launch(lib)
+        except mm.ModmanError:
+            facts["deploy"] = "first"
+        else:
+            if mm.missing_paths(launch):
+                facts["deploy"] = "broken"
+            elif mm.inputs_hash(lib) != launch.get("hash"):
+                facts["deploy"] = "changed"
+        return facts
+
+    def start_plain(self):
+        return la.start_plain(self.install, tuple(getattr(self.mm, "MOD_ENV", ())), self.popen)
+
+
+class LaunchController(Controller):
+    """The launcher's Home without widgets. Play (launch) runs, one after the other in the background: the changes
+    from the game's Mods page (modmenu apply, which deploys), else a deploy when the mods changed since the last one,
+    then modman run. Each step's output is in details_text(); a step that fails stops the rest and says why in
+    plain words. While the game is open, Play waits (watch() notices when it closes)."""
+
+    def __init__(self, backend: LaunchBackend, clock=time.monotonic, port: int | None = None):
+        self.chain: list[Job] = []
+        self.step: Job | None = None
+        self.game_open = False
+        self.offer: tuple[str, str] | None = None   # an extra button under Play: (label, action)
+        self.blocked = False                        # the Mod Manager window is open
+        self.rebuilding = False
+        self.no_rebuild = False
+        self._watching = False
+        self._gone = 0
+        self.first_time = False
+        self.installing: list[str] | None = None   # while the picked mods are added: the ones that failed
+        self.install_total = 0
+        super().__init__(backend, clock, port)
+
+    def _first_status(self) -> Status:
+        if self.listing.error:
+            return Status("error", ["Your mod list can't be read.", plain(self.listing.error)])
+        if not self.listing.rows:
+            return Status("info", ["Ready to play.", "No mods yet. Press Add mod to add one, or just play."])
+        return Status("info", ["Ready to play.", "Turn mods on or off below, then press Play."])
+
+    def summary_line(self) -> str:
+        if self.listing.error:
+            return ""
+        rows = self.listing.rows
+        text = f"{sum(r.on for r in rows)} of {n_of(len(rows), 'mod')} on." if rows else "No mods yet."
+        return f"{text} {self.state_text}".strip()
+
+    def can(self, action: str) -> bool:
+        if action in ("details", "refresh", "settings"):
+            return True
+        if self.blocked:
+            return False
+        job = self.jobs.get("main")
+        if action == "cancel":
+            return job is not None and job.action in ("prepare", "apply", "deploy") and not job.cancelled
+        if job is not None:
+            return False
+        if action in ("play", "play_plain", "deploy", "more"):
+            return "play" not in self.jobs and not self.game_open
+        return True
+
+    def free(self, action: str) -> bool:
+        if self.can(action):
+            return True
+        job = self.jobs.get("main")
+        if self.blocked:
+            self.status = Status("warn", ["Close the Mod Manager window first."])
+        elif job is not None:
+            self.status = Status("warn", [f"Please wait: {LAUNCH_BUSY.get(job.action, 'busy').lower()}..."])
+        else:
+            self.status = Status("warn", ["The game is open.", "Close it first."])
+        return False
+
+    def progress(self) -> list[str]:
+        """One line under Play while something runs (the status above says more; Details has modman's output)."""
+        job = self.jobs.get("main")
+        if job:
+            return [f"{LAUNCH_BUSY.get(job.action, 'Working')}... {mmss(self.clock() - job.started)}"]
+        if "play" in self.jobs:
+            return ["The game is open." if self.jobs["play"].game_started else "Starting the game..."]
+        if self.game_open:
+            return ["The game is open. Close it to play again with other mods."]
+        return []
+
+    # --- Play
+
+    def launch(self, no_rebuild: bool = False) -> None:
+        """Play: find out what it takes (in the background), then do it step by step."""
+        if not self.free("play"):
+            return
+        self.offer, self.rebuilding, self.no_rebuild = None, False, no_rebuild
+        job = Job("prepare", [], started=self.clock())
+        self.jobs["main"] = job
+        self.status = Status("busy", ["Getting ready..."])
+
+        def work():
+            try:
+                facts = self.backend.play_facts()
+            except Exception as e:  # (said in the window, never a crash)
+                facts = {"error": f"{type(e).__name__}: {e}"}
+            self.events.put(("plan", job, facts))
+
+        threading.Thread(target=work, daemon=True, name="launcher prepare").start()
+
+    def other_event(self, kind: str, who, value) -> None:
+        if kind == "plan":
+            self._plan(who, value)
+        elif kind == "game":
+            self._game_state(value)
+
+    def _plan(self, job: Job, facts: dict) -> None:
+        if self.jobs.get("main") is job:
+            del self.jobs["main"]
+        job.lines = [f"{k}: {v}" for k, v in facts.items()]
+        job.code, job.ended = 0, self.clock()
+        self.details_job = job
+        if job.cancelled:
+            self.status = Status("info", ["Stopped.", "Press Play to try again."])
+            return
+        if facts.get("error"):
+            self.status = Status("error", ["The game didn't start.", plain(facts["error"])])
+            return
+        if facts.get("running"):
+            self.game_open = True   # (watch() says when it closes)
+            self.status = Status("error", ["Savage Wind is already open.", "Close it, then press Play."])
+            return
+        steps = []
+        if facts.get("pending"):
+            steps.append(Job("apply", ["apply"], script=MODMENU_PY))
+        elif self.no_rebuild:
+            steps.append(Job("deploy", ["deploy", "--no-rebuild"]))
+        elif facts.get("deploy"):
+            steps.append(Job("deploy", ["deploy"]))
+        steps.append(Job("play", list(self.run_args), in_process=True))
+        self.first_time = facts.get("deploy") == "first"
+        self.chain = steps
+        self._next()
+
+    def _next(self) -> None:
+        job = self.chain.pop(0)
+        self.step = job
+        self._start(job)
+        if self.installing is not None:
+            done = self.install_total - len(self.chain)
+            self.status = Status("busy", [f"Adding the mods you picked ({done} of {self.install_total})...",
+                                          job.name])
+        elif job.action == "apply":
+            self.status = Status("busy", ["Using your changes from the game's Mods page...",
+                                          "Then the game starts."])
+        elif job.action == "deploy":
+            self.status = Status("busy", ["Getting your mods ready...",
+                                          "The first time takes longer." if self.first_time
+                                          else "Then the game starts."])
+        else:
+            self.status = Status("busy", ["Starting the game..."])
+
+    def _line(self, job: Job, text: str) -> None:
+        super()._line(job, text)
+        if job.action in ("apply", "deploy") and text.startswith(REBUILD_LINE) and not self.rebuilding:
+            self.rebuilding = True
+            self.status = Status("busy", ["Getting your mods ready...", REBUILD_SAY])
+
+    def _done(self, job: Job, code: int) -> None:
+        super()._done(job, code)
+        self.status = launcher_words(self.status)
+        if job is not self.step:
+            return
+        self.step = None
+        text = [x.rstrip() for x in job.lines if x.strip()]
+        if self.installing is not None:
+            if code != 0:
+                self.installing.append(job.name)
+                self.chain = [j for j in self.chain if j.mod_id != job.mod_id]   # (the rest of that mod's steps)
+            if self.chain:
+                self._next()
+            else:
+                self._installed()
+            return
+        if job.cancelled:
+            self.chain = []
+            self.status = Status("info", ["Stopped.", "Press Play to try again."])
+            return
+        if job.action == "play":
+            self.chain = []
+            started = any(x.startswith("Started Savage Wind") for x in text)
+            if started and not any(x.startswith("Savage Wind closed") for x in text):
+                self.game_open, self._gone = True, 0
+            busy = next((x for x in text if "already uses port" in x), None)
+            if busy:
+                m = re.search(r"port (\d+)", busy)
+                self.status = Status("error", [f"Another program uses port {m.group(1)}." if m else
+                                               "Another program uses the cheats' port.",
+                                               "Close it and press Play again, or pick another port in Settings."])
+            elif any("already running" in x for x in text):
+                self.game_open, self._gone = True, 0
+                self.status = Status("error", ["Savage Wind is already open.", "Close it, then press Play."])
+            return
+        if code == 0:
+            if self.chain:
+                self._next()
+            return
+        self.chain = []
+        if job.action == "deploy" and not self.no_rebuild and any(x.startswith(REBUILD_LINE) for x in text):
+            self.offer = ("Play without code mods", "no_rebuild")
+            reason = error_lines(text)
+            self.status = Status("error", ["Your code mods couldn't be built.", "You can play with the other mods: "
+                                           "press Play without code mods.", *reason[:1]])
+        elif job.action == "deploy":
+            self.status = launcher_words(failed("Your mods couldn't be made ready.", text))
+        else:
+            self.status = launcher_words(failed("Your changes from the game's Mods page couldn't be used.", text))
+
+    def cancel(self) -> None:
+        """Stop getting the mods ready (Cancel). The next Play starts over."""
+        job = self.jobs.get("main")
+        if not self.can("cancel"):
+            return
+        job.cancelled = True
+        self.chain = []
+        kill_tree(job.proc)
+        self.status = Status("busy", ["Stopping..."])
+
+    def play_plain(self) -> None:
+        """Play without mods: savagewind.exe as it is (the mod variables cleared). Your mods stay as they are."""
+        if not self.free("play_plain"):
+            return
+        if self.backend.running():
+            self.game_open, self._gone = True, 0
+            self.status = Status("error", ["Savage Wind is already open.", "Close it, then press Play."])
+            return
+        try:
+            self.backend.start_plain()
+        except OSError as e:
+            self.status = Status("error", ["The game didn't start.", plain(str(e))])
+            return
+        self.game_open, self._gone = True, 0
+        self.offer = None
+        self.status = Status("ok", ["Started Savage Wind without mods.", "Your mods are kept for next time."])
+
+    # --- Breathalyzer Plus: the mods picked in the mod picker
+
+    def install_picked(self, mods: list[dict], picks: dict[str, bool]) -> None:
+        """Put the picked bundled mods (launcher.read_bundled) into the library, one step after the other in the
+        background: each code mod not there yet is added (modman add, then its after_add commands), then turned on
+        or off as picked; a recipe mod turned on and not there yet is built from the player's game files (its build
+        commands). A recipe that stays off is built only when it is picked later."""
+        if not self.free("add"):
+            return
+        have = {r.id for r in self.listing.rows}
+        steps: list[Job] = []
+        for m in mods:
+            on, title = bool(picks.get(m["id"], m["on"])), m["title"]
+            new = m["id"] not in have
+            if m["kind"] == "code" and new:
+                steps.append(Job("add", ["add", m["folder"]], name=title, mod_id=m["id"]))
+            elif m["kind"] == "recipe" and new and on:
+                steps += [Job("tool", cmd[1:], script=os.path.join(TOOLS, cmd[0]), name=title, mod_id=m["id"])
+                          for cmd in m["build"]]
+            if new and (m["kind"] == "code" or on):
+                steps += [Job("tool", cmd[1:], script=os.path.join(TOOLS, cmd[0]), name=title, mod_id=m["id"])
+                          for cmd in m.get("after_add") or []]
+            if m["kind"] == "code" or not new:
+                steps.append(Job("enable" if on else "disable", ["enable" if on else "disable", m["id"]],
+                                 name=title, mod_id=m["id"], in_process=True))
+        self.installing, self.install_total = [], len(steps)
+        self.chain = steps
+        if steps:
+            self._next()
+        else:
+            self._installed()
+
+    def _installed(self) -> None:
+        failed, self.installing = self.installing or [], None
+        self._reload()
+        self.refresh_state()
+        if failed:
+            names = list(dict.fromkeys(failed))
+            self.status = Status("warn", [f"{n_of(len(names), 'mod')} couldn't be added: {', '.join(names)}.",
+                                          "The others are ready. Details says why."])
+        else:
+            self.status = Status("ok", ["Your mods are ready.", "Press Play. You can turn them on or off below."])
+
+    # --- while the game is open
+
+    def watch(self) -> None:
+        """Ask in the background whether the game still runs (the window calls this every few seconds)."""
+        if not self.game_open or self._watching or "play" in self.jobs:
+            return
+        self._watching = True
+
+        def work():
+            try:
+                running = bool(self.backend.running())
+            except Exception:  # (then it counts as closed: Play is never stuck)
+                running = False
+            self.events.put(("game", None, running))
+
+        threading.Thread(target=work, daemon=True, name="launcher game check").start()
+
+    def _game_state(self, running: bool) -> None:
+        self._watching = False
+        self._gone = 0 if running else self._gone + 1
+        if self.game_open and self._gone >= 2:   # (twice: a game that restarts itself isn't "closed")
+            self.game_open = False
+            self.status = Status("ok", ["The game closed.", "Press Play to play again."])
+            self.refresh_state()
+
+    # --- the Mod Manager's words
+
+    def _quick(self, action: str, refs: list[str], row: Row) -> None:
+        super()._quick(action, refs, row)
+        self.status = launcher_words(self.status)
+
+
+class LauncherView(BigText):
+    """Breathalyzer as the launcher (tools/launcher.py): the first-run screens, Home (the big Play button and the mods:
+    ON/OFF, title, what each does) and Settings. Everything Home does goes through a LaunchController; the first run
+    goes through launcher.FirstRun."""
+
+    def __init__(self, root, settings: la.Settings, settings_file: str, *, first_run: la.FirstRun | None = None,
+                 make_backend=None, port: int | None = None, library: str | None = None, app_dir: str = la.REPO):
+        self.root = root
+        self.bundled_key, self.bundled = la.read_bundled(app_dir)   # (Breathalyzer Plus: our mods for the picker)
+        self.picks: dict[str, bool] = {}
+        self.pick_buttons: dict[str, object] = {}
+        self.picker_buttons: list = []
+        self.picker_from_settings = False
+        self.settings, self.settings_file = settings, settings_file
+        self.first = first_run or la.FirstRun(settings, library=library)
+        self.make_backend = make_backend or (lambda lib, install: LaunchBackend(lib, install))
+        self.port, self.library_arg = port, library
+        self.ctl: LaunchController | None = None
+        self.closed = False
+        self.screen = ""                 # home, setup or settings
+        self.setup_mode = "first"        # first (the first run), change (Settings > Change), check (Check my setup)
+        self.check_report: la.Report | None = None
+        self.details_open = False
+        self.manager = None              # the Mod Manager window, while it is open
+        self.list_version = -1
+        self.ticks = 0
+        self.was_open = False
+        self.wraps: list = []            # (label, share of the width) whose text wraps
+        self.flows: list[Flow] = []
+        self.last_dir = next((d for d in (os.path.join(os.path.expanduser("~"), "Downloads"), os.path.expanduser("~"))
+                              if os.path.isdir(d)), "")
+        self.size = max(MIN_SIZE, min(MAX_SIZE, settings.size))
+        self.t = THEMES["dark" if settings.dark else "light"]
+        family = pick_family(root, ("Segoe UI", "Verdana", "DejaVu Sans", "Helvetica"), "TkDefaultFont")
+        mono = pick_family(root, ("Consolas", "Cascadia Mono", "DejaVu Sans Mono", "Courier New"), "TkFixedFont")
+        self.font = tkfont.Font(root, family=family, size=self.size)
+        self.bold = tkfont.Font(root, family=family, size=self.size, weight="bold")
+        self.head = tkfont.Font(root, family=family, size=self.size + 4, weight="bold")
+        self.big = tkfont.Font(root, family=family, size=self.size + 10, weight="bold")
+        self.play_font = tkfont.Font(root, family=family, size=self.play_size(), weight="bold")
+        self.mono = tkfont.Font(root, family=mono, size=max(MIN_SIZE, self.size - 4))
+        self.style = ttk.Style(root)
+        self.style.theme_use("clam")
+        root.title(la.WINDOW_TITLE)
+        set_app_icon(root)
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
+        for seq in ("<Control-plus>", "<Control-equal>", "<Control-KP_Add>"):
+            root.bind(seq, lambda e: self.set_size(self.size + 2))
+        for seq in ("<Control-minus>", "<Control-KP_Subtract>"):
+            root.bind(seq, lambda e: self.set_size(self.size - 2))
+        root.bind("<Control-0>", lambda e: self.set_size(la.DEFAULT_SIZE))
+        root.bind("<F1>", lambda e: self.help())
+        root.bind("<F5>", lambda e: self.reload())
+        root.bind("<Escape>", lambda e: self.back())
+        root.bind("<Configure>", self.on_resize)
+        self.width = 0
+        self.build()
+        self.first.start()
+        if self.first.ready and settings.install:
+            self.open_home()
+        else:
+            self.show_setup()
+        self.fit(shrink=True)
+        root.after(POLL_MS, self.tick)
+
+    def play_size(self) -> int:
+        return max(32, min(72, self.size * 2))
+
+    # --- building
+
+    def wrap_label(self, parent, font=None, share: float = 1.0, **kw):
+        lab = self.label(parent, font, **kw)
+        self.wraps.append((lab, share))
+        return lab
+
+    def build(self) -> None:
+        """Every screen's widgets (built again for another theme)."""
+        t, r = self.t, self.root
+        for w in r.winfo_children():
+            if not isinstance(w, tk.Toplevel):
+                w.destroy()
+        self.wraps, self.flows = [], []
+        r.configure(bg=t["bg"])
+        r.columnconfigure(0, weight=1)
+        r.rowconfigure(1, weight=1)
+        top = tk.Frame(r, bg=t["bg"])
+        top.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(PAD, 4))
+        top.columnconfigure(1, weight=1)
+        self.label(top, self.head, text="Breathalyzer").grid(row=0, column=0, sticky="w")
+        self.sw_label = self.label(top, anchor="e")
+        self.sw_label.grid(row=0, column=1, sticky="e")
+        self.frames = {name: tk.Frame(r, bg=t["bg"]) for name in ("home", "setup", "settings", "picker")}
+        for f in self.frames.values():
+            f.columnconfigure(0, weight=1)
+        self.build_home()
+        self.build_setup()
+        self.build_settings()
+        self.build_picker()
+        self.style_tree()
+        self.list_version = -1
+
+    def build_home(self) -> None:
+        t, f = self.t, self.frames["home"]
+        self.home_buttons: list = []
+        self.status_box = box = tk.Frame(f, bg=t["bg"])
+        box.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(6, 8))
+        box.columnconfigure(1, weight=1)
+        self.status_bar = tk.Frame(box, width=10, bg=t["info"])
+        self.status_bar.grid(row=0, column=0, rowspan=2, sticky="ns", padx=(0, 14))
+        self.status_head = self.wrap_label(box, self.head)
+        self.status_head.grid(row=0, column=1, sticky="ew")
+        self.status_more = self.wrap_label(box, anchor="nw")
+        self.status_more.grid(row=1, column=1, sticky="new")
+        # (Play and the smaller choices beside it share a row: Play without mods; while busy Cancel; after a failed
+        # code build Play without code mods)
+        row = tk.Frame(f, bg=t["bg"])
+        row.grid(row=1, column=0, sticky="ew", padx=PAD)
+        row.columnconfigure(0, weight=1)
+        self.play = self.make_button(row, "Play", lambda: self.after_action(lambda: self.ctl.launch()),
+                                     self.home_buttons, why=lambda: self.after_action(lambda: self.ctl.free("play")))
+        self.play.configure(font=self.play_font, bg=t["play"], fg=t["play_fg"], activebackground=t["active"],
+                            activeforeground=t["fg"], pady=0)   # (a Tk button adds room of its own)
+        self.play.pack_configure(fill="both", expand=True)
+        self.play.ring.grid(row=0, column=0, sticky="nsew")
+        self.side = tk.Frame(row, bg=t["bg"])
+        self.side.grid(row=0, column=1, sticky="ns")
+        self.plain_button = self.make_button(self.side, "Play without mods", self.on_play_plain, self.home_buttons)
+        self.offer_button = self.make_button(self.side, "", self.on_offer, self.home_buttons, bold=True)
+        self.cancel_button = self.make_button(self.side, "Cancel", lambda: self.after_action(self.ctl.cancel),
+                                              self.home_buttons)
+        self.why_button = self.make_button(self.side, "Details", self.on_details, self.home_buttons)
+        for b in (self.plain_button, self.offer_button, self.cancel_button, self.why_button):
+            b.pack_configure(fill="both", expand=True)
+        self.side_items: list = []
+        self.line = self.wrap_label(f)
+        self.line.grid(row=2, column=0, sticky="ew", padx=PAD, pady=(6, 8))
+        self.list_box = tk.Frame(f, bg=t["bg"], highlightthickness=4, highlightbackground=t["line"],
+                                 highlightcolor=t["focus"])
+        self.list_box.grid(row=5, column=0, sticky="nsew", padx=PAD)
+        self.list_box.columnconfigure(0, weight=1)
+        self.list_box.rowconfigure(0, weight=1)
+        f.rowconfigure(5, weight=1)
+        cols = (("on", "On/Off", "center"), ("name", "Mod", "w"), ("about", "What it does", "w"))
+        self.tree = ttk.Treeview(self.list_box, columns=[c for c, _, _ in cols], show="headings", selectmode="browse",
+                                 style="Home.Treeview", height=HOME_ROWS)
+        for col, text, anchor in cols:
+            self.tree.heading(col, text=text, anchor=anchor)
+            self.tree.column(col, anchor=anchor, stretch=col == "about")
+        scroll = ttk.Scrollbar(self.list_box, orient="vertical", command=self.tree.yview,
+                               style="Mods.Vertical.TScrollbar", takefocus=0)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.tree.bind("<space>", lambda e: self.key(self.on_toggle))
+        self.tree.bind("<Button-1>", self.on_click)
+        self.tree.bind("<Double-1>", self.on_double)
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.render_about())
+        self.tree.bind("<FocusIn>", self.list_focus)
+        self.tree.bind("<FocusOut>", lambda e: self.list_box.configure(highlightbackground=t["line"]))
+        self.about = self.wrap_label(f, anchor="nw")   # (ABOUT_LINES lines high; render_about cuts longer text)
+        self.about.grid(row=6, column=0, sticky="nsew", padx=PAD, pady=(6, 8))
+        self.flow = Flow(f, gap=4, bg=t["bg"])
+        self.flows.append(self.flow)
+        self.flow.frame.grid(row=7, column=0, sticky="ew", padx=PAD, pady=(0, PAD))
+        self.by_action = {}
+        group: list = []
+        for action, text, command in (
+                ("toggle", "Turn off", self.on_toggle), ("add", "Add mod", self.on_add),
+                ("mods_folder", "Open mods folder", self.on_open_mods),
+                ("settings", "Settings", lambda: self.show_settings()), ("more", "More...", self.on_more)):
+            b = self.make_button(self.flow.frame, text, command, group, width=8 if action == "toggle" else 0)
+            self.flow.items.append(b.ring)
+            self.by_action[action] = b
+
+    def build_setup(self) -> None:
+        t, f = self.t, self.frames["setup"]
+        self.setup_head = self.wrap_label(f, self.big)
+        self.setup_head.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(PAD, 6))
+        self.setup_line = self.wrap_label(f)
+        self.setup_line.grid(row=1, column=0, sticky="ew", padx=PAD)
+        self.setup_body = tk.Frame(f, bg=t["bg"])
+        self.setup_body.grid(row=2, column=0, sticky="ew", padx=PAD, pady=(12, 6))
+        self.setup_body.columnconfigure(0, weight=1)
+        self.setup_flow = Flow(f, gap=4, bg=t["bg"])
+        self.flows.append(self.setup_flow)
+        self.setup_flow.frame.grid(row=3, column=0, sticky="ew", padx=PAD, pady=(10, 6))
+        self.details_text = self.wrap_label(f, self.mono, fg=t["disabled"])
+        self.details_text.grid(row=5, column=0, sticky="ew", padx=PAD, pady=(4, PAD))
+        f.rowconfigure(6, weight=1)
+        self.setup_buttons: list = []
+
+    def build_settings(self) -> None:
+        t, f = self.t, self.frames["settings"]
+        self.settings_top = tk.Frame(f, bg=t["bg"])
+        self.settings_top.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(8, 10))
+        self.settings_body = tk.Frame(f, bg=t["bg"])
+        self.settings_body.grid(row=1, column=0, sticky="nsew", padx=PAD)
+        self.settings_body.columnconfigure(1, weight=1)
+        self.settings_buttons: list = []
+        self.fill_settings()
+
+    def style_tree(self) -> None:
+        t, s = self.t, self.style
+        line = self.font.metrics("linespace")
+        self.frames["home"].rowconfigure(6, minsize=ABOUT_LINES * line)   # (the list doesn't jump)
+        self.status_box.rowconfigure(1, minsize=2 * line)
+        s.configure("Home.Treeview", background=t["bg"], fieldbackground=t["bg"], foreground=t["fg"], font=self.font,
+                    rowheight=int(line * 1.45), borderwidth=0, bordercolor=t["bg"], lightcolor=t["bg"],
+                    darkcolor=t["bg"])
+        s.map("Home.Treeview", background=[("selected", t["sel_bg"])], foreground=[("selected", t["sel_fg"])])
+        s.configure("Home.Treeview.Heading", font=self.bold, background=t["button"], foreground=t["fg"],
+                    relief="flat", padding=(self.size // 2, self.size // 4), bordercolor=t["line"],
+                    lightcolor=t["button"], darkcolor=t["button"])
+        s.map("Home.Treeview.Heading", background=[("active", t["active"])])
+        s.configure("Mods.Vertical.TScrollbar", background=t["button"], troughcolor=t["bg"], arrowcolor=t["fg"],
+                    bordercolor=t["line"], lightcolor=t["button"], darkcolor=t["button"],
+                    arrowsize=max(16, int(line * 0.9)))
+        s.map("Mods.Vertical.TScrollbar", background=[("active", t["active"])])
+        zero = self.font.measure("0")
+        self.tree.column("on", width=self.bold.measure("On/Off") + zero * 3, minwidth=zero * 4)
+        self.tree.column("about", width=zero * 30, minwidth=zero * 8)
+        self.size_columns()
+
+    def size_columns(self) -> None:
+        """The Mod column as wide as the longest name, up to 45% of the list (What it does gets the rest)."""
+        zero = self.font.measure("0")
+        rows = self.ctl.listing.rows if self.ctl is not None else []
+        longest = max([self.font.measure(r.name) for r in rows] + [self.bold.measure("Mod"), zero * 8])
+        have = self.tree.winfo_width()
+        cap = int((have if have > 1 else self.text_width()) * 0.45)
+        self.tree.column("name", width=min(longest + zero * 2, cap), minwidth=zero * 8)
+
+    # --- screens
+
+    def show(self, name: str) -> None:
+        for key, f in self.frames.items():
+            if key == name:
+                f.grid(row=1, column=0, sticky="nsew")
+            else:
+                f.grid_remove()
+        self.screen = name
+        self.render()
+        self.rewrap()
+        if self.root.winfo_ismapped():
+            self.fit()   # (a screen that needs more room than the last one makes the window bigger)
+
+    def back(self) -> str:
+        """Esc: back to Home (from Settings, the mod picker, Check my setup, or a folder change that is left)."""
+        if self.ctl is not None and self.screen != "home":
+            self.setup_mode = "first"
+            self.show("home")
+            self.play.focus_set()
+        return "break"
+
+    def reload(self) -> str:
+        if self.screen == "home" and self.ctl is not None:
+            self.after_action(self.ctl.refresh)
+        elif self.screen == "setup" and self.setup_mode != "check":
+            self.do("recheck")
+        return "break"
+
+    def help(self) -> str:
+        lines = ["Keys: Tab and the arrow keys move, Space or Enter presses.",
+                 "Space in the list turns a mod on or off. Ctrl + and Ctrl - change the text size. Esc goes back."]
+        if self.ctl is not None and self.screen == "home":
+            self.ctl.status = Status("info", lines)
+            self.render()
+        return "break"
+
+    # --- the first run (and Check my setup, and Settings > Change)
+
+    def setup_content(self) -> tuple[str, str, list, list, list, str]:
+        """(heading, line, report lines, folder choices, buttons, details) for the setup screen."""
+        f = self.first
+        back = [("Back", "back")] if self.setup_mode != "first" and self.ctl is not None else []
+        if self.setup_mode == "check" and self.check_report is not None:
+            rep = self.check_report
+            sc = rep.first()
+            if sc is None:
+                return ("Your setup is ready", rep.folder, rep.lines(), [], [("Back", "back")], "")
+            return (sc.heading, sc.line, rep.lines(), [], [("Back", "back")] + sc.buttons, sc.details)
+        if f.screen is not None:
+            sc = f.screen
+            return sc.heading, sc.line, f.report.lines() if f.report else [], [], sc.buttons + back, sc.details
+        if f.choices:
+            return ("Savage Wind is in more than one place", "Pick the one to use.", [],
+                    [c.folder for c in f.choices], [("Choose another folder", "choose")] + back, "")
+        if f.ready:
+            rep = f.report
+            return ("Found Savage Wind", rep.folder, rep.lines(), [],
+                    [("Continue", "finish"), ("Choose another folder", "choose")] + back, "")
+        return "Looking for Savage Wind...", "", [], [], [], ""
+
+    def show_setup(self) -> None:
+        t = self.t
+        heading, line, lines, choices, buttons, details = self.setup_content()
+        self.setup_head.configure(text=heading)
+        self.setup_line.configure(text=line)
+        for w in self.setup_body.winfo_children():
+            w.destroy()
+        self.wraps = [(w, s) for w, s in self.wraps if w.winfo_exists()]
+        self.setup_buttons = []
+        for k, (ok, text) in enumerate(lines):
+            mark = self.label(self.setup_body, self.bold, text="✓" if ok else "✗",
+                              fg=t["ok"] if ok else t["error"])
+            mark.grid(row=k, column=0, sticky="nw", padx=(0, 12))
+            self.wrap_label(self.setup_body, text=text, share=0.9).grid(row=k, column=1, sticky="w")
+        self.setup_body.columnconfigure(0, weight=0)
+        self.setup_body.columnconfigure(1, weight=1)
+        for k, folder in enumerate(choices):
+            b = self.make_button(self.setup_body, self.one_line(folder, self.room()[0] - 160),
+                                 lambda p=folder: self.do("use", p), self.setup_buttons)
+            b.ring.grid(row=len(lines) + k, column=0, columnspan=2, sticky="w")
+        for w in self.setup_flow.frame.winfo_children():
+            w.destroy()
+        self.setup_flow.items = []
+        main = None
+        for k, (text, action) in enumerate(buttons):
+            b = self.make_button(self.setup_flow.frame, text, lambda a=action: self.do(a), self.setup_buttons,
+                                 bold=k == 0)
+            self.setup_flow.items.append(b.ring)
+            main = main or b
+        self.details_open = False
+        if details:
+            b = self.make_button(self.setup_flow.frame, "Details", self.toggle_details, self.setup_buttons)
+            self.setup_flow.items.append(b.ring)
+        self.setup_details = details
+        self.details_text.configure(text="")
+        self.setup_flow.shape = None
+        self.show("setup")
+        self.root.after_idle(lambda: self.setup_flow.reflow(force=True))
+        target = (self.setup_buttons[0] if choices else main)
+        if target is not None:
+            target.focus_set()
+
+    def toggle_details(self) -> None:
+        self.details_open = not self.details_open
+        self.details_text.configure(text=self.setup_details if self.details_open else "")
+
+    def do(self, action: str, arg: str | None = None) -> None:
+        """A setup screen's button."""
+        f = self.first
+        rep = f.report or self.check_report
+        if action == "choose":
+            path = filedialog.askdirectory(parent=self.root, title="Pick your Savage Wind folder", mustexist=True,
+                                           initialdir=self.settings.install or self.last_dir)
+            if not path:
+                return
+            f.pick(os.path.normpath(path))
+        elif action == "use":
+            f.use(arg, "picked")
+        elif action == "search":
+            f.search()
+        elif action == "recheck":
+            folder = (rep.folder if rep else None) or self.settings.install
+            if self.setup_mode == "check" and folder:
+                return self.on_check()
+            if folder:
+                f.use(folder, "picked")
+            else:
+                f.search()
+        elif action == "open_game":
+            if rep is not None:
+                la.open_path(os.path.join(rep.folder, la.EXE))
+            return
+        elif action == "download":
+            la.open_page(la.DOWNLOAD_PAGE)
+            return
+        elif action == "close":
+            return self.on_close()
+        elif action == "continue":
+            f.go_on()
+        elif action == "open_library":
+            if rep is not None and rep.library:
+                la.open_path(la.nearest_existing(rep.library))
+            return
+        elif action == "fresh_list":
+            if rep is None or not rep.library or not self.ask(
+                    "Your mod list", "Start a fresh mod list?", "The old list is kept as a backup next to it. Your "
+                    "mods stay in the mods folder; add them again to use them.", [("Start fresh", True),
+                                                                                 ("Cancel", False)], default=1):
+                return
+            try:
+                la.fresh_list(rep.library)
+            except OSError as e:
+                self.setup_line.configure(text=f"The old list couldn't be moved: {e}")
+                return
+            f.use(rep.folder, "picked")
+        elif action == "finish":
+            f.finish(self.settings_file)
+            self.setup_mode = "first"
+            self.open_home()
+            return
+        elif action == "back":
+            self.back()
+            return
+        self.show_setup()
+
+    def open_home(self) -> None:
+        """Home for the Savage Wind folder the first run settled on: the mod library made (or found), Play focused."""
+        rep = self.first.report
+        install = rep.folder
+        library = self.library_arg or rep.library or la.default_library(install)
+        backend = self.make_backend(library, install)
+        problem = self.ensure_library(backend, install)
+        if problem:
+            self.first.screen = la.Screen("library", "Your mod list couldn't be made", problem,
+                                          [("Check again", "recheck"), ("Choose another folder", "choose")])
+            self.show_setup()
+            return
+        if self.settings.library != library or self.settings.install != install:
+            self.settings.install, self.settings.library = install, library
+            self.save_settings()
+        if self.ctl is not None:
+            self.ctl.stop()
+        self.ctl = LaunchController(backend, port=self.port or self.settings.port)
+        warn = next((s for s in rep.screens if not s.blocks), None)
+        if warn is not None:
+            self.ctl.status = Status("warn", [warn.heading + ".", warn.line])
+        self.home_report = rep
+        self.list_version = -1
+        self.show("home")
+        self.play.focus_set()
+        self.ctl.refresh_state()
+        if self.bundled and self.settings.picked != self.bundled_key:
+            self.show_picker()   # (Breathalyzer Plus: pick our mods before the first Play)
+
+    def ensure_library(self, backend: LaunchBackend, install: str) -> str | None:
+        """The library knows this Savage Wind folder (modman init makes it, or points an old one here). None when it
+        does, else why not."""
+        mm = backend.mm
+        try:
+            lib = mm.Library.load(backend.root)
+        except (mm.ModmanError, OSError, ValueError) as e:
+            return plain(str(e))
+        if lib is not None and lib.install and \
+                os.path.normcase(os.path.abspath(lib.install)) == os.path.normcase(os.path.abspath(install)):
+            return None
+        code, lines = backend.quick(["init", install])
+        if code == 0:
+            return None
+        return (error_lines(lines) or [plain(x) for x in lines[-1:]] or ["modman init failed."])[0]
+
+    # --- Home
+
+    def render(self) -> None:
+        if self.closed:
+            return
+        rep = getattr(self, "home_report", None) or self.first.report
+        if rep is not None and rep.version and rep.ok:
+            self.sw_label.configure(text=f"Savage Wind {rep.version}  ✓", fg=self.t["ok"])
+        else:
+            self.sw_label.configure(text="")
+        if self.screen != "home" or self.ctl is None:
+            return
+        ctl, t = self.ctl, self.t
+        if self.list_version != ctl.list_version:
+            self.render_list()
+        st = ctl.status
+        self.status_bar.configure(bg=t.get(st.kind, t["info"]))
+        self.status_head.configure(text=st.lines[0] if st.lines else "", fg=t["error"] if st.kind == "error"
+                                   else t["fg"])
+        self.status_more.configure(text="\n".join(st.lines[1:3]))
+        self.play.configure(state="normal" if ctl.can("play") else "disabled",
+                            bg=t["play"] if ctl.can("play") else t["button"])
+        self.plain_button.configure(state="normal" if ctl.can("play_plain") else "disabled")
+        if ctl.can("cancel"):
+            items = [self.cancel_button.ring]
+        else:
+            items = [self.plain_button.ring]
+            if ctl.offer:
+                self.offer_button.configure(text=ctl.offer[0], state="normal" if ctl.can("play") else "disabled")
+                items.insert(0, self.offer_button.ring)
+            if st.kind == "error" and ctl.details_job is not None:
+                items.append(self.why_button.ring)
+        if items != self.side_items:
+            for w in self.side_items:
+                w.pack_forget()
+            for w in items:
+                w.pack(side="left", fill="y", padx=(8, 0))
+            self.side_items = items
+        for action, b in self.by_action.items():
+            gate = {"toggle": "toggle", "add": "add", "more": "more"}.get(action, "settings")
+            b.configure(state="normal" if ctl.can(gate) else "disabled")
+        self.render_line()
+        self.render_about()
+
+    def render_line(self) -> None:
+        lines = self.ctl.progress() if self.ctl.jobs or self.ctl.game_open else []
+        self.line.configure(text="\n".join(lines) if lines else self.ctl.summary_line())
+
+    def render_list(self) -> None:
+        keep = self.ctl.take_select() or self.selected_id()
+        self.tree.delete(*self.tree.get_children())
+        rows = self.ctl.listing.rows
+        for row in rows:
+            self.tree.insert("", "end", iid=row.id, values=("ON" if row.on else "OFF", row.name, row.about))
+        ids = [r.id for r in rows]
+        pick = keep if keep in ids else (ids[0] if ids else None)
+        if pick:
+            self.tree.selection_set(pick)
+            self.tree.focus(pick)
+            self.tree.see(pick)
+        self.list_version = self.ctl.list_version
+        self.size_columns()
+
+    def render_about(self) -> None:
+        if self.ctl is None:
+            return
+        row = self.ctl.row(self.selected_id())
+        if row is None:
+            text = "Add a mod with Add mod." if not self.ctl.listing.rows else "Pick a mod to read what it does."
+        else:
+            text = f"{row.name}: {row.full or row.about or kind_text(row.kinds)}"
+        width = int(self.about.cget("wraplength") or 0) or self.text_width()
+        self.about.configure(text=cut_lines(text, self.font, width, ABOUT_LINES))
+        self.by_action["toggle"].configure(text="Turn on" if row and not row.on else "Turn off")
+
+    def tick(self) -> None:
+        if self.closed:
+            return
+        try:
+            self.ticks += 1
+            if self.ctl is not None:
+                changed = self.ctl.poll()
+                if self.ctl.game_open and self.ticks % GAME_POLL_TICKS == 0:
+                    self.ctl.watch()
+                playing = self.ctl.game_open or "play" in self.ctl.jobs
+                if playing != self.was_open:
+                    self.was_open = playing
+                    self.hide_while_playing(playing)
+                if changed:
+                    self.render()
+                elif self.screen == "home" and (self.ctl.jobs or self.ctl.game_open):
+                    self.render_line()
+        finally:
+            if not self.closed:
+                self.root.after(POLL_MS, self.tick)
+
+    def hide_while_playing(self, playing: bool) -> None:
+        if not self.settings.hide_while_playing:
+            return
+        with contextlib.suppress(tk.TclError):
+            if playing:
+                self.root.iconify()
+            else:
+                self.root.deiconify()
+                self.root.lift()
+
+    def selected_id(self) -> str | None:
+        sel = self.tree.selection()
+        return sel[0] if sel else None
+
+    def list_focus(self, _event=None) -> None:
+        self.list_box.configure(highlightbackground=self.t["focus"])
+        if not self.tree.selection() and self.tree.get_children():
+            first = self.tree.get_children()[0]
+            self.tree.selection_set(first)
+            self.tree.focus(first)
+
+    def on_click(self, event):
+        """A click in the On/Off column turns that mod on or off."""
+        row = self.tree.identify_row(event.y)
+        if row and self.tree.identify_region(event.x, event.y) == "cell" and self.tree.identify_column(event.x) == "#1":
+            self.tree.selection_set(row)
+            self.tree.focus(row)
+            self.on_toggle()
+            return "break"
+        return None
+
+    def on_double(self, event):
+        if self.tree.identify_column(event.x) != "#1" and self.tree.identify_row(event.y):
+            self.on_toggle()
+        return "break"
+
+    def after_action(self, fn) -> None:
+        fn()
+        self.render()
+
+    def on_toggle(self) -> None:
+        self.after_action(lambda: self.ctl.toggle(self.selected_id()))
+
+    def on_offer(self) -> None:
+        if self.ctl.offer and self.ctl.offer[1] == "no_rebuild":
+            self.after_action(lambda: self.ctl.launch(no_rebuild=True))
+
+    def on_play_plain(self) -> None:
+        self.after_action(self.ctl.play_plain)
+
+    def on_details(self) -> None:
+        """What the last step printed, in its own window, with Copy (the home folder is written as %USERPROFILE%,
+        so a bug report doesn't carry the player's name)."""
+        t = self.t
+        text = report_text(self.ctl.details_text())
+        top = tk.Toplevel(self.root, bg=t["bg"], padx=16, pady=16)
+        top.title("Details")
+        top.transient(self.root)
+        top.columnconfigure(0, weight=1)
+        top.rowconfigure(0, weight=1)
+        box = tk.Text(top, font=self.mono, bg=t["bg"], fg=t["fg"], wrap="word", width=70, height=14,
+                      highlightthickness=4, highlightcolor=t["focus"], highlightbackground=t["line"], padx=8, pady=6)
+        box.insert("end", text)
+        box.configure(state="disabled")
+        scroll = ttk.Scrollbar(top, orient="vertical", command=box.yview, style="Mods.Vertical.TScrollbar")
+        box.configure(yscrollcommand=scroll.set)
+        box.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        row = tk.Frame(top, bg=t["bg"])
+        row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        group: list = []
+
+        def copy():
+            top.clipboard_clear()
+            top.clipboard_append(text)
+
+        for label, command in (("Copy", copy), ("Close", top.destroy)):
+            self.make_button(row, label, command, group).ring.pack(side="left", padx=(0, 8))
+        top.bind("<Escape>", lambda e: top.destroy())
+        group[-1].focus_set()
+
+    def on_add(self) -> None:
+        if not self.ctl.can("add"):
+            return self.after_action(lambda: self.ctl.free("add"))
+        what = self.ask("Add mod", "What is the mod?", "A folder, or a .zip or other file (patch, cheats, DLL).",
+                        [("A folder", "folder"), (".zip or file", "file"), ("Cancel", None)], default=0)
+        if what == "folder":
+            path = filedialog.askdirectory(parent=self.root, title="Pick the mod folder", initialdir=self.last_dir,
+                                           mustexist=True)
+        elif what == "file":
+            path = filedialog.askopenfilename(parent=self.root, title="Pick the mod file", initialdir=self.last_dir,
+                                              filetypes=[("Mods", "*.zip *.bnp *.ips *.pchtxt *.txt *.dll"),
+                                                         ("All files", "*.*")])
+        else:
+            return None
+        if path:
+            path = os.path.normpath(path)
+            self.last_dir = os.path.dirname(path)
+            self.after_action(lambda: self.ctl.add(path))
+        return None
+
+    def on_check(self) -> None:
+        """Check my setup (Settings > Check): the first run's checks, on the Savage Wind folder in use."""
+        install = self.ctl.backend.install if self.ctl else self.settings.install
+        if not install:
+            return
+        self.root.configure(cursor="watch")
+        self.root.update_idletasks()
+        try:
+            self.check_report = self.first.check(install, self.ctl.backend.root if self.ctl else None, "remembered")
+        finally:
+            self.root.configure(cursor="")
+        self.setup_mode = "check"
+        self.show_setup()
+
+    def on_open_mods(self) -> None:
+        la.open_path(la.nearest_existing(os.path.join(self.ctl.backend.root, "mods")))
+
+    def on_open_game(self) -> None:
+        la.open_path(self.ctl.backend.install)
+
+    def on_more(self) -> None:
+        """The Mod Manager window (move, remove, check, details, deploy) on the same library; Home waits meanwhile."""
+        if self.manager is not None or not self.ctl.can("more"):
+            return self.after_action(lambda: self.ctl.free("more"))
+        top = tk.Toplevel(self.root)
+        top.transient(self.root)
+        self.ctl.blocked = True
+        try:
+            View(top, Controller(Backend(self.ctl.backend.root, mm=self.ctl.backend.mm),
+                                 port=self.port or self.settings.port), size=self.size, dark=self.settings.dark)
+        except Exception:
+            self.ctl.blocked = False
+            top.destroy()
+            raise
+        self.manager = top
+
+        def gone(event):
+            if event.widget is top and self.manager is top:
+                self.manager = None
+                self.ctl.blocked = False
+                self.after_action(self.ctl.refresh)
+
+        top.bind("<Destroy>", gone, add="+")
+        self.render()
+        return None
+
+    # --- Breathalyzer Plus: the mod picker
+
+    def build_picker(self) -> None:
+        t, f = self.t, self.frames["picker"]
+        self.label(f, self.big, text="Pick your mods").grid(row=0, column=0, sticky="w", padx=PAD, pady=(8, 2))
+        self.wrap_label(f, text="Turn each one ON or OFF, then press Save. You can change it later on the Home "
+                                "screen.").grid(row=1, column=0, sticky="ew", padx=PAD)
+        # (the cards scroll when there are more than fit: the keyboard focus brings its card into view)
+        holder = tk.Frame(f, bg=t["bg"])
+        holder.grid(row=2, column=0, sticky="nsew", padx=PAD, pady=(12, 6))
+        holder.columnconfigure(0, weight=1)
+        holder.rowconfigure(0, weight=1)
+        f.rowconfigure(2, weight=1)
+        self.picker_canvas = canvas = tk.Canvas(holder, bg=t["bg"], highlightthickness=0, height=1, takefocus=0)
+        scroll = ttk.Scrollbar(holder, orient="vertical", command=canvas.yview, style="Mods.Vertical.TScrollbar",
+                               takefocus=0)
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.picker_body = tk.Frame(canvas, bg=t["bg"])
+        self.picker_body.columnconfigure(1, weight=1)
+        item = canvas.create_window(0, 0, window=self.picker_body, anchor="nw")
+        self.picker_body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(item, width=e.width))
+        for w in (canvas, self.picker_body):
+            w.bind("<MouseWheel>", self.picker_wheel)
+        self.picker_flow = Flow(f, gap=4, bg=t["bg"])
+        self.flows.append(self.picker_flow)
+        self.picker_flow.frame.grid(row=3, column=0, sticky="ew", padx=PAD, pady=(6, PAD))
+        if self.picker_buttons:   # (built again for another theme while it was open)
+            self.fill_picker()
+
+    def show_picker(self, from_settings: bool = False) -> None:
+        """Our mods, each with ON/OFF, its title, what it does and its notes. A mod already in the library shows
+        how it is now; the others their default."""
+        rows = {r.id: r for r in self.ctl.listing.rows} if self.ctl is not None else {}
+        self.picks = {m["id"]: rows[m["id"]].on if m["id"] in rows else m["on"] for m in self.bundled}
+        self.picker_from_settings = from_settings
+        self.fill_picker()
+        self.show("picker")
+        if self.picker_buttons:
+            self.picker_buttons[0].focus_set()
+
+    def fill_picker(self) -> None:
+        t, body = self.t, self.picker_body
+        for w in body.winfo_children():
+            w.destroy()
+        for w in self.picker_flow.frame.winfo_children():
+            w.destroy()
+        self.wraps = [(w, s) for w, s in self.wraps if w.winfo_exists()]
+        self.picker_buttons, self.pick_buttons, self.picker_flow.items = [], {}, []
+        for k, m in enumerate(self.bundled):
+            b = self.make_button(body, "", lambda i=m["id"]: self.flip_pick(i), self.picker_buttons, bold=True,
+                                 width=4)
+            b.ring.grid(row=k, column=0, sticky="nw", pady=(0, 8))
+            b.bind("<FocusIn>", lambda e, ring=b.ring: self.picker_see(ring), add="+")
+            self.pick_buttons[m["id"]] = b
+            self.paint_pick(m["id"])
+            card = tk.Frame(body, bg=t["bg"])
+            card.grid(row=k, column=1, sticky="ew", padx=(12, 0), pady=(0, 8))
+            self.label(card, self.bold, text=m["title"]).pack(anchor="w")
+            self.wrap_label(card, text=m["description"], share=0.85).pack(anchor="w")
+            if m["tags"]:
+                self.wrap_label(card, text=". ".join(m["tags"]) + ".", share=0.85, fg=t["disabled"]).pack(anchor="w")
+        buttons = [("Save", self.on_pick_save)] + ([("Back", self.back)] if self.picker_from_settings else [])
+        for k, (text, command) in enumerate(buttons):
+            b = self.make_button(self.picker_flow.frame, text, command, self.picker_buttons, bold=k == 0)
+            self.picker_flow.items.append(b.ring)
+        self.picker_flow.shape = None
+        self.root.after_idle(lambda: self.picker_flow.frame.winfo_exists() and self.picker_flow.reflow(force=True))
+        self.rewrap()
+        for w in body.winfo_children():
+            for x in (w, *w.winfo_children()):
+                x.bind("<MouseWheel>", self.picker_wheel, add="+")
+        self.size_picker()
+
+    def size_picker(self) -> None:
+        """The cards ask for their whole height, but never more than the screen leaves (then they scroll)."""
+        self.root.update_idletasks()
+        top = self.sw_label.master.winfo_reqheight() + PAD + 4
+        rest = self.frames["picker"].winfo_reqheight() - self.picker_canvas.winfo_reqheight()
+        self.picker_canvas.configure(height=max(self.font.metrics("linespace") * 3,
+                                                min(self.picker_body.winfo_reqheight(),
+                                                    self.room()[1] - top - rest - 8)))
+
+    def picker_see(self, widget) -> None:
+        """Scroll the cards so this one shows."""
+        canvas = self.picker_canvas
+        total = max(1, self.picker_body.winfo_height())
+        top, bottom = widget.winfo_y(), widget.winfo_y() + widget.winfo_height()
+        first, last = (x * total for x in canvas.yview())
+        if top < first:
+            canvas.yview_moveto(top / total)
+        elif bottom > last:
+            canvas.yview_moveto(max(0, bottom - (last - first)) / total)
+
+    def picker_wheel(self, event) -> str:
+        self.picker_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
+
+    def paint_pick(self, mod_id: str) -> None:
+        t, on = self.t, self.picks.get(mod_id, False)
+        self.pick_buttons[mod_id].configure(text="ON" if on else "OFF", bg=t["play"] if on else t["button"],
+                                            fg=t["play_fg"] if on else t["fg"])
+
+    def flip_pick(self, mod_id: str) -> None:
+        self.picks[mod_id] = not self.picks.get(mod_id, False)
+        self.paint_pick(mod_id)
+
+    def on_pick_save(self) -> None:
+        """Remember the answer, go Home, and add the picked mods there (Play waits until they are in)."""
+        if self.ctl is None or not self.ctl.can("add"):
+            if self.ctl is not None:
+                self.after_action(lambda: self.ctl.free("add"))
+            return
+        self.settings.picked = self.bundled_key
+        self.save_settings()
+        self.show("home")
+        self.play.focus_set()
+        self.after_action(lambda: self.ctl.install_picked(self.bundled, dict(self.picks)))
+
+    # --- Settings
+
+    def show_settings(self) -> None:
+        self.fill_settings()
+        self.show("settings")
+        if self.settings_buttons:
+            self.settings_buttons[0].focus_set()
+
+    def fill_settings(self) -> None:
+        t, body = self.t, self.settings_body
+        for w in body.winfo_children():
+            w.destroy()
+        self.wraps = [(w, s) for w, s in self.wraps if w.winfo_exists()]
+        self.settings_buttons = []
+        s = self.settings
+        install = (self.ctl.backend.install if self.ctl else None) or s.install or ""
+        library = (self.ctl.backend.root if self.ctl else None) or s.library or ""
+        rep = getattr(self, "home_report", None)
+        fps = la.frame_rate(install) if install else None
+        tool = os.path.join(install, la.CONFIG_EXE) if install else ""
+        sw = [("path", install)] if install else [("text", "Not set")]
+        if rep is not None and rep.version:
+            sw.append(("text", "Game files: OK" if rep.game_build == la.GAME_BUILD else "Game files: not 1.9.0"))
+        rows = [
+            ("Savage Wind", sw, [("Change...", self.on_change_folder), ("Check", self.on_check),
+                                 ("Open", lambda: la.open_path(install))]),
+            ("Frame rate", [("text", f"{fps} fps (in the game: F1, Video)" if fps else "In the game: F1, Video")],
+             [("Game settings", lambda: la.open_path(tool))] if os.path.isfile(tool) else []),
+            ("Mod library", [("path", library)] if library else [("text", "Not set")],
+             [("Open", lambda: la.open_path(la.nearest_existing(library)))] if library else []),
+            ("Text size", [("text", f"{self.size} pt")], [("Smaller", lambda: self.set_size(self.size - 2)),
+                                                         ("Bigger", lambda: self.set_size(self.size + 2))]),
+            ("Dark", [("text", "ON" if s.dark else "OFF")], [("Turn off" if s.dark else "Turn on", self.on_dark)]),
+            ("Hide while playing", [("text", "ON" if s.hide_while_playing else "OFF")],
+             [("Turn off" if s.hide_while_playing else "Turn on", self.on_hide)]),
+            ("Cheats port", [("text", str(self.port or s.port or 7777))], [("Change...", self.on_port)]),
+            ("Shortcut", [("text", "On your desktop")], [("Make one", self.on_shortcut)]),
+        ]
+        if self.bundled:
+            rows.append(("Our mods", [("text", f"{len(self.bundled)} come with Breathalyzer")],
+                         [("Pick again", lambda: self.show_picker(from_settings=True))]))
+        for w in self.settings_top.winfo_children():
+            w.destroy()
+        self.make_button(self.settings_top, "Back", self.back, self.settings_buttons, bold=True).ring.pack(
+            side="left")
+        self.label(self.settings_top, self.big, text="Settings").pack(side="left", padx=(16, 0))
+        self.settings_rows = []   # (name label, value label, value parts, buttons cell)
+        for k, (name, value, buttons) in enumerate(rows, 1):
+            name_label = self.label(body, self.bold, text=name)
+            name_label.grid(row=k, column=0, sticky="w", padx=(0, 16), pady=1)
+            line = tk.Frame(body, bg=t["bg"])   # (the value and its buttons: each row's value gets what they leave)
+            line.grid(row=k, column=1, sticky="ew", pady=1)
+            cell = tk.Frame(line, bg=t["bg"])
+            cell.pack(side="right")
+            value_label = self.label(line)
+            value_label.pack(side="left", fill="x")
+            for text, command in buttons:
+                b = self.make_button(cell, text, command, self.settings_buttons)
+                b.configure(pady=0)   # (a Tk button has room of its own: nine rows must fit at big text sizes)
+                b.ring.pack(side="left")
+            self.settings_rows.append((name_label, value_label, value, cell))
+        self.layout_settings()
+
+    def layout_settings(self, width: int | None = None) -> None:
+        """The values get the width the names and the buttons leave; a long folder is shortened in the middle."""
+        rows = [r for r in getattr(self, "settings_rows", []) if r[1].winfo_exists()]
+        if not rows:
+            return
+        self.root.update_idletasks()
+        names = max(n.winfo_reqwidth() for n, _, _, _ in rows) + 16
+        for _, value_label, parts, cell in rows:
+            room = max(self.font.measure("0") * 6, self.text_width(width) - names - cell.winfo_reqwidth() - 16)
+            text = "\n".join(self.one_line(x, room) if kind == "path" else x for kind, x in parts)
+            value_label.configure(text=text, wraplength=room)
+
+    def save_settings(self) -> None:
+        self.settings.size = self.size
+        with contextlib.suppress(OSError):
+            la.save_settings(self.settings_file, self.settings)
+
+    def on_change_folder(self) -> None:
+        if self.ctl is not None and (self.ctl.jobs or self.ctl.game_open):
+            self.ask("Savage Wind", "Not now.", "Wait until Play is done and the game is closed, then change the "
+                     "folder.", [("OK", None)])
+            return
+        path = filedialog.askdirectory(parent=self.root, title="Pick your Savage Wind folder", mustexist=True,
+                                       initialdir=self.settings.install or self.last_dir)
+        if not path:
+            return
+        self.setup_mode = "change"
+        self.first.library = None
+        self.first.pick(os.path.normpath(path))
+        self.show_setup()
+
+    def on_dark(self) -> None:
+        self.settings.dark = not self.settings.dark
+        self.save_settings()
+        self.t = THEMES["dark" if self.settings.dark else "light"]
+        self.build()
+        self.show_settings()
+        self.fit()
+
+    def on_hide(self) -> None:
+        self.settings.hide_while_playing = not self.settings.hide_while_playing
+        self.save_settings()
+        self.show_settings()
+
+    def on_port(self) -> None:
+        value = self.ask_text("Cheats port", "Which port do the cheats use?",
+                              "1 to 65535. Savage Wind's control port is 7777 unless another program needs it.",
+                              str(self.port or self.settings.port or 7777))
+        if value is None:
+            return
+        try:
+            port = la.port_arg(value.strip())
+        except Exception as e:  # (argparse's message)
+            self.ask("Cheats port", "That isn't a port.", str(e), [("OK", None)])
+            return
+        self.port = self.settings.port = None if port == 7777 else port
+        self.save_settings()
+        if self.ctl is not None:
+            self.ctl.run_args = ["run", *(["--port", str(port)] if self.port else [])]
+        self.show_settings()
+
+    def on_shortcut(self) -> None:
+        desktop = la.known_folders().get("Desktop", "")
+        path = os.path.join(desktop, "Breathalyzer.lnk")
+        try:
+            target, args, workdir, icon = la.shortcut_parts()
+            la.write_shortcut(path, target, args, workdir, icon, "Start Breathalyzer and play Savage Wind")
+        except OSError as e:
+            self.ask("Shortcut", "The shortcut couldn't be made.", str(e), [("OK", None)])
+            return
+        self.ask("Shortcut", "Made a shortcut on your desktop.", path, [("OK", None)])
+
+    def ask_text(self, title: str, message: str, detail: str, value: str) -> str | None:
+        """One line of text in the same big text; None when left with Cancel or Esc."""
         t = self.t
         top = tk.Toplevel(self.root, bg=t["bg"], padx=24, pady=20)
         top.title(title)
         top.transient(self.root)
-        top.resizable(False, False)
-        result = {"value": choices[-1][1]}
-
-        def done(value):
-            result["value"] = value
-            top.destroy()
-
+        result = {"value": None}
         wrap = max(320, self.font.measure("0") * 36)
         self.label(top, self.head, text=message, wraplength=wrap).pack(anchor="w")
-        if detail:
-            self.label(top, text=detail, wraplength=wrap).pack(anchor="w", pady=(10, 0))
+        self.label(top, text=detail, wraplength=wrap).pack(anchor="w", pady=(10, 0))
+        entry = tk.Entry(top, font=self.font, bg=t["bg"], fg=t["fg"], insertbackground=t["fg"], width=12,
+                         highlightthickness=4, highlightcolor=t["focus"], highlightbackground=t["line"])
+        entry.insert(0, value)
+        entry.pack(anchor="w", pady=(12, 0))
         row = tk.Frame(top, bg=t["bg"])
-        row.pack(anchor="w", pady=(20, 0))
+        row.pack(anchor="w", pady=(16, 0))
+
+        def done(ok):
+            result["value"] = entry.get() if ok else None
+            top.destroy()
+
         group: list = []
-        for text, value in choices:
-            self.make_button(row, text, lambda v=value: done(v), group).ring.pack(side="left", padx=(0, 8))
-        top.bind("<Escape>", lambda e: done(choices[-1][1]))
-        top.protocol("WM_DELETE_WINDOW", lambda: done(choices[-1][1]))
-        top.update_idletasks()
-        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - top.winfo_reqwidth()) // 2)
-        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - top.winfo_reqheight()) // 3)
-        top.geometry(f"+{x}+{y}")
-        before = self.root.focus_get()
-
-        def grab():  # (only once the window is on screen)
-            try:
-                if top.winfo_exists():
-                    top.grab_set()
-                    group[default].focus_force()
-            except tk.TclError:
-                with contextlib.suppress(tk.TclError):
-                    top.after(50, grab)
-
-        group[default].focus_set()
-        top.after(20, grab)
+        for text, ok in (("Save", True), ("Cancel", False)):
+            self.make_button(row, text, lambda ok=ok: done(ok), group).ring.pack(side="left", padx=(0, 8))
+        entry.bind("<Return>", lambda e: done(True))
+        top.bind("<Escape>", lambda e: done(False))
+        top.protocol("WM_DELETE_WINDOW", lambda: done(False))
+        entry.focus_set()
+        entry.select_range(0, "end")
+        top.after(20, lambda: top.winfo_exists() and top.grab_set())
         self.root.wait_window(top)
-        if before is not None and not self.closed:
-            with contextlib.suppress(tk.TclError):
-                before.focus_set()
         return result["value"]
+
+    # --- size
+
+    def apply_size(self) -> None:
+        for f in (self.font, self.bold):
+            f.configure(size=self.size)
+        self.head.configure(size=self.size + 4)
+        self.big.configure(size=self.size + 10)
+        self.play_font.configure(size=self.play_size())
+        self.mono.configure(size=max(MIN_SIZE, self.size - 4))
+        self.style_tree()
+        if self.screen == "picker":
+            self.size_picker()
+        for group in (self.home_buttons, list(self.by_action.values()), self.setup_buttons, self.settings_buttons,
+                      self.picker_buttons):
+            flat = group is self.settings_buttons
+            for b in group:
+                with contextlib.suppress(tk.TclError):
+                    b.configure(padx=self.size, pady=0 if b is self.play or flat else self.size // 3)
+
+    def set_size(self, size: int) -> str:
+        size = max(MIN_SIZE, min(MAX_SIZE, size))
+        if size == self.size:
+            return "break"
+        old, self.size = self.size, size
+        self.apply_size()
+        if size > old and not (self.fit() or self.fit()):   # (twice: wrapped text settles in the first)
+            self.size = old
+            self.apply_size()
+            self.fit()
+            if self.ctl is not None and self.screen == "home":
+                self.ctl.status = Status("info", ["This is the biggest text that fits on this screen."])
+        else:
+            self.fit()
+        self.save_settings()
+        if self.screen == "settings":
+            self.show_settings()
+        self.render()
+        return "break"
+
+    def room(self) -> tuple[int, int]:
+        return int(self.root.winfo_screenwidth() * 0.96), int(self.root.winfo_screenheight() * 0.88)
+
+    def need(self, width: int) -> int:
+        """The height every screen needs at this width (the list with HOME_ROWS rows)."""
+        self.rewrap(width)
+        self.root.update_idletasks()   # (first: a Flow lays itself out again at the width it has now)
+        for fl in self.flows:
+            fl.frame.configure(height=fl.height_for(width - 2 * PAD))
+        if self.screen == "picker":
+            self.size_picker()   # (its cards take what the screen leaves at this width)
+        self.root.update_idletasks()
+        top = self.sw_label.master.winfo_reqheight() + PAD + 4
+        return top + max(f.winfo_reqheight() for k, f in self.frames.items() if k != "picker" or self.screen == k)
+
+    def fit(self, shrink: bool = False) -> bool:
+        """Make the window as big as the text needs, up to the screen. False when it doesn't fit; with shrink, the
+        text gets smaller until it does."""
+        r = self.root
+        room_w, room_h = self.room()
+        while True:
+            shown = bool(r.winfo_ismapped())
+            cur_w, cur_h = (r.winfo_width(), r.winfo_height()) if shown else (0, 0)
+            w = min(room_w, max(cur_w, self.font.measure("0") * 72))
+            need = self.need(w)
+            if need <= room_h or not shrink or self.size <= MIN_SIZE:
+                break
+            self.size = max(MIN_SIZE, self.size - 2)
+            self.apply_size()
+        h = min(room_h, max(cur_h, need, self.font.metrics("linespace") * 20))
+        if (w, h) != (cur_w, cur_h) and r.state() != "zoomed":
+            sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
+            x, y = (r.winfo_x(), r.winfo_y()) if shown else ((sw - w) // 2, (sh - h) // 3)
+            r.geometry(f"{w}x{h}+{max(0, min(x, sw - w - 16))}+{max(0, min(y, sh - h - 90))}")
+        r.minsize(min(w, max(480, self.font.measure("0") * 40)), min(room_h, need))
+        self.rewrap(w)
+        for fl in self.flows:
+            r.after_idle(lambda fl=fl: fl.frame.winfo_exists() and fl.reflow(force=True))
+        return need <= room_h
+
+    def on_resize(self, event) -> None:
+        if event.widget is self.root and event.width != self.width:
+            self.width = event.width
+            self.rewrap()
+
+    def text_width(self, width: int | None = None) -> int:
+        return max(200, (width or self.root.winfo_width()) - 2 * PAD - 40)
+
+    def rewrap(self, width: int | None = None) -> None:
+        text_w = self.text_width(width)
+        for lab, share in self.wraps:
+            with contextlib.suppress(tk.TclError):
+                lab.configure(wraplength=int(text_w * share))
+        if self.ctl is not None and self.screen == "home":
+            self.render_about()
+            self.size_columns()
+        if self.screen == "settings" or width is not None:
+            self.layout_settings(width)
+
+    # --- closing
+
+    def on_close(self) -> None:
+        job = self.ctl.jobs.get("main") if self.ctl else None
+        if job is not None and job.action in ("apply", "deploy") and not self.ask(
+                "Close", "Your mods are still being made ready.", "Closing now stops it; the next Play starts over.",
+                [("Stop and close", True), ("Keep going", False)], default=1):
+            return
+        if self.ctl is not None:
+            self.ctl.stop()
+        self.save_settings()
+        self.closed = True
+        self.root.destroy()
+
+
+def launcher_main(args) -> int:
+    """tools/launcher.py: one launcher window per settings folder, "Starting..." while modman loads, then the
+    first-run screens or Home."""
+    if tk is None:
+        print("Breathalyzer needs Python's tkinter.")
+        return 2
+    path = la.settings_path()
+    settings, note = la.load_settings(path)
+    if la.single_instance(os.path.dirname(path)) is None:
+        return 0   # (the open window came to the front)
+    la.set_app_id()
+    dpi_aware()
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        print(f"Can't open a window: {e}")
+        return 2
+    if args.size:
+        settings.size = args.size
+    if args.dark:
+        settings.dark = True
+    t = THEMES["dark" if settings.dark else "light"]
+    root.title(la.WINDOW_TITLE)
+    root.configure(bg=t["bg"])
+    starting = tk.Label(root, text="Starting Breathalyzer...", font=("Segoe UI", 24), bg=t["bg"], fg=t["fg"],
+                        padx=60, pady=40)
+    starting.pack()
+    root.update()
+    mm = load_modman()   # (the slow import, while "Starting..." shows)
+    if sys.platform == "win32":
+        mm.game_running = la.game_running   # (modman's asks tasklist: a console window would flash up under pythonw)
+    places = None
+    if args.search_in:
+        folders = [os.path.abspath(d) for d in args.search_in]
+        places = lambda: {"near": [p for d in folders for p in (d, *la.subfolders(d))]}  # noqa: E731
+    first = la.FirstRun(settings, places=places, library=args.library)
+    starting.destroy()
+    view = LauncherView(root, settings, path, first_run=first, port=args.port, library=args.library)
+    if note and view.ctl is not None:
+        view.ctl.status = Status("warn", [note])
+        view.render()
+    root.lift()
+    with contextlib.suppress(tk.TclError):
+        root.focus_force()
+    root.mainloop()
+    return 0
 
 
 # ---------------------------------------------------------------- command line

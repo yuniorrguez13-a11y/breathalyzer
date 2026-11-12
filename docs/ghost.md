@@ -26,8 +26,9 @@ tried between two PCs, and attacks with a real weapon are not checked (the test 
   the ghost Link's body and his animations. It works: Link's face and body (bald, in underwear) standing, walking,
   running and swinging next to you. See [Link body](#link-body-050-opt-in).
 - **Held items** (0.6.0, `client.py --ghost-items`): the Link-body ghost holds the other player's weapon, shield and
-  bow, in its hands or on its back, and Link can't take them. **0.6.0 checked in the game on one PC** (2026-11-07,
-  twelfth round); 0.6.1 (a review's fixes) is not yet run in the game. See [Held items](#held-items-060-opt-in).
+  bow, in its hands or on its back, at Link's size and where Link carries them, and Link can't take them. **0.6.2
+  checked in the game on one PC** (2026-11-12, fourteenth round, last run: 22 PASS, 1 FAIL: only H4P, the record of the items' own offsets without the copy). Not tried between two PCs.
+  See [Held items](#held-items-060-opt-in).
 - The check, with one game and the bot: `python tools\mp\ghost_ingame_check.py --link --spot -1033.6 252.3 1809.3 132`
   (see [In-game check](#in-game-check)).
 
@@ -77,6 +78,7 @@ Alone, to try it: `python tools\mp\relay.py`, then the client with `--ghost`, th
 | `ghost items <weapon\|-> <shield\|-> <bow\|-> [mask]` | (0.6.0) What the ghost holds: item actor names, `-` for none. `mask` (0-7, default 4): which go on its back (bit 0 weapon, 1 shield, 2 bow). See [Held items](#held-items-060-opt-in) |
 | `ghost items off` | (0.6.0) Hold nothing (the items are deleted) |
 | `ghost items back on\|off` | (0.6.0) Back placement on (default) or off: off, everything is in the hands |
+| `ghost items rel <slot> <12 numbers>\|-` | (0.6.2) Where slot 0-2's item sits on the back: a 3x4 matrix, row by row, in the frame of the ghost's `Pod_A` (as `ghost self` gives Link's own, `<item>_rel`); `-`: the item's own offsets again. The client sends the other player's |
 | `ghost give <actor> [dx dy dz]` | (0.6.0, for tests) Spawn an actor near Link (default 1.5 m in front of him, 0.8 m up) for him to take. It never touches the ghost or its items |
 
 The commands only leave a request; the mod acts on it in the next frame. A `ghost spawn` sent in the same batch as a
@@ -267,21 +269,26 @@ RomFS mod (docs/romfs-mods.md) and use `client.py --ghost-link` (or `ghost spawn
 
 ## Held items (0.6.0, opt-in)
 
-**0.6.0 worked in the game on one PC** (2026-11-07, twelfth round, with `ghost items` from the check and through a
-relay and the bot): the Link-body ghost held a sword, two-hander or spear in its right hand, a shield and a bow in
-its left hand, or any of them on its back; it switched when the bot switched, held nothing when the bot held
-nothing, and Link couldn't take them. **0.6.1** (a review's fixes, below) passes the C selftest but **has not run in
-the game yet**: the thirteenth round's check waited 2 hours for another program's game to close, and it never did.
-Not yet tried between two PCs.
+**0.6.2 works in the game on one PC** (2026-11-12, fourteenth round, five runs; the last: 22 PASS, 1 FAIL, the one a record kept on purpose). The
+Link-body ghost holds a sword, two-hander or spear in its right hand and a shield on its left arm, with the bow on its
+back, as Link carries them with a sword out; with the bow drawn, the bow is in its left hand and the rest on its back;
+after a sprint everything is on its back. The items are Link's size (they were 1.4-1.5 times bigger before 0.6.2).
+It follows a real Link through two clients and a relay (sprint, draw, throw, a new sword: each shown 0.1-0.45 s
+later), switches, clears, and Link can't take its items. A reload after Game Over leaves no second ghost (0.6.2).
+On its back the items sit exactly where the other player's Link carries his (0.000 m off, with his own offsets sent
+over the network). The frame cost is below what the 30 fps cap can show: 30.0 frames a second with and without the
+items in 3 pairs out of 3 (fourth run of the fourteenth round, with the PC otherwise idle). Not yet tried between two
+PCs.
 
 ```
-python tools\build_native.py build                       # ghost.dll 0.6.1
+python tools\build_native.py build                       # ghost.dll 0.6.2
 python tools\mp\client.py --relay 192.168.1.20 --name Ana --ghost-link --ghost-items
 ```
 
-Use it on both PCs (each sends what its own Link holds; ghost mod 0.6.1 on each). Without `--ghost-items` nothing
+Use it on both PCs (each sends what its own Link holds; ghost mod 0.6.2 on each). Without `--ghost-items` nothing
 changes. An older client on the other PC (no `on_back`) still works: its weapon, shield and bow show, with the bow on
-the back (checked with made-up data only; the check's H10 has it, not run yet).
+the back (H10 in the game: each change shown within 0.33-0.63 s in runs 1 and 3; 1.06 s once in run 2, over the 1 s
+limit).
 
 **Load ghost.dll at game start only** (the normal way: modhost loads `mods\native` when the game starts). Never
 `modunload` or `modreload` it while the ghost holds items: the items' bone follows on the back and the item and
@@ -292,9 +299,17 @@ actor names live in the DLL's memory, so the game would read freed memory.
   From then on the game itself keeps the item on the ghost's hand bone (`Weapon_R` for the weapon, `Weapon_L` for the
   shield and the bow), every frame, and turns the item's pick-up off. The grab is refused until the item's AI has
   run once, so the mod asks each frame for up to 1 s; until it is taken, the item is a loose world item, so the mod
-  keeps it up there each frame, out of Link's reach (0.6.1). In the game (0.6.0, items spawned at the hand): all three
-  held 0.3-0.4 s after the request; how often the grab was refused first was not logged (0.6.1 logs it per item:
-  `items.N.refusals`). Parking over the ghost is not yet tried in the game.
+  keeps it up there each frame, out of Link's reach (0.6.1). In the game (0.6.2, parked over the ghost): all three
+  held 0.27-0.55 s after the request, the grab never refused first (every "holds" note of run 1's log).
+- **Link's size** (0.6.2). The weapon's own per-frame update (`0x70007a95d8`) sets its scale by its holder: in the
+  player's hands its base scale times one factor, held by anyone else (an NPC, our ghost) times another: 1.5 for the
+  sword and the shield, 1.4 for the bow. So the ghost's items were 1.4-1.5 times Link's (a giant spear and
+  two-hander, a shield over half the ghost's height; fourteenth round runs 1-2). Setting the scale from the frame job
+  did not stick (the update writes it again each frame: 4,627 sets, no change in the pictures). 0.6.2 wraps the
+  update (`hle_override`) and, for the ghost's own items only, puts the player's scale back right after it (the same
+  reads the game's player branch makes). In the game: size 1.00 in all 177 samples of H1 and H4, the same as Link's
+  own, and the pictures show the shield on the ghost's back the size of Link's
+  (`out\shots\ghostitems-r14-run3\ghostitems_H15_new_sword.png`). `items.N.size` reports it.
 - **Only weapons, shields and bows** (0.6.1): the mod spawns a name only if it is a one-handed sword, two-hander or
   spear for the right hand (`Weapon_Sword_`, `Weapon_Lsword_`, `Weapon_Spear_`), a shield (`Weapon_Shield_`) or a bow
   (`Weapon_Bow_`) for the left, and not one of the special ones never tried: `Weapon_Sword_070` and the four the
@@ -310,31 +325,50 @@ actor names live in the DLL's memory, so the game would read freed memory.
   deleted it gets its own bone follow back, so no item ever runs the mod's follow after the mod let it go; if the game
   refused that, the item is kept, not deleted (`items.kept`; C selftest only).
 - **On the back.** The client sends which items are on the sender's back (`on_back`, read from Link's own equipment:
-  `ghost self`). The mod then moves the item to a bone follow of its own on the ghost's `Pod_A` bone, with the item's
-  own "on the back" offsets from the game data. In the game (0.6.0) each item sat at its offset's distance from `Pod_A`:
-  that only shows the mod's follow is on, **not that it looks like Link's**. The pictures suggest it doesn't quite:
-  the item over the ghost's right shoulder rises about 3 head-heights above it, over Link's about 1, and Link has a
-  second item across his waist. 0.6.1 reads both (each item in its `Pod_A`'s frame; Link's also its distance to
-  `Pod_A`, `Pod_B`, `Pod_C`, to see which one he uses) and the check compares them (H4L); not run yet. `ghost items back off` keeps everything in the hands.
+  `ghost self`) and, from 0.6.2, where each sits there (`weapon_rel`, `shield_rel`, `bow_rel`: its matrix in the
+  frame of his Link's `Pod_A` bone, also from `ghost self`). The mod then moves the item to a bone follow of its own
+  on the ghost's `Pod_A` bone, with that matrix as the offset (`ghost items rel`), or, from an older sender, with the
+  item's own "on the back" offsets from the game data. In the game (0.6.0) each item sat at its offset's distance from `Pod_A`:
+  that only shows the mod's follow is on. With the item's own offsets, against Link's own (H4P, each item in its
+  `Pod_A`'s frame): the weapon matches (0.000 m, 0 degrees), the shield is 0.010 m off and **the bow 0.108 m and 4
+  degrees**. The reason: the game adds a second offset for the player's bow and shield from his armor (the item's
+  virtual calls at Weapon vtable `+0x780` and `+0x790` ask the armor actor's own; zero for anyone but the player), so
+  the item's data alone can't put it where Link's is. With Link's own offsets copied (H4L, 0.6.2): **all three 0.000 m
+  and 0 degrees off** (`out\shots\ghostitems-r14-run4\ghostitems_H4L_like_link.png`: the ghost and Link from
+  behind, the same shield and bow placement). Through the network (run 5, H15: the sender's offsets in his state, the receiving client sends them to the mod): all three 0.000 m off 0.07 s after his sprint (`out\shots\ghostitems-r14-run5\ghostitems_H15_back_like_link.png`). An older sender sends no offsets: then the item's own (the bow 0.1 m off). The item that rose high over the ghost's shoulder in the twelfth
+  round was the 1.4-1.5 times scale (fixed in 0.6.2). `ghost items back off` keeps everything in the hands.
 - **Can't take them.** Link walked up to the ghost and pressed A five times, unarmed and armed: no prompt, his own
-  items stayed his, the ghost's stayed the same actors, still held.
+  items stayed his, the ghost's stayed the same actors, still held (twelfth and fourteenth rounds, every run).
 - **Cleanup.** The items go before the ghost does (`ghost despawn`, the distance rule, a new spawn) and when the game
   removed the ghost. On a reload (a new spawn heap) they are forgotten without a call, as the ghost is, but still
   watched with plain reads (0.6.1), so one the reload left in the world shows in `items.stray` (still there 1 s after
   the mod let it go). The same heap with another player actor is no reload: the ghost and its items are removed the
   normal way; with no player actor for a moment and the same heap, they are left alone until he is back (0.6.1).
-  Checked in the game (0.6.0): despawn, the distance rule, the game removing the ghost. **Not yet checked: a reload**
-  (run 4 got stuck on the Game Over screen; its `stray 0` meant nothing, since 0.6.0 wiped the watch list on a
-  stage change), and none of the 0.6.1 changes.
+  **Reload (0.6.2):** the fourteenth round's first run fell 90 m (Game Over, Continue) while the ghost was being
+  spawned again: a ghost that had spawned 0.1 s before the stage change survived it, holding two items, next to the
+  new ghost (`out\shots\ghostitems-r14-run1\ghostitems_H9_after_reload.png`: two ghosts; `stray` 2). So 0.6.2 keeps
+  watching what a stage change dropped (plain reads), and once Link has been on the new stage for 3 s it removes
+  whatever of it the game kept, the normal way (the game's own link check first; an item gets its own bone follow
+  back first; never Link's). Runs 2 and 3: the ghost and its items back 12-15 s after the fall, `stray` 0, one ghost
+  in the picture. The same race came up in both (the ghost spawned again 0.1-0.2 s before the change); the log
+  says the old ghost and its items were removed 3 s after the change (`leftovers` 4 in run 2), no crash. Checked in the game: despawn, the distance rule,
+  the game removing the ghost, the reload.
 - **Which body.** Only the Link body has the hand bones; on the Sheikah man the mod finds none and spawns no item
   (`items.bones` says `missing`).
-- **Cost: not verified.** Run 3 (0.6.0, before the last change to plain reads) read 29.8 -> 29.2 frames a second,
-  inside the budget of 1, but the plan's own rule, the items' average under 50 microseconds a frame, failed in both
-  valid runs (3,895 and 4,871 microseconds, from rare item frames of 50-70 ms that are not explained; a 50 ms item
-  frame is a 50 ms tick too, since the items run inside it). 0.6.1 times every slow game call (name and time), every
-  slow item part (wall time and the thread's own cycles: few cycles = the thread was switched out, not working) and
-  every frame, and the check's H11 measures the plain mean again with the whole tick's worst over the same frames;
-  not run yet. The old claim that a held item makes no game call a frame was never measured either.
+- **Cost.** The 30-110 ms item frames of the earlier rounds were the mod's memory check: Windows' `VirtualQuery`
+  walks every page of the region it is asked about, and the game's heap is one region of gigabytes, asked about
+  again twice a second (fourteenth round run 1: item parts of 10-113 ms with no game call and the thread busy the
+  whole time; 3,529 microseconds a frame on average). 0.6.2 keeps the answer for a big region (64 MB or more) and lets
+  a helper thread of its own, at the lowest priority, confirm it every 20 s (only `VirtualQuery`, never game code);
+  small regions are asked again after 0.5 s as before. Since then the items' part is 12-13 microseconds a frame on
+  average (the plan's limit is 50) and the whole tick at most about 0.3 ms, with 0.003-3 game calls a frame. Frames a
+  second, ghost alone against ghost with its 3 items, **3 pairs in turn, medians** (run 4, 2026-11-12 08:59-09:01,
+  the PC otherwise idle; 7.5 GB of 15.3 GB RAM free before the game, 1.9-2.4 GB while it ran): **30.0 -> 30.0** (every
+  pair 30.0/30.0), items 9.5 microseconds a frame, no frame over 50 ms, the longest 41 ms. Run 5 (09:09-09:10, 2.5-2.8 GB free while the game ran): the same, 30.0 -> 30.0 in all 3 pairs, 9.5 microseconds a frame. The game is capped
+  at 30 frames a second here (`savagewind.ini`), so a cost that only eats headroom above 30 doesn't show; uncapped it
+  was not measured. Run 3's 30.0/29.0 -> 25.4/28.7 came while the user was working on the laptop (RAM-heavy). The
+  helper's own `VirtualQuery` takes up to 217 ms (other threads' memory calls may wait on it); every 20 s per big
+  region (3 here).
 
 `ghost` reply fields (0.6.0): `has_items` (the client looks for it), `items.on`, `items.back`, `items.mask`,
 `items.bones` (`ok`, `ok, no Pod_A`, `missing ...`, `looking`, `no model`), `items.stray`, `items.us` (median
@@ -348,17 +382,23 @@ calls and memory queries a frame), `tick_us` (the whole frame's tick), counters 
 `items.slow_parts` and `items.slow_part` (item parts over 5 ms: wall time, the thread's own cycles, game calls),
 `slow_calls`, `slow_call` and `call_most_ms` (game calls over 5 ms: name and time), `frame_ms`, `frame_ms_max`,
 `frames`, `frames_slow` (frames over 50 ms), `no_player`, `no_player_ticks`, and per slot `refusals` (grab calls
-refused before the grab was taken) and `rel` (the held item's matrix in the ghost's `Pod_A` frame). `ghost self`
-(0.6.0) adds `weapon_back`, `shield_back`, `bow_back` and `on_back`; 0.6.1 `weapon_rel`, `shield_rel`, `bow_rel`
-(each of Link's items in his `Pod_A`'s frame) and `weapon_pods`, `shield_pods`, `bow_pods` (its distance to his
-`Pod_A`, `Pod_B`, `Pod_C`).
+refused before the grab was taken) and `rel` (the held item's matrix in the ghost's `Pod_A` frame). 0.6.2 adds per
+slot `size` (how big it is drawn: its matrix's axes times its own scale; 1 = Link's), `size_first`, `axis`,
+`own_scale`, `model_scale`, `copied` (on the back with the other player's own offset); `has_items_rel` (it takes
+`ghost items rel`), `items.scale_sets` (player's scales set by the wrapper), `ghost_scale`, `mem.queries`,
+`mem.slow`, `mem.most_ms` (`VirtualQuery` on the tick: count, over 5 ms, longest), `mem.big`, `mem.helper`,
+`mem.helper_ms`, `mem.widened` (the helper thread), `leftovers`, `old_ghosts`, `old_items` (what a stage change
+dropped: removed, watched). `ghost self` (0.6.0) adds `weapon_back`, `shield_back`, `bow_back` and `on_back`; 0.6.1
+`weapon_rel`, `shield_rel`, `bow_rel` (each of Link's items in his `Pod_A`'s frame) and `weapon_pods`, `shield_pods`,
+`bow_pods` (its distance to his `Pod_A`, `Pod_B`, `Pod_C`); 0.6.2 `weapon_size`, `weapon_axis` (and the same for the
+shield and the bow).
 
 **Not done:** special items (the Master Sword, torches, boomerangs, elemental weapons) were not tried, and the
 Master Sword family and `Weapon_Bow_071` are refused until they are; a sheath or quiver is not drawn; the ghost's own
 pose doesn't change for a shield or a bow (it plays the other player's animation, as before). **Not verified:** two
-PCs; and on 0.6.1 everything the check has but never ran: a real Link as the sender (H15: sprint, draw,
-throw, a new sword), the ghost running, jumping, gliding and climbing with its items (H1), an older sender (H10), a
-reload (H9), the comparison with Link's back (H4L) and the cost (H11). **Armor is not built:** it would work the same way (an armor actor bound to the ghost copies
+PCs; the frame cost above the 30 fps cap. **Load ghost.dll at game start**
+(as before): 0.6.2 also wraps the Weapon class's update and runs a helper thread (its `swmod_exit` stops the thread
+for a `modload`ed copy). **Armor is not built:** it would work the same way (an armor actor bound to the ghost copies
 its pose by bone name), but almost every head piece and most upper pieces have cloth physics, estimated at 1-4 frames
 a second, and some of the game's code paths would meet a missing pointer that is not checked yet
 (out/research/ghost-items-plan.md, "Armor").
@@ -613,7 +653,37 @@ asking every 30 s, and gave up without starting ours (`out\research\ghost-items-
 | A stage change keeps watching the items (a stray shows); a pending request is released if still ours | C selftest `stage_change`, `stage_change_stray`, `orphan_released` |
 | `ghost give` names go in the item table (256), not the ghost's (32) | code |
 | Slow game calls, slow item parts (with the thread's cycles) and frames are timed and reported | code; the check reports them (H2, H11) |
-| The check: every change of every cycle timed from the bot's own time (H10, limit 1 s, the plan's), an older sender, the plan's average for the cost, the old item gone within 1 s of each switch, running and jump/glide/climb poses, the comparison with Link's back (H4L), a real Link as the sender through two clients (H15), more shots (H1 run, bow alone, H3 shield cleared, H8, H11), the tutorial window closed before H13 | `tests\test_mp_items.py` (the judges); not run |
+| The check: every change of every cycle timed from the bot's own time (H10, limit 1 s, the plan's), an older sender, the plan's average for the cost, the old item gone within 1 s of each switch, running and jump/glide/climb poses, the comparison with Link's back (H4L), a real Link as the sender through two clients (H15), more shots (H1 run, bow alone, H3 shield cleared, H8, H11), the tutorial window closed before H13 | `tests\test_mp_items.py` (the judges); run in the fourteenth round |
+
+Fourteenth round (held items in the game: 0.6.1, then 0.6.2), 2026-11-12, 07:56-09:00, the test save (backed up first,
+restored after), the scratch library `out\ghost-items-lib`, the spot above, `ghost_ingame_check.py --items --link
+--spot -1033.6 252.3 1809.3 132 --give-weapon --lib out\ghost-items-lib`. Five game starts, one at a time, each
+closed with `exit` (code 0), no crash, no bad log line. Run 1 (0.6.1): 17 PASS, 4 FAIL; run 2 (0.6.2 without the
+update wrapper): 19 PASS, 3 FAIL; run 3 (0.6.2): **20 PASS, 2 FAIL**. Someone watching run 1 saw the items far bigger
+than normal and the bow on the sword's side; both came from the mod or the check, and are fixed. Results
+`out\research\ghost-items-results-r14-run{1,2,3,4,5}.txt`, logs `ghost-items-r14-run{1..5}.log` (runs 4 and 5 also
+free RAM and CPU every 10 s: `-run4-ram.log`, `-run5-ram.log`), screenshots `out\shots\ghostitems-r14-run{1..5}\`.
+Runs 4 and 5 (08:57-09:13, the laptop left to the check): 0.6.2 with the back offsets copied (`ghost items rel`, then
+over the network) and H11 as 3 pairs in turn; both **22 PASS, 1 FAIL** (H4P, the record below).
+
+| Check | Run 3 (0.6.2) | Before |
+|---|---|---|
+| H1 in hand | PASS: held 0.41 s after the request; sword in the right hand, shield on the left arm, bow on the back; 0.000 m from the hand bones in 54 samples (standing, walking, running, jump/glide/climb, swinging); the bow drawn: in the left hand, sword and shield on the back (`ghostitems_H1_stand.png`, `H1_bow_drawn.png`) | Runs 1-2 PASS. Run 1's check put all three in the hands (mask 0): the bow, held flat in the left hand and 1.4 times its size, reached across to the sword's side. The check now uses Link's own layout (MASK 4; MASK 3 with the bow drawn) |
+| H16 size (new) | PASS: 177 samples at size 1.00; Link's own items 1.0 (`H15_new_sword.png`: the ghost's shield the size of Link's) | Run 2 FAIL: 1.4-1.5 (the weapon's own update gives an NPC holder's scale; a `SET_TRANSFORM` from the frame job didn't stick) |
+| H2 switch, H3 clear | PASS: 0.14-0.30 s, old item gone 0.18-0.33 s after each switch, stray 0; clear 0.02-0.03 s | PASS in all runs |
+| H4 back | PASS: all three on `Pod_A` at their offsets (0.000 m off), back to the usual layout, 10 toggles, stray 0 | PASS in all runs |
+| H4L like Link's back | FAIL: weapon 0.000 m, shield 0.010 m, **bow 0.108 m and 4 degrees** off Link's (Link's minus the ghost's in `Pod_A`'s frame: -0.100, +0.010, -0.040 m) | the same in all runs: open |
+| H5 can't take | PASS unarmed and armed (0.51-0.59 m, A five times; nothing moved over) | PASS in all runs |
+| H6-H8 | PASS: despawn, the distance rule (back in 0.27 s), the game removing it (back in 0.3 s); stray 0 | PASS in all runs |
+| H9 reload | PASS: the ghost and its items back 15.3 s after the fall, stray 0, one ghost in the picture | Run 1 FAIL: a second ghost with two items next to the new one (`ghostitems-r14-run1\ghostitems_H9_after_reload.png`); fixed (leftovers, above); run 2 PASS |
+| H10 network | PASS: every change within 0.52 s (newer sender) and 0.63 s (older sender) | Run 2: the older sender's clear once took 1.06 s (limit 1) |
+| H11 cost | FAIL: 30.0 / 29.0 alone against 25.4 / 28.7 with the items (mean drop 2.5, budget 1); items part 12.2 microseconds a frame (limit 50), the whole tick at most 0.33 ms; 48 frames over 50 ms while measuring with the items | Run 1 FAIL: 3,529 microseconds (the memory check: fixed); run 2 PASS: 30.0 -> 29.1, 13.0 microseconds |
+| H12, H13 | PASS: Link took the sword, shield and bow (`ghost give`); out / after a sprint read right for all three | PASS in all runs |
+| H15 real sender | PASS: sprint 0.09 s, draw 0.10 s, sprint again 0.08 s, throw 0.45 s, a new sword 0.10 s | Run 1 FAIL: two sprints in a row ran Link off the plateau (Game Over); the check now goes back to the spot before each sprint |
+| H14 log | PASS: no bad line, exit code 0 | PASS in all runs |
+| H4L, runs 4-5 | PASS: Link's own back offsets copied: weapon, shield, bow 0.000 m and 0 degrees off his (`ghostitems-r14-run4\ghostitems_H4L_like_link.png`); through the network too (run 5's H15: 0.07 s after his sprint, `ghostitems-r14-run5\ghostitems_H15_back_like_link.png`) | H4P (the items' own offsets, kept as a record): the bow 0.108 m, 4 degrees off in every run |
+| H11, runs 4-5 | PASS: 3 pairs in turn, medians 30.0 -> 30.0 in both runs (every pair 30.0/30.0, the 30 fps cap); items 9.5 microseconds a frame; no frame over 50 ms in run 4. Free RAM 7.5-8.2 GB before the game, 1.9-2.8 GB while it ran | Run 3's drop came while the user worked on the laptop |
+| H5 armed, run 5 | PASS at 0.49 m (run 4's "PASS" was 20 m away, after H4L's sprint: not valid; the check now walks Link back first and fails beyond 1.2 m) | runs 1-3 PASS at 0.49-0.52 m |
 
 ## In-game check
 
@@ -640,7 +710,7 @@ equipped, or `--give-weapon`; else SKIP), item names, the frame cost of `ghost s
 body (spawn, `Wait`, walk and run, attacks, jump, glide, climb, swim, frame cost), and a relay with the bot sending
 animation names (`bot.py --anim`).
 
-The held items (0.6.1) have their own run, H1-H15 (`tools\mp\ghost_items_check.py`; it builds and deploys the Link
+The held items (0.6.2) have their own run, H1-H16 (`tools\mp\ghost_items_check.py`; it builds and deploys the Link
 body too, about 12 minutes):
 
 ```
@@ -649,18 +719,26 @@ python tools\mp\ghost_ingame_check.py --items --spot -1033.6 252.3 1809.3 132 --
 
 `--lib` is a scratch mod library: `ghost.dll` goes to `out\ghost-items-lib\mods` and the Link body to
 `out\ghost-items-lib\overlay`, never to your own library. The mod plays the other player with `ghost items`; H10 goes
-through a relay, the bot (`--items`) and the client (`--ghost-items`). Checks: H1 all three held in the hands while
-the ghost stands, walks, runs, jumps, glides, climbs and swings; H2 switching (each old item gone within 1 s; then
+through a relay, the bot (`--items`) and the client (`--ghost-items`). Unless a check says otherwise, the ghost holds
+them as Link does with a sword out: sword in the right hand, shield on the left arm, bow on the back. Checks: H1 all
+three held in their places while the ghost stands, walks, runs, jumps, glides, climbs and swings, then the bow drawn
+(the bow in the left hand, the rest on the back); H2 switching (each old item gone within 1 s; then
 10 switches 0.3 s apart, with the longest frame against a quiet moment); H3 clearing; H4 on the back and back again
-(10 toggles); H4L the ghost's back against Link's own; H5 Link can't take them (unarmed, and armed after H12); H6
+(10 toggles); H4P the ghost's back from the items' own offsets against Link's own (the bow 0.1 m off: for the
+record); H4L Link's own offsets copied (`ghost items rel`): the ghost's back must match his, with a picture of both from
+behind; H5 Link can't take them (unarmed, and armed after H12); H6
 despawn, H7 the distance rule, H8 the game removing the ghost, H9 a reload (Link falls from 90 m, Game Over,
 Continue): the old items watched through it and the items come back; H10 the network (every change of every cycle
-within 1 s of the bot's own time for it; then an older sender without `on_back`); H11 the frame cost (the plan's
-average, with the whole tick's worst over the same frames); H12 `ghost give`: Link takes a sword, a shield and a bow
+within 1 s of the bot's own time for it; then an older sender without `on_back`); H11 the frame cost (3 pairs alone /
+with the items in turn, the medians; the plan's average for the items' part, with the whole tick's worst over the
+same frames); H12 `ghost give`: Link takes a sword, a shield and a bow
 (this changes the test save if the game saves); H13 the sender's "on the back" bytes; H15 a real sender: a second
 client sends this Link (1.5 m to the side) through a relay, and the ghost must show what he holds after a sprint, a
-draw, a throw (he drops his sword) and a new sword; H14 no bad line in the log, and the game closed with `exit`. Results go to `out\research\ghost-items-results.txt`, screenshots to
-`out\shots\ghostitems_*.png`.
+draw, a throw (he drops his sword) and a new sword, and after the sprint his items on the ghost's back where his are
+(his offsets through the network); H16 every held item drawn at Link's size (`items.N.size` 1,
+and Link's own `ghost self` sizes); H14 no bad line in the log, and the game closed with `exit`. Last run:
+**22 PASS, 1 FAIL** (fourteenth round, run 5: H4P, the record of the items' own offsets; the copy, H4L, passes). Results go to
+`out\research\ghost-items-results.txt`, screenshots to `out\shots\ghostitems_*.png`.
 
 
 ## Stand-ins: which actors work

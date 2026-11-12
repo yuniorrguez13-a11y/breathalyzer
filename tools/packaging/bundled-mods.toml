@@ -1,0 +1,130 @@
+# The mods that come with Breathalyzer Plus (tools/make_release.py --edition plus). docs/release.md explains it all.
+#
+# Only our own mods: ids start with botw-mod-loader. or giruka., every file comes from this repo (git-tracked) or from
+# build\native (DLLs build_native.py or modmenu.py built here). Never game files, never mods by other people, never
+# the stress-test mods, never anything from out\.
+#
+# title, description: what the mod picker and the game's Mods page show. Plain words; the description is one line of
+#   at most 80 characters (the Mods page cuts there) in plain ASCII, without { } | ` ^ ~ % # (the game font lacks them).
+# default: "on" or "off" in the picker. The rule: a mod that changes nothing until you use it is on; a mod that
+#   changes the game (gameplay, looks, a game file), costs fps or uses the network is off.
+# why: why that default (shown under Details).
+# tags: short notes the picker shows on the mod's card.
+# ready: true = in the Plus zip. false = not tested enough yet: left out (make_release --with-experimental adds the
+#   built ones, marked Experimental and off).
+# kind "code": a DLL. manifest = its mod.toml, dll = the built DLL (a path under build/native).
+# kind "recipe": built on the player's PC from their own game files when it is first turned on: folder = the recipe
+#   (shipped in app\ anyway), build = the tool commands that build it (tools\<tool> <args>), in order.
+# after_add: tool commands to run once the mod is in the library.
+
+[[mod]]
+id = "botw-mod-loader.modmenu"
+title = "Mods page in the game"
+description = "Adds a Mods page to the game's Options: turn mods on or off there."
+default = "on"
+why = "It only adds a page to the game's Options."
+tags = []
+ready = true
+kind = "code"
+manifest = "build/native/modmenu-mods/modmenu/mod.toml"   # written by python tools/modmenu.py setup
+dll = "build/native/modmenu-mods/modmenu/modmenu.dll"
+after_add = [["modmenu.py", "sync"]]
+
+[[mod]]
+id = "botw-mod-loader.basics-show-pos"
+title = "Show Position"
+description = "Type where in the game's console (F12) to see where Link is."
+default = "on"
+why = "It does nothing until you type the command."
+tags = []
+ready = true
+kind = "code"
+manifest = "native/examples/basics_show_pos/mod.toml"
+dll = "build/native/basics-mods/basics_show_pos.dll"
+
+[[mod]]
+id = "botw-mod-loader.basics-inf-stamina"
+title = "Infinite Stamina"
+description = "Stamina never runs out. Type infstamina off in the console to stop it."
+default = "off"
+why = "It changes gameplay."
+tags = ["Changes gameplay", "Needs developer mode for its command"]
+ready = true
+kind = "code"
+manifest = "native/examples/basics_inf_stamina/mod.toml"
+dll = "build/native/basics-mods/basics_inf_stamina.dll"
+
+[[mod]]
+id = "botw-mod-loader.basics-teleport-up"
+title = "Teleport Up"
+description = "Type up in the console to move Link straight up (10 m, or up 50)."
+default = "off"
+why = "It moves Link, and you can get stuck."
+tags = ["Needs developer mode"]
+ready = true
+kind = "code"
+manifest = "native/examples/basics_teleport_up/mod.toml"
+dll = "build/native/basics-mods/basics_teleport_up.dll"
+
+[[mod]]
+id = "botw-mod-loader.perf-effects"
+title = "Performance: effects off"
+description = "No glow, soft shadows or far blur, for more fps on a weak PC."
+default = "off"
+why = "It replaces Pack/Bootup.pack, so Savage Wind's HUD button letters and voice fix are off."
+tags = ["Built from your game files the first time (about 1 minute)", "Changes how the game looks"]
+ready = true
+kind = "recipe"
+folder = "native/examples/perf_effects"
+build = [["quality.py", "toggle", "ssao", "off"], ["quality.py", "toggle", "bloom", "off"],
+         ["quality.py", "toggle", "dof", "off"]]
+
+# ---- not ready yet: never in the Plus zip unless --with-experimental (and then only if built)
+
+[[mod]]
+id = "botw-mod-loader.ghost"
+title = "Ghost multiplayer"
+description = "See a friend as a second Link in your world (on your home network)."
+default = "off"
+why = "It uses the network, and it isn't tested on two PCs yet."
+tags = ["Experimental", "Uses the network"]
+ready = false
+kind = "code"
+manifest = "native/examples/ghost/mod.toml"
+dll = "build/native/ghost-mods/ghost.dll"
+
+[[mod]]
+id = "botw-mod-loader.zelda-view"
+title = "Secret word"
+description = "A hidden easter egg for the game's console."
+default = "on"
+why = "It does nothing until you type its word. Its hooks make the first start 10-20 minutes longer."
+tags = ["Experimental", "First start takes 10-20 minutes longer"]
+ready = false
+kind = "code"
+manifest = "native/examples/zelda_view/mod.toml"
+dll = "build/native/hook-mods/zelda_view.dll"
+
+[[mod]]
+id = "giruka.castle-date"
+title = "Castle date"
+description = "Beat the game, find the right door in Zelda's room, and she greets you."
+default = "off"
+why = "It changes the castle map."
+tags = ["Experimental", "Built from your game files the first time"]
+ready = false
+kind = "recipe"
+folder = "castle"
+build = [["castle_build.py", "build"]]
+
+[[mod]]
+id = "botw-mod-loader.perf-shadows"
+title = "Performance: shorter shadows"
+description = "Meant to end sun shadows nearer. No visible change found yet."
+default = "off"
+why = "No visible change or fps gain was measured."
+tags = ["Experimental", "Built from your game files the first time"]
+ready = false
+kind = "recipe"
+folder = "native/examples/perf_shadows"
+build = [["quality.py", "toggle", "shadow_range", "1000"]]

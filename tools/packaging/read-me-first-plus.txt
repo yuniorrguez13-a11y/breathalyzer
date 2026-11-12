@@ -1,0 +1,40 @@
+Breathalyzer Plus {version}
+Mod manager and launcher for Savage Wind (Breath of the Wild on PC), with our own mods. Made by giruka.
+
+HOW TO START
+
+1. Unpack this whole zip: right-click it, choose Extract All.
+   A good place: next to your Savage Wind folder, for example Documents\SavageWind\Breathalyzer.
+   Not in Program Files.
+2. Open "Start Breathalyzer".
+3. The first time, show it your Savage Wind folder (the folder with savagewind.exe in it).
+4. Pick your mods: each one has a title and a short description. Turn on the ones you want.
+   You can change this later.
+5. Press Play.
+
+WHAT YOU NEED
+
+- Savage Wind 0.4.1-alpha.4, with its game files set up from your own copy of the game (version 1.9.0).
+- Nothing else. Breathalyzer brings its own Python. You don't install anything.
+
+THE MODS
+
+The mods in this zip are made by us, for Breathalyzer. Mods that change the game are off until you turn them on.
+Some are built from your own game files the first time you turn them on.
+The list: app\bundled-mods.json
+
+IF WINDOWS OR YOUR ANTIVIRUS STOPS IT
+
+- "Windows protected your PC": press "More info", then "Run anyway".
+  Start Breathalyzer is a small new program that isn't signed yet.
+- If your antivirus holds Start Breathalyzer back, open app\Start Breathalyzer (backup).cmd instead.
+
+GOOD TO KNOW
+
+- No game files are in this zip, and no mods made by other people.
+- Breathalyzer never goes online by itself.
+- Your settings and mods stay when you update: unpack the new version and use it instead.
+- Help: app\docs\launcher.md
+
+Free and open source (MIT licence, app\LICENSE). Python (PSF licence, app\runtime\LICENSE.txt) and
+Tcl/Tk (BSD-style licence, app\runtime\tcl) come with it.

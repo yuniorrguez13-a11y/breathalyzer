@@ -302,6 +302,7 @@ static int g_calls, g_deletes, g_releases, g_requests, g_follow_zero, g_follow_s
 static const char *g_refuse_name = "Weapon_Sword_999";  // the request is refused for this name
 static float g_set_y;                  // SET_MTX: the y of the last matrix set
 static int g_not_weapon;               // the next request makes an actor of another class
+static float g_fake_axis;              // 0.6.2: new items' matrix axes have this length (0: left at 0) and scale 1
 
 static void ld_new(FakeLinkData *ld, uint64_t proc) { ld->id = g_next_id++, ld->proc = proc; }
 static void ld_kill(FakeLinkData *ld) { ld->proc = 0, ld->id = g_next_id++; }
@@ -412,6 +413,11 @@ static FakeItem *fake_item_new(const char *name, uint64_t handle) {
     W32(f->plist, PLIST_COUNT, 18);
     W64(f->plist, PLIST_OBJS, f->table);
     for (int k = 0; k < 18; k++) f->table[k] = P(f->obj);
+    if (g_fake_axis > 0) {  // (0.6.2: a hand bone with a scale: the matrix's axes carry it; its own scale 1)
+        float *mtx = (float *)(void *)(f->mem + ACTOR_MTX), *sc = (float *)(void *)(f->mem + ACTOR_SCALE);
+        mtx[0] = mtx[5] = mtx[10] = g_fake_axis;
+        sc[0] = sc[1] = sc[2] = 1.0f;
+    }
     static const int tr[5] = {0x78, 0x78, 0x78, 0x2c0, 0x50}, rt[5] = {0xa0, 0xa0, 0xa0, 0x2e8, 0x78};
     float trans[3] = {0.3f, 0.0f, 0.0f}, rot[3] = {180.0f, 120.0f, 0.0f};
     memcpy(f->obj + tr[kind], trans, sizeof trans);
@@ -805,6 +811,106 @@ static void check_items(void) {
     }
     check("items", "give", t_status.items.give_state == GV_DONE && g_nfi == 1 && g_fi[0].taken &&
           t_status.items.slot[0].state == IS_NONE, "give %s, made %d", GV_NAMES[t_status.items.give_state], g_nfi);
+    g_not_weapon = 0;
+    // 0.6.2: a weapon held by anyone but the player gets a bigger scale from its own update (1.5 here): the ghost's
+    // grabbed items are named to the WEAPON_CALC wrapper, which gives them the player's scale (base x object 9's
+    // +0x50); a deleted one is no longer named
+    items_fresh(1);
+    g_fake_axis = 1.0f;
+    items_want("Weapon_Sword_001", "Weapon_Shield_001", "", 0);
+    items_run(ghost, 2.0);
+    FakeItem *sw = fi_of(t_status.items.slot[0].actor);
+    int named = sw && g_size_item[0] == P(sw->mem) && g_size_item[1] == t_status.items.slot[1].actor &&
+                g_size_item[2] == 0;
+    float npc[3] = {1.5f, 1.5f, 1.5f}, base[3] = {1.0f, 1.0f, 1.0f}, k = 1.0f;
+    if (sw) {
+        memcpy(sw->mem + ACTOR_SCALE, npc, sizeof npc);  // (the game's update: an NPC's scale)
+        memcpy(sw->mem + WEAPON_BASE_SCALE, base, sizeof base);
+        memcpy(sw->obj + WEAPON_SCALE_PLAYER, &k, sizeof k);
+        weapon_player_scale(P(sw->mem));
+    }
+    items_run(ghost, 0.3);
+    const ItemStatus *o0 = &t_status.items.slot[0];
+    check("items", "size_player", held_count() == 2 && named && o0->size > 0.99f && o0->size < 1.01f &&
+          o0->own_scale > 0.99f && o0->axis > 0.99f && g_scale_sets >= 1,
+          "held %d, named %d, size %.2f (own %.2f, axes %.2f), sets %lld", held_count(), named, o0->size,
+          o0->own_scale, o0->axis, (long long)g_scale_sets);
+    items_want("Weapon_Lsword_001", "", "", 0);
+    items_run(ghost, 0.1);
+    int unnamed = sw && g_size_item[0] != P(sw->mem) && g_size_item[1] == 0;
+    items_run(ghost, 1.5);
+    check("items", "size_unnamed", unnamed && g_size_item[0] == t_status.items.slot[0].actor && held_count() == 1,
+          "unnamed %d, held %d", unnamed, held_count());
+    g_fake_axis = 0;
+    // 0.6.2: a stage change drops the ghost and its items without a call; the game kept them (as after the fourteenth
+    // round's Game Over): nothing while there is no player or for LEFTOVER_WAIT_S with him, then they are removed
+    items_fresh(1);
+    items_want("Weapon_Sword_001", "Weapon_Shield_001", "Weapon_Bow_001", 4);
+    items_run(ghost, 2.0);
+    int held3 = held_count() == 3;
+    memset(t_old_ghost_t, 0, sizeof t_old_ghost_t);
+    g_link.data = P(&g_gh.ld), g_link.id = g_gh.ld.id;
+    t_stage_back_t = 0;
+    t_status.items.leftovers = 0;
+    calls = g_calls;
+    old_ghost_add(g_it);
+    items_forget(g_it);
+    zero_link();
+    for (int k = 0; k < 30; k++, g_it += 1.0 / 30.0) leftovers_tick(c, 0, g_it);  // (loading: no player)
+    int quiet = g_calls == calls && t_status.items.old_ghosts == 1 && t_status.items.old_items == 3;
+    for (int k = 0; k < 60; k++, g_it += 1.0 / 30.0) leftovers_tick(c, P(player), g_it);  // (2 s with him)
+    int waited = t_status.items.leftovers == 0;
+    del = g_deletes;
+    for (int k = 0; k < 45; k++, g_it += 1.0 / 30.0) {  // (then 1.5 s more)
+        leftovers_tick(c, P(player), g_it);
+        world_step();
+    }
+    check("items", "leftovers", held3 && quiet && waited && t_status.items.leftovers == 4 && g_deletes == del + 4 &&
+          live_items() == 0 && !g_gh.ld.proc && t_status.items.old_ghosts == 0 && t_status.items.old_items == 0,
+          "held %d, quiet %d, waited %d, removed %lld, deletes +%d, live %d", held3, quiet, waited,
+          (long long)t_status.items.leftovers, g_deletes - del, live_items());
+    // ... and one that is gone (the stage change took it along): nothing is called
+    items_fresh(1);
+    items_want("Weapon_Sword_001", "", "", 0);
+    items_run(ghost, 2.0);
+    g_link.data = P(&g_gh.ld), g_link.id = g_gh.ld.id;
+    t_stage_back_t = 0;
+    t_status.items.leftovers = 0;
+    old_ghost_add(g_it);
+    items_forget(g_it);
+    zero_link();
+    ld_kill(&g_gh.ld);
+    for (int i = 0; i < g_nfi; i++) g_fi[i].dead = 1, ld_kill(&g_fi[i].ld);
+    del = g_deletes;
+    for (int k = 0; k < 150; k++, g_it += 1.0 / 30.0) leftovers_tick(c, P(player), g_it);
+    // 0.6.2: the other player's own back offset (`ghost items rel`): the bow's follow gets exactly that matrix (no
+    // euler call), its hold length is the matrix's; a new one while on the back moves it to the other follow
+    items_fresh(1);
+    float relm[12] = {0, 0, 1, 0.12f, 0, 1, 0, -0.05f, -1, 0, 0, 0.2f};
+    memcpy(g_irq.item_rel[2], relm, sizeof relm);
+    g_irq.item_has_rel[2] = 1;
+    items_want("Weapon_Sword_001", "", "Weapon_Bow_001", 4);
+    items_run(ghost, 2.0);
+    uint64_t bow_fol = t_status.items.slot[2].actor ? R64((void *)(uintptr_t)t_status.items.slot[2].actor, ACTOR_FOLLOW) : 0;
+    int copied_ok = follow_is_ours(2, bow_fol) &&
+                    !memcmp((const uint8_t *)(uintptr_t)bow_fol + FOLLOW_OFFSET, relm, sizeof relm) &&
+                    t_status.items.slot[2].copied && t_status.items.slot[2].hold > 0.238f &&
+                    t_status.items.slot[2].hold < 0.239f && !t_status.items.slot[0].copied;
+    relm[3] = 0.3f;
+    memcpy(g_irq.item_rel[2], relm, sizeof relm);
+    items_run(ghost, 0.3);
+    uint64_t bow_fol2 = t_status.items.slot[2].actor ? R64((void *)(uintptr_t)t_status.items.slot[2].actor, ACTOR_FOLLOW) : 0;
+    int moved = bow_fol2 != bow_fol && follow_is_ours(2, bow_fol2) &&
+                !memcmp((const uint8_t *)(uintptr_t)bow_fol2 + FOLLOW_OFFSET, relm, sizeof relm);
+    g_irq.item_has_rel[2] = 0;
+    items_run(ghost, 0.3);
+    int sets = g_follow_sets;
+    items_run(ghost, 0.5);
+    check("items", "back_copied", held_count() == 2 && copied_ok && moved && !t_status.items.slot[2].copied &&
+          g_follow_sets == sets, "held %d, copied %d, moved %d, follow sets +%d once settled", held_count(), copied_ok,
+          moved, g_follow_sets - sets);
+    check("items", "leftovers_gone", t_status.items.leftovers == 0 && g_deletes == del && t_status.items.old_ghosts == 0,
+          "removed %lld, deletes +%d", (long long)t_status.items.leftovers, g_deletes - del);
 }
 
 static void items_setup(void) {

@@ -67,12 +67,14 @@ class GhostNative(unittest.TestCase):
         """0.6.0 (made-up world): held with the right hand bone after the grab is refused once, switched and cleared
         by delete (never let go), the back on a follow of ours and back again (never a 0 written), a let-go item
         deleted at once, the ghost's removal and a stage change, a refused name given up after 3 tries, a non-weapon
-        released, no items on a body without hand bones, nothing at all while off, and `ghost give`."""
+        released, no items on a body without hand bones, nothing at all while off, and `ghost give`. 0.6.2: the
+        ghost's grabbed items get the player's scale (not an NPC's), only while they are its; what a stage change
+        dropped and the game kept removed after Link is back (and nothing for what the game took along)."""
         self.group("items", ["bones", "held", "in_hand", "same_again", "switch", "quick_switches", "back",
                              "back_toggles", "back_off", "clear_one", "clear_all", "let_go", "ghost_gone",
                              "ghost_back", "stage_change", "stage_change_stray", "orphan_released", "parked", "taken_in_gap",
                              "own_follow_first", "owns_follow_kept", "names", "gave_up", "not_a_weapon", "no_hand_bones",
-                             "off_costs_nothing", "give"])
+                             "off_costs_nothing", "give", "size_player", "size_unnamed", "leftovers", "back_copied", "leftovers_gone"])
 
     def test_nothing_else_failed(self):
         self.assertEqual(self.fails, 0, self.report)

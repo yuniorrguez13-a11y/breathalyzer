@@ -4,6 +4,7 @@ import contextlib
 import gzip
 import hashlib
 import io
+import json
 import os
 import re
 import shlex
@@ -12,6 +13,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 import zipfile
 from pathlib import Path
@@ -140,7 +142,7 @@ class Base(unittest.TestCase):
         return code, out.getvalue() + err.getvalue()
 
     def zip_path(self, version="1.2.3"):
-        return self.out / f"breathalyzer-{version}.zip"
+        return self.out / f"breathalyzer-source-{version}.zip"
 
 
 class WhatGoesIn(Base):
@@ -273,18 +275,18 @@ class TheZip(Base):
         with zipfile.ZipFile(zp) as zf:
             names = zf.namelist()
             self.assertEqual(names, sorted(names))
-            self.assertTrue(all(n.startswith("breathalyzer-1.2.3/") for n in names))
-            self.assertIn("breathalyzer-1.2.3/build/native/modhost.dll", names)
-            self.assertIn("breathalyzer-1.2.3/SHA256SUMS.txt", names)
+            self.assertTrue(all(n.startswith("breathalyzer-source-1.2.3/") for n in names))
+            self.assertIn("breathalyzer-source-1.2.3/build/native/modhost.dll", names)
+            self.assertIn("breathalyzer-source-1.2.3/SHA256SUMS.txt", names)
             self.assertTrue(all(i.date_time == mr.FIXED_DATE for i in zf.infolist()))
-            sums = zf.read("breathalyzer-1.2.3/SHA256SUMS.txt").decode()
+            sums = zf.read("breathalyzer-source-1.2.3/SHA256SUMS.txt").decode()
             for line in sums.splitlines():
                 sha, rel = line.split("  ")
-                self.assertEqual(hashlib.sha256(zf.read("breathalyzer-1.2.3/" + rel)).hexdigest(), sha)
+                self.assertEqual(hashlib.sha256(zf.read("breathalyzer-source-1.2.3/" + rel)).hexdigest(), sha)
             self.assertEqual(len(sums.splitlines()), len(names) - 1)
-        outer = (self.out / "breathalyzer-1.2.3.SHA256SUMS.txt").read_text()
-        self.assertIn(f"{hashlib.sha256(zp.read_bytes()).hexdigest()}  breathalyzer-1.2.3.zip\n", outer)
-        self.assertIn("  breathalyzer-1.2.3/tools/tool.py\n", outer)
+        outer = (self.out / "breathalyzer-source-1.2.3.SHA256SUMS.txt").read_text()
+        self.assertIn(f"{hashlib.sha256(zp.read_bytes()).hexdigest()}  breathalyzer-source-1.2.3.zip\n", outer)
+        self.assertIn("  breathalyzer-source-1.2.3/tools/tool.py\n", outer)
         self.assertFalse(list(self.out.glob("*.tmp")))
 
     def test_byte_identical(self):
@@ -531,10 +533,10 @@ class FileNames(Base):
         code, out = self.run_main("--version", "1.2.3")
         self.assertEqual(code, 0, out)  # (it crashed writing SHA256SUMS.txt as ASCII)
         with zipfile.ZipFile(self.zip_path()) as zf:
-            self.assertIn(f"breathalyzer-1.2.3/{name}", zf.namelist())
-            self.assertIn(f"  {name}\n", zf.read("breathalyzer-1.2.3/SHA256SUMS.txt").decode("utf-8"))
-        outer = (self.out / "breathalyzer-1.2.3.SHA256SUMS.txt").read_text(encoding="utf-8")
-        self.assertIn(f"  breathalyzer-1.2.3/{name}\n", outer)
+            self.assertIn(f"breathalyzer-source-1.2.3/{name}", zf.namelist())
+            self.assertIn(f"  {name}\n", zf.read("breathalyzer-source-1.2.3/SHA256SUMS.txt").decode("utf-8"))
+        outer = (self.out / "breathalyzer-source-1.2.3.SHA256SUMS.txt").read_text(encoding="utf-8")
+        self.assertIn(f"  breathalyzer-source-1.2.3/{name}\n", outer)
 
     def test_user_name_in_a_file_name(self):
         self.put(f"docs/notes-{LOGIN}.md", "made up\n")
@@ -598,7 +600,7 @@ class LeakTerms(unittest.TestCase):
 
 class WriteErrors(Base):
     def sums_path(self):
-        return self.out / "breathalyzer-1.2.3.SHA256SUMS.txt"
+        return self.out / "breathalyzer-source-1.2.3.SHA256SUMS.txt"
 
     def first_release(self):
         self.assertEqual(self.run_main("--version", "1.2.3")[0], 0)
@@ -734,6 +736,385 @@ class Docs(unittest.TestCase):
         # (a zip is only byte-identical on the same Python: 3.14 on Windows compresses with zlib-ng)
         self.assertIn("same Python version", " ".join(mr.__doc__.split()))
         self.assertNotIn("The same files always give a byte-identical zip", flat)
+
+
+def make_exe(subsystem=2, machine=0x8664) -> bytes:
+    """A made-up 64-bit program (not a DLL) with this subsystem (2: a window program, 3: a console one)."""
+    data = bytearray(make_dll((), machine=machine, dll=False))
+    struct.pack_into("<H", data, 0x80 + 24 + 68, subsystem)
+    return bytes(data)
+
+
+ICO = struct.pack("<HHH", 0, 1, 1) + struct.pack("<BBBBHHII", 16, 16, 0, 0, 1, 32, 8, 22) + b"madeupic"
+PTH = "python313.zip\n.\n..\\tools\n"
+BUNDLED = '''
+[[mod]]
+id = "botw-mod-loader.show"
+title = "Show Position"
+description = "Type where in the console to see where Link is."
+default = "on"
+why = "It does nothing until you type the command."
+tags = []
+ready = true
+kind = "code"
+manifest = "native/examples/show/mod.toml"
+dll = "build/native/basics-mods/show.dll"
+
+[[mod]]
+id = "botw-mod-loader.perf"
+title = "Performance: effects off"
+description = "No glow, for more fps."
+default = "off"
+why = "It changes how the game looks."
+tags = ["Built from your game files the first time"]
+ready = true
+kind = "recipe"
+folder = "native/examples/perf"
+build = [["quality.py", "set", "low"]]
+
+[[mod]]
+id = "botw-mod-loader.ghosty"
+title = "Ghosty"
+description = "Not ready yet."
+default = "on"
+why = "Made up."
+tags = []
+ready = false
+kind = "code"
+manifest = "native/examples/ghosty/mod.toml"
+dll = "build/native/ghost-mods/ghosty.dll"
+'''
+SHOW_TOML = '''# show: a made-up example mod (developer notes that stay out of the bundled copy)
+# Build it: python tools/build_native.py build
+
+[mod]
+id = "botw-mod-loader.show"
+name = "Show Position (example)"
+version = "1.0.0"
+authors = ["giruka"]
+description = "Adds the command where."
+game_versions = ["1.9.0"]   # by address
+
+[code]
+windows = "show.dll"
+
+[[settings]]
+key = "loud"
+type = "toggle"
+label = "Loud"
+default = false
+'''
+
+
+class PlayerBase(Base):
+    """A made-up project with everything the player zips need: a runtime and its lock, a starter and its lock, the
+    packaging texts, a bundled code mod, a recipe and a not-ready mod."""
+
+    def setUp(self):
+        super().setUp()
+        base = Path(self.tmp.name)
+        self.runtime = base / "work" / "runtime"
+        self.starter = base / "work" / "starter" / mr.STARTER_NAME
+        self.put("build/native/modhost.dll", HOST_DLL)
+        self.put("build/native/basics-mods/show.dll", make_dll())
+        self.put("tools/modman_gui.py", "print('window')\n")
+        self.put("tools/modman.py", "print('modman')\n")
+        self.put("tools/quality.py", "print('quality')\n")
+        self.put("assets/breathalyzer.ico", ICO)
+        self.put("native/examples/show/mod.toml", SHOW_TOML)
+        self.put("native/examples/show/show.c", "int swmod_init(void) { return 0; }\n")
+        self.put("native/examples/perf/mod.toml", '[mod]\nid = "botw-mod-loader.perf"\nname = "Perf"\n')
+        self.put("native/examples/ghosty/mod.toml",
+                 '[mod]\nid = "botw-mod-loader.ghosty"\nname = "G"\ndescription = "g"\n\n[code]\nwindows = '
+                 '"ghosty.dll"\n')
+        self.put("tools/packaging/bundled-mods.toml", BUNDLED)
+        self.put("tools/packaging/read-me-first-core.txt", "Breathalyzer {version}\nUnpack the whole zip.\n")
+        self.put("tools/packaging/read-me-first-plus.txt", "Breathalyzer Plus {version}\nPick your mods.\n")
+        self.put("tools/packaging/start-backup.cmd", "@echo off\nstart \"\" runtime\\pythonw.exe\n")
+        self.put("tools/packaging/starter/start.c", "void start(void) {}\n")
+        self.put("tools/packaging/build_starter.py", "# made up\n")
+        self.make_runtime()
+        self.make_starter()
+
+    def make_runtime(self, extra=None, lock=True):
+        files = {"python.exe": make_exe(3), "pythonw.exe": make_exe(2), "python313.dll": make_dll(()),
+                 "python313.zip": zip_of({"os.pyc": b"\xf3\x0d\x0d\x0amade up"}), "python313._pth": PTH.encode(),
+                 "LICENSE.txt": b"PSF made up\n", "tcl/tcl8.6/init.tcl": b"# made up\n", **(extra or {})}
+        if self.runtime.exists():
+            shutil.rmtree(self.runtime)
+        for rel, data in files.items():
+            p = self.runtime / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(data)
+        if lock:
+            self.lock_runtime()
+
+    def lock_runtime(self):
+        files = {p.relative_to(self.runtime).as_posix(): {"sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
+                                                           "size": p.stat().st_size}
+                 for p in self.runtime.rglob("*") if p.is_file()}
+        self.put(mr.RUNTIME_LOCK, json.dumps({"format": 1, "files": files}))
+
+    def make_starter(self, data=None, lock=True):
+        data = make_exe(2) if data is None else data
+        self.starter.parent.mkdir(parents=True, exist_ok=True)
+        self.starter.write_bytes(data)
+        if lock:
+            sources = {n: hashlib.sha256((self.root / rel).read_bytes()).hexdigest()
+                       for n, rel in mr.STARTER_SOURCES.items()}
+            self.put(mr.STARTER_LOCK, json.dumps({"format": 1, "sha256": hashlib.sha256(data).hexdigest(),
+                                                  "sources": sources}))
+
+    def plan(self, **kw):
+        kw.setdefault("edition", "core")
+        kw.setdefault("runtime_dir", self.runtime)
+        kw.setdefault("starter", self.starter)
+        return super().plan(**kw)
+
+    def run_main(self, *args, **kw):
+        return super().run_main("--runtime", str(self.runtime), "--starter", str(self.starter), *args, **kw)
+
+    def refused(self, **kw):
+        return dict(self.plan(**kw).refused)
+
+
+class PlayerZips(PlayerBase):
+    def test_core_layout(self):
+        plan = self.plan()
+        self.assertEqual(plan.refused, [])
+        rels = {i.rel for i in plan.items}
+        for need in (mr.STARTER_NAME, mr.README_NAME, f"app/{mr.BACKUP_CMD}", "app/runtime/python.exe",
+                     "app/runtime/python313._pth", "app/runtime/tcl/tcl8.6/init.tcl", "app/build/native/modhost.dll",
+                     "app/tools/tool.py", "app/tools/modman_gui.py", "app/docs/guide.md", "app/LICENSE",
+                     "app/native/examples/show/show.c"):
+            self.assertIn(need, rels)
+        # never in a player zip: tests, .github, packaging files, git's own files, the mods
+        for rel in rels:
+            self.assertFalse(rel.startswith(("app/tests/", "app/.github/", "app/tools/packaging/", "app/bundled-mods")),
+                             rel)
+        self.assertNotIn("app/.gitignore", rels)
+        self.assertFalse([r for r in rels if r.endswith(".dll") and not r.startswith("app/runtime/")
+                          and r != "app/build/native/modhost.dll"])
+        self.assertEqual(plan.folder, "breathalyzer-1.2.3")
+        readme = next(i.data for i in plan.items if i.rel == mr.README_NAME)
+        self.assertEqual(readme, b"Breathalyzer 1.2.3\r\nUnpack the whole zip.\r\n")
+
+    def test_plus_has_our_mods_with_player_text(self):
+        plan = self.plan(edition="plus")
+        self.assertEqual(plan.refused, [])
+        self.assertEqual(plan.folder, "breathalyzer-plus-1.2.3")
+        items = {i.rel: i for i in plan.items}
+        self.assertIn("app/bundled-mods/show/show.dll", items)
+        man = tomllib.loads(items["app/bundled-mods/show/mod.toml"].data.decode())
+        self.assertEqual(man["mod"]["name"], "Show Position")
+        self.assertEqual(man["mod"]["description"], "Type where in the console to see where Link is.")
+        self.assertEqual(man["code"]["windows"], "show.dll")
+        self.assertEqual(man["settings"][0]["key"], "loud")  # (the rest of the mod.toml stays)
+        self.assertNotIn(b"developer notes", items["app/bundled-mods/show/mod.toml"].data)
+        doc = json.loads(items["app/bundled-mods.json"].data)
+        self.assertEqual([(m["id"], m["default"]) for m in doc["mods"]],
+                         [("botw-mod-loader.show", "on"), ("botw-mod-loader.perf", "off")])
+        self.assertEqual(doc["mods"][0]["folder"], "bundled-mods/show")
+        self.assertEqual(doc["mods"][1]["recipe"], "native/examples/perf")
+        self.assertEqual(doc["mods"][1]["build"], [["quality.py", "set", "low"]])
+        self.assertFalse([r for r in items if "ghosty" in r and r.startswith("app/bundled")])  # not ready: left out
+
+    def test_experimental_mods_only_when_asked_and_built(self):
+        plan = self.plan(edition="plus", experimental=True)
+        self.assertIn("build/native/ghost-mods/ghosty.dll", plan.not_built)
+        self.put("build/native/ghost-mods/ghosty.dll", make_dll())
+        plan = self.plan(edition="plus", experimental=True)
+        self.assertEqual(plan.refused, [])
+        ghost = next(m for m in plan.bundled if m["id"] == "botw-mod-loader.ghosty")
+        self.assertEqual(ghost["default"], "off")   # (on in the list, but experimental mods start off)
+        self.assertEqual(ghost["tags"][0], "Experimental")
+        self.assertTrue(ghost["experimental"])
+        code, out = self.run_main("--edition", "core", "--with-experimental")
+        self.assertEqual(code, 2, out)
+
+    def test_ready_mod_not_built_refuses(self):
+        (self.build / "basics-mods" / "show.dll").unlink()
+        self.assertIn("not built", self.refused(edition="plus").get("app/bundled-mods/show/show.dll", ""))
+
+    def test_self_tests_and_cleanallowed_files_stay_out(self):
+        gen = "".join(f"void f_{0x7100000000 + i:010x}(Cpu *c) {{}}\n" for i in range(3))
+        self.put("native/modhost/selftest/hooked/main_000.c", gen)
+        self.put("native/modhost/selftest/probe.c", "int swmod_init(void) { return 0; }\n")
+        self.put(".cleanallow", "# made up\nnative/modhost/selftest/hooked/main_000.c\nnative/made/main_001.c\n")
+        plan = self.plan()
+        self.assertFalse([i.rel for i in plan.items if "selftest" in i.rel])
+        self.put("native/made/main_001.c", gen)
+        self.assertIn(".cleanallow", self.refused().get("app/native/made/main_001.c", ""))
+        self.assertIn("native/modhost/selftest/probe.c", {i.rel for i in self.plan(edition="source").items})
+
+    def test_no_dll_but_ours(self):
+        self.put("native/prebuilt/other.dll", make_dll())  # a DLL sitting in the project: not in a player zip
+        for edition in ("core", "plus"):
+            self.assertIn("no program or DLL", self.refused(edition=edition).get("app/native/prebuilt/other.dll", ""))
+
+    def test_runtime_must_match_its_lock(self):
+        (self.runtime / "python313.dll").write_bytes(make_dll(("changed",)))
+        self.assertIn("differs from runtime.lock.json", self.refused().get("app/runtime/python313.dll", ""))
+        self.make_runtime()
+        (self.runtime / "site.py").write_text("made up\n")
+        self.assertIn("not in runtime.lock.json", self.refused().get("app/runtime/site.py", ""))
+        self.make_runtime()
+        (self.runtime / "LICENSE.txt").unlink()
+        self.assertIn("missing", self.refused().get("app/runtime/LICENSE.txt", ""))
+        (self.root / mr.RUNTIME_LOCK).unlink()
+        self.assertIn(mr.RUNTIME_LOCK, self.refused())
+
+    def test_runtime_rules(self):
+        self.make_runtime({"python313._pth": b"python313.zip\nimport site\nC:\\Python313\\Lib\n",
+                           "Lib/site-packages/x.py": b"made up\n", "x.pth": b"made up\n",
+                           "old32.dll": make_dll((), machine=0x14C)})
+        refused = self.refused()
+        why = refused.get("app/runtime/python313._pth", "")
+        self.assertIn("site-packages could come in", why)
+        self.assertIn("an absolute path", why)
+        self.assertIn("never goes in", refused.get("app/runtime/Lib/site-packages/x.py", ""))
+        self.assertIn(".pth files never go in", refused.get("app/runtime/x.pth", ""))
+        self.assertIn("not a 64-bit", refused.get("app/runtime/old32.dll", ""))
+
+    def test_game_files_leaks_and_secrets_in_the_runtime(self):
+        self.make_runtime({"tcl/x.sarc": b"made up", "tcl/note.txt": f"C:\\Users\\{LOGIN}\\x\n".encode(),
+                           "tcl/t.txt": f"token {TOKEN}\n".encode(),
+                           "python313.zip": zip_of({"os.pyc": b"made up", "Pack/a.sarc": b"made up"})})
+        refused = self.refused()
+        self.assertIn("game file type", refused.get("app/runtime/tcl/x.sarc", ""))
+        self.assertIn("leak", refused.get("app/runtime/tcl/note.txt", ""))
+        self.assertIn("access token", refused.get("app/runtime/tcl/t.txt", ""))
+        self.assertIn("game file type", refused.get("app/runtime/python313.zip", ""))
+
+    def test_starter_checks(self):
+        self.make_starter(lock=False)
+        self.put(mr.STARTER_LOCK, json.dumps({"format": 1, "sha256": "0" * 64}))
+        self.assertIn("doesn't match", self.refused().get(mr.STARTER_NAME, ""))
+        self.make_starter()
+        self.put("tools/packaging/starter/start.c", "void start(void) { /* changed */ }\n")
+        self.assertIn("changed since the starter was built", self.refused().get(mr.STARTER_NAME, ""))
+        self.make_starter(make_exe(3))
+        self.assertIn("not a window program", self.refused().get(mr.STARTER_NAME, ""))
+        self.make_starter(make_dll())
+        self.assertIn("a DLL, not a program", self.refused().get(mr.STARTER_NAME, ""))
+        self.make_starter(make_exe(2) + f"\\{LOGIN}\\".encode())
+        self.assertIn("leak", self.refused().get(mr.STARTER_NAME, ""))
+        self.starter.unlink()
+        self.assertIn("not built yet", self.refused().get(mr.STARTER_NAME, ""))
+
+    def test_write_both_zips_and_byte_identical(self):
+        code, out = self.run_main("--edition", "players", "--version", "1.2.3")
+        self.assertEqual(code, 0, out)
+        core, plus = self.out / "breathalyzer-1.2.3.zip", self.out / "breathalyzer-plus-1.2.3.zip"
+        with zipfile.ZipFile(core) as zf:
+            names = zf.namelist()
+            self.assertIn("breathalyzer-1.2.3/Start Breathalyzer.exe", names)
+            self.assertIn("breathalyzer-1.2.3/app/runtime/python313.zip", names)
+            self.assertFalse([n for n in names if "bundled" in n])
+        with zipfile.ZipFile(plus) as zf:
+            self.assertIn("breathalyzer-plus-1.2.3/app/bundled-mods/show/show.dll", zf.namelist())
+            self.assertIn("breathalyzer-plus-1.2.3/app/bundled-mods.json", zf.namelist())
+            unpacked = Path(self.tmp.name) / "unpacked"
+            zf.extractall(unpacked)
+        with contextlib.redirect_stdout(io.StringIO()) as said:  # (what a player or a site scan would check)
+            self.assertEqual(mr.cc.main([str(unpacked)]), 0, said.getvalue())
+        self.assertTrue((self.out / "breathalyzer-plus-1.2.3.SHA256SUMS.txt").is_file())
+        first = (core.read_bytes(), plus.read_bytes())
+        self.assertEqual(self.run_main("--edition", "players", "--version", "1.2.3")[0], 0)
+        self.assertEqual((core.read_bytes(), plus.read_bytes()), first)
+
+    def test_one_refused_edition_writes_neither(self):
+        self.put("tools/packaging/bundled-mods.toml", BUNDLED.replace("botw-mod-loader.show", "someone.else.show"))
+        code, out = self.run_main("--edition", "players", "--version", "1.2.3")
+        self.assertEqual(code, 1, out)
+        self.assertIn("isn't one of ours", out)
+        self.assertFalse(self.out.exists())
+
+    def test_dry_run_lists_both(self):
+        code, out = self.run_main("--edition", "players", "--version", "1.2.3", "--dry-run")
+        self.assertEqual(code, 0, out)
+        for text in ("breathalyzer-1.2.3.zip (core)", "breathalyzer-plus-1.2.3.zip (plus)", "app/runtime/",
+                     "mod: Show Position (on)", "mod: Performance: effects off (off)"):
+            self.assertIn(text, out)
+        self.assertFalse(self.out.exists())
+
+    def test_option_mixups(self):
+        self.assertEqual(self.run_main("--edition", "core", "--with-binaries")[0], 2)
+        self.assertEqual(self.run_main("--edition", "source", "--with-experimental")[0], 2)
+
+    def test_source_zip_keeps_its_contents(self):
+        plan = self.plan(edition="source")
+        rels = {i.rel for i in plan.items}
+        self.assertIn("tests/test_tool.py", rels)
+        self.assertIn("tools/packaging/bundled-mods.toml", rels)
+        self.assertEqual(plan.folder, "breathalyzer-source-1.2.3")
+
+
+class BundledRules(PlayerBase):
+    def bad(self, old, new):
+        self.put("tools/packaging/bundled-mods.toml", BUNDLED.replace(old, new, 1))
+        return " ".join(w for _, w in self.plan(edition="plus").refused)
+
+    def test_only_our_mods_from_this_repo(self):
+        self.assertIn("isn't one of ours", self.bad('"botw-mod-loader.show"', '"linkle.mod"'))
+        self.assertIn("never shipped", self.bad("native/examples/show/mod.toml", "out/stress-lib/x/mod.toml"))
+        self.assertIn("isn't a file git tracks", self.bad("native/examples/show/mod.toml", "native/x/mod.toml"))
+        self.assertIn("plain path", self.bad("native/examples/show/mod.toml", "../outside/mod.toml"))
+        self.assertIn("under build/native", self.bad("build/native/basics-mods/show.dll", "tools/show.dll"))
+        self.assertIn("isn't one of our tools", self.bad('"quality.py"', '"C:/x/evil.py"'))
+
+    def test_player_text_rules(self):
+        self.assertIn("more than 80", self.bad("Type where in the console", "x" * 81))
+        self.assertIn("plain ASCII", self.bad("Type where", "Type # where"))
+        self.assertIn("plain ASCII", self.bad("Show Position", "Show Position \u2014 now"))
+        self.assertIn("default must be", self.bad('default = "on"', 'default = "maybe"'))
+        self.assertIn("unknown keys", self.bad('tags = []', 'tags = []\ncolour = "red"'))
+        self.assertIn("listed twice", self.bad('"botw-mod-loader.perf"', '"botw-mod-loader.show"'))
+
+    def test_manifest_must_match(self):
+        self.put("native/examples/show/mod.toml", SHOW_TOML.replace("botw-mod-loader.show", "botw-mod-loader.other"))
+        self.assertIn("says id", self.refused(edition="plus").get("app/bundled-mods/show/mod.toml", ""))
+        self.put("native/examples/show/mod.toml", SHOW_TOML.replace('windows = "show.dll"', 'windows = "x.dll"'))
+        self.assertIn("[code] windows", self.refused(edition="plus").get("app/bundled-mods/show/mod.toml", ""))
+
+    def test_player_manifest(self):
+        text, why = mr.player_manifest(SHOW_TOML, {"id": "botw-mod-loader.show", "title": 'A "quoted" title',
+                                                   "description": "Short.", "dll": "build/native/x/show.dll"})
+        self.assertEqual(why, [])
+        man = tomllib.loads(text)
+        self.assertEqual((man["mod"]["name"], man["mod"]["description"]), ('A "quoted" title', "Short."))
+        self.assertEqual(man["mod"]["game_versions"], ["1.9.0"])
+        self.assertTrue(text.startswith("# Comes with Breathalyzer Plus"))
+        _, why = mr.player_manifest('[mod]\nid = "botw-mod-loader.show"\n[code]\nwindows = "show.dll"\n',
+                                    {"id": "botw-mod-loader.show", "title": "T", "description": "D",
+                                     "dll": "build/native/show.dll"})
+        self.assertIn("no name and description", " ".join(why))
+
+
+class RealPackagingFiles(unittest.TestCase):
+    """The packaging files in this repo, as they are."""
+
+    def test_bundled_list_reads(self):
+        tracked = set(mr.source_files(REPO)) if HAVE_GIT else set()
+        if not tracked:
+            self.skipTest("git isn't installed")
+        mods, bad = mr.read_bundled(REPO, tracked)
+        self.assertEqual(bad, [])
+        ready = {m["id"]: m["default"] for m in mods if m["ready"]}
+        self.assertEqual(ready.get("botw-mod-loader.modmenu"), "on")
+        self.assertEqual(ready.get("botw-mod-loader.basics-inf-stamina"), "off")
+        for m in mods:
+            self.assertTrue(m["id"].startswith(mr.OUR_IDS))
+            if not m["ready"]:
+                self.assertNotIn(m["id"], ready)
+
+    def test_templates_have_the_version(self):
+        for rel in mr.READ_ME.values():
+            text = (REPO / rel).read_text(encoding="utf-8")
+            self.assertIn("{version}", text)
+            self.assertIn("Start Breathalyzer", text)
+            self.assertIn(mr.BACKUP_CMD, text)
+        self.assertIn("launcher.py", (REPO / mr.BACKUP_CMD_SRC).read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -82,7 +82,7 @@
 #include "swmod.h"
 #include "botw.h"  // (only BOTW_ADDR_MAIN and BOTW_ADDR_GUEST_END: the guest window for `ghost self`'s pointer check)
 
-#define GHOST_VERSION "0.6.1"  // (the same as mod.toml)
+#define GHOST_VERSION "0.6.2"  // (the same as mod.toml)
 
 // ---- Win32 / C runtime (declared here: the zig that ships with Savage Wind has no windows.h or stdio.h)
 __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
@@ -99,6 +99,12 @@ typedef struct {  // MEMORY_BASIC_INFORMATION (64-bit)
 } MemInfo;
 _Static_assert(sizeof(MemInfo) == 48, "MEMORY_BASIC_INFORMATION is 48 bytes");
 __declspec(dllimport) size_t __stdcall VirtualQuery(const void *addr, MemInfo *info, size_t len);
+__declspec(dllimport) void *__stdcall CreateThread(void *attr, size_t stack, unsigned long(__stdcall *fn)(void *),
+                                                   void *arg, unsigned long flags, unsigned long *tid);
+__declspec(dllimport) int __stdcall SetThreadPriority(void *thread, int prio);
+__declspec(dllimport) void __stdcall Sleep(unsigned long ms);
+__declspec(dllimport) unsigned long __stdcall WaitForSingleObject(void *h, unsigned long ms);
+__declspec(dllimport) int __stdcall CloseHandle(void *h);
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wbuiltin-requires-header"
 int snprintf(char *buf, size_t n, const char *fmt, ...);
@@ -282,6 +288,16 @@ int vsnprintf(char *buf, size_t n, const char *fmt, __builtin_va_list ap);
 #define MTX_FROM_EULER 0x700056b4b0ull   // (out 3x4*, rot xyz radians*, trans*)
 #define ACTOR_MODEL 0x4e0                // actor: its model holder (vptr MODEL_VPTR)
 #define MODEL_VPTR 0x7001d0fa48ull
+#define ACTOR_SCALE 0x418                // 0.6.2: actor: its scale (3 floats); each frame the game copies it, with the
+#define MODEL_SCALE 0x88                 // actor's matrix, to its model holder (+0x88): the model is drawn with both
+#define WEAPON_CALC 0x70007a95d8ull      // 0.6.2: Weapon vtable +0x228, its per-frame update. Each frame it sets the
+                                         // weapon's scale (ACTOR_SCALE) by its holder (0x70007a9e18): in the player's
+                                         // hands its base scale times its parameter object WEAPON_SCALE_OBJ's
+                                         // WEAPON_SCALE_PLAYER; held by anyone else (the ghost, a DemoNPC) times
+                                         // +0x70: 1.4-1.5 (fourteenth round: the ghost's items 1.4-1.5 times Link's)
+#define WEAPON_BASE_SCALE 0xd5c          // Weapon: its base scale (3 floats)
+#define WEAPON_SCALE_OBJ 9               // its parameter object with the scales (object 0 when it has 9 or fewer)
+#define WEAPON_SCALE_PLAYER 0x50         // ... the factor in the player's hands
 #define MODEL_NUNITS 0x38                // model holder: s32 unit count
 #define MODEL_UNITS 0x40                 // ... the unit slots (u64 each; the unit at slot+0)
 #define UNIT_VPTR_A 0x7001d10738ull      // the two model unit classes
@@ -305,6 +321,8 @@ int vsnprintf(char *buf, size_t n, const char *fmt, __builtin_va_list ap);
 #define TRASH_MAX 16                     // deleted items watched until they are gone
 #define TRASH_STRAY_S 1.0                // a deleted item still there after this long is a stray
 #define TRASH_FORGET_S 30.0              // ... watched at most this long
+#define LEFTOVER_WAIT_S 3.0              // 0.6.2: after a stage change, Link back this long on the new stage: what
+#define LEFTOVER_WATCH_S 90.0            // it dropped and the game kept is removed; watched at most this long
 #define MAX_ITEM_NAMES 256               // different item names used (the request keeps the pointer)
 #define SLOW_CALL_MS 5.0                 // a game call that takes longer is counted and noted (its name, its time)
 #define SLOW_PART_MS 5.0                 // an items part that takes longer is counted (wall time and the thread's own
@@ -690,28 +708,113 @@ static double backoff_delay(int quick) {
 // wrong or stale pointer gives an empty or "?" answer, never a crash.
 
 #define MEM_CACHE 32  // (0.6.0: 32, not 8: the items read more regions a frame, and a miss is a VirtualQuery)
+#define MEM_KEEP_S 0.5         // a region's answer is kept this long ...
+#define MEM_BIG (64ull << 20)  // ... 0.6.2: but one this big (the game's heap: one region of GBs) as long as the helper
+#define MEM_BIG_KEEP_S 60.0    // thread saw it unchanged less than this long ago. Asking Windows about such a region
+#define MEM_HELPER_MS 20000    // walks all its pages: 10-215 ms each time (fourteenth round: items parts of 30-110 ms
+                               // with no game call, twice a second, and a stutter each time). The helper asks this
+                               // often, at the lowest priority, only about the big regions the tick used since (rarely:
+                               // the walk also holds Windows' lock on the address space, which the game's threads need).
 typedef struct {
     uint64_t lo, hi;
     double until;
+    uint64_t alloc;  // 0.6.2: the allocation it is in (the helper widens a big region to it when it can)
+    int big, used;   // ... big: the helper keeps it; used: the tick read in it since the helper's last look
 } MemSpan;
-static MemSpan g_mem_cache[MEM_CACHE];  // (the tick's only)
+static MemSpan g_mem_cache[MEM_CACHE];  // new answers: the tick (under g_mem_lock); `until`, a wider lo/hi: the helper
 static int g_mem_next;
+static int g_mem_lock;                  // (held only for copies, never across a VirtualQuery)
+static int64_t g_vq_tick, g_vq_slow, g_vq_helper, g_vq_widened;  // VirtualQuery calls on the tick, of those over 5 ms;
+static double g_vq_most_ms, g_vq_helper_ms;  // the helper's; big regions it widened; the tick's longest, the helper's
 
-// a .. a+n-1 is committed, readable memory in the guest window (Windows says so: VirtualQuery). A region's answer is
-// kept half a second; the game's heap is one region, so this is about one call a frame at most.
+static void mem_lock(void) {
+    while (__atomic_test_and_set(&g_mem_lock, __ATOMIC_ACQUIRE)) __builtin_ia32_pause();
+}
+static void mem_unlock(void) { __atomic_clear(&g_mem_lock, __ATOMIC_RELEASE); }
+
+// MEM_COMMIT; readable (PAGE_READONLY, READWRITE, WRITECOPY and their EXECUTE_ forms), not NOACCESS or GUARD
+static int mem_readable(const MemInfo *mi) { return mi->state == 0x1000 && !(mi->protect & 0x101) && (mi->protect & 0xee); }
+
+// a .. a+n-1 is committed, readable memory in the guest window (Windows says so: VirtualQuery). A small region's answer
+// is kept MEM_KEEP_S; a big one's while the helper thread keeps confirming it (0.6.2), so the tick asks about the
+// game's heap once, not twice a second.
 static int mem_ok(uint64_t a, uint64_t n, double t) {
     if (!n || a < GUEST_LO || a >= GUEST_HI || n > GUEST_HI - a) return 0;
-    for (int i = 0; i < MEM_CACHE; i++)
-        if (a >= g_mem_cache[i].lo && a + n <= g_mem_cache[i].hi && t < g_mem_cache[i].until) return 1;
+    for (int i = 0; i < MEM_CACHE; i++) {
+        MemSpan *e = &g_mem_cache[i];
+        if (a >= *(volatile uint64_t *)&e->lo && a + n <= *(volatile uint64_t *)&e->hi && t < *(volatile double *)&e->until) {
+            if (e->big && !e->used) e->used = 1;
+            return 1;
+        }
+    }
     MemInfo mi;
     g_nqueries++;
-    if (VirtualQuery((const void *)(uintptr_t)a, &mi, sizeof mi) != sizeof mi) return 0;
-    // MEM_COMMIT; readable (PAGE_READONLY, READWRITE, WRITECOPY and their EXECUTE_ forms), not NOACCESS or GUARD
-    if (mi.state != 0x1000 || (mi.protect & 0x101) || !(mi.protect & 0xee)) return 0;
+    int64_t q0, q1;
+    QueryPerformanceCounter(&q0);
+    size_t got = VirtualQuery((const void *)(uintptr_t)a, &mi, sizeof mi);
+    QueryPerformanceCounter(&q1);
+    double ms = g_qpf ? (double)(q1 - q0) * 1e3 / (double)g_qpf : 0.0;
+    g_vq_tick++;
+    if (ms > g_vq_most_ms) g_vq_most_ms = ms;
+    if (ms > 5.0) g_vq_slow++;
+    if (got != sizeof mi || !mem_readable(&mi)) return 0;
     if (a + n > mi.base + mi.size) return 0;
-    g_mem_cache[g_mem_next] = (MemSpan){mi.base, mi.base + mi.size, t + 0.5};
+    int big = mi.size >= MEM_BIG;
+    mem_lock();
+    g_mem_cache[g_mem_next] = (MemSpan){mi.base, mi.base + mi.size, t + (big ? MEM_BIG_KEEP_S : MEM_KEEP_S),
+                                        mi.alloc_base, big, 1};
     g_mem_next = (g_mem_next + 1) % MEM_CACHE;
+    mem_unlock();
     return 1;
+}
+
+// 0.6.2: the helper thread. Every MEM_HELPER_MS it asks Windows again about each big region the tick used since its
+// last look (never the game's code or memory: only VirtualQuery), from the start of its allocation if that is one
+// readable run reaching as far (then the region widens to it, so reads lower down hit it too), else from the region's
+// own start. Unchanged and readable: kept MEM_BIG_KEEP_S more; else dropped at once (the tick asks again itself).
+static void *g_helper;
+static int g_helper_stop;
+static int mem_helper_stop(void) { return __atomic_load_n(&g_helper_stop, __ATOMIC_ACQUIRE); }
+static unsigned long __stdcall mem_helper(void *arg) {
+    (void)arg;
+    while (!mem_helper_stop()) {
+        for (int w = 0; w < MEM_HELPER_MS / 100 && !mem_helper_stop(); w++) Sleep(100);
+        for (int k = 0; k < MEM_CACHE && !mem_helper_stop(); k++) {
+            mem_lock();
+            MemSpan e = g_mem_cache[k];
+            g_mem_cache[k].used = 0;
+            mem_unlock();
+            if (!e.big || !e.used || !e.until) continue;  // (not used since: it runs out, the tick asks again if needed)
+            int64_t q0, q1;
+            QueryPerformanceCounter(&q0);
+            MemInfo mi;
+            uint64_t lo = 0, hi = 0;
+            if (e.alloc && e.alloc < e.lo && VirtualQuery((const void *)(uintptr_t)e.alloc, &mi, sizeof mi) == sizeof mi &&
+                mem_readable(&mi) && mi.base <= e.lo && mi.base + mi.size >= e.hi)
+                lo = mi.base, hi = mi.base + mi.size;
+            else if (VirtualQuery((const void *)(uintptr_t)e.lo, &mi, sizeof mi) == sizeof mi && mem_readable(&mi) &&
+                     mi.base == e.lo && mi.base + mi.size >= e.hi)
+                lo = mi.base, hi = mi.base + mi.size;
+            QueryPerformanceCounter(&q1);
+            double ms = g_qpf ? (double)(q1 - q0) * 1e3 / (double)g_qpf : 0.0;
+            mem_lock();
+            MemSpan *n = &g_mem_cache[k];
+            if (n->lo == e.lo && n->hi == e.hi && n->big) {  // (the tick didn't put another region in this slot meanwhile)
+                if (hi) {
+                    if (lo < e.lo) g_vq_widened++;
+                    *(volatile uint64_t *)&n->hi = hi;  // (a read between the two stores sees a part of the new region:
+                    *(volatile uint64_t *)&n->lo = lo;  // it contains the old one, and all of it was just confirmed)
+                    *(volatile double *)&n->until = now_s() + MEM_BIG_KEEP_S;
+                } else {
+                    *(volatile double *)&n->until = 0;
+                }
+            }
+            g_vq_helper++;
+            if (ms > g_vq_helper_ms) g_vq_helper_ms = ms;
+            mem_unlock();
+        }
+    }
+    return 0;
 }
 
 static uint64_t self_u64(uint64_t a, double t) {
@@ -764,6 +867,7 @@ typedef struct {
     uint64_t item[3];          // 0.6.1: the items' actors (0: none), as read with the names
     float rel[3][12];          // ... each one's matrix in the frame of Link's Pod_A (3x4 row by row, m) ...
     float pods[3][3];          // ... its distance to Link's Pod_A, Pod_B, Pod_C (m; -1: not readable)
+    float size[3], axis[3];    // 0.6.2: ... how big it is drawn and its matrix's axes (as items.N.size, .axis; -1)
     int has_rel[3];            // ... (0: not read: no item, or no bone)
     int equip_new;             // ... the equipment was just read (self_rel runs once after each read)
     double equip_t;            // when the equipment was read last
@@ -937,6 +1041,10 @@ static _Alignas(16) Pack g_item_pack[ITEM_SLOTS];
 static _Alignas(16) float g_item_mtx[ITEM_SLOTS][12];
 static _Alignas(16) Follow g_follow[ITEM_SLOTS][2];
 static _Alignas(16) float g_euler_rot[4], g_euler_trans[4];
+static uint64_t g_size_item[ITEM_SLOTS];  // 0.6.2: the ghost's grabbed items: the WEAPON_CALC wrapper gives them the
+                                          // player's scale (written by the tick, read on any game thread)
+static int64_t g_scale_sets;               // ... how often it did
+static void size_item_set(int i, uint64_t item) { __atomic_store_n(&g_size_item[i], item, __ATOMIC_RELEASE); }
 static _Alignas(16) Link g_trash[TRASH_MAX];  // deleted items, watched until they are gone (`stray`)
 static _Alignas(16) Handle g_give_handle;     // `ghost give`: its own request, never the ghost's or an item's
 static _Alignas(16) Pack g_give_pack;
@@ -1005,6 +1113,8 @@ typedef struct {
     char item_names[3][64];  // ... weapon, shield, bow ("" none)
     int items_mask;        // ... which of them are on the back (bit 0 weapon, 1 shield, 2 bow)
     int items_back;        // `ghost items back on|off`: back placement (default on)
+    float item_rel[3][12]; // 0.6.2 `ghost items rel slot m...`: the other player's own item on his back, in his Pod_A's
+    int item_has_rel[3];   // frame (3x4 row by row; their `ghost self` `<item>_rel`): used as that slot's back offset
     int give_seq;          // bumped by every `ghost give` ...
     char give_name[64];    // ... the actor
     float give_off[3];     // ... its offset from Link
@@ -1032,6 +1142,13 @@ typedef struct {
     int refusals;        // 0.6.1: grab calls refused before the held item's grab was taken (0 until held)
     float rel[12];       // 0.6.1: the held item's matrix in Pod_A's frame (3x4 row by row, m), for the comparison
     int has_rel;         // ... with Link's own items (`ghost self`); 0: not read
+    float size;          // 0.6.2: how big it is drawn (1: its normal size, as Link's): its matrix's axes times its own
+                         // scale, the mean of the three (-1: not read)
+    float size_first;    // ... the same when it was first held, before any fix (-1: not read)
+    float axis;          // ... the mean length of its matrix's axes: the scale the bone it follows passes on
+    float own_scale;     // ... its own scale (ACTOR_SCALE), the mean of the three
+    float model_scale;   // ... its model's scale (the model holder's copy of it; -1: not read)
+    int copied;          // 0.6.2: on the back with the other player's own offset (`ghost items rel`)
 } ItemStatus;
 
 typedef struct {
@@ -1060,6 +1177,13 @@ typedef struct {
     int give_state;                // GV_*
     char give_name[64];
     uint64_t give_actor;
+    int64_t scale_sets;            // 0.6.2: the player's scale given to the ghost's items (WEAPON_CALC wrapper)
+    float ghost_scale;             // ... the ghost's own scale (ACTOR_SCALE, mean; -1: not read)
+    int64_t vq_tick, vq_slow, vq_helper, vq_widened;  // 0.6.2: VirtualQuery on the tick (all of the mod's), of those
+    double vq_most_ms, vq_helper_ms;  // over 5 ms, the longest; the helper thread's calls, longest, regions widened
+    int mem_big;                   // ... big regions known now (kept by the helper)
+    int64_t leftovers;             // 0.6.2: a ghost or items a stage change left behind, removed after it
+    int old_ghosts, old_items;     // ... watched now (the ghost and items a stage change dropped)
 } ItemsStatus;
 
 #define MAX_THREADS 8
@@ -1403,6 +1527,9 @@ typedef struct {
     int has_hold;       // its "on the back" offsets were read ...
     float rot[3], trans[3];  // ... (degrees; m)
     int grab_refusals;  // 0.6.1: grab calls refused for the item now in IS_GRAB (its AI hadn't run yet)
+    int has_rel;        // 0.6.2: a copied back offset (`ghost items rel`) is used instead of the item's own ...
+    float rel[12];      // ... this one (3x4 row by row, m)
+    int rel_new;        // ... it changed while the item was on our follow: set up again
 } ItemSlot;
 
 static ItemSlot t_items[ITEM_SLOTS];
@@ -1414,6 +1541,12 @@ static uint8_t t_follow_built[ITEM_SLOTS][2];
 static uint8_t t_item_orphan[ITEM_SLOTS]; // a request still pending at a stage change: released (if still ours) by the
                                           // next items part, before the slot's handle is used again
 static double t_trash_t[TRASH_MAX];       // when each watched item was deleted (0: free)
+static int t_trash_stage[TRASH_MAX];      // 0.6.2: ... dropped by a stage change (forgotten, not deleted: leftovers_tick)
+#define OLD_MAX 4                         // 0.6.2: ghosts a stage change dropped, watched (leftovers_tick)
+static _Alignas(16) Link g_old_ghost[OLD_MAX];
+static double t_old_ghost_t[OLD_MAX];     // ... when (0: free)
+static double t_stage_back_t;             // ... Link there (on the current heap) since then (0: not now) ...
+static uint64_t t_stage_back_heap;        // ... and that heap
 static double t_items_us_avg, t_items_calls, t_items_queries;
 static Times t_items_times, t_tick_times, t_frame_times;
 static double t_last_tick_t;              // the previous tick's time (frame times)
@@ -1514,6 +1647,34 @@ static int rel_to_bone(const float bm[12], uint64_t item, float out[12], double 
     return 1;
 }
 
+// 0.6.2: how big actor a is drawn, per axis: each axis of its matrix (a bone it follows passes the bone's scale on)
+// and its own scale (ACTOR_SCALE); drawn = axis x scale. 0: not readable or not sane.
+static int actor_size(uint64_t a, float axis[3], float scale[3], double t) {
+    if (!mem_ok(a + ACTOR_MTX, 0x30, t) || !mem_ok(a + ACTOR_SCALE, 12, t)) return 0;
+    for (int k = 0; k < 3; k++) {  // (the matrix is 3 rows of 4: axis k is column k)
+        float x = rdf(a + ACTOR_MTX + 4 * (uint64_t)k), y = rdf(a + ACTOR_MTX + 0x10 + 4 * (uint64_t)k),
+              z = rdf(a + ACTOR_MTX + 0x20 + 4 * (uint64_t)k);
+        if (!finite_f(x, 100.0f) || !finite_f(y, 100.0f) || !finite_f(z, 100.0f)) return 0;
+        axis[k] = __builtin_sqrtf(x * x + y * y + z * z);
+        scale[k] = rdf(a + ACTOR_SCALE + 4 * (uint64_t)k);
+        if (!(axis[k] > 0.01f && axis[k] < 100.0f) || !(scale[k] > 0.01f && scale[k] < 100.0f)) return 0;
+    }
+    return 1;
+}
+
+// 0.6.2: the scale actor a's model holder has (MODEL_SCALE, the mean of the three; -1: not readable).
+static float model_scale(uint64_t a, double t) {
+    uint64_t m = self_u64(a + ACTOR_MODEL, t);
+    if (!m || self_u64(m, t) != MODEL_VPTR || !mem_ok(m + MODEL_SCALE, 12, t)) return -1.0f;
+    float s = 0;
+    for (int k = 0; k < 3; k++) {
+        float v = rdf(m + MODEL_SCALE + 4 * (uint64_t)k);
+        if (!finite_f(v, 100.0f)) return -1.0f;
+        s += v;
+    }
+    return s / 3.0f;
+}
+
 // Bone `name` of actor a: its unit and index (-1: not found), looked through the first 8 units.
 static int actor_bone(uint64_t a, const char *name, int *unit, double t) {
     int nunits = 0;
@@ -1556,6 +1717,10 @@ static void self_rel(SelfState *s, uint64_t pi, double t) {
             float bp[3] = {pm[k][3], pm[k][7], pm[k][11]};
             s->pods[i][k] = it && has_pm[k] ? dist3(ip, bp) : -1.0f;
         }
+        float ax[3], sc[3];  // (0.6.2: how big Link's own item is drawn: what the ghost's should match)
+        int ok = it && actor_size(it, ax, sc, t);
+        s->size[i] = ok ? (ax[0] * sc[0] + ax[1] * sc[1] + ax[2] * sc[2]) / 3.0f : -1.0f;
+        s->axis[i] = ok ? (ax[0] + ax[1] + ax[2]) / 3.0f : -1.0f;
     }
 }
 
@@ -1656,11 +1821,12 @@ static int link_ok(const Link *l, double t) {
 
 // ---- deleted items: watched until they are gone
 
-static void trash_add(const Link *l, double t) {
+static void trash_add(const Link *l, double t, int stage) {
     for (int k = 0; k < TRASH_MAX; k++)
         if (!t_trash_t[k]) {
             g_trash[k] = *l;
             t_trash_t[k] = t;
+            t_trash_stage[k] = stage;
             return;
         }
 }
@@ -1669,9 +1835,9 @@ static void trash_tick(double t) {
     int stray = 0, dying = 0;
     for (int k = 0; k < TRASH_MAX; k++) {
         if (!t_trash_t[k]) continue;
-        if (!link_ok(&g_trash[k], t) || t - t_trash_t[k] > TRASH_FORGET_S) {
+        if (!link_ok(&g_trash[k], t) || t - t_trash_t[k] > (t_trash_stage[k] ? LEFTOVER_WATCH_S : TRASH_FORGET_S)) {
             memset(&g_trash[k], 0, sizeof g_trash[k]);
-            t_trash_t[k] = 0;
+            t_trash_t[k] = 0, t_trash_stage[k] = 0;
         } else {
             dying++;
             stray += t - t_trash_t[k] > TRASH_STRAY_S;
@@ -1704,6 +1870,7 @@ static int item_follow_own(struct Cpu *c, int i, uint64_t item, double t) {
 // deleted, only forgotten; an item gets its own follow back first.
 static void item_remove(struct Cpu *c, int i, double t) {
     ItemSlot *s = &t_items[i];
+    size_item_set(i, 0);  // (0.6.2: before anything else: the wrapper never touches an item we let go)
     if (s->state == IS_PENDING) {
         GCALL1(c, HANDLE_RELEASE, &g_item_handle[i]);  // (an actor created but not taken is deleted)
         GCALL1(c, HANDLE_CLEAR, &g_item_handle[i]);
@@ -1721,7 +1888,7 @@ static void item_remove(struct Cpu *c, int i, double t) {
                 note("items: %s keeps the mod's bone follow (the game refused to change it): not deleted",
                      s->name ? s->name : "?");
             } else if (proc) {
-                trash_add(&g_item_link[i], t);
+                trash_add(&g_item_link[i], t, 0);
                 gcall(c, DELETE_LATER, proc, 0, 0, 0, 0, 0, 0);
                 t_status.items.deleted++;
             }
@@ -1831,7 +1998,7 @@ static void item_pending(struct Cpu *c, int i, uint64_t ghost, double t) {
         s->since = t;
         s->grab_refusals = 0;
         s->grabbed = item_grab(c, i, proc, ghost, t);
-        if (s->grabbed) s->grab_t = t;
+        if (s->grabbed) s->grab_t = t, size_item_set(i, proc);
         else s->grab_refusals++;
         return;
     }
@@ -1865,6 +2032,11 @@ static uint64_t follow_setup(struct Cpu *c, int i, uint64_t ghost) {
     memcpy(f->b + FOLLOW_BONE, &bone, 8);
     memcpy(f->b + FOLLOW_INDEX, &again, 4);
     memcpy(f->b + FOLLOW_MODE, &mode, 4);
+    s->rel_new = 0;
+    if (s->has_rel) {  // (0.6.2: the other player's own: exactly where his Link carries it, armor and all)
+        memcpy(f->b + FOLLOW_OFFSET, s->rel, sizeof s->rel);
+        return P(f);
+    }
     for (int j = 0; j < 3; j++) g_euler_rot[j] = s->rot[j] * 0.0174533f, g_euler_trans[j] = s->trans[j];
     gcall(c, MTX_FROM_EULER, P(f->b + FOLLOW_OFFSET), P(g_euler_rot), P(g_euler_trans), 0, 0, 0, 0);
     return P(f);
@@ -1891,6 +2063,10 @@ static const char *item_place(struct Cpu *c, int i, uint64_t item, uint64_t ghos
     }
     s->back_asked = 0;
     if (ours) s->back_t = 0;
+    if (want_back && ours && s->rel_new) {  // (0.6.2: a new copied offset: the other of our two follows, then switch)
+        gcall(c, FOLLOW_SET, item, follow_setup(c, i, ghost), 0, 0, 0, 0, 0);
+        return "back";
+    }
     if (!want_back && ours) {
         gcall(c, FOLLOW_SET, item, own, 0, 0, 0, 0, 0);
         return "back";
@@ -1898,10 +2074,65 @@ static const char *item_place(struct Cpu *c, int i, uint64_t item, uint64_t ghos
     return cur == own ? "hand" : ours ? "back" : "other";
 }
 
+// 0.6.2: how big a held item is drawn (plain reads; the status only). The fourteenth round showed the ghost's items
+// 1.4-1.5 times Link's: the weapon's own per-frame update gives a weapon held by anyone but the player a bigger scale.
+// weapon_calc_wrapper gives the ghost's the player's scale instead (g_size_item), right after the game's update.
+static void item_size_read(int i, uint64_t item, double t) {
+    ItemStatus *o = &t_status.items.slot[i];
+    float ax[3], sc[3];
+    if (!actor_size(item, ax, sc, t)) {
+        o->size = o->axis = o->own_scale = -1.0f;
+        return;
+    }
+    o->size = (ax[0] * sc[0] + ax[1] * sc[1] + ax[2] * sc[2]) / 3.0f;
+    o->axis = (ax[0] + ax[1] + ax[2]) / 3.0f;
+    o->own_scale = (sc[0] + sc[1] + sc[2]) / 3.0f;
+    if (o->size_first <= 0) o->size_first = o->size;  // (0 or -1: a fresh slot)
+}
+
+// 0.6.2: the player's scale for weapon w, as the game's own update gives it in Link's hands: its base scale times its
+// scale object's WEAPON_SCALE_PLAYER (the same reads the game's update just made). On a game thread: plain reads,
+// each pointer in the guest window.
+static int guest_ptr(uint64_t a) { return a >= GUEST_LO && a < GUEST_HI && !(a & 7); }
+static void weapon_player_scale(uint64_t w) {
+    uint64_t pl = rd64(w + ACTOR_PARAMS);
+    uint64_t gp = guest_ptr(pl) ? rd64(pl + PARAMS_LIST) : 0;
+    if (!guest_ptr(gp)) return;
+    int32_t n = *(volatile const int32_t *)(uintptr_t)(gp + PLIST_COUNT);
+    uint64_t tab = rd64(gp + PLIST_OBJS);
+    if (!guest_ptr(tab)) return;
+    uint64_t obj = rd64(tab + (n > WEAPON_SCALE_OBJ ? WEAPON_SCALE_OBJ * 8u : 0u));
+    if (!guest_ptr(obj)) return;
+    float k = rdf(obj + WEAPON_SCALE_PLAYER), out[3];
+    if (!(k > 0.01f && k < 100.0f)) return;
+    for (int j = 0; j < 3; j++) {
+        float b = rdf(w + WEAPON_BASE_SCALE + 4 * (uint64_t)j);
+        if (!(b > 0.01f && b < 100.0f)) return;
+        out[j] = b * k;
+    }
+    memcpy((void *)(uintptr_t)(w + ACTOR_SCALE), out, sizeof out);
+    __atomic_fetch_add(&g_scale_sets, 1, __ATOMIC_RELAXED);
+}
+
+// 0.6.2: wraps WEAPON_CALC (a virtual call: every weapon, every frame): the game's update first, then, for one of the
+// ghost's items only, the player's scale. Everything else is untouched.
+static SwModGuestFn g_orig_weapon_calc;
+static void weapon_calc_wrapper(struct Cpu *c) {
+    uint64_t self = SWMOD_REGS(c)->x[0];
+    g_orig_weapon_calc(c);
+    if (!self) return;
+    for (int i = 0; i < ITEM_SLOTS; i++)
+        if (__atomic_load_n(&g_size_item[i], __ATOMIC_ACQUIRE) == self) {
+            weapon_player_scale(self);
+            return;
+        }
+}
+
 static void item_held(struct Cpu *c, int i, uint64_t ghost, int want_back, double t) {
     ItemSlot *s = &t_items[i];
     ItemStatus *o = &t_status.items.slot[i];
     if (!link_ok(&g_item_link[i], t)) {
+        size_item_set(i, 0);
         GCALL1(c, LINK_RESET, &g_item_link[i]);
         item_zero_link(i);
         s->state = IS_NONE;
@@ -1928,13 +2159,16 @@ static void item_held(struct Cpu *c, int i, uint64_t ghost, int want_back, doubl
         item_fail(i, why, ITEM_LOST_RETRY_S, t);
         return;
     }
-    o->hold = s->has_hold ? __builtin_sqrtf(s->trans[0] * s->trans[0] + s->trans[1] * s->trans[1] +
-                                            s->trans[2] * s->trans[2])
-                          : -1.0f;
-    const char *place = item_place(c, i, item, ghost, want_back && s->has_hold, t);
+    const float *tr = s->has_rel ? (const float[3]){s->rel[3], s->rel[7], s->rel[11]} : s->trans;
+    o->hold = s->has_hold || s->has_rel ? __builtin_sqrtf(tr[0] * tr[0] + tr[1] * tr[1] + tr[2] * tr[2]) : -1.0f;
+    o->copied = s->has_rel;
+    const char *place = item_place(c, i, item, ghost, want_back && (s->has_hold || s->has_rel), t);
     snprintf(o->place, sizeof o->place, "%s", place);
+    size_item_set(i, item);  // (0.6.2: the player's scale: weapon_calc_wrapper)
+    item_size_read(i, item, t);
     if (t >= s->dist_t) {
         s->dist_t = t + ITEM_STATUS_S;
+        o->model_scale = model_scale(item, t);
         int b = !strcmp(place, "back") ? BONE_POD : i == 0 ? BONE_R : BONE_L;
         float bp[3], ip[3] = {self_f32(item + ACTOR_MTX + 0x0c, t), self_f32(item + ACTOR_MTX + 0x1c, t),
                               self_f32(item + ACTOR_MTX + 0x2c, t)};
@@ -1949,6 +2183,7 @@ static void item_grab_tick(struct Cpu *c, int i, uint64_t ghost, double t) {
     ItemSlot *s = &t_items[i];
     ItemStatus *o = &t_status.items.slot[i];
     if (!link_ok(&g_item_link[i], t)) {
+        size_item_set(i, 0);
         GCALL1(c, LINK_RESET, &g_item_link[i]);
         item_zero_link(i);
         s->state = IS_NONE;
@@ -1968,7 +2203,7 @@ static void item_grab_tick(struct Cpu *c, int i, uint64_t ghost, double t) {
             return;
         }
         item_park(c, i, item, ghost, t);
-        if ((s->grabbed = item_grab(c, i, item, ghost, t))) s->grab_t = t;
+        if ((s->grabbed = item_grab(c, i, item, ghost, t))) s->grab_t = t, size_item_set(i, item);
         else s->grab_refusals++;
         return;
     }
@@ -1999,7 +2234,8 @@ static void item_status_empty(int i) {
 // is released by the next items part if its unit still points back at our handle (items_orphans).
 static void items_forget(double t) {
     for (int i = 0; i < ITEM_SLOTS; i++) {
-        if (t_items[i].state == IS_GRAB || t_items[i].state == IS_HELD) trash_add(&g_item_link[i], t);
+        size_item_set(i, 0);
+        if (t_items[i].state == IS_GRAB || t_items[i].state == IS_HELD) trash_add(&g_item_link[i], t, 1);
         if (t_items[i].state == IS_PENDING) t_item_orphan[i] = 1;
         else memset(&g_item_handle[i], 0, sizeof g_item_handle[i]);
         if (t_items[i].state != IS_NONE && t_items[i].state != IS_FAILED) t_items[i].state = IS_NONE;
@@ -2093,6 +2329,12 @@ static void items_tick(struct Cpu *c, uint64_t ghost, const Requests *rq, double
                 }
             }
             snprintf(o->name, sizeof o->name, "%s", want);
+            int has_rel = rq->item_has_rel[i] != 0;  // (0.6.2: the other player's own back offset, when sent)
+            if (has_rel != s->has_rel || (has_rel && memcmp(s->rel, rq->item_rel[i], sizeof s->rel))) {
+                s->has_rel = has_rel;
+                if (has_rel) memcpy(s->rel, rq->item_rel[i], sizeof s->rel);
+                s->rel_new = 1;
+            }
             switch (s->state) {
             case IS_WAIT:
                 if (t >= s->retry_at && !item_request(c, i, ghost, t)) s->retry_at = t + 0.5;
@@ -2213,6 +2455,78 @@ static void give_tick(struct Cpu *c, const Requests *rq, uint64_t pi, uint64_t p
 }
 
 // Remove our ghost (a pending request is released) and forget it. Its items go first, in the same tick.
+// 0.6.2: a stage change drops the ghost and its items without a call (they were thought gone with the old stage).
+// The fourteenth round's Game Over and Continue kept a ghost that had spawned 0.1 s before the change, and two items,
+// next to the new ghost. So what a stage change drops is watched (plain reads), and once Link is back on the current
+// stage for LEFTOVER_WAIT_S, whatever of it the game kept is removed the normal way: the game's own link check first,
+// an item gets its own bone follow back first, never Link's. Nothing is touched while there is no player (a load).
+static void old_ghost_add(double t) {
+    for (int k = 0; k < OLD_MAX; k++)
+        if (!t_old_ghost_t[k]) {
+            g_old_ghost[k] = g_link;
+            t_old_ghost_t[k] = t;
+            return;
+        }
+}
+
+static void leftovers_tick(struct Cpu *c, uint64_t player, double t) {
+    int ghosts = 0, items = 0;
+    for (int k = 0; k < OLD_MAX; k++) ghosts += t_old_ghost_t[k] != 0;
+    for (int k = 0; k < TRASH_MAX; k++) items += t_trash_t[k] != 0 && t_trash_stage[k];
+    t_status.items.old_ghosts = ghosts, t_status.items.old_items = items;
+    if (!ghosts && !items) {
+        t_stage_back_t = 0;
+        return;
+    }
+    uint64_t heap = spawn_heap();
+    if (!player || !heap) {  // (loading: wait)
+        t_stage_back_t = 0;
+        return;
+    }
+    if (!t_stage_back_t || heap != t_stage_back_heap) t_stage_back_t = t, t_stage_back_heap = heap;
+    if (t - t_stage_back_t < LEFTOVER_WAIT_S) return;
+    for (int k = 0; k < OLD_MAX; k++) {
+        if (!t_old_ghost_t[k]) continue;
+        if (t - t_old_ghost_t[k] <= LEFTOVER_WATCH_S && link_ok(&g_old_ghost[k], t) &&
+            (GCALL1(c, LINK_VALID, &g_old_ghost[k]) & 1)) {
+            uint64_t proc = rd64(g_old_ghost[k].data + LINKDATA_PROC);
+            if (proc && proc != t_status.actor && proc != player) {
+                gcall(c, DELETE_LATER, proc, 0, 0, 0, 0, 0, 0);
+                t_status.items.leftovers++;
+                note("a ghost the stage change left behind was removed (%.0f s after the change)", t - t_old_ghost_t[k]);
+            }
+        }
+        memset(&g_old_ghost[k], 0, sizeof g_old_ghost[k]);  // (forgotten: no game call on an old link)
+        g_old_ghost[k].id = 0xffffffffu;
+        t_old_ghost_t[k] = 0;
+    }
+    for (int k = 0; k < TRASH_MAX; k++) {
+        if (!t_trash_t[k] || !t_trash_stage[k]) continue;
+        t_trash_stage[k] = 0;  // (once; from now on an ordinary watched item: still there in a second, a stray)
+        if (!link_ok(&g_trash[k], t) || !(GCALL1(c, LINK_VALID, &g_trash[k]) & 1)) continue;
+        uint64_t proc = rd64(g_trash[k].data + LINKDATA_PROC);
+        if (!proc || link_at(proc + ITEM_HOLDER, t) == player) continue;  // (Link's: never touched)
+        uint64_t fol = self_u64(proc + ACTOR_FOLLOW, t);
+        int ours = 0;
+        for (int i = 0; i < ITEM_SLOTS; i++) ours |= follow_is_ours(i, fol);
+        if (ours) {  // (its own follow back first: no item runs ours after we let it go)
+            gcall(c, FOLLOW_SET, proc, proc + ITEM_FOLLOW, 0, 0, 0, 0, 0);
+            fol = self_u64(proc + ACTOR_FOLLOW, t);
+            int still = 0;
+            for (int i = 0; i < ITEM_SLOTS; i++) still |= follow_is_ours(i, fol);
+            if (still) {
+                t_status.items.kept++;
+                continue;
+            }
+        }
+        gcall(c, DELETE_LATER, proc, 0, 0, 0, 0, 0, 0);
+        t_trash_t[k] = t;  // (watched from now: gone within a second, or a stray)
+        t_status.items.deleted++;
+        t_status.items.leftovers++;
+        note("an item the stage change left behind was removed");
+    }
+}
+
 static void remove_ghost(struct Cpu *c) {
     items_drop(c, t_now);
     if (t_status.state == ST_PENDING) {
@@ -2598,7 +2912,8 @@ static void ghost_tick_body(struct Cpu *c, double t) {
     int no_player = 0;
     if (t_status.state == ST_LIVE) {
         if (spawn_heap() != t_stage_heap) {
-            items_forget(t);  // (its items too, without a call: watched until they are gone)
+            old_ghost_add(t);  // (0.6.2: watched; removed after the change if the game kept it: leftovers_tick)
+            items_forget(t);   // (its items too, without a call: watched until they are gone)
             zero_link();
             lose("stage changed: ghost dropped", t, t - t_live_since);
         } else if (player && player != t_stage_player) {
@@ -2611,6 +2926,7 @@ static void ghost_tick_body(struct Cpu *c, double t) {
         }
     }
     t_status.no_player = no_player;
+    leftovers_tick(c, player, t);  // (0.6.2: what a stage change dropped and the game kept)
     far_check(c, pi, player, rq.far_m, rq.near_m, t);
 
     switch (t_status.state) {
@@ -2632,6 +2948,16 @@ static void ghost_tick_body(struct Cpu *c, double t) {
     t_status.behind =  // (only while it moves to `ghost pos` targets: `follow` places it without a target)
         t_status.move == MOVE_POS && t_smooth.placed && t_smooth.has_to ? dist3(t_smooth.shown, t_smooth.to) : 0.0f;
     t_status.retry_at = t_status.state == ST_IDLE && t_status.wanted ? t_respawn_at : 0;
+    ItemsStatus *is = &t_status.items;  // (0.6.2: the ghost's own scale; the memory checks' cost)
+    float ax[3], sc[3];
+    is->ghost_scale = t_status.state == ST_LIVE && t_status.actor && actor_size(t_status.actor, ax, sc, t)
+                          ? (sc[0] + sc[1] + sc[2]) / 3.0f : -1.0f;
+    is->vq_tick = g_vq_tick, is->vq_slow = g_vq_slow, is->vq_most_ms = g_vq_most_ms;
+    is->scale_sets = __atomic_load_n(&g_scale_sets, __ATOMIC_RELAXED);
+    is->vq_helper = g_vq_helper, is->vq_helper_ms = g_vq_helper_ms, is->vq_widened = g_vq_widened;
+    int big = 0;
+    for (int k = 0; k < MEM_CACHE; k++) big += g_mem_cache[k].big && t < g_mem_cache[k].until;
+    is->mem_big = big;
 }
 
 static void job_wrapper(struct Cpu *c) {
@@ -2737,6 +3063,7 @@ static void report(SwModReply *r) {
     api->reply_bool(r, "takes_anim", true);   // (0.5.0: `ghost pos x y z yaw speed anim`; the client looks for it)
     api->reply_bool(r, "has_self", true);     // (0.5.0: `ghost self`)
     api->reply_bool(r, "has_items", true);    // (0.6.0: `ghost items`; the client looks for it)
+    api->reply_bool(r, "has_items_rel", true);  // (0.6.2: `ghost items rel`; the client looks for it)
     api->reply_str(r, "version", GHOST_VERSION);
     const ItemsStatus *it = &s.items;
     api->reply_bool(r, "items.on", it->on != 0);
@@ -2772,6 +3099,18 @@ static void report(SwModReply *r) {
     api->reply_int(r, "items.taken", it->taken);
     api->reply_int(r, "items.kept", it->kept);
     api->reply_int(r, "items.parks", it->parks);
+    api->reply_int(r, "items.scale_sets", it->scale_sets);
+    api->reply_num(r, "ghost_scale", it->ghost_scale);
+    api->reply_int(r, "mem.queries", it->vq_tick);  // (0.6.2: VirtualQuery on the tick; over 5 ms; the longest)
+    api->reply_int(r, "mem.slow", it->vq_slow);
+    api->reply_num(r, "mem.most_ms", it->vq_most_ms);
+    api->reply_int(r, "mem.big", it->mem_big);
+    api->reply_int(r, "mem.helper", it->vq_helper);
+    api->reply_num(r, "mem.helper_ms", it->vq_helper_ms);
+    api->reply_int(r, "mem.widened", it->vq_widened);
+    api->reply_int(r, "leftovers", it->leftovers);
+    api->reply_int(r, "old_ghosts", it->old_ghosts);
+    api->reply_int(r, "old_items", it->old_items);
     for (int i = 0; i < ITEM_SLOTS; i++) {
         const ItemStatus *o = &it->slot[i];
         char key[32];
@@ -2790,6 +3129,13 @@ static void report(SwModReply *r) {
         char rel[160];
         rel_text(o->has_rel, o->rel, rel, sizeof rel);
         api->reply_str(r, ITEM_KEY("rel"), rel);
+        int held = o->state == IS_HELD;  // (0.6.2: how big it is drawn, and why)
+        api->reply_num(r, ITEM_KEY("size"), held ? o->size : -1.0);
+        api->reply_num(r, ITEM_KEY("size_first"), held ? o->size_first : -1.0);
+        api->reply_num(r, ITEM_KEY("axis"), held ? o->axis : -1.0);
+        api->reply_num(r, ITEM_KEY("own_scale"), held ? o->own_scale : -1.0);
+        api->reply_num(r, ITEM_KEY("model_scale"), held ? o->model_scale : -1.0);
+        api->reply_bool(r, ITEM_KEY("copied"), held && o->copied);
 #undef ITEM_KEY
     }
     api->reply_str(r, "give.state", GV_NAMES[it->give_state >= 0 && it->give_state <= GV_FAILED ? it->give_state : 0]);
@@ -2880,6 +3226,10 @@ static void report_self(SwModReply *r) {
         snprintf(text, sizeof text, "%.4f %.4f %.4f", (double)s->pods[i][0], (double)s->pods[i][1],
                  (double)s->pods[i][2]);
         api->reply_str(r, key, s->item[i] ? text : "");
+        snprintf(key, sizeof key, "%s_size", KEYS[i]);  // (0.6.2: how big his item is drawn; its matrix's axes)
+        api->reply_num(r, key, s->item[i] ? s->size[i] : -1.0);
+        snprintf(key, sizeof key, "%s_axis", KEYS[i]);
+        api->reply_num(r, key, s->item[i] ? s->axis[i] : -1.0);
     }
     char shape[64];
     int n = 0;
@@ -2911,6 +3261,7 @@ static void cmd_items(int argc, char **argv, SwModReply *r) {
         lock();
         g_req.items_on = 0;
         memset(g_req.item_names, 0, sizeof g_req.item_names);
+        memset(g_req.item_has_rel, 0, sizeof g_req.item_has_rel);
         unlock();
         api->reply_str(r, "items", "off");
         return;
@@ -2923,8 +3274,29 @@ static void cmd_items(int argc, char **argv, SwModReply *r) {
         api->reply_bool(r, "back", on != 0);
         return;
     }
+    if (argc >= 4 && !strcmp(argv[2], "rel")) {  // 0.6.2: `ghost items rel <slot 0-2> <12 numbers>|-`
+        char *end;
+        long slot = strtol(argv[3], &end, 10);
+        float m[12];
+        int ok = end != argv[3] && !*end && slot >= 0 && slot <= 2 && (argc == 5 || argc == 16);
+        if (ok && argc == 16)
+            for (int k = 0; k < 12 && ok; k++)  // (a turn: each entry within 1.01; a place: within 2 m of Pod_A)
+                ok = parse_float(argv[4 + k], &m[k]) && finite_f(m[k], (k % 4 == 3) ? 2.0f : 1.01f);
+        if (ok && argc == 5) ok = !strcmp(argv[4], "-");
+        if (!ok) {
+            api->reply_fail(r, "usage: ghost items rel <slot 0-2> <12 numbers: a 3x4 matrix row by row> | -");
+            return;
+        }
+        lock();
+        g_req.item_has_rel[slot] = argc == 16;
+        if (argc == 16) memcpy(g_req.item_rel[slot], m, sizeof m);
+        unlock();
+        api->reply_int(r, "slot", slot);
+        api->reply_bool(r, "rel", argc == 16);
+        return;
+    }
     if (argc != 5 && argc != 6) {
-        api->reply_fail(r, "usage: ghost items weapon|- shield|- bow|- [mask 0-7] | off | back on|off");
+        api->reply_fail(r, "usage: ghost items weapon|- shield|- bow|- [mask 0-7] | off | back on|off | rel slot m...|-");
         return;
     }
     char names[3][64] = {{0}}, refused[200] = {0};
@@ -3143,8 +3515,26 @@ SWMOD_EXPORT int swmod_init(const SwModApi *a) {
         return 3;
     }
     QueryPerformanceFrequency(&g_qpf);
+    g_helper = CreateThread(0, 64 * 1024, mem_helper, 0, 0, 0);  // (0.6.2: keeps the big memory regions' answers)
+    if (g_helper) SetThreadPriority(g_helper, -2);                 // (THREAD_PRIORITY_LOWEST)
+    else api->log("ghost: no helper thread: big memory regions are asked about on the frame (slower)");
     api->hle_override(FRAME_JOB, job_wrapper, "ghost_frame_job");
+    g_orig_weapon_calc = api->dispatch_lookup(WEAPON_CALC);  // (0.6.2: the ghost's items at the player's scale)
+    if (g_orig_weapon_calc) api->hle_override(WEAPON_CALC, weapon_calc_wrapper, "ghost_weapon_calc");
+    else api->log("ghost: no recompiled function at %#llx: the ghost's items are drawn at an NPC's scale",
+                  (unsigned long long)WEAPON_CALC);
     api->control_register(commands, (int)(sizeof commands / sizeof *commands));
     api->log("ghost: ready (frame job %#llx wrapped)", (unsigned long long)FRAME_JOB);
     return 0;
+}
+
+// Only for a `modload`ed copy (modhost never unloads mods loaded at game start): the helper thread stops first.
+SWMOD_EXPORT void swmod_exit(const SwModApi *a) {
+    (void)a;
+    __atomic_store_n(&g_helper_stop, 1, __ATOMIC_RELEASE);
+    if (g_helper) {
+        WaitForSingleObject(g_helper, 5000);
+        CloseHandle(g_helper);
+        g_helper = 0;
+    }
 }

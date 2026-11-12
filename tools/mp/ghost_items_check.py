@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""In-game checks for the ghost's held items (ghost mod 0.6.0, docs/ghost.md "Held items"). Run through
+"""In-game checks for the ghost's held items (ghost mod 0.6.2, docs/ghost.md "Held items"). Run through
 ghost_ingame_check.py --items (it starts the game once, with the Link body, and closes it at the end):
 
     python tools/mp/ghost_ingame_check.py --items --spot -1033.6 252.3 1809.3 132 --give-weapon
@@ -8,8 +8,11 @@ The mod drives the items directly with `ghost items` (it plays the remote player
 the client. The ghost stands about 2.6 m in front of Link, a little to the left, facing him. Screenshots go to
 out\\shots\\ghostitems_*.png and the results to out\\research\\ghost-items-results.txt (never committed).
 
-  H1 in hand: sword, shield, bow held (state 255, holder the ghost) within 3 s, each within HAND_DIST of its hand
-     bone while the ghost stands, walks a circle and swings (CutS1)
+  H1 in hand: sword, shield, bow held (state 255, holder the ghost) within 3 s as Link carries them with a sword out
+     (MASK: sword in the right hand, shield on the left arm, bow on the back), each item in a hand within HAND_DIST of
+     its hand bone while the ghost stands, walks and runs a circle, jumps, glides, climbs and swings (CutS1); then
+     the bow drawn (MASK_BOW: the bow in the left hand, sword and shield on the back) (0.6.2: as Link, not all three
+     in the hands)
   H2 switch: sword -> two-hander -> spear -> sword, each held within 2 s, then 10 switches 0.3 s apart; no stray
   H3 clear: the shield to none (the others stay the same actors), then none at all; gone within 1 s, no stray
   H4 back: mask 7 (camera behind the ghost), then 0, then 10 toggles: on Pod_A at the item's own offset (its
@@ -21,17 +24,25 @@ out\\shots\\ghostitems_*.png and the results to out\\research\\ghost-items-resul
   H10 network: relay + bot.py --items + the client with --ghost-items: names and places follow every change of
      every cycle within NET_IN of the bot's own time for it; then an older sender (bot --no-on-back): the bow on
      the back (the receiver's guess)
-  H11 cost: frames a second with the ghost alone and with its 3 items (drop at most FPS_DROP), items.us_mean (the
-     plain mean over the last 64 frames, the plan's rule) under US_MAX; the longest item part and the longest whole
-     tick over the same frames; slow parts with the thread's own cycles (few cycles: it was switched out)
+  H11 cost: frames a second with the ghost alone and with its 3 items, COST_PAIRS pairs in turn (0.6.2: 3; the
+     median of each side, drop at most FPS_DROP; every pair is reported), items.us_mean (the plain mean over the last
+     64 frames, the plan's rule) under US_MAX; the longest item part and the longest whole tick over the same frames;
+     slow parts with the thread's own cycles (few cycles: it was switched out)
   H12 give: `ghost give` a sword, a shield and a bow near Link; he takes each (A); `ghost self` names all three
   H13 the sender's bytes: weapon, shield and bow out (Y, ZL, ZR) read "not on the back", after a sprint "on the back"
-  H4L like Link: the ghost's items on its back (H4) against Link's own on his (H13), each in its Pod_A's frame:
-     the same place within LIKE_M and the same turn within LIKE_DEG (0.6.1)
+  H4P the ghost's back from the items' own offsets (H4) against Link's own (H13), each in its Pod_A's frame (0.6.1;
+     the bow is about 0.1 m off: Link's armor adds to it)
+  H4L like Link (0.6.2): Link sprints (all on his back), his own back offsets (`ghost self` `<item>_rel`) go to the
+     mod (`ghost items rel`), and the ghost's items must sit where his do: the same place within LIKE_M and the same
+     turn within LIKE_DEG; a picture of the two from behind
   H15 a real sender: a second client reads this Link (`ghost self`) and sends him, 1.5 m to the side, through a
      relay to the client with --ghost-items: the ghost shows what Link holds, where he holds it, after a sprint,
-     a draw (Y), a throw (R: he drops the weapon) and a new sword (0.6.1)
+     a draw (Y), a throw (R: he drops the weapon) and a new sword (0.6.1); after the sprint, his items on the
+     ghost's back exactly where his are (his own back offsets in the state he sends, 0.6.2)
   H14 log: no exception, assert, panic or fatal line in savagewind.log (judged by ghost_ingame_check.py after exit)
+  H16 size (0.6.2): every held item drawn at its normal size (`items.N.size`, its matrix's axes times its own scale,
+     within SIZE_TOL of 1) in every H1 and H4 sample, and Link's own items (H13's `ghost self` `<key>_size`) at 1 too;
+     the first size (before the mod's fix), the axes and the scales are reported
 """
 from __future__ import annotations
 
@@ -52,11 +63,15 @@ from mp import client  # noqa: E402
 from mp.bot import ItemScript  # noqa: E402
 
 ITEMS = ("Weapon_Sword_001", "Weapon_Shield_001", "Weapon_Bow_001")
+MASK = 4              # 0.6.2: the usual look (Link with a sword out): sword in the right hand, shield on the left arm,
+MASK_BOW = 3          # the bow on the back; the bow drawn: the bow in the left hand, sword and shield on the back
+SIZE_TOL = 0.05       # H16: a held item drawn within this of its normal size (1)
 SWITCHES = ("Weapon_Lsword_001", "Weapon_Spear_001", "Weapon_Sword_001")
 NONE3 = ("", "", "")
 HAND_DIST = 0.05      # m: H1 an item at most this far from its hand bone is in the hand
 BACK_TOL = 0.05       # m: H4 |distance to Pod_A - the length of its own offset|
 FPS_DROP = 1.0        # H11 frames a second
+COST_PAIRS = 3        # H11 (0.6.2): alone / with the items, this many pairs in turn
 US_MAX = 50.0         # H11 microseconds a frame (average)
 HELD_IN = 3.0         # s: H1
 SWITCH_IN = 2.0       # s: H2
@@ -71,11 +86,11 @@ LIKE_M = 0.05         # m: H4L the ghost's item and Link's, each in its Pod_A's 
 LIKE_DEG = 10.0       # degrees: ... and their turn
 E2E_IN = 2.0          # s: H15 from Link's change to the ghost showing it (the sender's `ghost self` is read 20 times a
                       # second, the receiver's jitter buffer, then the spawn)
-BOT_ITEMS = "Weapon_Sword_001/Weapon_Shield_001/Weapon_Bow_001/0:5,Weapon_Lsword_001/-/Weapon_Bow_001/1:5,-/-/-/0:3"
+BOT_ITEMS = "Weapon_Sword_001/Weapon_Shield_001/Weapon_Bow_001/4:5,Weapon_Lsword_001/-/Weapon_Bow_001/5:5,-/-/-/0:3"
 BOT_STEP = re.compile(r"items step: (\S+) (\S+) (\S+) mask (\d) at (\d+(?:\.\d+)?)")
 LOG_BAD = re.compile(r"exception|assert|panic|fatal|access violation", re.I)
 SLOT_KEYS = ("name", "state", "actor", "place", "dist_m", "hold_m", "tries", "item_state", "holder_ok", "why", "rel",
-             "refusals")
+             "refusals", "size", "size_first", "axis", "own_scale", "model_scale", "copied")
 
 
 # ------------------------------------------------------------------ judging (pure: tests/test_mp_items.py)
@@ -89,7 +104,7 @@ def slots(st: dict) -> list[dict]:
 def held_as(st: dict, names, mask: int = 0, max_dist: float | None = None) -> str | None:
     """None when the reply shows exactly `names` held (state held, item state 255, holder the ghost; an empty name: an
     empty slot), each in its hand or, for a bit of mask, on the back; max_dist: also at most that far from its hand
-    bone. Else why not."""
+    bone (0.6.2: only an item in a hand). Else why not."""
     for i, (sl, name) in enumerate(zip(slots(st), names)):
         if not name:
             if sl["state"] not in ("none", None) or sl["actor"] not in ("0x0", None):
@@ -103,23 +118,25 @@ def held_as(st: dict, names, mask: int = 0, max_dist: float | None = None) -> st
         if sl["place"] != place:
             return f"slot {i}: {sl['place']}, not {place}"
         d = sl["dist_m"]
-        if max_dist is not None and not (isinstance(d, (int, float)) and 0 <= d <= max_dist):
+        if max_dist is not None and place == "hand" and not (isinstance(d, (int, float)) and 0 <= d <= max_dist):
             return f"slot {i}: {d} m from its hand bone"
     return None
 
 
-def judge_held(phases: dict[str, list[dict]], names=ITEMS, max_dist: float = HAND_DIST) -> tuple[str, str]:
+def judge_held(phases: dict[str, list[dict]], names=ITEMS, max_dist: float = HAND_DIST, mask: int = 0
+               ) -> tuple[str, str]:
     """H1: {"standing": [`ghost` replies], "walking": [...], "attacking": [...]}: every sample shows the three held in
-    their hands, at most max_dist from the hand bones."""
+    their places (mask: which on the back), those in a hand at most max_dist from their hand bones."""
     parts, ok = [], True
     for phase, samples in phases.items():
         if not samples:
             ok = False
             parts.append(f"{phase}: no samples")
             continue
-        bad = [w for w in (held_as(s, names, 0, max_dist) for s in samples) if w]
+        bad = [w for w in (held_as(s, names, mask, max_dist) for s in samples) if w]
         worst = max((sl["dist_m"] for s in samples for sl in slots(s)[:3]
-                     if isinstance(sl["dist_m"], (int, float)) and sl["dist_m"] >= 0), default=-1.0)
+                     if sl["place"] == "hand" and isinstance(sl["dist_m"], (int, float)) and sl["dist_m"] >= 0),
+                    default=-1.0)
         ok &= not bad
         parts.append(f"{phase}: {len(samples) - len(bad)}/{len(samples)} ok, farthest {worst:.3f} m"
                      + (f" ({bad[0]})" if bad else ""))
@@ -136,7 +153,8 @@ def judge_times(label: str, times: list[float | None], limit: float, final_why: 
     return ("PASS" if ok else "FAIL"), text
 
 
-def judge_back(back: list[dict], hand: list[dict], bones: str, tol: float = BACK_TOL) -> tuple[str, str]:
+def judge_back(back: list[dict], hand: list[dict], bones: str, tol: float = BACK_TOL, hand_mask: int = 0
+               ) -> tuple[str, str]:
     """H4: `ghost` replies with mask 7 (back), then with mask 0 (hand). On the back: each item on Pod_A at the length
     of its own offset (|dist_m - hold_m| <= tol). SKIP when the ghost has no Pod_A or no item ever got its offsets
     (the fallback: they stay in the hand). This only shows our follow is on (any offset passes); whether it looks
@@ -151,20 +169,20 @@ def judge_back(back: list[dict], hand: list[dict], bones: str, tol: float = BACK
             if isinstance(sl["dist_m"], (int, float)) and isinstance(sl["hold_m"], (int, float)) and sl["dist_m"] >= 0]
     if why is None and (len(errs) < 3 or max(errs) > tol):
         why = f"off by {[round(e, 3) for e in errs]} m from the offsets {[sl['hold_m'] for sl in last]}"
-    hand_why = held_as(hand[-1], ITEMS, 0)
+    hand_why = held_as(hand[-1], ITEMS, hand_mask)
     ok = why is None and hand_why is None
     text = (f"back: {why or 'all three on Pod_A'}, off by at most {max(errs, default=-1):.3f} m; "
-            f"then hand: {hand_why or 'all three in the hand'}")
+            f"then hand (mask {hand_mask}): {hand_why or 'each in its place'}")
     return ("PASS" if ok else "FAIL"), text
 
 
-def judge_no_take(me0: dict, me1: dict, actors0: list, st1: dict) -> tuple[str, str]:
+def judge_no_take(me0: dict, me1: dict, actors0: list, st1: dict, mask: int = 0) -> tuple[str, str]:
     """H5: Link's own items before and after pressing A next to the ghost, and the ghost's item actors before and its
     reply after: nothing moved over."""
     own0 = tuple(me0.get(k) for k in ("weapon", "shield", "bow"))
     own1 = tuple(me1.get(k) for k in ("weapon", "shield", "bow"))
     actors1 = [sl["actor"] for sl in slots(st1)]
-    why = held_as(st1, ITEMS, 0)
+    why = held_as(st1, ITEMS, mask)
     ok = own0 == own1 and actors0 == actors1 and why is None
     return ("PASS" if ok else "FAIL"), (f"Link's items {own0} -> {own1}; the ghost's actors "
                                         f"{'the same' if actors0 == actors1 else f'{actors0} -> {actors1}'}, "
@@ -177,6 +195,22 @@ def judge_gone(st: dict, label: str, want_state=("idle", "far")) -> tuple[str, s
     ok = st.get("state") in want_state and not held and st.get("items.stray") == 0
     return ("PASS" if ok else "FAIL"), (f"{label}: ghost {st.get('state')}, items left {held or 'none'}, stray "
                                         f"{st.get('items.stray')}, deleted {st.get('items.deleted')}")
+
+
+def median(vals) -> float | None:
+    v = sorted(x for x in vals if isinstance(x, (int, float)))
+    if not v:
+        return None
+    return v[len(v) // 2] if len(v) % 2 else (v[len(v) // 2 - 1] + v[len(v) // 2]) / 2
+
+
+def judge_pairs(alone: list, items: list, us_mean: float | None, drop: float = FPS_DROP, us_max: float = US_MAX
+                ) -> tuple[str, str]:
+    """H11 (0.6.2): pairs measured in turn (alone, then with the items): the median of each side; every pair shown."""
+    pairs = ", ".join(f"{'?' if a is None else f'{a:.1f}'}/{'?' if b is None else f'{b:.1f}'}"
+                      for a, b in zip(alone, items))
+    status, text = judge_cost(median(alone), median(items), us_mean, drop, us_max)
+    return status, f"medians of {len(alone)} pairs: {text}; pairs alone/with {pairs}"
 
 
 def judge_cost(base: float | None, with_items: float | None, us_mean: float | None, drop: float = FPS_DROP,
@@ -274,7 +308,9 @@ def judge_like_link(ghost_back: dict, link_rows: dict[str, dict], names=ITEMS, m
         d, a = rel_compare(gm, lm)
         good = d <= max_m and a <= max_deg
         ok &= good
-        parts.append(f"{key}: {d:.3f} m and {a:.0f} deg apart (Link's nearest pods {row.get(f'{key}_pods')})")
+        delta = "" if good else (f"; Link's minus the ghost's place in Pod_A's frame {lm[3] - gm[3]:+.3f} "
+                                 f"{lm[7] - gm[7]:+.3f} {lm[11] - gm[11]:+.3f} m")   # (0.6.2: for a later fix)
+        parts.append(f"{key}: {d:.3f} m and {a:.0f} deg apart (Link's nearest pods {row.get(f'{key}_pods')}){delta}")
     if not any_:
         return "SKIP", "; ".join(parts)
     return ("PASS" if ok else "FAIL"), "; ".join(parts) + f" (limits {max_m:g} m, {max_deg:g} deg)"
@@ -312,6 +348,38 @@ def judge_back_bytes(rows: dict[str, dict]) -> tuple[str, str]:
     if not any_:
         return "SKIP", "Link has none of them: " + "; ".join(parts)
     return ("PASS" if ok else "FAIL"), "; ".join(parts)
+
+
+def judge_size(samples: list[dict], link_rows: dict[str, dict] | None = None, tol: float = SIZE_TOL
+               ) -> tuple[str, str]:
+    """H16 (0.6.2): `ghost` replies (H1, H4): every held item drawn within tol of its normal size (`items.N.size`);
+    Link's own items (`ghost self` rows, `<key>_size`) at 1 too (the mod's rule: Link's are drawn at 1). Reports the
+    first size each slot had (before the mod's fix), its matrix's axes and its own and its model's scale."""
+    vals, bad, first = [], [], {}
+    for st in samples:
+        for i, sl in enumerate(slots(st)):
+            v = sl["size"]
+            if sl["state"] != "held" or not isinstance(v, (int, float)) or v <= 0:
+                continue
+            vals.append(v)
+            if abs(v - 1.0) > tol:
+                bad.append((sl["name"], round(v, 2)))
+            first.setdefault(i, sl)
+    link = [(k, row.get(f"{k}_size")) for row in (link_rows or {}).values() for k in ("weapon", "shield", "bow")
+            if isinstance(row.get(f"{k}_size"), (int, float)) and row.get(f"{k}_size") > 0]
+    link_bad = [(k, round(v, 2)) for k, v in link if abs(v - 1.0) > tol]
+    how = "; ".join(f"{sl['name']}: first {sl['size_first']}, axes {sl['axis']}, own scale {sl['own_scale']}, model "
+                    f"scale {sl['model_scale']}" for _, sl in sorted(first.items()))
+    sets = next((st.get("items.scale_sets") for st in reversed(samples) if "items.scale_sets" in st), None)
+    how += f"; the player's scale set {sets} times (all items, so far)"
+    if not vals:
+        return "FAIL", "no held item's size read (an older mod?)"
+    ok = not bad and not link_bad
+    text = (f"{len(vals)} sizes {min(vals):.2f}-{max(vals):.2f} (limit 1 +- {tol:g})"
+            + (f"; off: {bad[:4]}" if bad else "")
+            + (f"; Link's own {sorted(set(round(v, 2) for _, v in link))}" if link else "; Link's own not read")
+            + (f" (not 1: {link_bad})" if link_bad else "") + f". {how}")
+    return ("PASS" if ok else "FAIL"), text
 
 
 def judge_give(me: dict, names=ITEMS) -> tuple[str, str]:
@@ -417,7 +485,7 @@ def walk_circle(port: int, center: tuple[float, float, float], secs: float, radi
             time.sleep(0.05)
 
 
-def ensure_ghost(c: Control, spot: Spot, gic, names=ITEMS, mask: int = 0, secs: float = 15.0) -> dict:
+def ensure_ghost(c: Control, spot: Spot, gic, names=ITEMS, mask: int = MASK, secs: float = 15.0) -> dict:
     """A live Link-body ghost at its usual place holding `names`: spawned if it isn't live."""
     st = gst(c)
     if st.get("state") != "live":
@@ -438,7 +506,7 @@ def guard(rep, check: str, fn, *a) -> None:
         rep.add(check, "FAIL", f"stopped: {type(e).__name__}: {e}")
 
 
-def h1(c, port, spot, gic, rep) -> None:
+def h1(c, port, spot, gic, rep, ctx: dict) -> None:
     c.cmd("ghost", "far", "60", "50")
     c.cmd("ghost", "spawn", "link")
     st = gic.wait_live(c)
@@ -452,8 +520,8 @@ def h1(c, port, spot, gic, rep) -> None:
     shot(c, "L2_link")
     rep.add("L2", *gic.judge_link_spawn(st, cut))
     c.cmd("ghost", "anim", "auto")
-    set_items(c, ITEMS, 0)
-    took, st = poll(c, lambda s: held_as(s, ITEMS, 0) is None, HELD_IN + 2)
+    set_items(c, ITEMS, MASK)
+    took, st = poll(c, lambda s: held_as(s, ITEMS, MASK) is None, HELD_IN + 2)
     print(f"  H1: held after {took} s; bones {st.get('items.bones')!r}; {st.get('last')!r}", flush=True)
     time.sleep(0.5)
     shot(c, "H1_stand")
@@ -486,15 +554,22 @@ def h1(c, port, spot, gic, rep) -> None:
     c.cmd("ghost", "anim", "CutS1")
     phases["attacking"] += sample(c, 1.0)
     c.cmd("ghost", "anim", "auto")
-    set_items(c, ("", "", ITEMS[2]), 0)   # (the bow alone, for the picture: it hides behind the shield)
-    poll(c, lambda s: held_as(s, ("", "", ITEMS[2]), 0) is None, 3.0)
+    ctx.setdefault("sizes", []).extend(s for v in phases.values() for s in v)   # (H16)
+    set_items(c, ITEMS, MASK_BOW)   # (0.6.2: the bow drawn, as Link: the bow in the left hand, the rest on the back)
+    poll(c, lambda s: held_as(s, ITEMS, MASK_BOW) is None, 3.0)
     time.sleep(0.4)
-    shot(c, "H1_bow_only")
-    set_items(c, ITEMS, 0)
-    poll(c, lambda s: held_as(s, ITEMS, 0) is None, 3.0)
-    status, text = judge_held(phases)
+    shot(c, "H1_bow_drawn")
+    bow_why = held_as(gst(c), ITEMS, MASK_BOW, HAND_DIST)
+    set_items(c, ITEMS, MASK)
+    poll(c, lambda s: held_as(s, ITEMS, MASK) is None, 3.0)
+    time.sleep(0.4)
+    shot(c, "H1_sword_out")
+    status, text = judge_held(phases, mask=MASK)
+    text += f"; the bow drawn: {bow_why or 'bow in the left hand, sword and shield on the back'}"
+    if bow_why:
+        status = "FAIL"
     if took is None or took > HELD_IN:
-        status, text = "FAIL", f"not all held within {HELD_IN:g} s ({held_as(st, ITEMS, 0)}); " + text
+        status, text = "FAIL", f"not all held within {HELD_IN:g} s ({held_as(st, ITEMS, MASK)}); " + text
     rep.add("H1", status, f"held after {took if took is None else round(took, 2)} s; " + text)
 
 
@@ -518,9 +593,9 @@ def h2(c, spot, gic, rep) -> None:
     times, gone = [], []
     for name in SWITCHES:
         old = slots(gst(c))[0]["actor"]
-        set_items(c, (name, ITEMS[1], ITEMS[2]), 0)
+        set_items(c, (name, ITEMS[1], ITEMS[2]), MASK)
         t0 = time.monotonic()
-        took, st = poll(c, lambda s, n=name, o=old: held_as(s, (n, ITEMS[1], ITEMS[2]), 0) is None
+        took, st = poll(c, lambda s, n=name, o=old: held_as(s, (n, ITEMS[1], ITEMS[2]), MASK) is None
                         and slots(s)[0]["actor"] != o, SWITCH_IN + 2)
         times.append(took)
         _, st = poll(c, lambda s: s.get("items.dying") == 0, GONE_IN + 1, 0.05)   # (0.6.1: the old one is gone)
@@ -530,17 +605,17 @@ def h2(c, spot, gic, rep) -> None:
 
     def switches():
         for k in range(10):
-            set_items(c2, (SWITCHES[k % 2], ITEMS[1], ITEMS[2]), 0)
+            set_items(c2, (SWITCHES[k % 2], ITEMS[1], ITEMS[2]), MASK)
             time.sleep(0.3)
     with Control(c.sock.getpeername()[1], timeout=5) as c2:   # (a second connection: c is polled meanwhile)
         busy = frames_over(c, 0.0, switches)
-    set_items(c, ITEMS, 0)
-    took, st = poll(c, lambda s: held_as(s, ITEMS, 0) is None, SWITCH_IN + 2)
+    set_items(c, ITEMS, MASK)
+    took, st = poll(c, lambda s: held_as(s, ITEMS, MASK) is None, SWITCH_IN + 2)
     times.append(took)
     time.sleep(1.5)
     st = gst(c)
     shot(c, "H2_end")
-    status, text = judge_times("switches", times, SWITCH_IN, held_as(st, ITEMS, 0), st.get("items.stray"))
+    status, text = judge_times("switches", times, SWITCH_IN, held_as(st, ITEMS, MASK), st.get("items.stray"))
     if any(g is None or g > GONE_IN for g in gone):   # (deleted at the switch: gone within GONE_IN of it)
         status = "FAIL"
     rep.add("H2", status, text + f"; the old item gone {['never' if g is None else round(g, 2) for g in gone]} s "
@@ -551,8 +626,8 @@ def h2(c, spot, gic, rep) -> None:
 def h3(c, spot, gic, rep) -> None:
     st = ensure_ghost(c, spot, gic)
     keep = [sl["actor"] for sl in slots(st)]
-    set_items(c, (ITEMS[0], "", ITEMS[2]), 0)
-    t1, st = poll(c, lambda s: held_as(s, (ITEMS[0], "", ITEMS[2]), 0) is None, CLEAR_IN + 1)
+    set_items(c, (ITEMS[0], "", ITEMS[2]), MASK)
+    t1, st = poll(c, lambda s: held_as(s, (ITEMS[0], "", ITEMS[2]), MASK) is None, CLEAR_IN + 1)
     same = [sl["actor"] for sl in slots(st)][0::2] == keep[0::2]
     time.sleep(0.4)
     shot(c, "H3_shield_cleared")   # (0.6.1: sword and bow kept, the shield gone)
@@ -576,23 +651,26 @@ def h4(c, spot, gic, rep, ctx: dict) -> None:
     shot(c, "H4_back")
     back = sample(c, 1.0)
     ctx["ghost_back"] = back[-1] if back else {}   # (H4L: against Link's own, after H13)
-    set_items(c, ITEMS, 0)
-    poll(c, lambda s: held_as(s, ITEMS, 0) is None, 3.0)
+    ctx.setdefault("sizes", []).extend(back)      # (H16: on the back too)
+    set_items(c, ITEMS, MASK)
+    poll(c, lambda s: held_as(s, ITEMS, MASK) is None, 3.0)
     time.sleep(0.4)
     shot(c, "H4_hand_again")
     for k in range(10):
-        set_items(c, ITEMS, 7 if k % 2 == 0 else 0)
+        set_items(c, ITEMS, 7 if k % 2 == 0 else MASK)
         time.sleep(0.3)
-    set_items(c, ITEMS, 0)
-    poll(c, lambda s: held_as(s, ITEMS, 0) is None, 3.0)
+    set_items(c, ITEMS, MASK)
+    poll(c, lambda s: held_as(s, ITEMS, MASK) is None, 3.0)
     hand = sample(c, 0.6)
     st = hand[-1] if hand else {}
-    status, text = judge_back(back, hand, str(st.get("items.bones")))
+    status, text = judge_back(back, hand, str(st.get("items.bones")), hand_mask=MASK)
     rep.add("H4", status, text + f"; after 10 toggles stray {st.get('items.stray')}")
     spot.place(c)
 
 
 def h5(c, spot, gic, rep, label: str) -> None:
+    gic.back_to(c, spot.p)
+    spot.look(c)
     c.cmd("ghost", "self")
     time.sleep(0.3)
     me0 = c.cmd("ghost", "self")
@@ -622,8 +700,11 @@ def h5(c, spot, gic, rep, label: str) -> None:
     me1 = c.cmd("ghost", "self")
     st1 = gst(c)
     shot(c, f"H5_{label}_after")
-    status, text = judge_no_take(me0, me1, actors0, st1)
-    rep.add("H5", status, f"{label}, {math.hypot(x - p[0], z - p[2]):.2f} m from the ghost: {text}")
+    status, text = judge_no_take(me0, me1, actors0, st1, MASK)
+    far = math.hypot(x - p[0], z - p[2])
+    if far > 1.2:   # (0.6.2: run 4's armed H5 "passed" 20 m away: Link never reached the ghost)
+        status, text = "FAIL", f"Link didn't reach the ghost; {text}"
+    rep.add("H5", status, f"{label}, {far:.2f} m from the ghost: {text}")
     gic.back_to(c, start)
     spot.look(c)
     spot.place(c)
@@ -647,9 +728,9 @@ def h7(c, spot, gic, rep) -> None:
     far = gst(c)
     status, text = judge_gone(far, "far", ("far",))
     spot.place(c, ahead=3.0)
-    took, st = poll(c, lambda s: s.get("state") == "live" and held_as(s, ITEMS, 0) is None, FAR_BACK_IN + 3)
+    took, st = poll(c, lambda s: s.get("state") == "live" and held_as(s, ITEMS, MASK) is None, FAR_BACK_IN + 3)
     shot(c, "H7_back")
-    s2, t2 = judge_times("back", [took], FAR_BACK_IN, held_as(st, ITEMS, 0), st.get("items.stray"))
+    s2, t2 = judge_times("back", [took], FAR_BACK_IN, held_as(st, ITEMS, MASK), st.get("items.stray"))
     rep.add("H7", "PASS" if status == s2 == "PASS" else "FAIL", f"{text}; {t2}")
 
 
@@ -668,7 +749,7 @@ def h8(c, spot, gic, rep) -> None:
         status, text = "FAIL", "the game didn't remove the ghost at 90 m within 6 s; " + text
     c.cmd("ghost", "far", "60", "50")
     spot.place(c)
-    took2, st2 = poll(c, lambda s: s.get("state") == "live" and held_as(s, ITEMS, 0) is None, 20.0)
+    took2, st2 = poll(c, lambda s: s.get("state") == "live" and held_as(s, ITEMS, MASK) is None, 20.0)
     time.sleep(0.4)
     shot(c, "H8_back")
     rep.add("H8", status, f"{text}; back with its items after {took2 if took2 is None else round(took2, 1)} s")
@@ -693,7 +774,7 @@ def h9(c, spot, gic, rep) -> None:
             st = gst(c)
             if lost is None and st.get("drops", 0) > drops:
                 lost = time.monotonic() - t0
-            if lost is not None and st.get("state") == "live" and held_as(st, ITEMS, 0) is None:
+            if lost is not None and st.get("state") == "live" and held_as(st, ITEMS, MASK) is None:
                 took = time.monotonic() - t0 - lost
                 break
             if time.monotonic() >= press_at:
@@ -707,7 +788,7 @@ def h9(c, spot, gic, rep) -> None:
     st = gst(c) if took is not None else st   # (0.6.1: the old items are watched through the stage change: a stray
     old = {sl["actor"] for sl in before}      # is one the reload left in the world)
     reused = [sl["actor"] for sl in slots(st) if sl["actor"] in old]
-    status, text = judge_times("back with its items after the drop", [took], RELOAD_BACK_IN, held_as(st, ITEMS, 0),
+    status, text = judge_times("back with its items after the drop", [took], RELOAD_BACK_IN, held_as(st, ITEMS, MASK),
                                st.get("items.stray"))
     if lost is None:
         status = "FAIL"
@@ -825,23 +906,23 @@ def cost_text(rows: list[dict]) -> str:
 def h11(c, spot, gic, rep) -> None:
     ensure_ghost(c, spot, gic)
     alone, items, rows_alone, rows_items, held_ok = [], [], [], [], True
-    for _ in range(2):
+    for _ in range(COST_PAIRS):
         set_items(c, NONE3, 0)
         time.sleep(1.5)
         f, rows = watched_fps(c, gic)
         alone.append(f)
         rows_alone += rows
-        set_items(c, ITEMS, 0)
-        poll(c, lambda s: held_as(s, ITEMS, 0) is None, 4.0)
+        set_items(c, ITEMS, MASK)
+        poll(c, lambda s: held_as(s, ITEMS, MASK) is None, 4.0)
         time.sleep(2.5)   # (64 frames held before the measurement: the items' timer has only frames that held them)
         f, rows = watched_fps(c, gic)
         items.append(f)
         rows_items += rows
-        held_ok &= bool(rows) and all(held_as(r, ITEMS, 0) is None for r in rows)
+        held_ok &= bool(rows) and all(held_as(r, ITEMS, MASK) is None for r in rows)
     shot(c, "H11_with_items")
     means = [float(r["items.us_mean"]) for r in rows_items if isinstance(r.get("items.us_mean"), (int, float))]
     us_mean = sum(means) / len(means) if means else None
-    status, text = judge_cost(gic.mean_fps(alone), gic.mean_fps(items), us_mean)
+    status, text = judge_pairs(alone, items, us_mean)
     if not held_ok:   # (run 4 measured on the Game Over screen, with no ghost: not a cost)
         status, text = "FAIL", "the items were not held in every sample while measuring; " + text
     rows_alone_t = [{"tick_us_max": r.get("tick_us_max"), "frame_ms_max": r.get("frame_ms_max"),
@@ -953,6 +1034,74 @@ def h13(c, spot, gic, rep, ctx: dict) -> None:
     gic.back_to(c, spot.p)
 
 
+def h4l(c, spot, gic, rep) -> None:
+    """H4L (0.6.2): Link sprints (everything on his back); his own back offsets from `ghost self` go to the mod
+    (`ghost items rel`); the ghost (beside him, its back to the camera like his) puts its items there."""
+    gic.back_to(c, spot.p)
+    spot.look(c)
+    sprint(c)
+    time.sleep(0.5)
+    c.cmd("ghost", "self")
+    time.sleep(0.3)
+    me = c.cmd("ghost", "self")
+    names = tuple(me.get(k) or "" for k in ("weapon", "shield", "bow"))
+    mask = me.get("on_back") if isinstance(me.get("on_back"), int) else 0
+    sent = []
+    for i, key in enumerate(("weapon", "shield", "bow")):
+        m = rel_matrix(me.get(f"{key}_rel"))
+        if names[i] and mask >> i & 1 and m:
+            c.cmd("ghost", "items", "rel", str(i), *(f"{x:.5f}" for x in m))
+            sent.append(key)
+        else:
+            c.cmd("ghost", "items", "rel", str(i), "-")
+    p = link_pos(c)
+    fx, fz = spot.f
+    st = gst(c)
+    if st.get("state") != "live":
+        c.cmd("ghost", "spawn", "link")
+        gic.wait_live(c, 15.0)
+    yaw = math.degrees(math.atan2(fx, fz))   # (its back to the camera, as Link's)
+    c.cmd("ghost", "pos", f"{p[0] + 1.2 * fz:.3f}", f"{p[1]:.3f}", f"{p[2] - 1.2 * fx:.3f}", f"{yaw:.1f}")
+    c.cmd("ghost", "anim", "Wait")
+    set_items(c, names, mask)
+    idx = [("weapon", "shield", "bow").index(k) for k in sent]
+    poll(c, lambda s: held_as(s, names, mask) is None and all(slots(s)[i]["copied"] is True for i in idx), 5.0)
+    time.sleep(1.0)
+    st = gst(c)
+    shot(c, "H4L_like_link")
+    rows = {f"{k}_back": me for k in ("weapon", "shield", "bow")}
+    status, text = judge_like_link(st, rows, names)
+    rep.add("H4L", status, f"Link's own offsets sent for {sent or 'nothing'} (on_back {mask}): " + text)
+    for i in range(3):
+        c.cmd("ghost", "items", "rel", str(i), "-")
+    c.cmd("ghost", "anim", "auto")
+    gic.back_to(c, spot.p)   # (the next check starts from the spot)
+    spot.look(c)
+
+
+def net_back(c, steps: list) -> None:
+    """H15 (0.6.2): after a sprint, Link's own back offsets went into the state he sends; the receiving client passed
+    them to the mod (`ghost items rel`): the ghost's items must sit where his do (H4L's judge), within E2E_IN + 3 s."""
+    t0, why = time.monotonic(), "no reply"
+    while time.monotonic() - t0 < E2E_IN + 3:
+        c.cmd("ghost", "self")
+        me = c.cmd("ghost", "self")
+        st = gst(c)
+        names = tuple(me.get(k) or "" for k in ("weapon", "shield", "bow"))
+        mask = me.get("on_back") if isinstance(me.get("on_back"), int) else 0
+        copied = all(slots(st)[i]["copied"] is True for i in range(3) if names[i] and mask >> i & 1)
+        status, text = judge_like_link(st, {f"{k}_back": me for k in ("weapon", "shield", "bow")}, names)
+        why = f"copied {copied}: {text}"
+        if copied and status == "PASS":
+            steps.append(("back like Link's", time.monotonic() - t0, None))
+            print(f"  H15: back like Link's after {time.monotonic() - t0:.2f} s: {text}", flush=True)
+            shot(c, "H15_back_like_link")
+            return
+        time.sleep(0.2)
+    steps.append(("back like Link's", None, why))
+    shot(c, "H15_back_like_link")
+
+
 def h15(c, port, spot, gic, rep, relay_port: int) -> None:
     """A real sender: client A (sync, shows nobody) reads this Link with `ghost self` and sends him through a relay,
     shifted 1.5 m to the side; client B (--ghost-items, shows A) drives the ghost. Link sprints, draws (Y), throws his
@@ -998,27 +1147,38 @@ def h15(c, port, spot, gic, rep, relay_port: int) -> None:
         steps.append((what, None, f"{why}; Link: {me.get('weapon')!r} {me.get('shield')!r} {me.get('bow')!r} "
                                   f"on_back {me.get('on_back')}"))
         shot(c, f"H15_{what.replace(' ', '_')}")
-    try:
+    def home() -> None:   # (0.6.2: back on the meadow before each sprint: two in a row ran off the plateau's edge)
         gic.back_to(c, spot.p)
         spot.look(c)
+
+    try:
+        home()
         gic.wait_live(c, 20.0)
         sprint(c)
         follow("sprint")
+        net_back(c, steps)
+        home()
         c.cmd("press", "y")
         time.sleep(0.6)
         follow("draw")
         sprint(c)
         follow("sprint again")
+        home()
         try:
             c.cmd("press", "y")      # (draw first: a throw needs the weapon out)
-            time.sleep(0.8)
+            time.sleep(1.2)
             c.cmd("hold", "r")       # (R held, then let go: he throws it; it lands in front of him)
-            time.sleep(1.0)
+            time.sleep(1.2)
             c.cmd("release", "all")
-            time.sleep(1.5)
-            c.cmd("ghost", "self")
-            me = c.cmd("ghost", "self")
+            me, end = {}, time.monotonic() + 4.0
+            while time.monotonic() < end:   # (the throw takes a moment)
+                c.cmd("ghost", "self")
+                time.sleep(0.2)
+                me = c.cmd("ghost", "self")
+                if not me.get("weapon"):
+                    break
             if me.get("weapon"):
+                shot(c, "H15_no_throw")
                 steps.append(("throw", None, f"Link still holds {me.get('weapon')!r} (the throw didn't happen)"))
             else:
                 follow("throw")
@@ -1040,17 +1200,17 @@ def h15(c, port, spot, gic, rep, relay_port: int) -> None:
 
 def run(c: Control, port: int, gic, rep, *, give: bool) -> None:
     """Every check in the plan's order (out/research/ghost-items-plan.md): L2, H1-H4, H5 (unarmed), H6-H9, H11, H10,
-    H12, H13, H4L, H5 again (armed), H15. H14 is judged by the caller after the game closed."""
+    H12, H13, H4L, H16, H5 again (armed), H15. H14 is judged by the caller after the game closed."""
     spot = Spot(c, gic)
     c.cmd("ghost", "self")
     time.sleep(0.3)
     me = c.cmd("ghost", "self")
     armed = bool(me.get("weapon") or me.get("shield") or me.get("bow"))
     print(f"  Link has {me.get('weapon')!r} {me.get('shield')!r} {me.get('bow')!r}", flush=True)
-    guard(rep, "H1", h1, c, port, spot, gic, rep)
+    ctx: dict = {}
+    guard(rep, "H1", h1, c, port, spot, gic, rep, ctx)
     guard(rep, "H2", h2, c, spot, gic, rep)
     guard(rep, "H3", h3, c, spot, gic, rep)
-    ctx: dict = {}
     guard(rep, "H4", h4, c, spot, gic, rep, ctx)
     guard(rep, "H5", h5, c, spot, gic, rep, "armed" if armed else "unarmed")
     guard(rep, "H6", h6, c, spot, gic, rep)
@@ -1069,9 +1229,12 @@ def run(c: Control, port: int, gic, rep, *, give: bool) -> None:
         rep.add("H12", "SKIP", "no --give-weapon")
     guard(rep, "H13", h13, c, spot, gic, rep, ctx)
     if ctx.get("ghost_back") and ctx.get("link_rows"):
-        rep.add("H4L", *judge_like_link(ctx["ghost_back"], ctx["link_rows"]))
+        status, text = judge_like_link(ctx["ghost_back"], ctx["link_rows"])
+        rep.add("H4P", status, "the items' own offsets (no copy): " + text)
     else:
-        rep.add("H4L", "SKIP", "H4 or H13 gave nothing to compare")
+        rep.add("H4P", "SKIP", "H4 or H13 gave nothing to compare")
+    guard(rep, "H4L", h4l, c, spot, gic, rep)
+    rep.add("H16", *judge_size(ctx.get("sizes", []), ctx.get("link_rows")))
     me = c.cmd("ghost", "self")
     if me.get("weapon") or me.get("shield") or me.get("bow"):
         guard(rep, "H5", h5, c, spot, gic, rep, "armed")

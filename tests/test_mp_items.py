@@ -34,6 +34,8 @@ def session(**extra):
 
 MOD_060 = {"state": "live", "last": "", "takes_speed": True, "takes_anim": True, "has_self": True, "has_items": True,
            "version": "0.6.1"}
+MOD_062 = dict(MOD_060, has_items_rel=True, version="0.6.2")
+REL = [0.0, 0.0, 1.0, 0.12, 0.0, 1.0, 0.0, -0.05, -1.0, 0.0, 0.0, 0.2]
 MOD_051 = {"state": "live", "last": "", "takes_speed": True, "takes_anim": True, "has_self": True, "version": "0.5.1"}
 
 
@@ -63,6 +65,25 @@ class OnBackTests(unittest.TestCase):
         self.assertEqual((msg["weapon"], msg["on_back"]), ("W_1", 5))
         msg = s.update_local({"x": 1.0, "y": 2.0, "z": 3.0}, {"yaw": 0.0}, 5.1, own={"on_back": 9})
         self.assertNotIn("on_back", msg)
+
+
+class RelTests(unittest.TestCase):
+    """0.6.2: each item's place on the sender's back (`<item>_rel`), 12 numbers in his Pod_A's frame."""
+    def test_kept_when_good(self):
+        st = mp.clean_state(state(bow_rel=REL, weapon_rel=" ".join(map(str, REL))))
+        self.assertEqual(st["bow_rel"], REL)
+        self.assertEqual(st["weapon_rel"], REL)                    # (the `ghost self` text form too)
+
+    def test_bad_ones_dropped_alone(self):
+        for bad in (REL[:11], REL + [0.0], [True] + REL[1:], [float("nan")] + REL[1:], [1.5] + REL[1:],
+                    REL[:3] + [2.5] + REL[4:], "1 2 x", 7, None):
+            st = mp.clean_state(state(bow_rel=bad))
+            self.assertIsNotNone(st)
+            self.assertNotIn("bow_rel", st, bad)
+
+    def test_it_travels_to_the_views(self):
+        v = session(bow=ITEMS[2], on_back=4, bow_rel=REL).views(10.0)[0]
+        self.assertEqual(v["bow_rel"], REL)
 
 
 # ---------------------------------------------------------------- client
@@ -191,6 +212,41 @@ class GhostItemsTests(unittest.TestCase):
         self.tick(s, 10.05, items_reply=ControlError("usage: ghost ..."))
         self.assertFalse(self.g.has_items)
 
+    @staticmethod
+    def rels_of(reqs):
+        return [r for r in reqs if r[1:3] == ["items", "rel"]]
+
+    def test_back_offsets_sent_once_each(self):
+        """0.6.2: a mod that takes `ghost items rel` gets the sender's back offsets, once per change, before the names;
+        an item no longer on their back (no offset in a state with the items) goes back to its own offsets."""
+        s = session(weapon=ITEMS[0], shield=ITEMS[1], bow=ITEMS[2], on_back=4, bow_rel=REL)
+        self.tick(s, 10.0, mod=MOD_062)
+        reqs = self.tick(s, 10.05, mod=MOD_062)
+        rels = self.rels_of(reqs)
+        self.assertEqual(rels[2], ["ghost", "items", "rel", "2"] + [f"{x:.4f}" for x in REL])
+        self.assertEqual(rels[:2], [["ghost", "items", "rel", "0", "-"], ["ghost", "items", "rel", "1", "-"]])
+        self.assertLess(reqs.index(rels[2]), reqs.index(self.items_of(reqs)[-1]))
+        self.assertEqual(self.rels_of(self.tick(s, 10.1, mod=MOD_062)), [])          # (no change)
+        s.handle(dict(state(x=3.0, z=0.0, t=2.0), id=1, name="Bo", weapon=ITEMS[0], shield=ITEMS[1], bow=ITEMS[2],
+                      on_back=0), now=10.15)
+        self.assertEqual(self.rels_of(self.tick(s, 10.2, mod=MOD_062)), [["ghost", "items", "rel", "2", "-"]])
+
+    def test_back_offsets_not_for_an_older_mod(self):
+        s = session(weapon=ITEMS[0], bow=ITEMS[2], on_back=4, bow_rel=REL)
+        for k in range(3):
+            self.assertEqual(self.rels_of(self.tick(s, 10.0 + k * 0.05)), [])   # (MOD_060: no has_items_rel)
+
+    def test_own_back_offsets_go_into_the_state(self):
+        g = client.Ghost(actor=client.GHOST_LINK_ACTOR, log=self.log.append, items=True)
+        g._take_self({"active": True, "found": True, "anim": "Wait", "equip_ok": True, "weapon": "Weapon_Sword_001",
+                      "shield": "", "bow": "Weapon_Bow_001", "on_back": 4, "bow_rel": " ".join(map(str, REL)),
+                      "weapon_rel": " ".join(map(str, REL))})
+        own = g.own_state()
+        self.assertEqual(own["bow_rel"], REL)
+        self.assertNotIn("weapon_rel", own)                          # (the sword is in his hand: not sent)
+        msg = client.Session("Me").update_local({"x": 1.0, "y": 2.0, "z": 3.0}, {"yaw": 0.0}, 5.0, own=own)
+        self.assertEqual(msg["bow_rel"], REL)
+
     def test_own_on_back_goes_into_the_state(self):
         s = session(weapon=ITEMS[0])
         self.tick(s, 10.0)
@@ -223,10 +279,10 @@ class BotItemsTests(unittest.TestCase):
     def test_script(self):
         sc = bot.ItemScript.parse(gi.BOT_ITEMS)
         self.assertEqual(sc.duration, 13.0)
-        self.assertEqual(sc.at(0.0), (*ITEMS, 0))
-        self.assertEqual(sc.at(6.0), ("Weapon_Lsword_001", "", "Weapon_Bow_001", 1))
+        self.assertEqual(sc.at(0.0), (*ITEMS, 4))             # (0.6.2: as Link carries them: the bow on the back)
+        self.assertEqual(sc.at(6.0), ("Weapon_Lsword_001", "", "Weapon_Bow_001", 5))
         self.assertEqual(sc.at(11.0), ("", "", "", 0))
-        self.assertEqual(sc.at(13.5), (*ITEMS, 0))            # (a loop)
+        self.assertEqual(sc.at(13.5), (*ITEMS, 4))            # (a loop)
         self.assertEqual(bot.ItemScript.parse("A_1/-/-/7").steps, [("A_1", "", "", 7, 1.0)])
 
     def test_bad_scripts(self):
@@ -293,7 +349,7 @@ class BotItemsTests(unittest.TestCase):
         self.assertTrue(all("on_back" not in m and m["weapon"] == ITEMS[0] for m in sent))
         changes = gi.bot_changes(logged)
         self.assertEqual(len(changes), 1)
-        self.assertEqual(changes[0][1:], (ITEMS, 0))
+        self.assertEqual(changes[0][1:], (ITEMS, 4))
 
     def test_command_line(self):
         for bad in (["--on-back", "9"], ["--shield", "a b"], ["--items", "A/-/-/0", "--weapon", "W_1"]):
@@ -332,6 +388,50 @@ class JudgeTests(unittest.TestCase):
         self.assertIn("item state 2", gi.held_as(dropped, ITEMS))
         self.assertIn("not empty", gi.held_as(reply(), (ITEMS[0], "", ITEMS[2])))
         self.assertIsNone(gi.held_as(reply(names=(ITEMS[0], "", ITEMS[2])), (ITEMS[0], "", ITEMS[2])))
+
+    def test_held_as_link_carries_them(self):
+        """0.6.2: H1 as Link carries them (MASK: the bow on the back); the hand-bone distance only for a hand."""
+        usual = reply(places=("hand", "hand", "back"), dists=(0.0, 0.01, 0.35))
+        self.assertEqual(gi.judge_held({"standing": [usual], "walking": [usual]}, mask=gi.MASK)[0], "PASS")
+        self.assertEqual(gi.judge_held({"standing": [usual]})[0], "FAIL")                 # (mask 0: all in the hands)
+        far = reply(places=("hand", "hand", "back"), dists=(0.2, 0.01, 0.35))
+        self.assertIn("from its hand bone", gi.held_as(far, ITEMS, gi.MASK, gi.HAND_DIST))
+        drawn = reply(places=("back", "back", "hand"), dists=(0.3, 0.2, 0.0))
+        self.assertIsNone(gi.held_as(drawn, ITEMS, gi.MASK_BOW, gi.HAND_DIST))
+        self.assertEqual(gi.judge_back([reply(places=("back",) * 3, dists=(0.3, 0.2, 0.4))], [usual], "ok",
+                                       hand_mask=gi.MASK)[0], "PASS")
+        st = usual
+        actors = [sl["actor"] for sl in gi.slots(st)]
+        me = {"weapon": "", "shield": "", "bow": ""}
+        self.assertEqual(gi.judge_no_take(me, me, actors, st, gi.MASK)[0], "PASS")
+
+    def test_cost_pairs(self):
+        """H11 (0.6.2): the medians of pairs in turn; one bad pair doesn't decide it, every pair is shown."""
+        status, text = gi.judge_pairs([30.0, 29.0, 29.8], [25.4, 28.9, 29.5], 12.0)
+        self.assertEqual(status, "PASS", text)                 # (medians 29.8 -> 28.9)
+        self.assertIn("30.0/25.4", text)
+        self.assertEqual(gi.judge_pairs([30.0, 30.0, 30.0], [28.0, 28.5, 29.5], 12.0)[0], "FAIL")
+        self.assertEqual(gi.judge_pairs([30.0], [29.9], 80.0)[0], "FAIL")   # (the items' part over 50 us)
+        self.assertEqual(gi.judge_pairs([None], [None], 1.0)[0], "SKIP")
+        self.assertEqual(gi.median([3, 1, 2]), 2)
+        self.assertEqual(gi.median([1, 2]), 1.5)
+
+    def test_size(self):
+        """H16 (0.6.2): every held item drawn within SIZE_TOL of 1, Link's own at 1 too."""
+        def sized(sizes, first=1.6):
+            st = reply()
+            for i, v in enumerate(sizes):
+                st.update({f"items.{i}.size": v, f"items.{i}.size_first": first, f"items.{i}.axis": 1.6,
+                           f"items.{i}.own_scale": 0.625, f"items.{i}.model_scale": 0.625, f"items.{i}.size_fixes": 1})
+            return st
+        rows = {"weapon_back": {"weapon_size": 1.0, "shield_size": 1.0, "bow_size": 1.0}}
+        status, text = gi.judge_size([sized((1.0, 1.01, 0.99))] * 3, rows)
+        self.assertEqual(status, "PASS", text)
+        self.assertIn("first 1.6", text)
+        self.assertEqual(gi.judge_size([sized((1.0, 1.6, 1.0))], rows)[0], "FAIL")
+        self.assertEqual(gi.judge_size([sized((1.0, 1.0, 1.0))], {"x": {"weapon_size": 1.6}})[0], "FAIL")
+        self.assertEqual(gi.judge_size([reply()], rows)[0], "FAIL")                      # (no size: an older mod)
+        self.assertEqual(gi.judge_size([sized((1.0, 1.0, 1.0))])[0], "PASS")             # (Link's not read: still)
 
     def test_times(self):
         self.assertEqual(gi.judge_times("x", [0.5, 1.9], 2.0, None, 0)[0], "PASS")

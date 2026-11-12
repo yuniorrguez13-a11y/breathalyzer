@@ -37,8 +37,9 @@ _TOOLS = str(Path(__file__).resolve().parent.parent)
 if _TOOLS not in sys.path:
     sys.path.insert(0, _TOOLS)
 from control import DEFAULT_PORT as GAME_PORT, Control, ControlError  # noqa: E402
-from mp import (DEFAULT_RELAY_PORT, DEFAULT_ROOM, ITEM_KEYS, PROTOCOL_VERSION, clean_state, decode,  # noqa: E402
-                encode, parse_hostport, safe_console, safe_name, valid_anim, valid_name, valid_on_back, valid_room)
+from mp import (DEFAULT_RELAY_PORT, DEFAULT_ROOM, ITEM_KEYS, PROTOCOL_VERSION, REL_KEYS, clean_state,  # noqa: E402
+                decode, encode, parse_hostport, safe_console, safe_name, valid_anim, valid_name, valid_on_back,
+                valid_rel, valid_room)
 
 DEFAULT_HZ = 20.0
 DEFAULT_DELAY = 0.1       # how far behind real time other players are drawn (s)
@@ -78,7 +79,7 @@ def interpolate(s0: dict, s1: dict, f: float) -> dict:
     if v0 is not None or v1 is not None:
         out["speed"] = lerp(v0, v1, f) if v0 is not None and v1 is not None else (v1 if v1 is not None else v0)
     near = s0 if f < 0.5 else s1
-    for key in ("place", "anim", "attack", "on_back") + ITEM_KEYS:   # (names aren't blended: the nearer sample's)
+    for key in ("place", "anim", "attack", "on_back") + ITEM_KEYS + REL_KEYS:   # (not blended: the nearer sample's)
         if near.get(key) is not None:
             out[key] = near[key]
     return out
@@ -394,7 +395,7 @@ class Session:
             yaw = cam.get("yaw") if isinstance(cam, dict) else None
             msg = {"t": round(now, 3), "x": pos.get("x"), "y": pos.get("y"), "z": pos.get("z"),
                    "yaw": yaw, "stamina": pos.get("stamina"), "place": pos.get("place")}
-            for key in ("anim", "attack", "on_back") + ITEM_KEYS:
+            for key in ("anim", "attack", "on_back") + ITEM_KEYS + REL_KEYS:
                 if own and own.get(key) is not None:
                     msg[key] = own[key]
             st = clean_state(msg)
@@ -424,7 +425,7 @@ class Session:
                 s = peer.buffer.sample(now)
                 if s is not None:
                     v.update(x=s["x"], y=s["y"], z=s["z"], yaw=s.get("yaw"), speed=s.get("speed"))
-                    v.update((k, s[k]) for k in ("anim", "attack", "on_back") + ITEM_KEYS if k in s)
+                    v.update((k, s[k]) for k in ("anim", "attack", "on_back") + ITEM_KEYS + REL_KEYS if k in s)
                     v["age"] = max(0.0, now - peer.buffer.last_recv)
                     v["stale"] = v["age"] > STALE_AFTER
                     if local is not None:
@@ -864,6 +865,16 @@ def item_name_ok(slot: int, name) -> bool:
     return any(s == slot and name.startswith(p) and len(name) > len(p) for p, s in ITEM_PREFIXES)
 
 
+def rel_commands(v: dict) -> list[list[str]]:
+    """--ghost-items (ghost mod 0.6.2): `ghost items rel <slot> <12 numbers>` for each item the shown player has on
+    his back with its place sent (REL_KEYS), else `ghost items rel <slot> -` (the item's own offsets)."""
+    out = []
+    for i, (k, rk) in enumerate(zip(ITEM_KEYS, REL_KEYS)):
+        rel = valid_rel(v.get(rk)) if item_name_ok(i, v.get(k)) else None
+        out.append(["ghost", "items", "rel", str(i)] + ([f"{x:.4f}" for x in rel] if rel else ["-"]))
+    return out
+
+
 def items_command(v: dict) -> list[str]:
     """--ghost-items: `ghost items weapon shield bow mask` for the shown player ("-": none, or a name the ghost may not
     hold: item_name_ok)."""
@@ -954,6 +965,8 @@ class Ghost:
         self.items = items           # --ghost-items: the ghost holds what the shown player holds (ghost mod 0.6.0)
         self.has_items = False       # ... the mod takes `ghost items` (its `ghost` reply said has_items)
         self._items_sent: list[str] | None = None   # the last `ghost items` sent on this connection
+        self.has_items_rel = False   # 0.6.2: the mod takes `ghost items rel` (its `ghost` reply says has_items_rel)
+        self._rel_sent: list = [None, None, None]   # ... the last `ghost items rel` per slot on this connection
         self._items_at = 0.0         # ... and when it goes again with no change
         self._no_items_said = False
         self.spawned = False         # `ghost spawn` went to the game on the current connection
@@ -997,6 +1010,7 @@ class Ghost:
             self.takes_anim = self.has_self = self.has_items = False
             self.own = {}
             self._items_sent = None
+            self.has_items_rel, self._rel_sent = False, [None, None, None]
         self._sent, self._now = [], now
         if self.unavailable:
             return []
@@ -1031,7 +1045,13 @@ class Ghost:
                 pos.append(anim)
             out.append(pos)
             if self.items and self.has_items:
-                cmd = items_command(self.held(v))
+                held = self.held(v)
+                if self.has_items_rel:   # (0.6.2: where each item sits on their back, before the names)
+                    for i, cmd in enumerate(rel_commands(held)):
+                        if cmd != self._rel_sent[i]:
+                            out.append(cmd)
+                            self._rel_sent[i] = cmd
+                cmd = items_command(held)
                 if cmd != self._items_sent or now >= self._items_at:
                     out.append(cmd)
                     self._items_sent, self._items_at = cmd, now + GHOST_ITEMS_EVERY
@@ -1052,6 +1072,13 @@ class Ghost:
                 self._held[k] = v[k]
         if valid_on_back(v.get("on_back")) is not None:
             self._held["on_back"] = v["on_back"]
+        if any(isinstance(v.get(k), str) for k in ITEM_KEYS):   # (0.6.2: a state with the items: its offsets too;
+            for k in REL_KEYS:                                   # none sent for an item = not on their back)
+                rel = valid_rel(v.get(k))
+                if rel is None:
+                    self._held.pop(k, None)
+                else:
+                    self._held[k] = rel
         return dict(self._held, anim=v.get("anim"))
 
     def _log_items(self, v: dict) -> None:
@@ -1091,6 +1118,10 @@ class Ghost:
             on_back = valid_on_back(r.get("on_back"))   # (ghost mod 0.6.0)
             if on_back is not None:
                 self.own["on_back"] = on_back
+                for i, k in enumerate(ITEM_KEYS):   # (0.6.2: where each item on his back sits, in his Pod_A's frame)
+                    rel = valid_rel(r.get(f"{k}_rel")) if on_back >> i & 1 and self.own.get(k) else None
+                    if rel is not None:
+                        self.own[REL_KEYS[i]] = rel
 
     def replies(self, replies) -> None:
         """The game's answers to the last requests(); None: they weren't sent (no game connection)."""
@@ -1134,6 +1165,10 @@ class Ghost:
                 self.takes_anim = r.get("takes_anim") is True and self.takes_speed
                 self.has_self = r.get("has_self") is True
                 was, self.has_items = self.has_items, r.get("has_items") is True
+                if r.get("has_items_rel") is not True:
+                    self.has_items_rel = False
+                elif not self.has_items_rel:
+                    self.has_items_rel, self._rel_sent = True, [None, None, None]
                 if not was and self.has_items:
                     self._items_sent = None   # (send what they hold at once)
                 if self.items and not self.has_items and not self._no_items_said:
