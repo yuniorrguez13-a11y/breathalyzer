@@ -32,4 +32,4 @@ GOOD TO KNOW
 - Help: app\docs\launcher.md
 
 Free and open source (MIT licence, app\LICENSE). Python (PSF licence, app\runtime\LICENSE.txt) and
-Tcl/Tk (BSD-style licence, app\runtime\tcl) come with it.
+Tcl/Tk (BSD-style licence, also in app\runtime\LICENSE.txt) come with it.

@@ -91,5 +91,67 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(story.story_bits(f, NAMES), set())
 
 
+class FakeControl:
+    """Savage Wind's control connection as probe run B saw it: `time` answers {'hour': ..., 'hour_held': ...}; the
+    ghost mod's `coop story get` has n 0 until a list is loaded."""
+
+    def __init__(self, port, timeout=None):
+        self.sent, self.n, self.hour = [], 0, 11.06
+
+    def cmd(self, *w):
+        self.sent.append(w)
+        if w == ("time",):
+            return {"hour": self.hour, "hour_held": False}
+        if w[:2] == ("time", "set"):
+            self.hour = float(w[2])
+            return {}
+        if w[:3] == ("coop", "story", "load"):
+            self.n = 3
+            return {"flags": 3}
+        if w[:3] in (("coop", "story", "get"), ("coop", "story", "status")):
+            return {"ready": self.n > 0, "n": self.n, "seq": 1, "bits": "05" if self.n else ""}
+        return {}
+
+    def close(self):
+        pass
+
+
+class ControlGameTests(unittest.TestCase):
+    def game(self):
+        g = coop_agent.ControlGame(7777, 3, Path("story-list.txt"))
+        g._Control = FakeControl
+        return g
+
+    def test_hour_reply(self):
+        """The `time` reply's key seen in the game (probe run B, 2026-11-12) is `hour`."""
+        self.assertAlmostEqual(coop_agent._hour_of({"hour": 21.0076, "hour_held": False}), 21.0076)
+        self.assertEqual(coop_agent._hour_of({"hour": 9.5}), 9.5)
+        self.assertEqual(coop_agent._hour_of({"time": "21:30"}), 21.5)
+        self.assertIsNone(coop_agent._hour_of({"hour": 25}))
+        self.assertIsNone(coop_agent._hour_of({}))
+        g = self.game()
+        self.assertAlmostEqual(g.get_hour(), 11.06)
+        g.set_hour(21.0)
+        self.assertEqual(g.get_hour(), 21.0)
+
+    def test_loads_the_list_when_the_mod_has_none(self):
+        """In the game nothing loaded the story list into the mod: the agent does it when `coop story get` shows
+        another count (a new game), then reads."""
+        g = self.game()
+        self.assertIsNone(g.story_get())
+        load = [w for w in g.c.sent if w[:3] == ("coop", "story", "load")]
+        self.assertEqual(len(load), 1)
+        self.assertTrue(load[0][3].endswith("story-list.txt"))
+        self.assertEqual(g.story_get(), {0, 2})
+
+    def test_no_game_yet(self):
+        """The game isn't up (or restarted): reads are None and writes are skipped, nothing raises."""
+        g = coop_agent.ControlGame(1, 3)   # (port 1: nothing listens)
+        self.assertIsNone(g.get_hour())
+        self.assertIsNone(g.story_get())
+        g.set_hour(12.0)
+        g.story_add({0}, 3)
+
+
 if __name__ == "__main__":
     unittest.main()

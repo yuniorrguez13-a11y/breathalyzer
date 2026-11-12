@@ -82,6 +82,7 @@ R_BAD_NAME = "bad file name"
 R_ROOT = "at the RomFS root"
 R_DLC_MARK = "DLC file in the game's place"
 R_SAME = "same file twice"
+R_EDITING = "image or 3D editor file"   # (mod_inspect.EDITING_EXT: .dds, .gtx, .png...: the game reads none of them)
 
 
 class DeployError(Exception):
@@ -412,6 +413,9 @@ def map_paths(paths: list[str], known_top: set[str] = ROMFS_TOP, context: tuple[
                 continue
         if any(_bad_name(x) for x in rel):
             skipped.append((path, R_BAD_NAME))
+            continue
+        if "." in rel[-1] and rel[-1].rsplit(".", 1)[1].lower() in mi.EDITING_EXT:
+            skipped.append((path, R_EDITING))
             continue
         entries.append(Entry(member=path, rel="/".join(rel), dlc=dlc))
         layouts.add(layout)

@@ -51,8 +51,10 @@ import time
 import zipfile
 import zlib
 from dataclasses import dataclass, field
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mod_inspect as mi  # noqa: E402
 import romfs_mods as rm  # noqa: E402
 import wiiu_convert as wc  # noqa: E402
 
@@ -443,6 +445,278 @@ def is_archive(path: str) -> bool:
             return f.read(6) == SEVEN_ZIP_MAGIC
     except OSError:
         return False
+
+
+# ---------------------------------------------------------------------------------------------------- packed downloads
+# A download modman add can't use as it is: a .rar, a .7z that isn't a .bnp, a .zip holding archives. It is unpacked
+# into a work folder with the same tools and checks as a .bnp (extract()), level by level, and the mods in it are
+# found with mod_inspect. Nothing from it is run.
+
+RAR_MAGIC = b"Rar!\x1a\x07"
+ZIP_MAGICS = (b"PK\x03\x04", b"PK\x05\x06")
+PACKED_EXTS = (".7z", ".rar", ".zip", ".bnp")
+UNPACK_LEVELS = 3            # the download, an archive in it, one in that: nothing deeper is opened
+BOMB_RATIO = 1000            # an archive listing more than this many times its own size...
+BOMB_MIN = 1 << 30           # ...and more than this in all is refused (made to fill the disk)
+GAME_VERSION_RE = re.compile(r"(?<![\d.])v?(1\.\d{1,2}\.\d{1,2})(?![\d.])", re.I)  # in a folder's name
+VERSION_WORDS = {"v", "ver", "version", "for", "switch", "nx", "botw", "game", "update", "only"}  # around it
+KEEP_WRAPPER = {"sdcafiine"}   # (folders _unwrap doesn't go into: the mod would be named after them)
+
+
+def archive_magic(path: str) -> str | None:
+    """"7z", "rar" or "zip", by the file's first bytes (None: none of them, or it can't be read)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8)
+    except OSError:
+        return None
+    if head.startswith(SEVEN_ZIP_MAGIC):
+        return "7z"
+    if head.startswith(RAR_MAGIC):
+        return "rar"
+    return "zip" if head[:4] in ZIP_MAGICS else None
+
+
+def packed_download(src: str, findings: list = (), names: list[str] = ()) -> bool:
+    """Whether modman add unpacks src first (unpack_download): a .rar, a 7-Zip archive without a BCML info.json (so
+    not a .bnp), or a .zip that holds archives and isn't a BCML or UKMM package itself. `findings` and `names`:
+    mod_inspect's for src. Reads only."""
+    if not os.path.isfile(src):
+        return False
+    kind = archive_magic(src)
+    if kind == "rar":
+        return True
+    if kind == "7z":
+        try:
+            members, _ = list_archive(src)
+        except BnpError:
+            return False  # (peek() says why)
+        return find_info([m.name for m in members if not m.is_dir]) is None
+    if kind == "zip":
+        package = any(getattr(f, "kind", "") in ("BCML mod (BNP)", "UKMM package") for f in findings)
+        return not package and any(n.lower().endswith(PACKED_EXTS) for n in names)
+    return False
+
+
+@dataclass
+class Found:
+    """One mod in a download."""
+    label: str    # its name for --option: the file name of a package in it, else the folder's (or the download's)
+    path: str     # what modman add is given: a folder, or a package file, in the work folder
+    what: str     # what it holds, for the player
+
+
+@dataclass
+class Download:
+    name: str                                         # the download's file name
+    found: list[Found] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)    # what was left out (folders for other game versions...)
+    levels: int = 1                                   # archives opened one inside the other
+    files: int = 0                                    # listed by every archive opened, together
+    size: int = 0
+    boxes: int = 0                                    # work subfolders made
+
+    def pick(self, picks: list[str] = ()) -> tuple[Found, list[str]]:
+        """The mod to add, and the picks left for its own options. One mod: that one. Several: the one a pick names
+        (its whole name, or a part only it has); none named, or nothing found: BnpError saying what is there."""
+        left = "".join(f"\n  - left out: {n}" for n in self.notes)
+        if not self.found:
+            raise BnpError(f"Not added: {self.name} holds no BotW mod (no RomFS files, patches, cheats, DLLs or "
+                           f"mod packages, also in the archives inside it).{left}")
+        if len(self.found) == 1:
+            return self.found[0], list(picks)
+        for k, pick in enumerate(picks):
+            want = pick.strip().casefold()
+            hits = [f for f in self.found if f.label.casefold() == want] or \
+                   [f for f in self.found if want and want in f.label.casefold()]
+            if len(hits) == 1:
+                return hits[0], [p for j, p in enumerate(picks) if j != k]
+        shown = "".join(f'\n  - "{f.label}": {f.what}' for f in self.found)
+        raise BnpError(f"Not added: {self.name} holds {len(self.found)} mods. Add it again with --option and the "
+                       f"name of the one you want (once for each one you want):{shown}{left}")
+
+    def box(self, work: str, name: str) -> str:
+        """A new folder in work for one archive's files, named like it (modman names a mod after its folder)."""
+        self.boxes += 1
+        clean = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")[:60].strip(" .") or "mod"
+        if rm._bad_name(clean):
+            clean = "mod-" + clean
+        return os.path.join(work, str(self.boxes), clean)
+
+
+def unpack_download(src: str, work: str, say=print) -> Download:
+    """Unpack a download (packed_download) into work, a new folder, and find the mods in it: each archive with
+    extract()'s checks (names, links, sizes, free space) plus: every file the size the archive lists, a budget for
+    all levels together (MAX_MEMBERS, MAX_UNPACKED), no archive listing over BOMB_RATIO times its size above
+    BOMB_MIN, at most UNPACK_LEVELS archives one inside the other. A .bnp or a mod .zip in it is a mod as it is (not
+    opened); another archive is opened in turn. Of folders named for game versions (1.6.0/, 1.9.0/), only the
+    one for 1.9.0 (else the newest) is kept. Nothing from the download is run. On a refusal work is left for the
+    caller to remove (it is named ".adding-...", so an add cut short leaves nothing for long: sweep_stale)."""
+    if os.path.lexists(work):
+        raise BnpError(f"{work} already exists: unpacking needs a new folder.")
+    os.makedirs(work)
+    dl = Download(os.path.basename(src))
+    stem = os.path.splitext(dl.name)[0]
+    root = dl.box(work, stem)
+    _unpack_one(src, root, 1, dl, say)
+    _find_mods(root, os.path.basename(root), 1, work, dl, say)
+    for f in dl.found:   # (two named alike, as two archives with one name in two folders: numbered)
+        same = [g for g in dl.found if g.label.casefold() == f.label.casefold()]
+        if len(same) > 1:
+            for k, g in enumerate(same, 1):
+                g.label = f"{g.label} ({k})"
+    return dl
+
+
+def _unpack_one(path: str, dest: str, level: int, dl: Download, say) -> None:
+    name = os.path.basename(path)
+    if archive_magic(path) == "rar" and not any(k == "7z" for k, _ in archive_tools()):
+        raise BnpError(f"Can't open {name}: a .rar needs 7-Zip on this PC (7-zip.org). Or extract it with any "
+                       "archive tool and add the folder.")
+    members, _ = list_archive(path)
+    files = [m for m in members if not m.is_dir]
+    listed = sum(m.size for m in files)
+    packed = max(os.path.getsize(path), 1)
+    if listed > BOMB_MIN and listed > packed * BOMB_RATIO:
+        raise BnpError(f"Not added: {name} would unpack to {listed >> 30} GB from {max(packed >> 20, 1)} MB: that "
+                       "isn't a mod (an archive made to fill the disk).")
+    dl.files += len(files)
+    dl.size += listed
+    if dl.files > MAX_MEMBERS:
+        raise BnpError(f"Not added: {dl.name} holds over {MAX_MEMBERS} files with the archives in it: too many for "
+                       "a mod.")
+    if dl.size > MAX_UNPACKED:
+        raise BnpError(f"Not added: {dl.name} unpacks to over {MAX_UNPACKED >> 30} GB with the archives in it: "
+                       "damaged, or not a mod.")
+    say(f"Unpacking {name}...")
+    extract(path, dest)
+    got = {k.lower(): v for k, v in _walk(dest).items()}
+    for m in files:
+        p = got.get(m.name.lower())
+        if p is None or os.path.getsize(p) != m.size:
+            raise BnpError(f"Not added: {name} gave {m.name} with another size than it lists: damaged, or made to "
+                           "fool archive tools.")
+    dl.levels = max(dl.levels, level)
+
+
+def _unwrap(folder: str) -> str:
+    """The folder inside the wrapper folders an archive often has (one folder holding everything, not one with a
+    meaning like romfs/ or a title id)."""
+    while True:
+        try:
+            with os.scandir(folder) as it:
+                kids = [e for e in it if e.name.lower() not in mi.JUNK]
+        except OSError:
+            return folder
+        low = kids[0].name.lower() if len(kids) == 1 else ""
+        if (not low or not kids[0].is_dir(follow_symlinks=False) or low in mi.STRUCTURAL | mi.ROMFS_TOP | KEEP_WRAPPER
+                or re.fullmatch(r"[0-9a-f]{16}", low)):
+            return folder
+        folder = kids[0].path
+
+
+def _game_version(folder: str, name: str) -> str | None:
+    """The game version a folder is for: its name ("1.6.0", "v1.9.0", "For Switch 1.6.0": a version and only such
+    words, not a mod's own "Armor v1.2.0"), else the build its patches name."""
+    m = GAME_VERSION_RE.search(name)
+    if m and set(re.sub(r"[\W_]+", " ", f"{name[:m.start()]} {name[m.end():]}".lower()).split()) <= VERSION_WORDS:
+        return m.group(1)
+    for rel, path in _walk(folder).items():
+        if rel.lower().endswith((".pchtxt", ".ips")):
+            try:
+                with open(path, "rb") as f:
+                    head = f.read(4096)
+            except OSError:
+                continue
+            hit = mi.NSOBID_RE.search(head)
+            stem = rel.rsplit("/", 1)[-1].rsplit(".", 1)[0].lower()
+            build = hit.group(1).decode().lower() if hit else stem if re.fullmatch(r"[0-9a-f]{16,64}", stem) else ""
+            if mi.KNOWN_BUILDS.get(build[:16]):
+                return mi.KNOWN_BUILDS[build[:16]]
+    return None
+
+
+def _drop_other_versions(base: str, dl: Download) -> None:
+    """Of two or more folders named for game versions side by side, keep the one for 1.9.0 (else the newest) and
+    remove the others from the work folder (named in dl.notes)."""
+    try:
+        with os.scandir(base) as it:
+            dirs = [(e.name, e.path) for e in it if e.is_dir(follow_symlinks=False)]
+    except OSError:
+        return
+    versions = {path: (name, v) for name, path in dirs if (v := _game_version(path, name))}
+    if len(versions) < 2:
+        return
+    def key(path):
+        return tuple(int(x) for x in versions[path][1].split("."))
+    keep = next((p for p in versions if versions[p][1] == mi.TARGET_VERSION), None) or max(versions, key=key)
+    for path, (name, v) in sorted(versions.items()):
+        if path != keep:
+            _remove(path)
+            dl.notes.append(f"{name}/ (for game version {v})")
+    name, v = versions[keep]
+    if v != mi.TARGET_VERSION:
+        dl.notes.append(f"kept {name}/, for game version {v}: the newest it has (yours is {mi.TARGET_VERSION}), so its "
+                        "patches may need porting")
+
+
+def _what(findings: list) -> str:
+    return ", ".join(dict.fromkeys(f.kind for f in findings))
+
+
+def _find_mods(folder: str, label: str, level: int, work: str, dl: Download, say) -> None:
+    """Add the mods in an unpacked folder to dl.found: its own files when mod_inspect finds a mod in them (archives
+    moved out first), and each archive in it (a package as it is, any other one opened, one level deeper)."""
+    base = _unwrap(folder)
+    if base != folder:
+        label = os.path.basename(base)
+    _drop_other_versions(base, dl)
+    nested = []
+    for rel, path in sorted(_walk(base).items()):
+        if rel.lower().endswith(PACKED_EXTS) and archive_magic(path):
+            stem = os.path.splitext(os.path.basename(path))[0]
+            moved = os.path.join(os.path.dirname(dl.box(work, stem)), os.path.basename(path))
+            os.makedirs(os.path.dirname(moved))
+            os.replace(path, moved)
+            nested.append((rel, moved, stem))
+    own = _walk(base)
+    findings = mi.inspect(mi.FolderSource(Path(base))) if own else []
+    if findings or any(r.lower().endswith(".dll") for r in own):
+        path = base
+        if any(f.kind == mi.BARE_WIIU for f in findings):
+            # (a Wii U mod's content folder without its name: modman converts a folder named content)
+            path = os.path.join(dl.box(work, label), "content")
+            os.makedirs(os.path.dirname(path))
+            top = (mi.bare_root(list(own)) or "").strip("/")
+            os.replace(os.path.join(base, *top.split("/")) if top else base, path)
+        dl.found.append(Found(label, path, _what(findings) or "DLLs"))
+    for rel, path, stem in nested:
+        kind = archive_magic(path)
+        if kind == "7z":
+            members, _ = list_archive(path)
+            if find_info([m.name for m in members if not m.is_dir]) is not None:
+                dl.found.append(Found(stem, path, "BCML package (.bnp)"))
+                continue
+        elif kind == "zip":
+            found, inner = [], []
+            try:
+                src = mi.ZipSource(Path(path))
+                try:
+                    found = mi.inspect(src)
+                    inner = [n for n in src.files if n.lower().endswith(PACKED_EXTS)]
+                finally:
+                    src.zf.close()
+            except (OSError, ValueError, RuntimeError, EOFError, NotImplementedError, zipfile.BadZipFile, zlib.error):
+                found = []   # (a .zip Python can't read, as one packed with Deflate64: 7-Zip opens it below)
+            if found and not inner:
+                dl.found.append(Found(stem, path, _what(found)))
+                continue
+        if level >= UNPACK_LEVELS:
+            raise BnpError(f"Not added: {dl.name} holds archives packed more than {UNPACK_LEVELS} deep ({rel} is "
+                           "one more): not opened.")
+        dest = dl.box(work, stem)
+        _unpack_one(path, dest, level + 1, dl, say)
+        _find_mods(dest, os.path.basename(dest), level + 1, work, dl, say)
 
 
 # ---------------------------------------------------------------------------------------------------- the package

@@ -823,7 +823,8 @@ class PlayerBase(Base):
         self.put("assets/breathalyzer.ico", ICO)
         self.put("native/examples/show/mod.toml", SHOW_TOML)
         self.put("native/examples/show/show.c", "int swmod_init(void) { return 0; }\n")
-        self.put("native/examples/perf/mod.toml", '[mod]\nid = "botw-mod-loader.perf"\nname = "Perf"\n')
+        self.put("native/examples/perf/mod.toml", '# developer notes\n[mod]\nid = "botw-mod-loader.perf"\nname = "Perf"\n'
+                                                  'description = "As tools/quality.py picks."\n')
         self.put("native/examples/ghosty/mod.toml",
                  '[mod]\nid = "botw-mod-loader.ghosty"\nname = "G"\ndescription = "g"\n\n[code]\nwindows = '
                  '"ghosty.dll"\n')
@@ -872,7 +873,9 @@ class PlayerBase(Base):
         return super().plan(**kw)
 
     def run_main(self, *args, **kw):
-        return super().run_main("--runtime", str(self.runtime), "--starter", str(self.starter), *args, **kw)
+        # (--working-tree: these made-up projects aren't committed; PlayerSnapshot tests the commit snapshot)
+        tree = [] if kw.pop("snapshot", False) else ["--working-tree"]
+        return super().run_main("--runtime", str(self.runtime), "--starter", str(self.starter), *tree, *args, **kw)
 
     def refused(self, **kw):
         return dict(self.plan(**kw).refused)
@@ -1048,6 +1051,104 @@ class PlayerZips(PlayerBase):
         self.assertIn("tests/test_tool.py", rels)
         self.assertIn("tools/packaging/bundled-mods.toml", rels)
         self.assertEqual(plan.folder, "breathalyzer-source-1.2.3")
+
+    def test_developer_only_files_stay_out(self):
+        for rel in ("docs/PLAN.md", "docs/release.md", "tools/make_release.py", "tools/check_clean.py",
+                    "tools/modmenu_ingame_check.py", "tools/mp/ghost_ingame_check.py", "tools/mp/ghost_items_check.py"):
+            self.put(rel, "made up\n")
+        rels = {i.rel for i in self.plan(edition="plus").items}
+        self.assertFalse([r for r in rels if r.endswith(("PLAN.md", "release.md", "make_release.py",
+                                                         "check_clean.py", "_check.py"))], rels)
+        self.assertIn("app/tools/tool.py", rels)
+        source = {i.rel for i in self.plan(edition="source").items}
+        self.assertIn("docs/PLAN.md", source)
+        self.assertIn("tools/mp/ghost_items_check.py", source)
+
+    def test_recipe_mod_toml_gets_player_text(self):
+        items = {i.rel: i for i in self.plan(edition="plus").items}
+        man = tomllib.loads(items["app/native/examples/perf/mod.toml"].data.decode())
+        self.assertEqual((man["mod"]["name"], man["mod"]["description"]),
+                         ("Performance: effects off", "No glow, for more fps."))
+        self.assertNotIn(b"developer notes", items["app/native/examples/perf/mod.toml"].data)
+        core = {i.rel: i for i in self.plan().items}   # (core keeps the repo's: it has no picker)
+        self.assertIn(b"quality.py picks", core["app/native/examples/perf/mod.toml"].data)
+
+    def test_developer_flag_reaches_the_picker_list(self):
+        self.put("tools/packaging/bundled-mods.toml", BUNDLED.replace('kind = "code"', 'kind = "code"\ndeveloper = true',
+                                                                      1))
+        doc = json.loads(next(i.data for i in self.plan(edition="plus").items if i.rel == "app/bundled-mods.json"))
+        self.assertTrue(doc["mods"][0]["developer"])
+        self.assertNotIn("developer", doc["mods"][1])
+        self.put("tools/packaging/bundled-mods.toml", BUNDLED.replace('kind = "code"', 'kind = "code"\ndeveloper = 1',
+                                                                      1))
+        self.assertIn("developer must be", " ".join(w for _, w in self.plan(edition="plus").refused))
+
+
+class PlayerSnapshot(PlayerBase):
+    """The player zips come from a commit (git archive), never from the working tree."""
+
+    def setUp(self):
+        super().setUp()
+        self.git("add", "-A")
+        self.git("-c", "user.name=made up", "-c", "user.email=made@up.invalid", "commit", "-q", "-m", "made up")
+        self.commit = subprocess.run(["git", "-C", str(self.root), "rev-parse", "HEAD"], capture_output=True,
+                                     text=True, check=True).stdout.strip()
+        self.built = []
+        real = mr.build_snapshot_native
+
+        def fake_build(src, install=None):   # (the real one needs zig: the made-up DLLs stand in)
+            self.built.append(src.commit)
+            out = src.root / "build" / "native"
+            shutil.copytree(self.build, out)
+            return out
+
+        mr.build_snapshot_native = fake_build
+        self.addCleanup(setattr, mr, "build_snapshot_native", real)
+
+    def unpacked(self, name):
+        with zipfile.ZipFile(self.out / f"{name}-1.2.3.zip") as zf:
+            return {n.split("/", 1)[1]: zf.read(n) for n in zf.namelist()}
+
+    def test_other_jobs_unfinished_files_stay_out(self):
+        self.put("tools/tool.py", "print('half written')\n")    # changed, not committed
+        self.put("tools/mp/coop.py", "x = 'unfinished'\n")      # new, not committed
+        code, out = self.run_main("--edition", "players", "--version", "1.2.3", build_dir=None, snapshot=True)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.built, [self.commit])   # (the DLLs come from the same commit)
+        for name in ("breathalyzer", "breathalyzer-plus"):
+            files = self.unpacked(name)
+            self.assertEqual(files["app/tools/tool.py"].replace(b"\r\n", b"\n"), b"print('hi')\n")
+            self.assertNotIn("app/tools/mp/coop.py", files)
+            first = files["SHA256SUMS.txt"].decode().splitlines()[0]
+            self.assertTrue(first.startswith("# Breathalyzer") and self.commit in first, first)
+            outer = (self.out / f"{name}-1.2.3.SHA256SUMS.txt").read_text(encoding="utf-8")
+            self.assertIn(self.commit, outer.splitlines()[0])
+        doc = json.loads(self.unpacked("breathalyzer-plus")["app/bundled-mods.json"])
+        self.assertEqual(doc["commit"], self.commit)
+
+    def test_overlay_is_listed_as_a_test_build(self):
+        self.put("tools/tool.py", "print('fixed')\n")
+        self.put("tools/mp/coop.py", "x = 'unfinished'\n")
+        code, out = self.run_main("--edition", "core", "--version", "1.2.3", "--overlay", "tools/tool.py",
+                                  build_dir=None, snapshot=True)
+        self.assertEqual(code, 0, out)
+        files = self.unpacked("breathalyzer")
+        self.assertEqual(files["app/tools/tool.py"], b"print('fixed')\n")
+        self.assertNotIn("app/tools/mp/coop.py", files)
+        first = files["SHA256SUMS.txt"].decode().splitlines()[0]
+        self.assertIn("tools/tool.py", first)
+        self.assertIn("not for upload", first)
+        code, out = self.run_main("--edition", "core", "--overlay", "out/x.txt", build_dir=None, snapshot=True)
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.run_main("--edition", "source", "--overlay", "tools/tool.py", snapshot=True)[0], 2)
+
+    def test_working_tree_build_is_stamped(self):
+        self.put("tools/mp/coop.py", "x = 'unfinished'\n")
+        code, out = self.run_main("--edition", "core", "--version", "1.2.3")
+        self.assertEqual(code, 0, out)
+        first = self.unpacked("breathalyzer")["SHA256SUMS.txt"].decode().splitlines()[0]
+        self.assertIn("working tree", first)
+        self.assertIn("not for upload", first)
 
 
 class BundledRules(PlayerBase):

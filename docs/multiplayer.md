@@ -193,7 +193,7 @@ with a sword attack and the sword's name read in the game):
 `python tools\mp\ghost_ingame_check.py --link --spot -1033.6 252.3 1809.3 132 --give-weapon`. While the Link body is deployed,
 every ghost uses it, and if it ever crashes the game, every use of the ghost does (no crash so far).
 
-## Co-op: story together, shared time, host-only control (not yet run in the game)
+## Co-op: story together, shared time, host-only control (checked in the game 2026-11-12; live story reads off)
 
 [docs/coop.md](coop.md): the host owns the story and a friend's co-op save gets it **added** (backup first, only 0 to 1,
 asked every session), the host's hour is everyone's, hosts on your home network are found without typing

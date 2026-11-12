@@ -20,7 +20,12 @@ __declspec(dllimport) int __stdcall ReadFile(void *h, void *buf, unsigned long s
 
 #define COOP_FLAG_MGR 0x7001e3b188ull  // [ptr]: the game's flag manager (co-op study, static)
 #define COOP_SET_BOOL 0x700112d5c0ull  // (mgr, w1 value, x2 name object) -> w0: 1 = set (both copies, one call)
-#define COOP_GET_BOOL 0x700112dba4ull  // (mgr, x1 bool *out, x2 name object) -> w0: 1 = found  [probe P1: argument order]
+// The game's get-bool-by-name is NOT known yet. The first guess (docs/addresses.md, docs/coop.md) takes (mgr, name)
+// only and ends in a change-and-notify path (it looks like a reset, which would REMOVE progress); in probe run B
+// (2026-11-12) it crashed the game. It is never called. Until a real getter is found, reads are off: `coop story get` never gets ready and
+// `coop probe flag <name>` (a read) answers ok 0. Adds still go through the setter (value 1 only).
+#define COOP_GET_BOOL 0ull
+static uint64_t g_coop_get_fn = COOP_GET_BOOL;  // (the selftest points it at its fake getter)
 #define COOP_BUSY_OFF 0xc1a            // mgr byte: bit 2 set = every set/get by name refuses (loading, saving: probe)
 #define COOP_BUSY_BIT 0x04
 #define COOP_MAX 1536                  // story flags (1,075 today)
@@ -45,7 +50,7 @@ static uint8_t g_coop_pass[COOP_BYTES];        // (tick) this pass's reads
 static uint8_t g_coop_want[COOP_BYTES];        // (tick) bits to add
 static uint8_t g_coop_req[COOP_BYTES];         // (under the lock) bits a command asked to add
 static int g_coop_req_new;
-static int g_coop_cursor, g_coop_seen_pass;
+static int g_coop_cursor, g_coop_seen_pass, g_coop_pass_fails;
 static uint64_t g_coop_mgr_slot = COOP_FLAG_MGR;  // (the selftest points it at its own memory)
 static int coop_world_real(void) { return botw_time_of_day(api) >= 0.0f; }
 static int (*g_coop_world)(void) = coop_world_real;
@@ -79,8 +84,9 @@ static uint64_t coop_mgr(void) {
 
 // One name -> 0 or 1, or -1 if the game didn't answer.
 static int coop_read(struct Cpu *c, uint64_t mgr, StrObj *obj) {
+    if (!g_coop_get_fn) return -1;  // (no known getter: see COOP_GET_BOOL)
     g_coop_out[0] = 0;
-    uint64_t ok = gcall(c, COOP_GET_BOOL, mgr, P(g_coop_out), P(obj), 0, 0, 0, 0) & 1;
+    uint64_t ok = gcall(c, g_coop_get_fn, mgr, P(g_coop_out), P(obj), 0, 0, 0, 0) & 1;
     return ok ? (g_coop_out[0] & 1) : -1;
 }
 
@@ -96,7 +102,7 @@ static void coop_tick(struct Cpu *c) {
         memset(g_coop_last, 0, sizeof g_coop_last);
         memset(g_coop_pass, 0, sizeof g_coop_pass);
         memset(g_coop_want, 0, sizeof g_coop_want);
-        g_coop_cursor = 0, g_coop_seen_pass = 0;
+        g_coop_cursor = 0, g_coop_seen_pass = 0, g_coop_pass_fails = 0;
         memset(&t_coop, 0, sizeof t_coop);
         t_coop.n = g_coop_list.n;
         lock();
@@ -134,9 +140,12 @@ static void coop_tick(struct Cpu *c) {
                 int i = g_coop_cursor;
                 int v = coop_read(c, mgr, &g_coop_obj[i]);
                 t_coop.reads++;
-                if (v < 0) t_coop.read_fails++;
+                if (v < 0) t_coop.read_fails++, g_coop_pass_fails++;
                 else if (v) BIT_SET(g_coop_pass, i);
-                if (++g_coop_cursor >= n) {  // a full pass: publish it
+                if (++g_coop_cursor >= n && g_coop_pass_fails) {  // a pass with a failed read: never published
+                    g_coop_cursor = 0, g_coop_pass_fails = 0;      // (a 0 there could be a 1: "ready" would lie)
+                    memset(g_coop_pass, 0, sizeof g_coop_pass);
+                } else if (g_coop_cursor >= n) {  // a full pass: publish it
                     g_coop_cursor = 0;
                     if (!g_coop_seen_pass) {  // (the first pass: seq 1 even when nothing is set)
                         t_coop.seq++;

@@ -91,6 +91,14 @@ ROMFS_TOP = {"actor", "camera", "cooking", "ecosystem", "effect", "elink2", "eve
 
 STRUCTURAL = {"romfs", "exefs", "content", "aoc", "cheats", "logs", "options", "atmosphere", "contents",
               "exefs_patches", "skyline", TITLE, DLC_TITLE}
+# A bare RomFS tree (Pack/, Model/... with no romfs/ or content/ folder): its platform is read from a few files'
+# headers (byte order), these kinds (a Yaz0 copy adds an "s": .sbfres)
+BARE_WIIU = "Wii U files in bare RomFS folders"
+SNIFF_EXT = {"pack", "sarc", "bactorpack", "beventpack", "bquestpack", "byml", "bgdata", "bgsvdata", "mubin", "bfres",
+             "msbt", "blarc", "bfarc"}
+SNIFF_MAX = 8
+# Files of image and 3D editors that mods sometimes ship next to the game files: the game reads none of them
+EDITING_EXT = {"dds", "gtx", "png", "psd", "tga", "xcf", "kra", "blend", "fbx", "dae", "obj"}
 SHADER_RE = re.compile(r"(^|/)[0-9a-f]{16}_[0-9a-f]{16}_(vs|ps|gs)(_msl)?\.txt$")
 WIIU_DATA_RE = re.compile(r"(^|/)(content|aoc)/.")
 WIIU_GAME_RE = re.compile(r"(^|/)(content|aoc/0010)/.")  # the files wiiu_convert converts (or keeps)
@@ -394,6 +402,88 @@ def wiiu_model_files(game: list[str]) -> tuple[list[str], list[str], list[str]]:
     return models, no_mips, lone
 
 
+def bare_root(files: list[str]) -> str | None:
+    """Where a bare RomFS tree starts: the shallowest folder holding RomFS top folders (Actor/, Pack/, Model/...),
+    tools/romfs_mods.py's rule for a mod with no romfs/ folder. "" for the mod's top, else "a/b/" as the mod spells
+    it; None when there is none, or several side by side."""
+    roots: dict[tuple[str, ...], str] = {}
+    for f in files:
+        parts = f.split("/")[:-1]
+        for i, d in enumerate(parts):
+            if d.lower() in ROMFS_TOP:
+                roots.setdefault(tuple(x.lower() for x in parts[:i]), "".join(x + "/" for x in parts[:i]))
+                break
+    if not roots:
+        return None
+    depth = min(len(k) for k in roots)
+    top = [v for k, v in roots.items() if len(k) == depth]
+    return top[0] if len(top) == 1 else None
+
+
+def _byte_order_platform(head: bytes) -> str | None:
+    """"wiiu" (big-endian) or "switch" (little-endian) by a SARC, BYML, MSBT or BFRES header; None for others."""
+    if head[:4] == b"SARC":
+        return {b"\xfe\xff": "wiiu", b"\xff\xfe": "switch"}.get(head[6:8])
+    if head[:8] == b"MsgStdBn":
+        return {b"\xfe\xff": "wiiu", b"\xff\xfe": "switch"}.get(head[8:10])
+    if head[:2] in (b"BY", b"YB"):
+        return "wiiu" if head[:2] == b"BY" else "switch"
+    if head[:4] == b"FRES" and len(head) >= 8:
+        return "switch" if head[4:8] == b"    " else "wiiu"
+    return None
+
+
+def sniff_platform(src: Source, files: list[str]) -> tuple[int, int]:
+    """(Wii U, Switch) counts among up to SNIFF_MAX of these files (as src names them) whose header shows it."""
+    wiiu = switch = tried = 0
+    for rel in files:
+        ext = _ext(rel.lower())
+        if not (ext in SNIFF_EXT or (ext[:1] == "s" and ext[1:] in SNIFF_EXT)):
+            continue
+        if tried >= SNIFF_MAX:
+            break
+        tried += 1
+        try:
+            head = src.read(rel, 1 << 16)
+            if head[:4] == b"Yaz0":
+                import bnp  # (as ArchiveSource: only when needed)
+                head = bnp._yaz0_head(head, 16)
+        except Exception:  # noqa: BLE001 (any file that can't be read just isn't counted)
+            continue
+        found = _byte_order_platform(head)
+        wiiu += found == "wiiu"
+        switch += found == "switch"
+    return wiiu, switch
+
+
+def _bare_tree(src: Source, low: list[str]) -> Finding | None:
+    """A Switch (or Wii U) mod as bare RomFS folders (Pack/TitleBG.pack, Model/X.sbfres) with no romfs/ or
+    content/ folder: tools/romfs_mods.py deploys it from the folder that holds them."""
+    if any(ANCHOR_RE.search(p) for p in low):
+        return None
+    root = bare_root(src.files)
+    if root is None:
+        return None
+    files = [f for f, p in zip(src.files, low) if p.startswith(root.lower()) and "/" in p[len(root):]
+             and not any(x in JUNK or x.startswith(".") for x in p.split("/"))]
+    if not files:
+        return None
+    tops = sorted({f[len(root):].split("/", 1)[0] for f in files})
+    where = f"{len(files)} file(s) in bare RomFS folders ({', '.join(tops[:4])}{', ...' if len(tops) > 4 else ''})"
+    wiiu, switch = sniff_platform(src, files)
+    if wiiu and not switch:
+        return Finding(BARE_WIIU, "wiiu", LATER,
+                       f"{where} without a content/ folder, and they are Wii U files: put those folders in a folder "
+                       "named content, then add that folder (tools/modman.py add converts it)")
+    detail = f"{where} with no romfs/ folder: used through the mod overlay"
+    detail += " (Switch files, checked)" if switch else " (taken as Switch files: none of them shows its platform)"
+    editing = [f for f in files if _ext(f.lower()) in EDITING_EXT]
+    if editing:
+        detail += (f". {len(editing)} of them are image or 3D editor files (.dds, .gtx, .png...), which the game "
+                   "doesn't read: left out")
+    return Finding("Switch RomFS files", "switch", WORKS, detail)
+
+
 def _switch_romfs(low: list[str], overlay: tuple[list[str], list[str]]) -> Finding | None:
     files, aoc = overlay
     data = [p for p in low if ROMFS_RE.search(p)] + files
@@ -472,7 +562,8 @@ def inspect(src: Source) -> list[Finding]:
     if bnp and bnp.verdict == MERGE:
         return findings + [bnp]  # its packs hold only the changes: none of its files is used as it is
     overlay = _overlay(low)
-    for f in (bnp, _wiiu_data(low, overlay[1]), _switch_romfs(low, overlay), _code_mods(low)):
+    romfs = _switch_romfs(low, overlay) or (None if bnp else _bare_tree(src, low))
+    for f in (bnp, _wiiu_data(low, overlay[1]), romfs, _code_mods(low)):
         if f:
             findings.append(f)
     findings += _graphic_packs(src, low) + _exefs_patches(src, low) + _cheats(low)

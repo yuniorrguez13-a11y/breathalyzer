@@ -16,12 +16,10 @@ How players use them: [launcher](launcher.md).
 
 Once per release, on the build PC, in this order:
 
-1. `python tools/build_native.py build` builds `modhost.dll` and the example mods into `build\native`.
-2. The Mods page mod: `tools/modmenu.py setup` builds `modmenu.dll` into `build\native\modmenu-mods\modmenu`
-   (with a scratch library, not your own).
-3. `python tools/packaging/build_runtime.py` makes our own Python in `out\packaging-work\runtime` and records it.
-4. `python tools/packaging/build_starter.py` makes `Start Breathalyzer.exe` in `out\packaging-work\starter`.
-5. Then:
+1. Commit the finished code. The player zips come from one commit, never from the working tree (see below).
+2. `python tools/packaging/build_runtime.py` makes our own Python in `out\packaging-work\runtime` and records it.
+3. `python tools/packaging/build_starter.py` makes `Start Breathalyzer.exe` in `out\packaging-work\starter`.
+4. Then:
 
 ```
 python tools/make_release.py --edition players --version 0.2.0-beta.1 --dry-run   # list both; write nothing
@@ -33,6 +31,23 @@ python tools/make_release.py --dry-run                                          
 python tools/make_release.py --version 0.1.0-dev                                   # the source zip
 python tools/make_release.py --version 0.1.0-dev --with-binaries                   # + the DLLs we built
 ```
+
+**The player zips come from a commit.** `make_release.py` unpacks `--commit` (default `HEAD`) with `git archive`
+into `out\packaging-work\src\<commit>\` and builds `modhost.dll`, the example mods and `modmenu.dll` from that copy
+(its own `build_native.py` and `modmenu.py`, low priority) into its own `build\native`. Uncommitted files, other
+jobs' half-done work and whatever `build\native` holds now never get in. The commit id is the first line of each
+`SHA256SUMS.txt` (a `# ` comment, which `sha256sum -c` skips) and `"commit"` in `bundled-mods.json`.
+
+- `--overlay <file>` (repeat it) lays one uncommitted file over the commit, for a test build of a fix that isn't
+  committed yet. Each is listed with its SHA-256 in the first line of `SHA256SUMS.txt`, which then says "A test
+  build: not for upload".
+- `--working-tree` takes the working tree and `build\native` as they are (the tests use it); also stamped "not for
+  upload".
+- `--install <Savage Wind folder>`: whose zig builds the DLLs (default: as `build_native.py`).
+
+The player zips leave out what only developers need (it stays in the source zip): `docs/PLAN.md`,
+`docs/release.md`, `tools/make_release.py`, `tools/check_clean.py`, and the test drivers that start the game
+(`*_ingame_check.py`, `*_items_check.py`).
 
 The zips land in `out\release\`. `out\` is ignored by git.
 Without `--version`, the version is the `VERSION` line at the top of the tool.
@@ -107,9 +122,9 @@ python.org's "embeddable package", plus Tcl/Tk for the window, from the same pyt
   `python tools/packaging/build_runtime.py --check` compares them.
 - **Size:** 341 files, 26.6 MB unpacked; each player zip is about 15 MB (31 MB unpacked).
 - **Licences:** Python's `LICENSE.txt` (PSF License v2, with the notices of OpenSSL, libffi, zlib, SQLite and the
-  rest) and Tk's `tcl\tk8.6\license.terms` go in. python.org's install has no copy of Tcl's own `license.terms`:
-  before a public upload, add it from the Tcl 8.6.15 source release with
-  `python tools/packaging/build_runtime.py --tcl-licence <license.terms>`.
+  rest; Tcl's and Tk's licence text is in it too, around line 564) and Tk's `tcl\tk8.6\license.terms` go in. The
+  READ ME files point at `app\runtime\LICENSE.txt`. A separate copy of Tcl's `license.terms` isn't needed;
+  `python tools/packaging/build_runtime.py --tcl-licence <license.terms>` can still add one.
 
 Why not PyInstaller: our tools start each other as `python tools/x.py`, which a frozen exe breaks; PyInstaller's
 loader is shared with a lot of malware, so antivirus programs (Bitdefender, Malwarebytes) often flag what it makes;
@@ -235,7 +250,8 @@ The self-test DLLs in `build\native\selftest` never go in.
 
 ## The SHA-256 lists
 
-- Inside the zip: `<name>-<version>/SHA256SUMS.txt`, one line per file (UTF-8).
+- Inside the zip: `<name>-<version>/SHA256SUMS.txt`, one line per file (UTF-8). The player zips' list starts with
+  one `# ` line: the commit the files come from (and any `--overlay` files).
 - Next to the zip: `<name>-<version>.SHA256SUMS.txt`, the same lines plus the zip's own hash.
 
 To check a download in PowerShell:
@@ -253,12 +269,21 @@ uses zlib-ng. Make releases you want to compare with the same `python`.
 
 ## Before you upload
 
-1. Build both zips again from the finished code (the launcher window and the mod picker must be in them).
-2. Add Tcl's `license.terms` to the runtime (see [The runtime](#the-runtime-players-need-no-python)).
-3. Unpack each zip into a new folder, open `Start Breathalyzer`, point it at Savage Wind, Play (one game at a
-   time, a test save).
-4. Scan both zips with Bitdefender and Malwarebytes.
-5. Upload the same two zips and their `.SHA256SUMS.txt` everywhere.
+1. Commit, then build both zips from that commit with no `--overlay` and no `--working-tree`. The first line of each
+   `SHA256SUMS.txt` must name the commit and must not say "not for upload".
+2. Check each zip the way a new player starts it (one game at a time, a test save):
+   - Give the zip a Zone.Identifier first (as a browser download has): `Set-Content <zip> -Stream Zone.Identifier
+     -Value "[ZoneTransfer]`nZoneId=3"`. Unpack it with `Expand-Archive` into a path with a space and letters
+     outside English, for example `out\fresh-install\Test Ünï\`. Then SmartScreen and the Mark of the Web are
+     tested too.
+   - Open `Start Breathalyzer.exe` with no arguments. Set `SWMOD_LIBRARY` to a scratch folder first, so the default
+     library code still runs but your own library isn't touched, and `BREATHALYZER_HOME` to a scratch folder (both
+     editions otherwise share `%LOCALAPPDATA%\Breathalyzer` and the library next to Savage Wind).
+   - Play once with Developer commands OFF, as players get it. In the report call the core edition "Breathalyzer
+     (no bundled mods)": it plays whatever mods the library holds, so "plain game" holds only with an empty library.
+3. Scan both zips, and one unpacked folder after its first run, with Bitdefender and Malwarebytes. If one is
+   flagged, report the false positive to that vendor before the upload.
+4. Upload the same two zips and their `.SHA256SUMS.txt` everywhere.
 
 ## Where to publish
 

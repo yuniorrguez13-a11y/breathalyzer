@@ -945,6 +945,12 @@ KIND_LABEL = {"yaz0": "Yaz0", "sarc": "SARC", "byml": "BYML", "msbt": "MSBT", "a
               "text": "text", "unknown": "unknown"}
 
 
+def is_le_event_flow(data: bytes) -> bool:
+    """An event flow or timeline (BFEVFL / BFEVTM) with a little-endian byte order mark (FF FE at 0x0C): BotW's are,
+    on the Wii U as on the Switch (a Wii U mod's Common.bfevfl is byte for byte the Switch game's)."""
+    return len(data) >= 0x20 and data[:6] in (b"BFEVFL", b"BFEVTM") and data[0x0C:0x0E] == b"\xff\xfe"
+
+
 class Converter:
     """Converts files to the byte order `to`, recursing into Yaz0 and SARC. Every file it meets (nested ones too)
     gets a Note. `recompress=False` (for check) skips Yaz0 compression: the result then keeps the old bytes."""
@@ -1013,6 +1019,9 @@ class Converter:
                 r = self.models.fres(self, data, path)
                 if r is not None:
                     return self._note(path, r)
+            if fmt == "event flow" and is_le_event_flow(data):
+                # (BotW's event flows and timelines are little-endian on the Wii U too: the same bytes on both)
+                return self._note(path, Result(data, SAME, fmt, "little-endian on both consoles"))
             detail = WHY.get(fmt, "")
             if name.lower().endswith((".tex1.sbfres", ".tex2.sbfres", ".tex1.bfres", ".tex2.bfres")):
                 detail = "not a Wii U texture BFRES (Tex1/Tex2), so it can't be joined into one .Tex.sbfres"
@@ -1920,7 +1929,7 @@ class ModelJob:
         raising) and a summary. Needs the game files. X.Tex: decompressed size + 8208 (exact on the user's files);
         models and animation files: wm_convert.rstb_model (a generous guess); a converted model without a vanilla
         entry gets none (merge with UKMM). Files that came out the same as the game's need nothing."""
-        info = {"raised": [], "added": [], "no_entry": [], "kept": 0}
+        info = {"raised": [], "added": [], "no_entry": [], "kept": 0, "sizes": {}}   # (sizes: name -> entry)
         if self.game is None or not self.outputs:
             return None, info
         raw = self.game.loose(RSTB_PATH)
@@ -1947,6 +1956,7 @@ class ModelJob:
             if old is not None and new <= old:
                 info["kept"] += 1
                 continue
+            info["sizes"][path] = max(new, info["sizes"].get(path, 0))
             if path in names:
                 named[names[path]] = (named[names[path]][0], new)
             else:

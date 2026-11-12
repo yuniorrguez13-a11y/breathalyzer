@@ -38,12 +38,14 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+TK_ERROR = ""   # why tkinter couldn't be loaded (the launcher says it)
 try:
     import tkinter as tk
     from tkinter import filedialog, ttk
     from tkinter import font as tkfont
-except ImportError:  # (the logic works without Tk; only the window needs it)
+except ImportError as _e:  # (the logic works without Tk; only the window needs it)
     tk = None
+    TK_ERROR = f"{type(_e).__name__}: {_e}"
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOLS)
@@ -51,6 +53,10 @@ import launcher as la  # noqa: E402 (tools/launcher.py: finding and checking Sav
 
 MODMAN_PY = os.path.join(TOOLS, "modman.py")
 MODMENU_PY = os.path.join(TOOLS, "modmenu.py")
+CONTROL_PORT = 7777   # the game's control port (modman.DEFAULT_PORT): open = developer mode (docs/game-basics.md)
+# our mods whose commands work only in developer mode: Play turns it on while one is ON (bundled-mods.toml's
+# developer = true adds more)
+DEV_MODS = ("botw-mod-loader.basics-inf-stamina", "botw-mod-loader.basics-teleport-up")
 
 TITLE = "Breathalyzer - Mods"
 # The window icon, when it is there (the window works without it): .ico for Windows, .png elsewhere.
@@ -1696,6 +1702,12 @@ class LaunchBackend(Backend):
     def start_plain(self):
         return la.start_plain(self.install, tuple(getattr(self.mm, "MOD_ENV", ())), self.popen)
 
+    def enabled_ids(self) -> set[str]:
+        """The ids of the mods that are ON in the library now."""
+        with self.files:
+            lib = self.mm.Library.load(self.root)
+        return {m["id"] for m in lib.mods if m.get("enabled")} if lib is not None else set()
+
 
 class LaunchController(Controller):
     """The launcher's Home without widgets. Play (launch) runs, one after the other in the background: the changes
@@ -1703,7 +1715,13 @@ class LaunchController(Controller):
     then modman run. Each step's output is in details_text(); a step that fails stops the rest and says why in
     plain words. While the game is open, Play waits (watch() notices when it closes)."""
 
-    def __init__(self, backend: LaunchBackend, clock=time.monotonic, port: int | None = None):
+    def __init__(self, backend: LaunchBackend, clock=time.monotonic, port: int | None = None, dev: bool = False,
+                 dev_ids=()):
+        self.port_arg = port                        # --port (tests, developers): always opens that control port
+        self.dev = dev                              # Settings > Developer commands
+        self.dev_ids = set(DEV_MODS) | set(dev_ids)  # mods whose commands need developer mode
+        self.install_mods: list[str] = []           # while the picked mods are added: their ids, in order
+        self.install_failed: Job | None = None      # the first step that failed (Details shows it)
         self.chain: list[Job] = []
         self.step: Job | None = None
         self.game_open = False
@@ -1823,14 +1841,34 @@ class LaunchController(Controller):
         self.chain = steps
         self._next()
 
+    def dev_mods_on(self) -> list[str]:
+        """The names of the mods that are ON and need developer mode (their commands), read from the library now
+        (the game's Mods page may just have changed it)."""
+        try:
+            on = self.backend.enabled_ids()
+        except Exception:  # (then the list as the window last read it)
+            on = {r.id for r in self.listing.rows if r.on}
+        names = {r.id: r.name for r in self.listing.rows}
+        return [names.get(i, i) for i in sorted(set(on) & self.dev_ids)]
+
+    def play_args(self) -> list[str]:
+        """modman run's arguments. Developer mode (the game's control port: SAVAGEWIND_CONTROL) is on when Settings
+        says Developer commands ON, while a mod that needs it is ON, or with --port; else modman decides (the port
+        only for cheats)."""
+        if self.port_arg or self.dev or self.dev_mods_on():
+            return ["run", "--port", str(self.port_arg or CONTROL_PORT)]
+        return ["run"]
+
     def _next(self) -> None:
         job = self.chain.pop(0)
         self.step = job
+        if job.action == "play":
+            job.args = self.play_args()
         self._start(job)
         if self.installing is not None:
-            done = self.install_total - len(self.chain)
-            self.status = Status("busy", [f"Adding the mods you picked ({done} of {self.install_total})...",
-                                          job.name])
+            n = len(self.install_mods)
+            k = self.install_mods.index(job.mod_id) + 1 if job.mod_id in self.install_mods else n
+            self.status = Status("busy", [f"Adding mod {k} of {n}...", job.name])
         elif job.action == "apply":
             self.status = Status("busy", ["Using your changes from the game's Mods page...",
                                           "Then the game starts."])
@@ -1857,6 +1895,7 @@ class LaunchController(Controller):
         if self.installing is not None:
             if code != 0:
                 self.installing.append(job.name)
+                self.install_failed = self.install_failed or job   # (Details shows the step that failed)
                 self.chain = [j for j in self.chain if j.mod_id != job.mod_id]   # (the rest of that mod's steps)
             if self.chain:
                 self._next()
@@ -1876,8 +1915,9 @@ class LaunchController(Controller):
             if busy:
                 m = re.search(r"port (\d+)", busy)
                 self.status = Status("error", [f"Another program uses port {m.group(1)}." if m else
-                                               "Another program uses the cheats' port.",
-                                               "Close it and press Play again, or pick another port in Settings."])
+                                               "Another program uses the game's port.",
+                                               "Close it and press Play again.",
+                                               *(["Or turn off Developer commands in Settings."] if self.dev else [])])
             elif any("already running" in x for x in text):
                 self.game_open, self._gone = True, 0
                 self.status = Status("error", ["Savage Wind is already open.", "Close it, then press Play."])
@@ -1950,6 +1990,8 @@ class LaunchController(Controller):
                 steps.append(Job("enable" if on else "disable", ["enable" if on else "disable", m["id"]],
                                  name=title, mod_id=m["id"], in_process=True))
         self.installing, self.install_total = [], len(steps)
+        self.install_mods = list(dict.fromkeys(j.mod_id for j in steps))   # ("Adding mod 2 of 5": mods, not steps)
+        self.install_failed = None
         self.chain = steps
         if steps:
             self._next()
@@ -1962,8 +2004,15 @@ class LaunchController(Controller):
         self.refresh_state()
         if failed:
             names = list(dict.fromkeys(failed))
-            self.status = Status("warn", [f"{n_of(len(names), 'mod')} couldn't be added: {', '.join(names)}.",
-                                          "The others are ready. Details says why."])
+            job = self.install_failed
+            if job is not None:   # (not whatever step ran last: that one may have worked)
+                self.details_job = job
+            if job is not None and any("is running" in x or "already running" in x for x in job.lines):
+                self.status = Status("error", [f"Savage Wind is open, so {', '.join(names)} isn't ready yet.",
+                                               "Close the game, then press Pick again in Settings and Save."])
+                return
+            self.status = Status("error", [f"{n_of(len(names), 'mod')} couldn't be added: {', '.join(names)}.",
+                                           "The others are ready. Press Details to see why."])
         else:
             self.status = Status("ok", ["Your mods are ready.", "Press Play. You can turn them on or off below."])
 
@@ -2016,6 +2065,7 @@ class LauncherView(BigText):
         self.first = first_run or la.FirstRun(settings, library=library)
         self.make_backend = make_backend or (lambda lib, install: LaunchBackend(lib, install))
         self.port, self.library_arg = port, library
+        self.note: str | None = None     # a notice for Home (launcher.json couldn't be read): shown when Home opens
         self.ctl: LaunchController | None = None
         self.closed = False
         self.screen = ""                 # home, setup or settings
@@ -2172,6 +2222,8 @@ class LauncherView(BigText):
             b = self.make_button(self.flow.frame, text, command, group, width=8 if action == "toggle" else 0)
             self.flow.items.append(b.ring)
             self.by_action[action] = b
+        self.flow_all = list(self.flow.items)   # (render hides Turn off while there are no mods)
+        self.tree.bind("<Configure>", lambda e: self.fit_cells(), add="+")
 
     def build_setup(self) -> None:
         t, f = self.t, self.frames["setup"]
@@ -2230,6 +2282,32 @@ class LauncherView(BigText):
         have = self.tree.winfo_width()
         cap = int((have if have > 1 else self.text_width()) * 0.45)
         self.tree.column("name", width=min(longest + zero * 2, cap), minwidth=zero * 8)
+        self.fit_cells()
+
+    def fit_cells(self) -> None:
+        """The Mod and What it does cells cut at a word with "..." when they don't fit (Tk would cut mid-word)."""
+        if self.ctl is None or not self.tree.winfo_exists():
+            return
+        pad = self.font.measure("0") * 2
+        widths = {c: int(self.tree.column(c, "width")) - pad for c in ("name", "about")}
+        for row in self.ctl.listing.rows:
+            if not self.tree.exists(row.id):
+                continue
+            for col, text in (("name", row.name), ("about", row.about)):
+                cut = cut_lines(text or "", self.font, max(widths[col], self.font.measure("0") * 4), 1)
+                if self.tree.set(row.id, col) != cut:
+                    self.tree.set(row.id, col, cut)
+
+    def show_flow(self, items: list) -> None:
+        """Home's row of buttons with only these (a hidden one leaves no gap)."""
+        if items == self.flow.items:
+            return
+        for w in self.flow.items:
+            if w not in items:
+                w.place_forget()
+        self.flow.items = items
+        self.flow.shape = None
+        self.flow.reflow(force=True)
 
     # --- screens
 
@@ -2414,10 +2492,14 @@ class LauncherView(BigText):
             self.save_settings()
         if self.ctl is not None:
             self.ctl.stop()
-        self.ctl = LaunchController(backend, port=self.port or self.settings.port)
+        self.ctl = LaunchController(backend, port=self.port or self.settings.port, dev=self.settings.dev,
+                                    dev_ids={m["id"] for m in self.bundled if m.get("developer")})
         warn = next((s for s in rep.screens if not s.blocks), None)
         if warn is not None:
             self.ctl.status = Status("warn", [warn.heading + ".", warn.line])
+        if self.note:
+            self.ctl.status = Status("warn", [self.note])
+            self.note = None
         self.home_report = rep
         self.list_version = -1
         self.show("home")
@@ -2465,10 +2547,12 @@ class LauncherView(BigText):
         self.play.configure(state="normal" if ctl.can("play") else "disabled",
                             bg=t["play"] if ctl.can("play") else t["button"])
         self.plain_button.configure(state="normal" if ctl.can("play_plain") else "disabled")
+        empty = not ctl.listing.rows and not ctl.listing.error   # (no mods: one Play, no Play without mods, no Turn off)
+        self.show_flow([r for r in self.flow_all if not (empty and r is self.by_action["toggle"].ring)])
         if ctl.can("cancel"):
             items = [self.cancel_button.ring]
         else:
-            items = [self.plain_button.ring]
+            items = [] if empty else [self.plain_button.ring]
             if ctl.offer:
                 self.offer_button.configure(text=ctl.offer[0], state="normal" if ctl.can("play") else "disabled")
                 items.insert(0, self.offer_button.ring)
@@ -2747,8 +2831,10 @@ class LauncherView(BigText):
             card.grid(row=k, column=1, sticky="ew", padx=(12, 0), pady=(0, 8))
             self.label(card, self.bold, text=m["title"]).pack(anchor="w")
             self.wrap_label(card, text=m["description"], share=0.85).pack(anchor="w")
-            if m["tags"]:
-                self.wrap_label(card, text=". ".join(m["tags"]) + ".", share=0.85, fg=t["disabled"]).pack(anchor="w")
+            notes = [*m["tags"], *([f"Starts {'ON' if m['on'] else 'OFF'}: {m['why'].rstrip('.')}"]
+                                   if m.get("why") else [])]
+            if notes:   # (the tags, and why it starts on or off)
+                self.wrap_label(card, text=". ".join(notes) + ".", share=0.85, fg=t["disabled"]).pack(anchor="w")
         buttons = [("Save", self.on_pick_save)] + ([("Back", self.back)] if self.picker_from_settings else [])
         for k, (text, command) in enumerate(buttons):
             b = self.make_button(self.picker_flow.frame, text, command, self.picker_buttons, bold=k == 0)
@@ -2832,7 +2918,8 @@ class LauncherView(BigText):
         rows = [
             ("Savage Wind", sw, [("Change...", self.on_change_folder), ("Check", self.on_check),
                                  ("Open", lambda: la.open_path(install))]),
-            ("Frame rate", [("text", f"{fps} fps (in the game: F1, Video)" if fps else "In the game: F1, Video")],
+            ("Frame rate", [("text", f"{fps} frames a second (in the game: F1, Video)" if fps
+                                     else "In the game: F1, Video")],
              [("Game settings", lambda: la.open_path(tool))] if os.path.isfile(tool) else []),
             ("Mod library", [("path", library)] if library else [("text", "Not set")],
              [("Open", lambda: la.open_path(la.nearest_existing(library)))] if library else []),
@@ -2841,7 +2928,8 @@ class LauncherView(BigText):
             ("Dark", [("text", "ON" if s.dark else "OFF")], [("Turn off" if s.dark else "Turn on", self.on_dark)]),
             ("Hide while playing", [("text", "ON" if s.hide_while_playing else "OFF")],
              [("Turn off" if s.hide_while_playing else "Turn on", self.on_hide)]),
-            ("Cheats port", [("text", str(self.port or s.port or 7777))], [("Change...", self.on_port)]),
+            ("Developer commands", [("text", self.dev_text())],
+             [("Turn off" if s.dev else "Turn on", self.on_dev)]),
             ("Shortcut", [("text", "On your desktop")], [("Make one", self.on_shortcut)]),
         ]
         if self.bundled:
@@ -2913,21 +3001,22 @@ class LauncherView(BigText):
         self.save_settings()
         self.show_settings()
 
-    def on_port(self) -> None:
-        value = self.ask_text("Cheats port", "Which port do the cheats use?",
-                              "1 to 65535. Savage Wind's control port is 7777 unless another program needs it.",
-                              str(self.port or self.settings.port or 7777))
-        if value is None:
-            return
-        try:
-            port = la.port_arg(value.strip())
-        except Exception as e:  # (argparse's message)
-            self.ask("Cheats port", "That isn't a port.", str(e), [("OK", None)])
-            return
-        self.port = self.settings.port = None if port == 7777 else port
+    def dev_text(self) -> str:
+        """Settings' Developer commands value: ON, or OFF and whether a mod turns them on anyway."""
+        if self.settings.dev or self.port:
+            return "ON"
+        mods = self.ctl.dev_mods_on() if self.ctl is not None else []
+        if mods:
+            return f"OFF, but ON while {', '.join(mods)} {'is' if len(mods) == 1 else 'are'} on"
+        return "OFF"
+
+    def on_dev(self) -> None:
+        """Developer commands ON: Play opens the game's control port, so the commands the game keeps for developers
+        (like up and infstamina) work. OFF: only while a mod that needs them is on."""
+        self.settings.dev = not self.settings.dev
         self.save_settings()
         if self.ctl is not None:
-            self.ctl.run_args = ["run", *(["--port", str(port)] if self.port else [])]
+            self.ctl.dev = self.settings.dev
         self.show_settings()
 
     def on_shortcut(self) -> None:
@@ -2939,7 +3028,9 @@ class LauncherView(BigText):
         except OSError as e:
             self.ask("Shortcut", "The shortcut couldn't be made.", str(e), [("OK", None)])
             return
-        self.ask("Shortcut", "Made a shortcut on your desktop.", path, [("OK", None)])
+        self.ask("Shortcut", "Made a shortcut on your desktop.",
+                 f"{path}\n\nIt starts this copy of Breathalyzer. After you unpack a new one, make it again there.",
+                 [("OK", None)])
 
     def ask_text(self, title: str, message: str, detail: str, value: str) -> str | None:
         """One line of text in the same big text; None when left with Cancel or Esc."""
@@ -3090,9 +3181,8 @@ class LauncherView(BigText):
 def launcher_main(args) -> int:
     """tools/launcher.py: one launcher window per settings folder, "Starting..." while modman loads, then the
     first-run screens or Home."""
-    if tk is None:
-        print("Breathalyzer needs Python's tkinter.")
-        return 2
+    if tk is None:   # (launcher.main shows it in a message box and writes launcher-error.txt: pythonw has no console)
+        raise RuntimeError(f"Python's tkinter couldn't be loaded ({TK_ERROR or 'no reason given'}).")
     path = la.settings_path()
     settings, note = la.load_settings(path)
     if la.single_instance(os.path.dirname(path)) is None:
@@ -3102,8 +3192,7 @@ def launcher_main(args) -> int:
     try:
         root = tk.Tk()
     except tk.TclError as e:
-        print(f"Can't open a window: {e}")
-        return 2
+        raise RuntimeError(f"Can't open a window: {e}") from e
     if args.size:
         settings.size = args.size
     if args.dark:
@@ -3125,9 +3214,12 @@ def launcher_main(args) -> int:
     first = la.FirstRun(settings, places=places, library=args.library)
     starting.destroy()
     view = LauncherView(root, settings, path, first_run=first, port=args.port, library=args.library)
-    if note and view.ctl is not None:
-        view.ctl.status = Status("warn", [note])
-        view.render()
+    if note:   # (on Home now, or on Home after the first-run screens: never dropped)
+        view.note = note
+        if view.ctl is not None:
+            view.ctl.status = Status("warn", [note])
+            view.note = None
+            view.render()
     root.lift()
     with contextlib.suppress(tk.TclError):
         root.focus_force()

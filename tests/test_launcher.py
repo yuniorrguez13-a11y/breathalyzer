@@ -97,6 +97,43 @@ class SettingsFile(Temp):
         self.assertEqual(la.home_dir({la.ENV_HOME: str(self.tmp)}), str(self.tmp))
         self.assertEqual(la.home_dir({"LOCALAPPDATA": "Z:\\Local"}), os.path.join("Z:\\Local", "Breathalyzer"))
 
+    def test_developer_commands_setting(self):
+        path = str(self.tmp / la.SETTINGS_FILE)
+        s, _ = la.load_settings(path)
+        self.assertFalse(s.dev)
+        s.dev = True
+        la.save_settings(path, s)
+        self.assertTrue(la.load_settings(path)[0].dev)
+        write(self.tmp / la.SETTINGS_FILE, json.dumps({"dev": "yes"}))
+        self.assertFalse(la.load_settings(path)[0].dev)
+
+
+class StartErrors(Temp):
+    """pythonw has no console: a launcher that can't start says so in a message box and launcher-error.txt."""
+
+    def test_a_failed_start_is_shown_and_written(self):
+        env = {la.ENV_HOME: str(self.tmp / "home")}
+        with mock.patch.dict(os.environ, env), mock.patch.object(la, "message_box") as box, \
+                mock.patch.object(gui, "launcher_main", side_effect=ImportError("DLL load failed: _tkinter")):
+            self.assertEqual(la.main([]), 3)
+        heading, text = box.call_args[0]
+        self.assertEqual(heading, "Breathalyzer couldn't start.")
+        self.assertIn("antivirus", text)
+        log = self.tmp / "home" / la.ERROR_FILE
+        self.assertIn(str(log), text)
+        self.assertIn("DLL load failed: _tkinter", log.read_text(encoding="utf-8"))
+
+    def test_tcl_variables_of_other_programs_are_dropped(self):
+        env = {"TCL_LIBRARY": "C:\\Other\\tcl8.5", "TK_LIBRARY": "C:\\Other\\tk8.5", "PATH": "x"}
+        self.assertEqual(la.clean_tcl_env(env), ["TCL_LIBRARY", "TK_LIBRARY"])
+        self.assertEqual(env, {"PATH": "x"})
+
+    def test_no_tkinter_is_an_error_not_a_print(self):
+        with mock.patch.object(gui, "tk", None), mock.patch.object(gui, "TK_ERROR", "ImportError: made up"):
+            with self.assertRaises(RuntimeError) as e:
+                gui.launcher_main(SimpleNamespace())
+        self.assertIn("made up", str(e.exception))
+
 
 # ---------------------------------------------------------------- finding Savage Wind
 
@@ -427,7 +464,11 @@ class Bundled(Temp):
                                                                       "code"),
                           ("botw-mod-loader.perf-effects", False, "recipe")])
         self.assertEqual(mods[0]["folder"], str(app / "bundled-mods" / "modmenu"))
+        self.assertEqual([m["developer"] for m in mods], [False, False, False])
         self.assertEqual(la.read_bundled(str(self.tmp / "no-app")), ("", []))
+        app = make_app(self.tmp / "app2", [{"id": "x.up", "title": "Up", "default": "off", "kind": "code",
+                                            "description": "Up.", "folder": "bundled-mods/up", "developer": True}])
+        self.assertTrue(la.read_bundled(str(app))[1][0]["developer"])
 
     def test_bad_entries_are_left_out(self):
         good = {"id": "x.good", "title": "Good", "default": "on", "kind": "code", "description": "Fine.",
@@ -462,7 +503,7 @@ class Picker(unittest.TestCase):
         with mock.patch.object(gui, "TOOLS", str(self.app / "tools")):
             ctl.install_picked(self.mods, picks)
         self.assertFalse(ctl.can("play"))
-        self.assertEqual(ctl.status.lines[0], "Adding the mods you picked (1 of 6)...")
+        self.assertEqual(ctl.status.lines[0], "Adding mod 1 of 3...")   # (mods, not steps: 6 steps here)
         self.assertTrue(ctl.settle())
         self.assertEqual(self.scripts(), [("modman.py", ["add", str(self.app / "bundled-mods" / "modmenu")]),
                                           ("modmenu.py", ["sync"]),
@@ -492,11 +533,28 @@ class Picker(unittest.TestCase):
         broken = dict(self.mods[1], id="botw-mod-loader.broken", title="Broken one")
         write(Path(broken["folder"]) / "mod.toml", '[mod]\nid = "botw-mod-loader.broken"\n')
         ctl = self.make(mods=[])
-        ctl.install_picked([self.mods[0], broken], {"botw-mod-loader.broken": True})
+        ctl.install_picked([broken, self.mods[0]], {"botw-mod-loader.broken": True})   # (the broken one first)
         self.assertTrue(ctl.settle())
         self.assertEqual(ctl.status.lines, ["1 mod couldn't be added: Broken one.",
-                                            "The others are ready. Details says why."])
+                                            "The others are ready. Press Details to see why."])
+        self.assertEqual(ctl.status.kind, "error")   # (Home shows the Details button for errors)
+        self.assertEqual(ctl.details_job.mod_id, "botw-mod-loader.broken")   # (not the last step, which worked)
+        self.assertNotEqual(ctl.details_job.code, 0)
         self.assertEqual([r.id for r in ctl.listing.rows], ["botw-mod-loader.modmenu"])
+
+    def test_a_step_refused_while_the_game_is_open(self):
+        ctl = self.make(mods=[])
+
+        def busy():   # (what modmenu.py sync says while Savage Wind runs)
+            print("Error: Savage Wind is running. Close it, then run sync again.")
+            return 2
+
+        self.mm.cmd_sync = busy
+        ctl.install_picked([self.mods[0]], {})
+        self.assertTrue(ctl.settle())
+        self.assertEqual(ctl.status.lines, ["Savage Wind is open, so Mods page in the game isn't ready yet.",
+                                            "Close the game, then press Pick again in Settings and Save."])
+        self.assertEqual(ctl.details_job.args, ["sync"])
 
 
 class FakeMenu:
@@ -674,8 +732,27 @@ class Play(unittest.TestCase):
         ctl = self.make(port_busy=True)
         ctl.launch()
         self.assertTrue(ctl.settle())
-        self.assertEqual(ctl.status.lines, ["Another program uses port 7777.",
-                                            "Close it and press Play again, or pick another port in Settings."])
+        self.assertEqual(ctl.status.lines, ["Another program uses port 7777.", "Close it and press Play again."])
+
+    def test_developer_mode_only_when_needed(self):
+        ctl = self.make()   # (no mod that needs it, Developer commands OFF: modman decides)
+        ctl.launch()
+        self.assertTrue(ctl.settle())
+        self.assertNotIn("--port", self.runs()[-1])
+        ctl = self.make()
+        ctl.dev_ids.add("a")   # (Alpha is ON and needs developer mode: Play opens the control port)
+        self.assertEqual(ctl.dev_mods_on(), ["Alpha"])
+        ctl.launch()
+        self.assertTrue(ctl.settle())
+        self.assertEqual(self.runs()[-1][:3], ["run", "--port", "7777"])
+        ctl = self.make()
+        ctl.dev_ids.add("b")   # (Bravo needs it but is OFF)
+        self.assertEqual(ctl.dev_mods_on(), [])
+        ctl.dev = True        # (Settings > Developer commands ON)
+        ctl.launch()
+        self.assertTrue(ctl.settle())
+        self.assertEqual(self.runs()[-1][:3], ["run", "--port", "7777"])
+        self.assertIn("botw-mod-loader.basics-teleport-up", ctl.dev_ids)   # (ours, even without the Plus list)
 
     def test_play_without_mods(self):
         ctl = self.make()
@@ -711,6 +788,15 @@ class WindowsParts(Temp):
         self.assertEqual((got["args"], got["workdir"], got["description"]), (args, workdir, "Start Breathalyzer"))
         self.assertTrue(args.startswith("-I ") and args.endswith('launcher.py"'))
         self.assertTrue(target.lower().endswith(("pythonw.exe", "python.exe")))
+
+    def test_shortcut_starts_the_starter_in_a_player_zip(self):
+        top = self.tmp / "Breathalyzer Plus"
+        write(top / la.STARTER, "made up")
+        (top / "app").mkdir()
+        target, args, workdir, icon = la.shortcut_parts(str(top / "app"))
+        self.assertEqual((target, args, workdir), (str(top / la.STARTER), "", str(top)))   # (never pythonw.exe straight)
+        target, args, _, _ = la.shortcut_parts(str(self.tmp / "no-starter" / "app"))
+        self.assertTrue(args.startswith("-I "))
 
     def test_one_window_only(self):
         key = str(self.tmp / "settings-home")

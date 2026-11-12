@@ -6,7 +6,8 @@
 - **Two looks:** `art` (default) puts your picture where the game's pictures are, on the left, with soft edges, over
   the game's blue pattern. `full` fills the whole screen, darker on the right so the menu words stay readable.
 - **Works with** BotW 1.9.0 on Savage Wind only, when the game starts through Mod Manager or `python tools/modman.py
-  run`. Not tried in the game yet (see [What is tested](#what-is-tested)).
+  run`. Tried in the game with tool version 1.0.0 (see [What is tested](#what-is-tested)); version 1.1.0 (the
+  readable-words fix) is not tried in the game yet.
 
 ## Commands
 
@@ -27,7 +28,7 @@ python tools/menu_bg.py preview --out game-menu.png
 |---|---|
 | `--mode art` / `--mode full` | where the picture goes (see below); default `art` |
 | `--sets all` / `--sets 2` / `--sets 1,3,5` | which slideshow pictures get your picture; default all |
-| `--focus left` / `center` / `right` | which part of your picture to keep when it has to be cut to fit; default center |
+| `--focus left` / `center` / `right` / `top` | which part of your picture to keep when it has to be cut to fit; default center (a tall picture keeps its upper third, where the head usually is; `top` keeps the very top) |
 | `--name NAME` | the mod's name in your library (default "Menu picture: <file name>") |
 | `--no-deploy` | only put it in the library; deploy later with `python tools/modman.py deploy` |
 | `--priority normal` | don't lower the tool's priority (it runs at below-normal priority, so the PC stays usable) |
@@ -42,17 +43,36 @@ The answer comes first, in short lines, for example:
 
 ```
 Done: your picture is on the main menu (all 7 slideshow pictures).
-Deployed. Start the game to see it.
+Deployed. Start the game to see it: python tools/modman.py run
 ```
+
+Only notes about the menu picture are shown; `python tools/modman.py deploy --dry-run` shows everything else. When a
+title picture is chosen in the Mods page (or a mod brings one), that one is shown instead, and `set`, `reset` and
+`status` say so.
 
 Exit codes: 0 done, 2 error (one plain line says what to do), 130 stopped.
 
 ## The slideshow
 
 The main menu is not one picture. It shows **7 pictures in a loop** (about 15 seconds each), and slowly pans each one.
-By default your picture goes into all 7, so the menu always shows it. `--sets 2` changes only the second one (the
-picture of the bow), so the other 6 stay the game's. With several pictures, slideshow picture 1 gets the first file,
-picture 2 the second, and so on, starting again at the first file when there are fewer than 7.
+By default your picture goes into all 7, so the menu always shows it. The numbers, in the order the menu shows them:
+
+1. a rock at sunset (whole screen)
+2. Link drawing a bow, on blue
+3. a green field (whole screen)
+4. a horse
+5. climbing a cliff at sunset (whole screen)
+6. Link drawing a bow, on gold
+7. a guardian
+
+`python tools/menu_bg.py preview --set all --out sheet.png` draws all 7 with their numbers, so you can check a number.
+`--sets 2` changes only picture 2, so the other 6 stay the game's. With several pictures, the first chosen picture gets
+the first file, the next chosen one the second file, and so on, starting again at the first file when there are more
+chosen pictures than files (`--sets 2,4` with `a.png b.png`: 2 gets a.png, 4 gets b.png).
+
+Between two pictures there is a short moment with no picture, where only the game's own pattern shows, in the
+game's own colour for that moment (light cream around picture 5, for example). The game's own menu does the same; the
+tool doesn't change it.
 
 The tool finds the slideshow in the menu file itself: which pictures there are, when each shows, where it sits on
 screen and how it pans. No picture name of the game is written in the tool.
@@ -61,13 +81,16 @@ screen and how it pans. No picture name of the game is written in the tool.
 
 **`art`** (default): your picture goes where each original picture is: on the left, about half the screen wide, with
 soft edges on the sides that are on screen, over the game's own blue pattern, with the logo and menu on the right. In
-the three pictures that cover the whole screen, the tool draws the game's pattern itself and puts your picture in the
-same place on the left.
+the three pictures that cover the whole screen (1, 3 and 5), the tool draws the pattern itself, always in the dark
+blue of picture 2, and puts your picture in the same place on the left, up to the screen's left edge. (The pattern's
+own colour at those moments is hidden in the game's menu and can be light cream, where the words would be hard to
+read.)
 
 **`full`**: your picture fills the screen and gets darker towards the right (from a bit past the middle down to half
-the light at the edge), so the menu words stay readable. 3 of the 7 pictures cover the whole screen. The other 4 are
-drawn smaller by the game, on the left: there your picture fades into the pattern on the right. (Covering the whole
-screen there too needs a change to the menu layout: not done yet.)
+the light at the edge), so the menu words stay readable. A bright picture (sky, snow) gets darker still under the
+words, until they are as readable as on the game's own menu. 3 of the 7 pictures cover the whole screen. The other 4
+are drawn smaller by the game, on the left: there your picture fades into the pattern on the right. (Covering the
+whole screen there too needs a change to the menu layout: not done yet.)
 
 The game adds a soft glow on top of each picture. The tool darkens your picture a little first, so the glow doesn't
 wash it out.
@@ -77,9 +100,11 @@ the screen is made bigger and looks soft: in `full` mode the tool says so below 
 
 ## Cut-outs
 
-A PNG with see-through parts (more than 1 % of its pixels) is used as a **cut-out**: in `art` mode it is fitted whole
-into each place, standing on the bottom edge, with its own soft edge and the pattern around it. In `full` mode the
-see-through parts become black (the tool says so).
+A picture with see-through parts (more than 1 % of its pixels; PNG, WEBP, GIF or BMP) is used as a **cut-out**: in
+`art` mode it is fitted whole into each place, standing on the bottom edge, with its own soft edge and the pattern
+around it. In `full` mode the see-through parts become black (the tool says so). A picture with only a few
+see-through pixels (rounded corners of a screenshot) is not a cut-out: those pixels become black, and the tool says
+so.
 
 ## Pictures and Pillow
 
@@ -89,9 +114,9 @@ see-through parts become black (the tool says so).
 - A picture must be at least 640 x 360 for `full` (360 pixels on the short side for `art`), and at most 8192 pixels a
   side and 36 million pixels.
 
-**How long it takes** (`set`, a 1920 x 1080 PNG, all 7 pictures, measured on this PC with the game closed): about
-30 s to 1 min with Pillow, about 45 s to 1.5 min without. A busy, detailed picture takes longest. While the game runs,
-it takes about twice as long. Most of it is compressing the textures and packing the menu file (up to 30 s each). A
+**How long it takes** (`set`, a 1920 x 1080 picture, all 7 pictures, measured on this PC with the game closed): about
+30 s to 1.5 min with Pillow (a detailed photo took 1.5 min), up to about 2 min without. While the game runs, it takes
+about twice as long. Most of it is compressing the textures (up to 45 s) and packing the menu file (30 to 45 s). A
 step line says what it is doing.
 
 ## What it changes, and other mods
@@ -102,7 +127,9 @@ step line says what it is doing.
   anything.
 - One menu file serves every language.
 - **Other mods that ship `Pack/Title.pack`** (another menu mod): the tool builds on the last one that is turned on, says
-  so, and keeps the menu picture after it in the list. If you add such a mod later, run `set` again.
+  so, and keeps the menu picture after it in the list. The menu-picture mod keeps a copy of that menu file: if you
+  add, update, turn off or remove such a mod later, run `set` again (`status` says when).
+- `status` also says when the mod was made by an older version of the tool: run `set` again to get the fixes.
 - Mods that change other files (Linkle, for example) don't clash with it.
 - The library keeps `menu-picture.json` next to the mod: the tool version, the mode, the pictures (name and SHA-256),
   the game build and where the menu file came from.
@@ -132,8 +159,9 @@ menu file in use, and gives it back as a file made at deploy (`Pack/Title.pack`,
 - No title picture: nothing changes.
 - A picture it can't use (too small, wrong game version, ...) gives one line under "Needs attention", and the menu
   stays as it is.
-- The first deploy with a new picture takes as long as `set` (about 30 s to 1 min). The result is kept in
-  `<library>\cache\menu-bg\` (the last 2), so later deploys with the same picture and menu file only read it.
+- The first deploy with a new picture takes as long as `set` (about 30 s to 1.5 min). The result is kept in
+  `<library>\cache\menu-bg\` (the last 2), so later deploys with the same picture, menu file and tool version only
+  read it.
 - A title picture wins over the menu-picture mod from `set` (files made at deploy come last).
 
 ## Not done yet
@@ -143,14 +171,21 @@ menu file in use, and gives it back as a file made at deploy (`Pack/Title.pack`,
 - `full` mode over the whole screen in all 7 pictures (needs a layout change).
 - A DLC copy of the menu file (none on this PC; the tool refuses one).
 - Calibrating the glow, soft edges and darkening in the game: the numbers are first guesses.
+- The logo in `full` mode on a bright picture: only the words' area is measured and darkened (the logo is partly in
+  the darker columns).
 
 ## What is tested
 
 - **With made-up files** (`tests/test_menu_bg.py`): PNG of every kind, the texture codec, picture fitting and soft
-  edges, the layout and animation readers on a made-up menu, both modes, the library steps, every refusal, deploy,
-  preview, the window's command line, the title picture at deploy (cache, problems as one line), and that every
-  command on this page parses.
+  edges, the layout and animation readers on a made-up menu (with a set that runs past the loop's end), both modes,
+  that the words' area stays dark (a white picture in `full` mode, a near-white pattern colour in `art` mode), the
+  picture order, the library steps, every refusal, deploy and its notes, a chosen title picture, `status`, preview,
+  the window's command line, the title picture at deploy (cache, problems as one line), and that every command on this
+  page parses.
 - **On this PC's game files** (read only, results kept in `out\`): the tool finds 7 pictures in 10 textures, rebuilds
   the menu file at its exact size, and its preview of the game's own menu matches a real screenshot (pattern and
   side panels within 2 colour steps). Textures written and read back come out at 38-44 dB of what was meant.
-- **In the game:** not yet.
+- **In the game (tool 1.0.0, 2026-11-12):** both looks and the reset show in the game, with Linkle, with no errors in
+  the log; odd-size textures show right. Found there: in `art` mode picture 5 had a light cream pattern under the
+  words (hard to read), and `full` mode keeps too much light under the words on a bright picture. Both are fixed in
+  1.1.0, which is not tried in the game yet.

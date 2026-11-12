@@ -1811,20 +1811,53 @@ def convert_wiiu(src: str, stage: str, name: str, game: str | None = None):
     return rep
 
 
+def add_download(lib: Library, src: str, name: str | None = None, *, convert: bool = True,
+                 bnp_options: list[str] = (), bnp_no_options: bool = False) -> tuple[dict, ModScan, list[str]]:
+    """add_mod for a download it can't use as it is (bnp.packed_download: a .rar, a .7z that isn't a .bnp, a .zip
+    holding archives): unpacked into a work folder in the library (tools/bnp.py unpack_download: every name and
+    size checked, at most 3 archives deep, nothing run), the mod in it added, the work folder removed. Several mods
+    in it: --option names the one to add."""
+    os.makedirs(lib.mods_dir, exist_ok=True)
+    work = os.path.join(lib.mods_dir, ADDING + slug(default_name(src))[:24] + ".unpack")
+    if os.path.lexists(work):
+        remove_tree(work)  # (left by an add that was cut short; the name is modman's own)
+    try:
+        try:
+            dl = bnp.unpack_download(src, work, say=say)
+            found, picks = dl.pick(list(bnp_options))
+        except bnp.BnpError as e:
+            raise ModmanError(str(e)) from None
+        entry, scan, notes = add_mod(lib, found.path, name, convert=convert, bnp_options=picks,
+                                     bnp_no_options=bnp_no_options, download=src)
+    finally:
+        if os.path.lexists(work):
+            remove_tree(work)
+    left = [f"left out of the download: {n}" for n in dl.notes]
+    return entry, scan, [f"unpacked from {os.path.basename(src)}" + (f": {found.label}" if len(dl.found) > 1 else "")
+                         ] + left + notes
+
+
 def add_mod(lib: Library, src: str, name: str | None = None, *, convert: bool = True,
-            bnp_options: list[str] = (), bnp_no_options: bool = False) -> tuple[dict, ModScan, list[str]]:
+            bnp_options: list[str] = (), bnp_no_options: bool = False,
+            download: str | None = None) -> tuple[dict, ModScan, list[str]]:
     """Inspect, store and record a mod. Returns (its config entry, its scan, notes). A mod with a mod.toml gets its
     id, name and version from it (--name still picks the name). A Wii U mod is converted into the library (its
-    notes start with what was converted), unless convert is False: then it is refused as before."""
+    notes start with what was converted), unless convert is False: then it is refused as before. A packed download
+    goes through add_download (`download`: the one src was unpacked from, by add_download only)."""
     src = _abs(src)
     if not os.path.exists(src):
         raise ModmanError(f"{src} not found.")
-    if _inside(src, lib.root) or _inside(lib.root, src):
+    if not download and (_inside(src, lib.root) or _inside(lib.root, src)):
         raise ModmanError("That folder is (or holds) the mod library itself: add the mod's own folder or .zip.")
     if lib.install and (_inside(src, os.path.join(lib.install, "extracted")) or _inside(lib.install, src)):
         raise ModmanError("That is Savage Wind's own folder or game files, not a mod.")
     given = one_line(name or "").strip()
     findings, names = _inspect_source(src)
+    if not download and bnp.packed_download(src, findings, names):
+        return add_download(lib, src, name, convert=convert, bnp_options=bnp_options, bnp_no_options=bnp_no_options)
+    bare = next((f for f in findings if f.kind == mi.BARE_WIIU), None)
+    if bare:  # (romfs_mods would deploy them as Switch files)
+        raise ModmanError(f"Not added: {given or default_name(src)} has {bare.detail}.")
     pkg = bnp.package_kind(src, findings, names)  # (a BCML package: installed by tools/bnp.py)
     upkg = None if pkg else ukmm.package_kind(src, findings, names)  # (a UKMM package: tools/ukmm.py)
     try:
@@ -1939,7 +1972,8 @@ def add_mod(lib: Library, src: str, name: str | None = None, *, convert: bool = 
         if os.path.lexists(stage):
             remove_tree(stage)
         raise
-    entry = {"id": mod_id, "name": name, "enabled": True, "kinds": scan.kinds, "source": src, "added": _now()}
+    entry = {"id": mod_id, "name": name, "enabled": True, "kinds": scan.kinds, "source": download or src,
+             "added": _now()}
     if man:
         entry["version"] = man.version
     elif pkg or upkg:

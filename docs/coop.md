@@ -1,8 +1,9 @@
-# Co-op: play the story together (beta work, not yet run in the game)
+# Co-op: play the story together (beta work)
 
 **Status (2026-11-12):** the session layer, base security, home-network discovery, shared time and story together
-are built and pass their tests on made-up saves and on save **copies**. **Nothing here has run with the game yet.**
-The game checks are listed at the end ("Needs the game"). The Multiplayer menu (Host / Join / Solo) is a small window
+are built and pass their tests on made-up saves and on save **copies**. **Checked in the game on 2026-11-12** (save
+copies only, the bot as host): an early save joined, got the 100 % save's story before loading, and played it (see
+"Game check 2026-11-12" at the end). Live reading of story flags in the game is **off** for now (no safe getter yet). The Multiplayer menu (Host / Join / Solo) is a small window
 started from a terminal; Breathalyzer's Play button doesn't open it yet, and the same menu over the game's title
 screen is not built yet.
 
@@ -129,15 +130,18 @@ Older Breathalyzer versions still join as **visitors**: they see the ghosts; the
   can draw); `tools/mp/worlds.py`: the co-op save copies.
 - `tools/mp/relay.py`: host role, host-only kinds, room code, bans, per-kind limits, visitors.
 - `native/examples/ghost/coop_story.c` (in the ghost DLL, because modhost runs one frame job per game): reads every
-  listed flag through the game's get-bool-by-name `0x700112dba4` (48 a frame) and adds queued ones through
+  listed flag through the game's get-bool-by-name (48 a frame; OFF until one is found: the first guess,
+  `0x700112dba4`, is not a getter and crashed the game) and adds queued ones through
   set-bool-by-name `0x700112d5c0` (value 1 only), using the flag manager at `[0x7001e3b188]`; waits while its busy
   byte `+0xc1a` (bit 2) is set or there is no world. Commands: `coop story load <list> [dlc]`, `coop story get`,
   `coop story add <hex>`, `coop story status`, and in developer mode `coop probe flag <name> [1]`.
 
 ## Honest limits
 
-- **Not yet run in the game.** The flag manager's addresses come from reading the code only. The getter's argument
-  order and the string object are guesses that probe run B checks first.
+- **Live story reads are off.** The game's get-bool-by-name is not known yet (the first guess crashed the game in
+  probe run B), so a host's game can't report new progress live yet and a friend's agent can't see what his game
+  has. What works: the story merge at join (before the game loads) and the setter (adds). Until a getter is found,
+  the host's story comes from his save file (`--story-from`), so new progress reaches friends at their next join.
 - **Weather is not shared yet** (needs probe A). Day count and Blood Moon are not shared.
 - A live add of a tower, shrine or beast shows after your next loading screen [guess]; at join everything is there.
 - Not shared: Korok seeds, chests, side quests, puzzle states inside shrines and beasts, place names, Spirit Orbs.
@@ -150,7 +154,31 @@ Older Breathalyzer versions still join as **visitors**: they see the ghosts; the
   and the ghosts are two connections per player for now.
 - Home network only for the beta.
 
-## Needs the game (probe run B, 30 minutes, save copies only)
+## Game check 2026-11-12 (probe run B, save copies only)
+
+Guest: a copy of `out\test-save` (Great Plateau, after the first tower: 7 story flags). Host: the bot with the 100 %
+copy's story (747 flags) and the hour 21:00. Join with Yes, then the game started on the merged copy.
+
+| Check | Result | Evidence |
+|---|---|---|
+| Hosts found on the home network | PASS | `find` listed Ana's world with its check words |
+| Backup before the first merge | PASS | `<library>\mp\backups\run-guest\<time>\`: equal to `out\test-save` byte for byte |
+| Story added, nothing removed | PASS | every slot 7 to 747 flags before the game started; 0 removed; the same after playing |
+| The merged copy loads, no cutscene loop | PASS | loaded on the plateau; Link ran 10 m with the stick; screenshots `out\shots\coop_*` |
+| Time follows the host | PASS | the game went from 11:03 to 21:00 within 1.1 s (`time` answers `hour`) |
+| Divine Beasts | PASS | all four Champion abilities on the HUD; Mipha's Grace revived Link after a fall |
+| Paraglider | PASS | Link glided off the Great Plateau (`coop_29_glide.png`) |
+| Quest log | PASS | Adventure Log: Destroy Ganon and The Hero's Sword open; Follow the Sheikah Slate, The Isolated Plateau, Seek Out Impa, Free the Divine Beasts done |
+| Towers | PASS (seen) | blue (active) tower beams in the distance; the map screen didn't open with `press minus` |
+| Setter (live add) | PASS | `coop probe flag IsPlayed_Demo010_1 1` answered 1; a menu save right after had it set, with all 747 kept |
+| Getter (live read) | FAIL | the first guess crashed the game (twice); the mod no longer calls it |
+| Save loads after a restart | PASS | the merged copy, and the game's own save made on it, loaded again |
+| Weather follows the host | not built | needs probe A |
+
+Still to check in the game: a real getter (then `coop story get`, the host's live progress through the agent and the
+read cost), the map screen, and a friend's `time`/`story` refused in a real game (the relay tests cover it).
+
+## Probe list (kept for the next run)
 
 1. `coop probe flag FirstTower_Activated` reads 1 and `IsGet_PlayerStole2` reads 0 on the test-save copy.
 2. `coop probe flag IsGet_Obj_Camera 1` sets it; `coop story get` shows it; the camera rune shows.

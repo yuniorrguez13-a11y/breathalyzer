@@ -21,6 +21,14 @@ The editions (docs/release.md):
   botw-mod-loader. or giruka., only files git tracks or DLLs from build/native; never anything from out/.
 - source: the repo as it is, for developers (what this tool made before the editions).
 
+The player zips come from one commit (--commit, default HEAD), never from the working tree: git archive unpacks it
+into out/packaging-work/src/<commit>/ and the DLLs are built from that copy (its own build_native.py and modmenu.py),
+so other jobs' unfinished files never get in. The commit id is the first line of SHA256SUMS.txt (a '# ' comment) and
+"commit" in bundled-mods.json. --overlay <file> lays one uncommitted file over the commit for a test build (each is
+listed with its SHA-256; such zips are not for upload); --working-tree takes everything as it is (tests only). The
+player zips leave out developer-only files: docs/PLAN.md, docs/release.md, make_release.py, check_clean.py and the
+test drivers that start the game (*_ingame_check.py, *_items_check.py).
+
 The runtime must match tools/packaging/runtime.lock.json file for file (SHA-256), and the starter
 tools/packaging/starter.lock.json (built from today's start.c); a 64-bit window program that uses only kernel32 and
 user32.
@@ -58,9 +66,11 @@ import io
 import json
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import tomllib
 import zipfile
@@ -155,15 +165,24 @@ BUNDLED_JSON = "bundled-mods.json"            # app/bundled-mods.json: what the 
 READ_ME = {"core": f"{PACKAGING}/read-me-first-core.txt", "plus": f"{PACKAGING}/read-me-first-plus.txt"}
 BACKUP_CMD_SRC = f"{PACKAGING}/start-backup.cmd"
 PLAYER_SKIP_TOP = {"tests", ".github"}        # repo folders that stay out of the player zips
-PLAYER_SKIP_FILES = {".gitignore", ".cleanallow"}
+# developer-only files (they stay in the source zip): the build PC's notes, the release steps, the release and
+# clean-check tools; and (PLAYER_SKIP_NAME) the test drivers that start the game
+PLAYER_SKIP_FILES = {".gitignore", ".cleanallow", "docs/plan.md", "docs/release.md", "tools/make_release.py",
+                     "tools/check_clean.py"}
+PLAYER_SKIP_NAME = re.compile(r"[a-z0-9_]+_(?:ingame|items)_check\.py")
 PLAYER_SKIP_DIRS = {"selftest"}              # the native self-tests (made-up "game code" check_clean blocks)
+SNAPSHOT_DIR = "src"                          # out/packaging-work/src/<commit>: the player zips' files come from here
+BELOW_NORMAL = 0x4000                         # BELOW_NORMAL_PRIORITY_CLASS: the DLL build stays out of the way
+# (builds modmenu.dll from the snapshot's own tools/modmenu.py: argv = tools folder, build folder[, Savage Wind])
+MODMENU_BUILD = ("import sys; sys.path.insert(0, sys.argv[1]); import modmenu; "
+                 "print(modmenu.build_mod(sys.argv[3] if len(sys.argv) > 3 else None, sys.argv[2]))")
 STARTER_IMPORTS = {"kernel32.dll", "user32.dll"}
 RUNTIME_NEEDS = ("python.exe", "pythonw.exe", "LICENSE.txt")
 OUR_IDS = ("botw-mod-loader.", "giruka.")     # bundled mods are ours: their ids start like this
 MAX_TITLE, MAX_DESCRIPTION, MAX_TAG = 40, 80, 80  # (the game's Mods page cuts a description at 80 characters)
 FONT_MISSING = set("{}|`^~%#")               # characters the game's menu font lacks (tools/modmenu.py)
 BUNDLED_KEYS = {"id", "title", "description", "default", "why", "tags", "ready", "kind", "manifest", "dll", "folder",
-                "build", "after_add"}
+                "build", "after_add", "developer"}
 
 
 class ReleaseError(RuntimeError):
@@ -197,6 +216,8 @@ class Plan:
     not_built: list[str] = field(default_factory=list)            # DLLs asked for that aren't built
     edition: str = "source"
     bundled: list[dict] = field(default_factory=list)             # plus: the mods in bundled-mods.json
+    commit: str = ""    # player zips: the commit the files come from
+    stamp: str = ""     # player zips: where the files come from, the first line of SHA256SUMS.txt (a # comment)
 
     @property
     def folder(self) -> str:
@@ -674,11 +695,13 @@ def _add_made(plan: Plan, dest: str, data: bytes, terms, kind: str = "made") -> 
 
 def plan_release(root: Path = REPO, version: str = VERSION, with_binaries: bool = False,
                  build_dir: Path | None = None, terms=None, forbidden=None, edition: str = "source",
-                 runtime_dir: Path | None = None, starter: Path | None = None, experimental: bool = False) -> Plan:
+                 runtime_dir: Path | None = None, starter: Path | None = None, experimental: bool = False,
+                 files: list[str] | None = None, commit: str = "", stamp: str = "") -> Plan:
     """Everything that would go in, and everything that blocks the release (check_clean's rules and more).
     Raises ReleaseError when git can't list the files."""
     if edition in PLAYER_EDITIONS:
-        return plan_player(root, version, edition, build_dir, terms, forbidden, runtime_dir, starter, experimental)
+        return plan_player(root, version, edition, build_dir, terms, forbidden, runtime_dir, starter, experimental,
+                           files, commit, stamp)
     plan = Plan(version)
     terms = leak_terms(root) if terms is None else terms
     allowed = cc.read_allow(root)
@@ -707,11 +730,113 @@ def player_file(rel: str) -> bool:
     low = rel.lower()
     parts = low.split("/")
     return not (parts[0] in PLAYER_SKIP_TOP or low in PLAYER_SKIP_FILES or low.startswith(PACKAGING + "/")
-                or PLAYER_SKIP_DIRS & set(parts[:-1]))
+                or PLAYER_SKIP_DIRS & set(parts[:-1])
+                or (parts[0] == "tools" and bool(PLAYER_SKIP_NAME.fullmatch(parts[-1]))))
 
 
 def default_work(root: Path) -> Path:
     return root / "out" / "packaging-work"
+
+
+# ------------------------------------------------------------------ the player zips come from a commit, not the work tree
+
+@dataclass
+class Source:
+    """Where a player zip's files come from: a snapshot of one commit (git archive) in out/packaging-work/src/, and
+    the DLLs built from that snapshot. Never the working tree: other jobs' unfinished files stay out."""
+    root: Path                                          # the snapshot folder (the project as of the commit)
+    commit: str                                         # the full commit id
+    files: list[str]                                    # the project files in it (relative, with /)
+    local: dict[str, str] = field(default_factory=dict)  # --overlay: uncommitted files laid over it -> SHA-256
+
+    def stamp(self, edition: str, version: str) -> str:
+        what = f"Breathalyzer{' Plus' if edition == 'plus' else ''} {version}, built from commit {self.commit}"
+        if not self.local:
+            return what
+        return (f"{what} plus {len(self.local)} uncommitted file(s): "
+                + ", ".join(f"{rel} ({sha[:12]})" for rel, sha in sorted(self.local.items()))
+                + ". A test build: not for upload.")
+
+
+def _git_bytes(root: Path, *args: str) -> bytes:
+    try:
+        r = subprocess.run(["git", "-C", str(root), *args], capture_output=True)
+    except OSError as e:
+        raise ReleaseError(f"git couldn't start ({e.strerror or e})")
+    if r.returncode:
+        said = next(iter(r.stderr.decode("utf-8", "replace").strip().splitlines()), f"exit code {r.returncode}")
+        raise ReleaseError(f"git {args[0]} failed: {said}")
+    return r.stdout
+
+
+def resolve_commit(root: Path, rev: str) -> str:
+    out = _git_bytes(root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}").decode().strip()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", out):
+        raise ReleaseError(f"{rev} isn't a commit here")
+    return out
+
+
+def take_snapshot(root: Path, rev: str = "HEAD", overlay=(), work: Path | None = None) -> Source:
+    """The project as of commit rev, unpacked from git archive into out/packaging-work/src/<commit> (made fresh).
+    overlay: working-tree files (tracked, or under the allow-list) laid over it for a test build; each is listed with
+    its SHA-256 in the stamp. Raises ReleaseError (nothing is left half made)."""
+    commit = resolve_commit(root, rev)
+    tracked_now = set(_git(root, "ls-files", "-c", "-z"))
+    files = {rel for rel in _git(root, "ls-tree", "-r", "-z", "--name-only", commit) if not never(rel)}
+    bad, local = [], {}
+    for raw in overlay:
+        rel = str(raw).replace("\\", "/").removeprefix("./")
+        p = root / rel
+        if never(rel) or not (rel in tracked_now or rel in files or allowed_root(rel)):
+            bad.append((rel, "--overlay takes project files only (tracked, or under tools/, native/, docs/ ...)"))
+        elif not p.is_file() or _is_link(p):
+            bad.append((rel, "--overlay: not a file here (or a link)"))
+    if bad:
+        raise ReleaseError("refused", bad)
+    work = default_work(root) if work is None else work
+    dest = work / SNAPSHOT_DIR / (commit[:12] + ("-local" if overlay else ""))
+    if not _inside(os.path.realpath(dest), work):
+        raise ReleaseError(f"the snapshot folder {dest} isn't under {work}")
+    try:
+        if dest.exists():
+            shutil.rmtree(dest)
+        dest.mkdir(parents=True)
+        # (the committed bytes: without core.autocrlf=false, git on Windows would write CRLF into the archive)
+        tar = _git_bytes(root, "-c", "core.autocrlf=false", "-c", "core.eol=lf", "archive", "--format=tar", commit)
+        with tarfile.open(fileobj=io.BytesIO(tar)) as tf:
+            tf.extractall(dest, filter="data")
+        for raw in overlay:
+            rel = str(raw).replace("\\", "/").removeprefix("./")
+            data = (root / rel).read_bytes()
+            target = dest.joinpath(*rel.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            local[rel] = hashlib.sha256(data).hexdigest()
+    except (OSError, tarfile.TarError) as e:
+        raise ReleaseError(f"couldn't unpack commit {commit[:12]} into {dest} ({e})")
+    rels = sorted(rel for rel in files | set(local) if (dest / rel).is_file())
+    return Source(dest, commit, rels, local)
+
+
+def build_snapshot_native(src: Source, install: Path | None = None) -> Path:
+    """modhost.dll and our mods' DLLs, built from the snapshot's own sources (its tools/build_native.py and
+    tools/modmenu.py) into <snapshot>/build/native, at below-normal priority. Returns that folder."""
+    out = src.root / "build" / "native"
+    tools = src.root / "tools"
+    sw = [str(install)] if install else []
+    cmds = [[sys.executable, "-I", str(tools / "build_native.py"), "build", "--out", str(out),
+             *(["--install", *sw] if sw else [])],
+            [sys.executable, "-I", "-c", MODMENU_BUILD, str(tools), str(out), *sw]]
+    flags = BELOW_NORMAL if os.name == "nt" else 0
+    for cmd in cmds:
+        try:
+            r = subprocess.run(cmd, capture_output=True, cwd=src.root, creationflags=flags)
+        except OSError as e:
+            raise ReleaseError(f"couldn't build the DLLs from commit {src.commit[:12]} ({e.strerror or e})")
+        if r.returncode:
+            tail = " | ".join((r.stdout + r.stderr).decode("utf-8", "replace").strip().splitlines()[-4:])
+            raise ReleaseError(f"building the DLLs from commit {src.commit[:12]} failed: {tail}")
+    return out
 
 
 def _read_json(path: Path) -> tuple[dict, str]:
@@ -963,6 +1088,8 @@ def read_bundled(root: Path, tracked: set[str]) -> tuple[list[dict], list[tuple[
                 why += _plain_text_problems("a tag", t, MAX_TAG)
         if not isinstance(m.get("ready"), bool):
             why.append("ready must be true or false")
+        if "developer" in m and not isinstance(m["developer"], bool):
+            why.append("developer must be true or false (true: Play turns on developer commands while it is on)")
         kind = m.get("kind")
         if kind == "code":
             why += _bundled_path_problems("manifest", m.get("manifest"), tracked, True)
@@ -1024,6 +1151,8 @@ def player_manifest(text: str, mod: dict) -> tuple[str, list[str]]:
         why.append(f"its mod.toml says id {info.get('id')!r}, not {mod['id']!r}")
     if (info.get("name"), info.get("description")) != (mod["title"], mod["description"]):
         why.append("its mod.toml has no name and description lines under [mod] to set")
+    if mod.get("kind") == "recipe":   # (a recipe's mod.toml: tools/quality.py copies it into the mod it builds)
+        return out, why
     if code.get("windows") != mod["dll"].rsplit("/", 1)[-1]:
         why.append(f"its mod.toml's [code] windows is {code.get('windows')!r}, not the DLL listed "
                    f"({mod['dll'].rsplit('/', 1)[-1]})")
@@ -1072,14 +1201,30 @@ def _add_bundled(plan: Plan, root: Path, tracked: set[str], build_dir: Path, for
                         kind="bundled")
             entry["folder"] = folder
         else:
+            # (the recipe's mod.toml in app/ gets the player text: tools/quality.py copies it into the mod it builds,
+            # so Home and the game's Mods page show the title and description from bundled-mods.toml)
+            dest_toml = f"{APP}/{m['folder']}/mod.toml"
+            item = next((i for i in plan.items if i.rel == dest_toml), None)
+            if item is None:
+                plan.refused.append((dest_toml, f"{m['folder']}/mod.toml isn't in the zip"))
+                continue
+            text, why = player_manifest(item.data.decode("utf-8", "replace"), m)
+            if why:
+                plan.refused.append((dest_toml, "; ".join(why)))
+                continue
+            plan.items.remove(item)
+            _add_made(plan, dest_toml, text.encode("utf-8"), terms)
             entry["recipe"] = m["folder"]
             entry["build"] = m["build"]
         if m.get("after_add"):
             entry["after_add"] = m["after_add"]
+        if m.get("developer"):
+            entry["developer"] = True
         listed.append(entry)
     plan.bundled = listed
     doc = {"format": 1, "edition": "plus", "version": plan.version, "from": BUNDLED_TOML,
            "about": "The mods that come with Breathalyzer Plus, for the mod picker. Paths are inside app/.",
+           **({"commit": plan.commit} if plan.commit else {}), **({"built_from": plan.stamp} if plan.stamp else {}),
            "mods": listed}
     _add_made(plan, f"{APP}/{BUNDLED_JSON}", (json.dumps(doc, indent=1) + "\n").encode("utf-8"), terms)
 
@@ -1116,9 +1261,11 @@ def edition_problems(plan: Plan) -> list[tuple[str, str]]:
 
 
 def plan_player(root: Path, version: str, edition: str, build_dir: Path | None = None, terms=None, forbidden=None,
-                runtime_dir: Path | None = None, starter: Path | None = None, experimental: bool = False) -> Plan:
-    """A player zip (core or plus): the starter, READ ME FIRST.txt and app/ (see the top of this file)."""
-    plan = Plan(version, edition=edition)
+                runtime_dir: Path | None = None, starter: Path | None = None, experimental: bool = False,
+                files: list[str] | None = None, commit: str = "", stamp: str = "") -> Plan:
+    """A player zip (core or plus): the starter, READ ME FIRST.txt and app/ (see the top of this file). files: the
+    project files (a snapshot's; default source_files(root)); commit and stamp: where they come from."""
+    plan = Plan(version, edition=edition, commit=commit, stamp=stamp)
     terms = leak_terms(root) if terms is None else terms
     build_dir = DEFAULT_BUILD if build_dir is None else build_dir
     forbidden = savage_wind_dirs() if forbidden is None else forbidden
@@ -1126,7 +1273,7 @@ def plan_player(root: Path, version: str, edition: str, build_dir: Path | None =
     starter = default_work(root) / "starter" / STARTER_NAME if starter is None else starter
     allowed = cc.read_allow(root)
     markers: dict[str, str] = {}
-    rels = source_files(root)
+    rels = source_files(root) if files is None else files
     for rel in rels:
         if not player_file(rel):
             continue
@@ -1164,15 +1311,17 @@ def plan_player(root: Path, version: str, edition: str, build_dir: Path | None =
 
 # ------------------------------------------------------------------ the zip
 
-def sums_text(items, prefix: str = "") -> str:
-    """sha256sum's format: '<hash>  <path>' per line, sorted by path. Written as UTF-8."""
-    return "".join(f"{i.sha256}  {prefix}{i.rel}\n" for i in sorted(items, key=lambda i: i.rel))
+def sums_text(items, prefix: str = "", stamp: str = "") -> str:
+    """sha256sum's format: '<hash>  <path>' per line, sorted by path. Written as UTF-8. The player zips' lists start
+    with one '# ' line saying which commit the files come from (sha256sum -c skips it)."""
+    head = f"# {stamp}\n" if stamp else ""
+    return head + "".join(f"{i.sha256}  {prefix}{i.rel}\n" for i in sorted(items, key=lambda i: i.rel))
 
 
 def entries(plan: Plan) -> dict[str, bytes]:
     """Zip entry name -> content: every file in one folder, with SHA256SUMS.txt."""
     out = {f"{plan.folder}/{i.rel}": i.data for i in plan.items}
-    out[f"{plan.folder}/{SUMS}"] = sums_text(plan.items).encode("utf-8")
+    out[f"{plan.folder}/{SUMS}"] = sums_text(plan.items, stamp=plan.stamp).encode("utf-8")
     return out
 
 
@@ -1286,8 +1435,9 @@ def verify_zip(zip_path: Path, plan: Plan, allowed: set[str], terms) -> list[tup
         sums_name = f"{plan.folder}/{SUMS}"
         if sums_name in names:
             inside = zf.read(sums_name).decode("utf-8", "replace")
-            actual = "".join(f"{hashlib.sha256(zf.read(n)).hexdigest()}  {n.split('/', 1)[1]}\n"
-                             for n in sorted(names) if n != sums_name and n in expected)
+            actual = (f"# {plan.stamp}\n" if plan.stamp else "") + "".join(
+                f"{hashlib.sha256(zf.read(n)).hexdigest()}  {n.split('/', 1)[1]}\n"
+                for n in sorted(names) if n != sums_name and n in expected)
             if inside != actual:
                 bad.append((sums_name, "doesn't match the files in the zip"))
     return sorted(set(bad))
@@ -1312,7 +1462,7 @@ def write_release(plan: Plan, out_dir: Path, allowed: set[str], terms) -> tuple[
     tmp_zip = out_dir / (plan.zip_name + ".tmp")
     tmp_sums = out_dir / (plan.sums_name + ".tmp")
     data = zip_bytes(entries(plan))
-    sums = (sums_text(plan.items, plan.folder + "/")
+    sums = (sums_text(plan.items, plan.folder + "/", plan.stamp)
             + f"{hashlib.sha256(data).hexdigest()}  {plan.zip_name}\n").encode("utf-8")
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1385,6 +1535,16 @@ def parser() -> argparse.ArgumentParser:
                     help="player zips: the runtime folder (default out/packaging-work/runtime)")
     ap.add_argument("--starter", type=Path, default=None,
                     help="player zips: Start Breathalyzer.exe (default out/packaging-work/starter/)")
+    ap.add_argument("--commit", default="HEAD",
+                    help="player zips: the commit their files come from (default HEAD); the DLLs are built from it too")
+    ap.add_argument("--overlay", action="append", default=[], metavar="PATH",
+                    help="player zips, test builds only: also take this uncommitted file from the working tree (listed "
+                         "with its SHA-256 in SHA256SUMS.txt; such zips are not for upload)")
+    ap.add_argument("--working-tree", action="store_true",
+                    help="player zips, developers' tests only: take the working tree as it is and build/native as "
+                         "it is (stamped as a test build, not for upload)")
+    ap.add_argument("--install", type=Path, default=None,
+                    help="player zips: the Savage Wind folder whose zig builds the DLLs (default: build_native's)")
     ap.add_argument("--dry-run", action="store_true", help="only list what would go in; write nothing")
     ap.add_argument("--out", type=Path, default=None,
                     help="folder for the zip (default out/release; any folder outside the project, or under out/)")
@@ -1448,13 +1608,44 @@ def main(argv: list[str] | None = None, *, root: Path = REPO, build_dir: Path | 
     if bad_out:
         print(bad_out, file=sys.stderr)
         return 2
+    players = a.edition != "source"
+    if not players and (a.overlay or a.working_tree or a.commit != "HEAD"):
+        print("--commit, --overlay and --working-tree are for the player zips (--edition core, plus or players).",
+              file=sys.stderr)
+        return 2
+    if a.working_tree and a.overlay:
+        print("--overlay lays files over a commit; --working-tree takes them all from the working tree: pick one.",
+              file=sys.stderr)
+        return 2
     terms = leak_terms(root) if terms is None else terms
+    src_root, files, commit, stamp = root, None, "", {}
+    runtime_dir = a.runtime if a.runtime is not None else default_work(root) / "runtime"
+    starter = a.starter if a.starter is not None else default_work(root) / "starter" / STARTER_NAME
     try:
-        plans = [plan_release(root, a.version, a.with_binaries, build_dir, terms, forbidden, edition=e,
-                              runtime_dir=a.runtime, starter=a.starter, experimental=a.with_experimental)
+        if players and a.working_tree:
+            head = next(iter(_git_lines(root, "rev-parse", "--verify", "--quiet", "HEAD")), "").strip()
+            dirty = [x for x in _git(root, "status", "--porcelain", "-z", "--untracked-files=all") if len(x) > 3]
+            for e in editions:
+                stamp[e] = (f"Breathalyzer{' Plus' if e == 'plus' else ''} {a.version}, built from the working tree "
+                            f"at commit {head or '(none yet)'} ({len(dirty)} changed file(s)). A test build: not for "
+                            f"upload.")
+        elif players:
+            src = take_snapshot(root, a.commit, a.overlay)
+            print(f"Taking the files from commit {src.commit[:12]}"
+                  + (f" plus {len(src.local)} uncommitted file(s) (a test build)" if src.local else "")
+                  + f": {src.root}")
+            if build_dir is None:
+                print("Building the DLLs from that commit (low priority)...")
+                build_dir = build_snapshot_native(src, a.install)
+            src_root, files, commit = src.root, src.files, src.commit
+            stamp = {e: src.stamp(e, a.version) for e in editions}
+        plans = [plan_release(src_root, a.version, a.with_binaries, build_dir, terms, forbidden, edition=e,
+                              runtime_dir=runtime_dir, starter=starter, experimental=a.with_experimental,
+                              files=files, commit=commit, stamp=stamp.get(e, ""))
                  for e in editions]
     except ReleaseError as e:
         print(f"Refused: {e}")
+        show_refused(e.problems)
         print("Nothing written.")
         return 1
 
@@ -1472,7 +1663,7 @@ def main(argv: list[str] | None = None, *, root: Path = REPO, build_dir: Path | 
         return 1
     for plan in plans:
         try:
-            zip_path, sums_path = write_release(plan, out_dir, cc.read_allow(root), terms)
+            zip_path, sums_path = write_release(plan, out_dir, cc.read_allow(src_root), terms)
         except WriteError as e:
             print(f"Couldn't write the release: {e}")
             return EXIT_WRITE_FAILED
@@ -1489,6 +1680,8 @@ def main(argv: list[str] | None = None, *, root: Path = REPO, build_dir: Path | 
         for rel in plan.not_built:
             print(f"Not built, left out: {rel}")
         print(f"SHA-256 list: {sums_path}")
+        if plan.stamp:
+            print(f"  {plan.stamp}")
     print("Checked again after writing: clean.")
     return 0
 

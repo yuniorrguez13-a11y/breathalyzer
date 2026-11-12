@@ -80,9 +80,12 @@ class GhostNative(unittest.TestCase):
         """0.7.0 (coop_story.c, a fake flag manager): the story list loads (dlc lines only when asked; a bad name is
         refused), every name is read and published with a seq that only moves on a change, a story line adds only
         0 -> 1 and only listed names, a bad line is refused, nothing is read or set while the busy bit is up or
-        there is no world, a refused set is tried again, and the developer probe reads one flag."""
+        there is no world, a refused set is tried again, and the developer probe reads one flag. With no known getter
+        (the game's, today: the first guess crashed the game in probe run B) nothing is called for a read and the list
+        never says "ready"."""
         self.group("coop", ["load", "bad_list", "load_dlc", "reads", "seq_steady", "bad_hex", "adds_only", "get_hex",
-                            "busy_waits", "retry", "no_world", "world_back", "probe_read"])
+                            "busy_waits", "retry", "no_world", "world_back", "probe_read", "no_getter_no_call",
+                            "no_getter_not_ready"])
 
     def test_nothing_else_failed(self):
         self.assertEqual(self.fails, 0, self.report)

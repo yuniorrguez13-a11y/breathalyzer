@@ -932,6 +932,7 @@ static void items_setup(void) {
 // table by the string object's char*. Every set is logged: a set to 0, or of a name the list doesn't have, fails.
 
 #define FF_N 6
+#define FF_GET 0x70000000f0ull  // the fake getter's address (the game's getter is not known yet: COOP_GET_BOOL is 0)
 static const char *const FF_NAMES[FF_N] = {"FirstTower_Activated", "MapTower_01", "Clear_Dungeon000",
                                             "IsGet_PlayerStole2", "IsGet_Obj_Camera", "Outside_The_List"};
 static int g_ff_val[FF_N];
@@ -951,10 +952,10 @@ static int ff_find(uint64_t obj) {
 
 static int coop_call(struct Cpu *c, uint64_t fn) {
     SwModRegs *r = SWMOD_REGS(c);
-    if (fn != COOP_GET_BOOL && fn != COOP_SET_BOOL) return 0;
+    if (fn != FF_GET && fn != COOP_SET_BOOL) return 0;
     int busy = r->x[0] != P(g_ff_mgr) || (g_ff_mgr[COOP_BUSY_OFF] & COOP_BUSY_BIT);
     int i = ff_find(r->x[2]);
-    if (fn == COOP_GET_BOOL) {
+    if (fn == FF_GET) {
         g_ff_gets++;
         if (busy || i < 0) {
             r->x[0] = 0;
@@ -985,6 +986,7 @@ static void check_coop(void) {
     g_coop_mgr_slot = P(&g_ff_slot);
     g_ff_slot = P(g_ff_mgr);
     g_coop_world = ff_world;
+    g_coop_get_fn = FF_GET;
     memset(g_ff_val, 0, sizeof g_ff_val);
     g_ff_val[0] = 1;  // FirstTower_Activated already set
     g_ff_val[5] = 0;
@@ -1075,6 +1077,26 @@ static void check_coop(void) {
     coop_ticks(1);
     check("coop", "probe_read", g_coop_probe.done && g_coop_probe.ok && g_coop_probe.value == 1 && !g_ff_set_unlisted,
           "done %d ok %lld value %lld", g_coop_probe.done, (long long)g_coop_probe.ok, (long long)g_coop_probe.value);
+    // no known getter (the game's): a read never calls anything and answers "not found"
+    g_coop_get_fn = COOP_GET_BOOL;
+    int64_t gets = g_ff_gets;
+    lock();
+    memset(&g_coop_probe, 0, sizeof g_coop_probe);
+    strcpy(g_coop_probe.name, "FirstTower_Activated");
+    g_coop_probe.want = 1;
+    unlock();
+    coop_ticks(1);
+    check("coop", "no_getter_no_call", g_coop_probe.done && !g_coop_probe.ok && g_ff_gets == gets,
+          "done %d ok %lld gets %lld", g_coop_probe.done, (long long)g_coop_probe.ok, (long long)(g_ff_gets - gets));
+    // ... and a list read without a getter never says "ready" (every read failed: its zeros mean nothing)
+    coop_load_text(list, 0);
+    coop_ticks(10);
+    lock();
+    int no_get_ready = g_coop_pub.ready;
+    int64_t no_get_fails = g_coop_pub.read_fails;
+    unlock();
+    check("coop", "no_getter_not_ready", !no_get_ready && no_get_fails > 0 && g_ff_gets == gets,
+          "ready %d read_fails %lld gets %lld", no_get_ready, (long long)no_get_fails, (long long)(g_ff_gets - gets));
     g_coop_world = coop_world_real;
     g_coop_mgr_slot = COOP_FLAG_MGR;
     coop_load_text("", 0);

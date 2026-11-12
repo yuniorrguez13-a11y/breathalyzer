@@ -326,21 +326,31 @@ def fake_layout(*, rotate_a=False, slots=True) -> bytes:
     return flyt([t[0] for t in TEXTURES], mats, root)
 
 
-def fake_loop(slots=True) -> bytes:
+# The pattern colour (black, white) per set, as in the game's menu: the single picture of set 2 sits on a dark blue
+# pattern; the back set (1) shows a near-white colour carried over from the set before it (3), which is hidden under
+# the back picture in the game's own menu.
+TINT_1 = ((230, 220, 200), (240, 230, 222))
+TINT_2 = ((6, 24, 51), (12, 31, 65))
+TINT_3 = ((231, 218, 197), (241, 229, 220))
+
+
+def fake_loop(slots=True, wrap_b=False) -> bytes:
+    """wrap_b: set 3 (Single_B) runs past the loop's end (frames 251-349, mid-hold 300 = frame 0)."""
     panes = {}
     if slots:
+        b_alpha = ([(0, 255, 0), (40, 255, 0), (50, 0, 0), (250, 0, 0), (260, 255, 0), (300, 255, 0)] if wrap_b
+                   else fade(200, 210, 290, 300))
         panes = {
             "Back": [("FLPA", 0, lin(0, 40, 100, 20), False), ("FLVC", 16, fade(0, 10, 90, 100), False)],
             "Front": [("FLPA", 0, lin(0, 0, 100, 50), False), ("FLVC", 16, fade(0, 15, 85, 100), False)],
             "Single_A": [("FLPA", 0, lin(100, -410, 200, -390), False), ("FLVC", 16, fade(100, 110, 190, 200), False)],
             "Cap_A": [("FLPA", 0, lin(100, -410, 200, -390), False)],
             "N_CapA": [("FLVC", 16, fade(100, 101, 199, 200), False)],
-            "Single_B": [("FLPA", 1, lin(200, -20, 300, 20), False), ("FLVC", 16, fade(200, 210, 290, 300), False)],
+            "Single_B": [("FLPA", 1, lin(200, -20, 300, 20), False), ("FLVC", 16, b_alpha, False)],
         }
     panes["Light"] = [("FLVC", 16, [(0, 144, 0), (300, 144, 0)], False)]
-    mats = {"P_Bg": [("FLMC", 0, 0, plateau(10, 100, 0), False), ("FLMC", 0, 1, plateau(20, 0, 0), False),
-                     ("FLMC", 0, 2, plateau(30, 0, 100), False), ("FLMC", 0, 4, plateau(40, 200, 50), False),
-                     ("FLMC", 0, 5, plateau(50, 50, 50), False), ("FLMC", 0, 6, plateau(60, 50, 250), False)]}
+    mats = {"P_Bg": [("FLMC", 0, 4 * k + c, plateau(TINT_1[k][c], TINT_2[k][c], TINT_3[k][c]), False)
+                     for k in (0, 1) for c in range(3)]}
     return flan(300, True, panes, mats)
 
 
@@ -456,6 +466,14 @@ class Png(unittest.TestCase):
         self.check(data, [[(10, 20, 30, 0), (1, 2, 3, 255)]])
         data = make_png(2, 1, 0, 16, lambda x, y: (1000,) if x else (65535,), trns=struct.pack(">H", 1000))
         self.check(data, [[(255, 255, 255, 255), (3, 3, 3, 0)]])
+        key = struct.pack(">HHH", 1000, 2000, 3000)   # 16-bit colour: the key compares all 16 bits
+        data = make_png(3, 1, 2, 16, lambda x, y: ((1000, 2000, 3000), (1000, 2000, 3001), (5, 6, 7))[x], trns=key)
+        self.check(data, [[(3, 7, 11, 0), (3, 7, 11, 255), (0, 0, 0, 255)]])
+
+    def test_long_palette(self):
+        plte = bytes(range(256)) * 3 + bytes(3 * 44)   # 300 colours (only 256 can be used)
+        data = make_png(2, 1, 3, 8, lambda x, y: (x * 255,), plte=plte)
+        self.check(data, [[(0, 1, 2, 255), (253, 254, 255, 255)]])
 
     def test_damaged_files(self):
         good = mb.png_bytes(gradient(8, 8))
@@ -544,6 +562,40 @@ class Loading(unittest.TestCase):
         self.assertFalse(mb.is_cutout(few))
         self.assertTrue(mb.is_cutout(more))
         self.assertFalse(mb.is_cutout(gradient(10, 10, lambda x, y: 250)))
+
+    def test_a_few_clear_pixels_become_black(self):
+        corner = gradient(400, 400, lambda x, y: 0 if x + y < 20 else 255)   # rounded corner: 0.13 % clear
+        p = write_pic(self.tmp / "shot.png", corner)
+        for pil in (False, True):
+            if pil and not PILImage:
+                continue
+            ctx = contextlib.nullcontext() if pil else mock.patch.dict(sys.modules, {"PIL": None})
+            with ctx:
+                pic = mb.load_picture(str(p))
+            self.assertEqual((pic.cutout, pic.cleared), (False, True))
+            self.assertEqual(set(pic.px[3::4]), {255})
+            self.assertEqual(bytes(pic.px[19 * 4:20 * 4]), b"\0\0\0\xff")       # the clear corner: black
+            self.assertEqual(pic.px[(200 * 400 + 200) * 4:(200 * 400 + 200) * 4 + 4],
+                             corner.px[(200 * 400 + 200) * 4:(200 * 400 + 200) * 4 + 4])
+        cut = write_pic(self.tmp / "cut.png", gradient(400, 400, lambda x, y: 0 if x < 100 else 255))
+        pic = mb.load_picture(str(cut))
+        self.assertEqual((pic.cutout, pic.cleared), (True, False))
+
+    @unittest.skipUnless(PILImage, "Pillow isn't installed")
+    def test_any_kind_can_be_a_cutout(self):
+        im = PILImage.new("RGBA", (400, 400), (10, 200, 30, 255))
+        im.paste((0, 0, 0, 0), (0, 0, 100, 400))
+        buf = io.BytesIO()
+        im.save(buf, "WEBP", lossless=True)
+        (self.tmp / "cut.webp").write_bytes(buf.getvalue())
+        self.assertTrue(mb.load_picture(str(self.tmp / "cut.webp")).cutout)
+
+    def test_too_much_memory_is_one_line(self):
+        p = write_pic(self.tmp / "pic.png", gradient(400, 380))
+        with mock.patch.object(mb, "is_cutout", side_effect=MemoryError), self.assertRaises(mb.MenuBgError) as cm:
+            mb.load_picture(str(p))
+        self.assertEqual(str(cm.exception), "pic.png is too big for this PC's memory. Save it smaller (for example "
+                                            "1920 x 1080).")
 
 
 # ================================================================ BC codec
@@ -658,6 +710,12 @@ class ImageOps(unittest.TestCase):
         self.assertEqual(mb.source_box((0, 0, 100, 100), p), (100.0, 0.0, 200.0, 100.0))
         p = mb.fit(pic, (10, 10, 110, 110), True, "center")     # contain: whole, on the bottom edge
         self.assertEqual((p.s, p.ox, p.oy), (0.5, 10.0, 60.0))
+        tall = mb.Picture(100, 300, bytearray(100 * 300 * 4))   # portrait into a wide box: 100 x 50 of it shows
+        p = mb.fit(tall, (0, 0, 100, 50), False, "center")
+        box = mb.source_box((0, 0, 100, 50), p)
+        self.assertAlmostEqual((box[1] + box[3]) / 2, 100.0)   # the upper third (the head) in the middle
+        p = mb.fit(tall, (0, 0, 100, 50), False, "top")
+        self.assertEqual(mb.source_box((0, 0, 100, 50), p), (0.0, 0.0, 100.0, 50.0))
 
     def test_feather(self):
         img = mb.Picture(100, 10, bytearray(b"\x80\x80\x80\xff" * 1000))
@@ -742,12 +800,25 @@ class Model(unittest.TestCase):
         self.assertEqual(s2.slots[0].copies, ["Cap_A"])
         self.assertAlmostEqual(s2.slots[0].glow, 128 / 255, places=3)
         self.assertEqual(back.glow, 0.0)
-        close(s1.tint[0], (10 / 255, 20 / 255, 30 / 255))
-        close(s1.tint[1], (40 / 255, 50 / 255, 60 / 255))
-        close(s2.tint[0], (100 / 255, 0, 0))
+        for st, tint in ((s1, TINT_1), (s2, TINT_2), (s3, TINT_3)):
+            close(st.tint[0], [v / 255 for v in tint[0]])
+            close(st.tint[1], [v / 255 for v in tint[1]])
         self.assertEqual((m.pattern.pane, m.pattern.texture, m.pattern.scale, m.pattern.center),
                          ("P_Bg", "Fake_Pattern^r", (2.0, 2.0), (640.0, 360.0)))
         close(m.art_box(), (40, 30, 640, 690))
+        self.assertEqual(m.art_tint(), s2.tint)             # (where the art box comes from: not set 1's near white)
+        # the words: 4 parts at x 491 (from the centre), y 40, 0, -40, -80; bars 90 x 14 ending 85 right of them
+        close(m.words, (1126 - mb.WORDS_PAD, 313 - mb.WORDS_PAD, 1216 + mb.WORDS_PAD, 447 + mb.WORDS_PAD))
+
+    def test_a_set_past_the_loop_end(self):
+        lay = mb.read_flyt(fake_layout())
+        info = {n: (f, w, h, 1) for n, f, w, h, _ in TEXTURES}
+        m = mb.build_model(lay, {"loop": mb.read_flan(fake_loop(wrap_b=True))}, info)
+        s3 = m.sets[2]
+        self.assertEqual((s3.window, s3.hold, s3.mid), ((251, 349), (260, 340), 300.0))
+        for got, want in zip(s3.tint, TINT_1):              # the colour at frame 0, not the last key's
+            for x, y in zip(got, want):
+                self.assertAlmostEqual(x, y / 255, places=3)
 
     def test_refused_layouts(self):
         for kw, why in (({"rotate_a": True}, "is rotated"), ({"slots": False}, "no ")):
@@ -812,6 +883,15 @@ class Build(unittest.TestCase):
         changed = [t.name for t in new.textures.textures if t.levels != ot[t.name].levels]
         self.assertEqual(changed, ["Pic_A^q"])
 
+    def test_archive_must_keep_its_size(self):
+        m = menu()
+        levels = mb.encode_slots(m.model, mb.make_slots(m.model, [gradient(640, 400)], "art", {2}, "center", None))
+        real = wc.sarc_build
+        with mock.patch.object(mb.wc, "sarc_build", side_effect=lambda *a, **k: real(*a, **k) + b"\0" * 16), \
+                self.assertRaises(mb.MenuBgError) as cm:
+            mb.build_pack(m, levels)
+        self.assertEqual(str(cm.exception), "The new menu file came out a different size. Nothing was changed.")
+
     def test_art_mode_looks(self):
         m = menu()
         pic = gradient(640, 400)
@@ -820,11 +900,43 @@ class Build(unittest.TestCase):
         alpha = a.px[3::4]
         self.assertEqual(alpha[(a.h // 2) * a.w + a.w // 2], 255)
         self.assertLess(alpha[(a.h // 2) * a.w + a.w - 1], 40)
-        back = images["Pic_Back^o"]           # outside the art box (x 40..640): the pattern, tinted
-        lut = [mb.lin_to_srgb((10 + 30 * v / 255) / 255) for v in (0, 255)]
-        x = int((1200 + 2) / 1344 * 64)
+        back = images["Pic_Back^o"]           # outside the art box (x 40..640): the pattern in set 2's blue
+        black, white = TINT_2
+        x = int((900 + 2) / 1344 * 64)
         o = ((back.h // 2) * back.w + x) * 4
-        self.assertTrue(min(lut) - 2 <= back.px[o] <= max(lut) + 2, back.px[o:o + 4])
+        for c in range(3):
+            lut = [mb.lin_to_srgb((black[c] + (white[c] - black[c]) * v / 255) / 255) for v in (0, 255)]
+            self.assertTrue(min(lut) - 3 <= back.px[o + c] <= max(lut) + 3, (c, back.px[o:o + 4]))
+        light, cols = mb.words_light(back, m.model.sets[0].slots[0].rect, m.model.sets[0].slots[0].pan, m.model.words)
+        self.assertIsNotNone(cols)
+        self.assertLessEqual(light, mb.WORDS_LIGHT)   # under the words: dark (set 1's own colour is near white)
+
+    def test_words_stay_readable_on_a_white_picture(self):
+        m = menu()
+        white = mb.Picture(640, 400, bytearray(b"\xff" * (640 * 400 * 4)))
+        slot = m.model.sets[0].slots[0]
+        for mode in ("full", "art"):
+            images = mb.make_slots(m.model, [white], mode, {1}, "center", m.pattern_plane())
+            back = images["Pic_Back^o"]
+            light, cols = mb.words_light(back, slot.rect, slot.pan, m.model.words)
+            self.assertLessEqual(light, mb.WORDS_LIGHT, mode)
+            if mode == "full":                # the left of the screen keeps the picture's light
+                x = int((200 + 2) / 1344 * 64)
+                self.assertGreater(back.px[((back.h // 2) * back.w + x) * 4], 230)
+        img = mb.Picture(64, 36, bytearray(b"\x10\x10\x10\xff" * (64 * 36)))   # already dark: left alone
+        before = bytes(img.px)
+        self.assertEqual(mb.guard_words(img, slot.rect, slot.pan, m.model.words, 1280), 1.0)
+        self.assertEqual(bytes(img.px), before)
+
+    def test_pictures_go_in_the_order_of_the_chosen_sets(self):
+        m = menu()
+        red = mb.Picture(400, 400, bytearray(b"\xff\x00\x00\xff" * (400 * 400)))
+        blue = mb.Picture(400, 400, bytearray(b"\x00\x00\xff\xff" * (400 * 400)))
+        images = mb.make_slots(m.model, [red, blue], "art", {2, 3}, "center", None)
+        for name, want in (("Pic_A^q", 0), ("Pic_B^q", 2)):
+            img = images[name]
+            o = ((img.h // 2) * img.w + img.w // 2) * 4
+            self.assertEqual(max(range(3), key=lambda c: img.px[o + c]), want, name)
 
     def test_cutout(self):
         m = menu()
@@ -885,7 +997,7 @@ class Library(Base):
         out = self.set()
         self.assertTrue(out.splitlines()[-3].startswith("Done: your picture is on the main menu (all 3 slideshow"),
                         out)
-        self.assertIn("Deployed. Start the game to see it.", out)
+        self.assertIn("Deployed. Start the game to see it: python tools/modman.py run", out)
         lib = self.lib
         self.assertEqual([m["id"] for m in lib.mods], [mb.MOD_ID])
         entry = lib.mods[0]
@@ -965,6 +1077,56 @@ class Library(Base):
         rc, out = run(["status", "--library", str(self.libdir)])
         self.assertIn("Menu picture: on, mode art, slideshow picture 2, picture: linkle.png.", out)
         self.assertIn("Not deployed yet", out)
+        self.assertNotIn("Run set again", out)
+        info_path = self.libdir / "mods" / mb.MOD_ID / mb.INFO_FILE
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        info["version"] = "1.0.0"
+        info_path.write_text(json.dumps(info), encoding="utf-8")
+        rc, out = run(["status", "--library", str(self.libdir)])
+        self.assertIn("It was made with an older version of this tool. Run set again to get the fixed menu.", out)
+        theirs = tm.write(self.tmp / "dl" / "Their Menu", {"romfs/Pack/Title.pack": fake_pack(seed=5)})
+        quiet(mm.add_mod, self.lib, str(theirs))
+        rc, out = run(["status", "--library", str(self.libdir)])
+        self.assertIn("It was made over the menu file of the game, but now Their Menu's is used. Run set again.", out)
+
+    def test_a_chosen_title_picture_wins(self):
+        chosen = self.libdir / "pictures" / "_title" / "chosen.png"
+        write_pic(chosen, gradient(400, 400))
+        out = self.set()
+        lines = out.splitlines()
+        self.assertIn("Done: the menu picture is in your library (all 3 slideshow pictures).", lines)
+        self.assertIn("Your title picture chosen.png is shown instead. Remove it in the Mods page to see this one.",
+                      lines)
+        self.assertNotIn("Done: your picture is on the main menu", out)
+        rc, out = run(["status", "--library", str(self.libdir)])
+        self.assertIn("Your title picture chosen.png is shown instead.", out)
+        rc, out = run(["reset", "--library", str(self.libdir)])
+        self.assertIn("Your title picture chosen.png stays on the menu. Remove it in the Mods page to get the game's "
+                      "own menu back.", out)
+        self.assertNotIn("The game's own menu is back", out)
+        chosen.unlink()
+        toml = '[mod]\nid = "test.pics"\nname = "Pics"\nversion = "1.0"\ntitle_picture = "title.png"\n' \
+               '[data]\nromfs = "romfs"\n'
+        mod = tm.write(self.tmp / "dl" / "Pics", {"mod.toml": toml, "title.png": mb.png_bytes(gradient(400, 400)),
+                                                  "romfs/Actor/Pack/Thing.sbactorpack": b"made-up"})
+        quiet(mm.add_mod, self.lib, str(mod))
+        self.assertEqual(mb.title_choice(self.lib), ("title.png", "Pics"))
+
+    def test_only_menu_picture_deploy_notes(self):
+        notes = ["the-other-mod ships an RSTB, so start Savage Wind with SOMETHING=1 (made up)",
+                 "The RSTB comes from the-other-mod only; files from botw-mod-loader.menu-picture may need entries",
+                 "Title: the title picture x.png isn't used this time: made up"]
+        orig = self.fake_deploy
+
+        def deploy(lib, **kw):
+            r = orig(lib, **kw)
+            r["attention"] = list(notes)
+            return r
+
+        with mock.patch.object(mm, "deploy", side_effect=deploy):
+            out = self.set()
+        self.assertIn("Note: Title: the title picture x.png isn't used this time: made up", out)
+        self.assertNotIn("RSTB", out)
 
 
 class Guards(Base):
@@ -1108,6 +1270,13 @@ class MadeAtDeploy(Base):
         gen = mb.deploy_files(self.lib, None, str(self.tmp / "missing.png"))
         self.assertEqual(list(gen), [])
         self.assertTrue(gen.attention)
+
+    def test_a_too_big_file_is_not_read(self):
+        with mock.patch.object(mb, "MAX_FILE", 1000), mock.patch.object(mb, "load_picture") as load:
+            gen = mb.deploy_files(self.lib, None, str(self.pic))
+        self.assertEqual(list(gen), [])
+        self.assertIn("linkle.png is too big", gen.attention[0])
+        load.assert_not_called()
 
 
 class Preview(Base):

@@ -9,7 +9,8 @@
 # default: "on" or "off" in the picker. The rule: a mod that changes nothing until you use it is on; a mod that
 #   changes the game (gameplay, looks, a game file), costs fps or uses the network is off.
 # why: why that default (shown under Details).
-# tags: short notes the picker shows on the mod's card.
+# tags: short notes the picker shows on the mod's card (plain words: "You type a command for it", not "console").
+# developer: true when the mod's commands need developer mode: Play turns developer commands on while it is ON.
 # ready: true = in the Plus zip. false = not tested enough yet: left out (make_release --with-experimental adds the
 #   built ones, marked Experimental and off).
 # kind "code": a DLL. manifest = its mod.toml, dll = the built DLL (a path under build/native).
@@ -33,10 +34,10 @@ after_add = [["modmenu.py", "sync"]]
 [[mod]]
 id = "botw-mod-loader.basics-show-pos"
 title = "Show Position"
-description = "Type where in the game's console (F12) to see where Link is."
+description = "Type where in the command box (press F12) to see where Link is."
 default = "on"
-why = "It does nothing until you type the command."
-tags = []
+why = "It does nothing until you type its command."
+tags = ["You type a command for it"]
 ready = true
 kind = "code"
 manifest = "native/examples/basics_show_pos/mod.toml"
@@ -45,10 +46,11 @@ dll = "build/native/basics-mods/basics_show_pos.dll"
 [[mod]]
 id = "botw-mod-loader.basics-inf-stamina"
 title = "Infinite Stamina"
-description = "Stamina never runs out. Type infstamina off in the console to stop it."
+description = "Stamina never runs out. Type infstamina off in the command box (F12) to stop."
 default = "off"
-why = "It changes gameplay."
-tags = ["Changes gameplay", "Needs developer mode for its command"]
+why = "It changes how the game plays."
+tags = ["Changes how the game plays", "While it is on, Play turns on developer commands"]
+developer = true
 ready = true
 kind = "code"
 manifest = "native/examples/basics_inf_stamina/mod.toml"
@@ -57,10 +59,11 @@ dll = "build/native/basics-mods/basics_inf_stamina.dll"
 [[mod]]
 id = "botw-mod-loader.basics-teleport-up"
 title = "Teleport Up"
-description = "Type up in the console to move Link straight up (10 m, or up 50)."
+description = "Type up in the command box (press F12) to lift Link 10 meters."
 default = "off"
-why = "It moves Link, and you can get stuck."
-tags = ["Needs developer mode"]
+why = "It moves Link, and he can get stuck."
+tags = ["You type a command for it", "While it is on, Play turns on developer commands"]
+developer = true
 ready = true
 kind = "code"
 manifest = "native/examples/basics_teleport_up/mod.toml"
@@ -69,10 +72,11 @@ dll = "build/native/basics-mods/basics_teleport_up.dll"
 [[mod]]
 id = "botw-mod-loader.perf-effects"
 title = "Performance: effects off"
-description = "No glow, soft shadows or far blur, for more fps on a weak PC."
+description = "No glow, soft shadows or far blur, so the game runs smoother on a slow PC."
 default = "off"
-why = "It replaces Pack/Bootup.pack, so Savage Wind's HUD button letters and voice fix are off."
-tags = ["Built from your game files the first time (about 1 minute)", "Changes how the game looks"]
+why = "It changes how the game looks."
+tags = ["Built from your game files the first time (about 1 minute)", "Changes how the game looks",
+        "Turns off Savage Wind's button letters and voice fix"]
 ready = true
 kind = "recipe"
 folder = "native/examples/perf_effects"

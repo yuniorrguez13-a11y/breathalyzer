@@ -78,12 +78,13 @@ class Settings:
     library: str | None = None        # the mod library
     size: int = DEFAULT_SIZE          # text size, points
     dark: bool = False
-    port: int | None = None           # the cheats' control port (None: modman's 7777)
+    port: int | None = None           # the control port (None: modman's 7777; only --port sets another)
     hide_while_playing: bool = False
     picked: str = ""                  # the bundled mods list the player answered in the mod picker (read_bundled)
+    dev: bool = False                 # Settings > Developer commands: Play opens the control port (developer mode)
     extra: dict = field(default_factory=dict)   # keys a newer launcher wrote: kept as they are
 
-    KEYS = ("install", "library", "size", "dark", "port", "hide_while_playing", "picked")
+    KEYS = ("install", "library", "size", "dark", "port", "hide_while_playing", "picked", "dev")
 
 
 def home_dir(env: dict | None = None) -> str:
@@ -121,7 +122,7 @@ def load_settings(path: str) -> tuple[Settings, str | None]:
             setattr(s, key, data[key])
     if type(data.get("size")) is int and MIN_SIZE <= data["size"] <= MAX_SIZE:
         s.size = data["size"]
-    for key in ("dark", "hide_while_playing"):
+    for key in ("dark", "hide_while_playing", "dev"):
         if type(data.get(key)) is bool:
             setattr(s, key, data[key])
     if type(data.get("port")) is int and 1 <= data["port"] <= 65535:
@@ -828,7 +829,7 @@ def read_bundled(app_dir: str = REPO) -> tuple[str, list[dict]]:
         mod = {"id": m["id"], "title": m["title"], "description": m["description"], "on": m["default"] == "on",
                "why": m.get("why") if isinstance(m.get("why"), str) else "", "kind": m["kind"],
                "tags": [t for t in m.get("tags") or [] if isinstance(t, str)], "after_add": after,
-               "experimental": m.get("experimental") is True}
+               "experimental": m.get("experimental") is True, "developer": m.get("developer") is True}
         if m["kind"] == "code":
             mod["folder"] = app_folder(m.get("folder"), app_dir)
             if mod["folder"] is None:
@@ -1047,9 +1048,17 @@ def read_shortcut(path: str) -> dict:
     return out
 
 
+STARTER = "Start Breathalyzer.exe"     # next to app\ in the player zips (tools/packaging/build_starter.py)
+
+
 def shortcut_parts(app_dir: str = REPO, python: str | None = None) -> tuple[str, str, str, str]:
-    """(target, arguments, start-in folder, icon) of a shortcut that starts this launcher: the python next to this
-    one (pythonw.exe: no console window), -I, tools\\launcher.py."""
+    """(target, arguments, start-in folder, icon) of a shortcut that starts this launcher. In the player zips:
+    Start Breathalyzer.exe, the starter the player knows (never pythonw.exe straight: antivirus programs flag that
+    pattern). From the source: the python next to this one (pythonw.exe: no console window), -I, tools\\launcher.py."""
+    top = package_top(app_dir)
+    starter = os.path.join(top, STARTER)
+    if os.path.basename(app_dir).lower() == "app" and os.path.isfile(starter):
+        return starter, "", top, starter
     exe = python or sys.executable or "pythonw.exe"
     folder = os.path.dirname(exe)
     w = os.path.join(folder, "pythonw.exe")
@@ -1094,10 +1103,59 @@ def parser() -> argparse.ArgumentParser:
     return ap
 
 
+ERROR_FILE = "launcher-error.txt"     # in home_dir(): what went wrong when the launcher couldn't start
+START_FAILED = ("Breathalyzer couldn't start.", "Unpack the zip again, or allow Breathalyzer in your antivirus.",
+                "What went wrong is in this file:")
+
+
+def write_error(text: str, env: dict | None = None) -> str:
+    """Write what went wrong to launcher-error.txt (home_dir); returns its path, or "" when it can't be written."""
+    path = os.path.join(home_dir(env), ERROR_FILE)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  Breathalyzer couldn't start (Python {sys.version.split()[0]},"
+                    f" {REPO})\n\n{text}")
+        return path
+    except OSError:
+        return ""
+
+
+def message_box(heading: str, text: str) -> bool:
+    """A Windows message box (user32, through ctypes: it needs no Tk). Under pythonw it is the only way a player sees
+    why the launcher didn't start. False when there is none (not Windows)."""
+    if sys.platform != "win32":
+        print(f"{heading}\n{text}", file=sys.stderr)
+        return False
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, f"{heading}\n\n{text}", APP_NAME, 0x10 | 0x10000)  # (error, on top)
+        return True
+    except Exception:  # (nothing more can be done)
+        return False
+
+
+def clean_tcl_env(env: dict | None = None) -> list[str]:
+    """Drop TCL_LIBRARY and TK_LIBRARY (another program may leave them set: Tk would then load that program's Tcl and
+    fail). Must run before tkinter is imported. Returns the names it dropped."""
+    env = os.environ if env is None else env
+    gone = [k for k in ("TCL_LIBRARY", "TK_LIBRARY") if k in env]
+    for k in gone:
+        del env[k]
+    return gone
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    import modman_gui as gui   # (the window; it imports modman, which takes a moment)
-    return gui.launcher_main(args)
+    clean_tcl_env()
+    try:
+        import modman_gui as gui   # (the window; it imports modman, which takes a moment)
+        return gui.launcher_main(args)
+    except Exception:  # (pythonw has no console: without this a failed start shows nothing at all)
+        import traceback
+        path = write_error(traceback.format_exc())
+        message_box(START_FAILED[0], START_FAILED[1] + (f"\n\n{START_FAILED[2]}\n{path}" if path else ""))
+        return 3
 
 
 if __name__ == "__main__":

@@ -2,10 +2,10 @@
 """Put your own picture on the game's main menu (BotW 1.9.0 on Savage Wind), for example a shot of your character.
 
     python tools/menu_bg.py set <picture> [<picture> ...] [--mode art|full] [--name NAME] [--sets all|2|1,3,5]
-                            [--focus left|center|right] [--no-deploy] [--priority normal] [--library <folder>]
+                            [--focus left|center|right|top] [--no-deploy] [--priority normal] [--library <folder>]
     python tools/menu_bg.py reset [--no-deploy] [--library <folder>]
     python tools/menu_bg.py preview [<picture> ...] --out <file.png> [--mode art|full] [--set 1-7|all]
-                                [--focus left|center|right] [--library <folder>]
+                                [--focus left|center|right|top] [--library <folder>]
     python tools/menu_bg.py status [--library <folder>]
 
 The main menu shows a slideshow of 7 pictures. `set` puts your picture into all of them (or only the ones --sets
@@ -14,10 +14,12 @@ texture file changes (inside Pack/Title.pack): every texture keeps its name, for
 its size and no size table (RSTB) is needed.
 
   --mode art   (default) your picture where each original picture is, on the left, with soft edges, over the game's
-               own blue pattern. A PNG with see-through parts is used as a cut-out.
-  --mode full  your picture fills the screen, darker on the right so the menu stays readable.
+               own blue pattern. A picture with see-through parts is used as a cut-out.
+  --mode full  your picture fills the screen, darker on the right so the menu stays readable (a bright picture gets
+               darker there until the words are).
 
-With several pictures, slideshow picture k gets picture (k-1) mod n. PNG works everywhere (pure Python); JPG, WEBP,
+With several pictures, the first chosen slideshow picture gets the first file, the next one the second file, and so
+on (starting again at the first file). PNG works everywhere (pure Python); JPG, WEBP,
 BMP and GIF need Pillow. `preview` draws one menu frame (or all 7, --set all) to a PNG and changes nothing; without a
 picture it draws the menu as it is. Exit codes: 0 done, 2 error (one plain line), 130 stopped.
 Everything is read from the files: no texture or pane name of the game is written in this tool. docs/menu-background.md
@@ -54,7 +56,7 @@ from wiiu_model import nx_bntx  # noqa: E402
 from wiiu_model.errors import ModelError  # noqa: E402
 
 TOOL_ID = "botw-mod-loader menu_bg"
-TOOL_VERSION = "1.0.0"
+TOOL_VERSION = "1.1.0"     # (1.1.0: words stay readable; menu files made by 1.0.0 should be made again)
 MOD_ID = "botw-mod-loader.menu-picture"
 AUTHOR = "giruka"
 PACK_REL = "Pack/Title.pack"
@@ -79,12 +81,23 @@ GLOW_GAIN = 0.63           # the menu's glow adds about this much of a picture's
 FULL_SHADE = (0.55, 0.5)   # full mode: from this share of the screen width, darker to the right, down to this light
 SOFTEN_PX = 1.5            # cut-outs: their edge is softened by about this many texels
 EDGE_TOL = 1.0             # a box edge this close to (or past) the screen border counts as off screen
+BACK_EDGE = 0.02           # art mode, whole-screen pictures: a box edge within this share of the screen border is
+                           # moved past it (no strip of pattern along the border)
+# The menu words must stay readable: the light (linear, this percentile) of what shows under them is kept at most
+# WORDS_LIGHT. The game's own menu has 0.05-0.2 there (its dim words at about 3:1 or more); a white or snowy picture
+# would have 0.6. Darker columns start WORDS_RAMP of the screen width before the words and are dark WORDS_MARGIN
+# before them.
+WORDS_LIGHT = 0.12
+WORDS_PCT = 0.95
+WORDS_RAMP = 0.2
+WORDS_MARGIN = 12.0
+WORDS_PAD = 10.0           # the words' box grown by this much (layout units) on each side (letters past the bars)
 # The self-check's floor: real pictures come out at 38-44 dB after texture compression, pure noise at about 20 dB;
 # a wrong mapping or a broken encoder gives far less.
 MIN_SELF_CHECK_DB = 18.0
 
 MODES = ("art", "full")
-FOCUS = ("left", "center", "right")
+FOCUS = ("left", "center", "right", "top")
 
 
 class MenuBgError(Exception):
@@ -106,6 +119,7 @@ class Picture:
     name: str = ""
     sha256: str = ""
     cutout: bool = False
+    cleared: bool = False   # it had a few see-through pixels (not a cut-out): they were made black
     cache: dict = field(default_factory=dict, repr=False, compare=False)
 
     def row(self, y: int) -> bytearray:
@@ -228,11 +242,14 @@ def _to_rgba(lines: bytearray, w: int, rows: int, stride: int, depth: int, ctype
             line = lines[y * stride:(y + 1) * stride]
             hi += line[0::2]
             full += line
-        if trns is not None and ctype in (0, 2):
-            keys = struct.unpack(">" + "H" * ch, trns[:2 * ch]) if len(trns) >= 2 * ch else None
-            if keys is not None:
-                vals = struct.unpack(f">{n * ch}H", bytes(full))
-                key_alpha = bytes(0 if tuple(vals[i * ch:(i + 1) * ch]) == keys else 255 for i in range(n))
+        if trns is not None and ctype in (0, 2) and len(trns) >= 2 * ch:
+            # (compared as bytes, a pixel at a time from slices: no Python number per sample)
+            key = bytes(trns[:2 * ch])
+            if ch == 1:
+                key_alpha = bytes(0 if bytes(t) == key else 255 for t in zip(full[0::2], full[1::2]))
+            else:
+                key_alpha = bytes(0 if bytes(t) == key else 255
+                                  for t in zip(*(full[k::6] for k in range(6))))
         samples = hi
     elif depth < 8:
         samples = _unpack_bits(lines, w, rows, stride, depth)
@@ -272,8 +289,8 @@ def _to_rgba(lines: bytearray, w: int, rows: int, stride: int, depth: int, ctype
     else:
         if not plte or len(plte) % 3:
             raise PngError("bad", "palette missing")
-        k = len(plte) // 3
-        pal = list(plte) + [0] * (3 * (256 - k))
+        k = min(256, len(plte) // 3)   # (a palette can't have more than 256 colours; extra ones are never used)
+        pal = list(plte[:3 * k]) + [0] * (3 * (256 - k))
         alpha = [255] * 256
         for i, a in enumerate((trns or b"")[:k]):
             alpha[i] = a
@@ -426,27 +443,38 @@ def load_picture(path: str, mode: str = "art") -> Picture:
         raise MenuBgError(f"Can't read {name}. This tool reads PNG (and JPG, WEBP, BMP with Pillow). Save it as PNG.")
     Image = pillow()
     pic = None
-    if kind == "png":
-        try:
-            w, h, depth, _, _ = png_info(data)
-        except PngError as e:
-            raise _damaged(name, e.why) from None
-        check_size(name, w, h, mode)
-        if Image is not None and depth <= 8:
-            pic = _pillow_load(Image, data, name, mode)
-        else:
+    try:
+        if kind == "png":
             try:
-                pic = read_png(data)
+                w, h, depth, _, _ = png_info(data)
             except PngError as e:
                 raise _damaged(name, e.why) from None
-    else:
-        if Image is None:
-            raise MenuBgError(f"Can't read {name}: {KINDS[kind]} needs Pillow, and this PC doesn't have it. Save it as "
-                              "PNG, or run: py -m pip install pillow")
-        pic = _pillow_load(Image, data, name, mode)
+            check_size(name, w, h, mode)
+            if Image is not None and depth <= 8:
+                pic = _pillow_load(Image, data, name, mode)
+            else:
+                try:
+                    pic = read_png(data)
+                except PngError as e:
+                    raise _damaged(name, e.why) from None
+        else:
+            if Image is None:
+                raise MenuBgError(f"Can't read {name}: {KINDS[kind]} needs Pillow, and this PC doesn't have it. Save "
+                                  "it as PNG, or run: py -m pip install pillow")
+            pic = _pillow_load(Image, data, name, mode)
+        # any kind with see-through parts is a cut-out; a picture with only a few (rounded corners) is made opaque
+        # over black, so no hidden colour or straight-alpha fringe shows
+        pic.cutout = is_cutout(pic)
+        if not pic.cutout and pic.px[3::4].count(255) != pic.w * pic.h:
+            pic = flatten(pic)
+            pic.cleared = True
+    except MemoryError:
+        raise MenuBgError(f"{name} is too big for this PC's memory. Save it smaller (for example 1920 x 1080).") \
+            from None
+    except ValueError:
+        raise _damaged(name, "bad") from None
     pic.name = name
     pic.sha256 = hashlib.sha256(data).hexdigest()
-    pic.cutout = kind == "png" and is_cutout(pic)
     return pic
 
 
@@ -1705,17 +1733,35 @@ class Model:
     width: float
     height: float
 
+    words: tuple | None = None    # screen box of the menu words (grown by WORDS_PAD), None when there are none
+
     def slots(self) -> list:
         return [s for st in self.sets for s in st.slots]
 
-    def art_box(self) -> tuple:
-        """Where the picture goes in art mode on a back slot: the first single picture's place (else the left half)."""
+    def _first_single(self):
         for st in self.sets:
             for s in st.slots:
                 if s.role == "single":
-                    x0, y0, x1, y1 = s.rect
-                    return (max(0.0, x0), max(0.0, y0), min(self.width, x1), min(self.height, y1))
+                    return st, s
+        return None, None
+
+    def art_box(self) -> tuple:
+        """Where the picture goes in art mode on a back slot: the first single picture's place (else the left half)."""
+        _, s = self._first_single()
+        if s is not None:
+            x0, y0, x1, y1 = s.rect
+            return (max(0.0, x0), max(0.0, y0), min(self.width, x1), min(self.height, y1))
         return (0.0, 0.0, self.width * FULL_SHADE[0], self.height)
+
+    def art_tint(self) -> tuple:
+        """The pattern colour baked into back slots in art mode: the one of the set art_box() comes from (the menu
+        shows that look next to its own pictures). Not each back set's own colour at mid-hold: that is carried over
+        from the set before it and can be near white, where the words would be unreadable. Without a single picture:
+        the darkest set's colour."""
+        st, _ = self._first_single()
+        if st is not None:
+            return st.tint
+        return min(self.sets, key=lambda x: sum(x.tint[1])).tint
 
 
 def _runs(flags: list[bool]) -> list[tuple[int, int]]:
@@ -1902,11 +1948,40 @@ def build_model(lay: Layout, anims: dict, textures: dict) -> Model:
         r = screen_rect(lay, ps, tf, p)
         pattern = Pattern(p.name, tex, (sx, sy), (tx, ty), ((r[0] + r[2]) / 2, (r[1] + r[3]) / 2))
         for st_ in sets:
-            _, mats = pane_states(lay, [(loop, st_.mid)])
+            _, mats = pane_states(lay, [(loop, st_.mid % n)])   # (a set may run past the loop's end)
             black, white = mats[m.name]
             st_.tint = (tuple(v / 255 for v in black[:3]), tuple(v / 255 for v in white[:3]))
         break
-    return Model(lay, loop, sets, pattern, W, H)
+    return Model(lay, loop, sets, pattern, W, H, menu_words(lay, loop))
+
+
+def menu_words(lay: Layout, loop: Anim) -> tuple | None:
+    """The screen box of the menu words: the bars the preview draws (WORD_BAR) for the first MENU_WORDS parts on
+    screen, grown by WORDS_PAD. None when the layout has no parts."""
+    ps, _ = pane_states(lay, [(loop, 0.0)])
+    tf = transforms(lay, ps)
+    vis = global_visible(lay, ps)
+    words = []
+
+    def walk(p: Pane) -> None:
+        if not vis.get(p.name, False) or any(k in p.user for k in CAPTURE_KEYS):
+            return
+        if p.kind == "prt1":
+            words.append(p)
+        for c in p.children:
+            walk(c)
+
+    walk(lay.root)
+    if not words:
+        return None
+    cx, cy = lay.width / 2, lay.height / 2
+    boxes = []
+    for p in words[:MENU_WORDS]:
+        x, y, _, _ = tf[p.name]
+        right = cx + x + WORD_BAR[0]
+        boxes.append((right - WORD_BAR[1], cy - y - WORD_BAR[2] / 2, right, cy - y + WORD_BAR[2] / 2))
+    return (min(b[0] for b in boxes) - WORDS_PAD, min(b[1] for b in boxes) - WORDS_PAD,
+            max(b[2] for b in boxes) + WORDS_PAD, max(b[3] for b in boxes) + WORDS_PAD)
 
 
 # ================================================================================================ slot pictures
@@ -1919,7 +1994,18 @@ class Place:
     oy: float
 
 
-FOCUS_SHARE = {"left": 0.0, "center": 0.5, "right": 1.0}
+FOCUS_SHARE = {"left": 0.0, "center": 0.5, "right": 1.0, "top": 0.5}
+
+
+def vertical_share(pic: Picture, shown_h: float, focus: str) -> float:
+    """Which part of the height stays when a picture is cut to fit (0 top, 0.5 middle): --focus top keeps the top; a
+    portrait picture (a full-body shot) keeps its upper third in the middle, so the head stays; else the middle."""
+    if focus == "top":
+        return 0.0
+    extra = pic.h - shown_h
+    if pic.h > pic.w and extra > 1e-6:
+        return min(0.5, max(0.0, (pic.h / 3 - shown_h / 2) / extra))
+    return 0.5
 
 
 def fit(pic: Picture, box: tuple, contain: bool, focus: str = "center") -> Place:
@@ -1932,7 +2018,8 @@ def fit(pic: Picture, box: tuple, contain: bool, focus: str = "center") -> Place
         s = min(bw / pic.w, bh / pic.h)
         return Place(s, bx0 + (bw - pic.w * s) * f, by1 - pic.h * s)
     s = max(bw / pic.w, bh / pic.h)
-    return Place(s, bx0 - (pic.w - bw / s) * f * s, by0 - (pic.h - bh / s) * 0.5 * s)
+    fy = vertical_share(pic, bh / s, focus)
+    return Place(s, bx0 - (pic.w - bw / s) * f * s, by0 - (pic.h - bh / s) * fy * s)
 
 
 def source_box(rect: tuple, place: Place) -> tuple:
@@ -1979,6 +2066,58 @@ def feather(img: Picture, rect: tuple, box: tuple, sides: dict, visible: tuple) 
     fx = ramp(img.w, rect[0], (rect[2] - rect[0]) / img.w, ex)
     fy = ramp(img.h, rect[1], (rect[3] - rect[1]) / img.h, ey)
     mul_alpha(img, fx, fy)
+
+
+def past_border(box: tuple, ext: tuple, w: float, h: float) -> tuple:
+    """A box with each edge that is within BACK_EDGE of the screen border moved out to `ext` (past the border and how
+    far the picture pans), so it gets no soft edge and no strip of pattern shows along the border."""
+    x0, y0, x1, y1 = box
+    mx, my = BACK_EDGE * w, BACK_EDGE * h
+    return (ext[0] if x0 <= mx else x0, ext[1] if y0 <= my else y0,
+            ext[2] if x1 >= w - mx else x1, ext[3] if y1 >= h - my else y1)
+
+
+_LUM = [[k * v for v in _SRGB2LIN] for k in (0.2126, 0.7152, 0.0722)]
+
+
+def words_light(img: Picture, rect: tuple, pan: tuple, words: tuple | None) -> tuple[float, tuple | None]:
+    """(light, texel columns i0, i1) of what a slot shows under the menu words while it pans: the WORDS_PCT
+    percentile of the texels' luminance (linear, times their alpha). (0.0, None) when it never comes under them."""
+    if not words:
+        return 0.0, None
+    tw, th = img.w, img.h
+    kx, ky = (rect[2] - rect[0]) / tw, (rect[3] - rect[1]) / th
+    dx0, dx1, dy0, dy1 = pan
+    i0 = max(0, math.floor((words[0] - dx1 - rect[0]) / kx))
+    i1 = min(tw, math.ceil((words[2] - dx0 - rect[0]) / kx))
+    j0 = max(0, math.floor((words[1] - dy1 - rect[1]) / ky))
+    j1 = min(th, math.ceil((words[3] - dy0 - rect[1]) / ky))
+    if i1 <= i0 or j1 <= j0:
+        return 0.0, None
+    lr, lg, lb = _LUM
+    vals = []
+    for j in range(j0, j1):
+        row = img.px[(j * tw + i0) * 4:(j * tw + i1) * 4]
+        vals += [(lr[r] + lg[g] + lb[b]) * a / 255
+                 for r, g, b, a in zip(row[0::4], row[1::4], row[2::4], row[3::4])]
+    vals.sort()
+    return vals[min(len(vals) - 1, int(WORDS_PCT * len(vals)))], (i0, i1)
+
+
+def guard_words(img: Picture, rect: tuple, pan: tuple, words: tuple | None, screen_w: float) -> float:
+    """Keep the menu words readable: when what shows under them is lighter than WORDS_LIGHT (a bright sky or snow),
+    darken those columns and everything right of them to that light, fading in from WORDS_RAMP of the screen width
+    before them. In place. Returns the light kept there (1.0: nothing changed)."""
+    light, cols = words_light(img, rect, pan, words)
+    if cols is None or light <= WORDS_LIGHT:
+        return 1.0
+    keep = 0.98 * WORDS_LIGHT / light   # (a little under: gains and sRGB values are rounded)
+    kx = (rect[2] - rect[0]) / img.w
+    g1 = rect[0] + cols[0] * kx - WORDS_MARGIN
+    g0 = g1 - WORDS_RAMP * screen_w
+    gains = [1.0 - (1.0 - keep) * smooth((rect[0] + (i + 0.5) * kx - g0) / (g1 - g0)) for i in range(img.w)]
+    apply_gain_columns(img, gains)
+    return keep
 
 
 def shade_gains(img_w: int, rect: tuple, screen_w: float) -> list[float]:
@@ -2080,11 +2219,13 @@ def make_slots(model: Model, pics: list[Picture], mode: str, numbers: set, focus
     out: dict = {}
     W, H = model.width, model.height
     art = model.art_box()
+    art_tint = model.art_tint()
+    order = sorted(numbers)     # the first picture goes to the first chosen set, the second to the next, ...
     flat: dict[int, Picture] = {}
     for st in model.sets:
         if st.number not in numbers:
             continue
-        pic = pics[(st.number - 1) % len(pics)]
+        pic = pics[order.index(st.number) % len(pics)]
         ext = st.ext(W, H)
         screen = (0.0, 0.0, W, H)
         for s in st.slots:
@@ -2114,16 +2255,18 @@ def make_slots(model: Model, pics: list[Picture], mode: str, numbers: set, focus
                 else:
                     feather(img, R, R, edges_on_screen(R, s.pan, W, H), intersect(R, screen))
             else:   # art mode, a back slot: the pattern, with the picture where the first single picture is
-                FA = intersect(art, ext)
+                box = past_border(art, ext, W, H)
+                FA = intersect(box, ext)
                 kx, ky = (R[2] - R[0]) / tw, (R[3] - R[1]) / th
-                keep = (math.floor((art[0] - R[0]) / kx) - 2, math.floor((art[1] - R[1]) / ky) - 2,
-                        math.ceil((art[2] - R[0]) / kx) + 2, math.ceil((art[3] - R[1]) / ky) + 2)
+                keep = (math.floor((box[0] - R[0]) / kx) - 2, math.floor((box[1] - R[1]) / ky) - 2,
+                        math.ceil((box[2] - R[0]) / kx) + 2, math.ceil((box[3] - R[1]) / ky) + 2)
                 top = sample(pic, source_box(R, fit(pic, FA, pic.cutout, focus)), tw, th, "clear", keep)
                 if pic.cutout:
                     soften_alpha(top, 1)
                 else:
-                    feather(top, R, art, edges_on_screen(art, s.pan, W, H), intersect(art, screen))
-                img = composite(top, bake_pattern(model.pattern, plane, st.tint, R, tw, th))
+                    feather(top, R, box, edges_on_screen(box, s.pan, W, H), intersect(box, screen))
+                img = composite(top, bake_pattern(model.pattern, plane, art_tint, R, tw, th))
+            guard_words(img, R, s.pan, model.words, W)
             apply_gain(img, 1 / (1 + GLOW_GAIN * s.glow))
             out[s.texture] = img
     return out
@@ -2238,6 +2381,8 @@ def build_pack(menu: MenuFile, levels: dict, say_step=None) -> tuple[bytes, int]
     files = [(n, new_bntx if n == menu.bntx_name else d) for n, d in menu.arc_files]
     archive = wc.sarc_build(files, menu.arc.order, align={"bntx": 0x1000}, hash_key=menu.arc.hash_key,
                             data_align=_align_of(menu.arc.data_offset))
+    if len(archive) != len(menu.archive):   # (the size table entry in use must still fit: exactly its size)
+        raise MenuBgError("The new menu file came out a different size. Nothing was changed.")
     if say_step:
         say_step()
     comp = wc.yaz0_compress(archive, menu.yaz_align) if menu.yaz_align is not None else archive
@@ -2487,8 +2632,71 @@ def put_in_library(lib: modman.Library, folder: str, name: str, menu_mods: list[
     return entry
 
 
+def title_choice(lib: modman.Library | None) -> tuple[str, str] | None:
+    """(file name, who) of the title picture modman's deploy puts on the menu instead of this mod (it wins, see
+    deploy_files): the one the player chose in the Mods page, else the last enabled mod's [mod] title_picture.
+    None: there is none. Reads only each mod's mod.toml (at its root or in its one folder)."""
+    if lib is None:
+        return None
+    chosen = modman.picture_choice(lib, modman.TITLE_PICK)
+    if chosen:
+        return os.path.basename(chosen), "you"
+    for m in reversed(lib.enabled()):
+        if m["id"] == MOD_ID:
+            continue
+        root = os.path.join(lib.mods_dir, m["id"])
+        try:
+            top = os.listdir(root)
+        except OSError:
+            continue
+        if modman.MANIFEST in top:
+            rels = [modman.MANIFEST]
+        elif len(top) == 1 and os.path.isfile(os.path.join(root, top[0], modman.MANIFEST)):
+            rels = [f"{top[0]}/{modman.MANIFEST}"]
+        else:
+            continue
+        man, _, _ = modman.read_manifest(root, rels)
+        if man is not None and man.title_picture:
+            return os.path.basename(man.title_picture), m["name"]
+    return None
+
+
+def title_note(choice: tuple[str, str] | None) -> str | None:
+    """One line about the title picture that is shown instead, or None."""
+    if choice is None:
+        return None
+    pic, who = choice
+    if who == "you":
+        return f"Your title picture {pic} is shown instead. Remove it in the Mods page to see this one."
+    return f"The title picture of {who} ({pic}) is shown instead. Turn that mod off to see this one."
+
+
+def base_changed(lib: modman.Library, info: dict) -> str | None:
+    """Why the menu-picture mod's frozen copy of the menu file it was made over is out of date, or None."""
+    old = info.get("base") or {}
+    try:
+        game = check_game(lib.require_install())
+        base = find_base(lib, game)
+    except (MenuBgError, modman.ModmanError):
+        return None
+    if old.get("source") != base.source:
+        was = old.get("name") or old.get("source") or "?"
+        return f"It was made over the menu file of {was}, but now {base.name}'s is used."
+    try:
+        h = hashlib.sha256()
+        with open(base.path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    if old.get("sha256") and h.hexdigest() != old["sha256"]:
+        return f"The menu file of {base.name} changed since it was made."
+    return None
+
+
 def deploy_now(lib: modman.Library, no_deploy: bool) -> tuple[bool, list[str]]:
-    """Deploy when the game is closed and no game code rebuild is needed. (deployed, lines to print)."""
+    """Deploy when the game is closed and no game code rebuild is needed. (deployed, lines to print: only the deploy
+    notes about the menu picture; the others are modman's, and `modman deploy` shows them)."""
     if no_deploy:
         return False, ["Not deployed (--no-deploy). To use it: python tools/modman.py deploy"]
     if modman.game_running():
@@ -2504,11 +2712,9 @@ def deploy_now(lib: modman.Library, no_deploy: bool) -> tuple[bool, list[str]]:
         launch = modman.deploy(lib)
     except (modman.ModmanError, rm.DeployError) as e:
         return False, [f"Not deployed: {e}"]
-    lines = []
-    att = launch.get("attention") or []
-    if att:
-        lines.append(f"Deploy note: {att[0]}" + (f" (and {len(att) - 1} more: python tools/modman.py deploy "
-                                                 "--dry-run shows them)" if len(att) > 1 else ""))
+    ours = next((m["name"] for m in lib.mods if m["id"] == MOD_ID), None)
+    prefixes = ("Title:",) + ((f"{ours}:",) if ours else ())
+    lines = [f"Note: {a}" for a in launch.get("attention") or [] if str(a).startswith(prefixes)]
     return True, lines
 
 
@@ -2581,9 +2787,15 @@ def deploy_files(lib, plan=None, picture: str | None = None) -> Generated:
         data, source = _in_use(plan, PACK_REL, game.romfs)
         if data is None:
             raise MenuBgError(f"The menu file ({PACK_REL}) is missing. Set up the game files in Savage Wind again.")
-        raw = _read(picture)
+        size = os.path.getsize(picture)
+        if size > MAX_FILE:
+            raise MenuBgError(f"{name} is too big ({size // (1024 * 1024)} MB). Save it smaller.")
+        ph = hashlib.sha256()
+        with open(picture, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                ph.update(chunk)
         key = hashlib.sha256(b"\0".join((TOOL_VERSION.encode(), DEPLOY_MODE.encode(), hashlib.sha256(data).digest(),
-                                         hashlib.sha256(raw).digest()))).hexdigest()[:32]
+                                         ph.digest()))).hexdigest()[:32]
         cache = os.path.join(getattr(lib, "root", lib), DEPLOY_CACHE)
         hit = os.path.join(cache, key + ".pack")
         cached = os.path.isfile(hit)
@@ -2712,7 +2924,9 @@ class Renderer:
 
     def render(self, frame_no: float, scale: float = 1.0) -> Picture:
         lay = self.lay
-        anims = [(a, float(a.frames)) for a in self.fades] + [(self.menu.model.loop, frame_no)]
+        loop = self.menu.model.loop
+        frame_no = frame_no % loop.frames if loop.frames > 0 else frame_no   # (a set may run past the loop's end)
+        anims = [(a, float(a.frames)) for a in self.fades] + [(loop, frame_no)]
         self.st, self.mats = pane_states(lay, anims)
         for name, show in self.variant.items():
             self.st[name].visible = show
@@ -2935,7 +3149,7 @@ def took(seconds: float) -> str:
 def estimate(kind: str, fast: bool) -> str:
     """How long a step takes on this PC with the game closed (measured; about 2x while the game runs)."""
     t = {"read": ("", " (up to 10 s a picture)"), "fit": (" (a few seconds)", " (about 10 s)"),
-         "encode": (" (up to 30 s)", " (up to 45 s)"), "pack": " (about 30 s)"}[kind]
+         "encode": (" (up to 45 s)", " (up to 1 min)"), "pack": " (30 to 45 s)"}[kind]
     return t if isinstance(t, str) else t[0 if fast else 1]
 
 
@@ -2961,11 +3175,20 @@ def cmd_set(args) -> int:
             notes.append(f"Note: {p.name} is smaller than the screen ({p.w} x {p.h}), so it will look soft.")
         if args.mode == "full" and p.cutout:
             notes.append(f"Note: {p.name} has see-through parts. In full mode they are black.")
+        if p.cleared:
+            notes.append(f"Note: {p.name} has a few see-through pixels (corners?). They are black on the menu.")
     step("reading the menu file")
     base = find_base(lib, game)
     menu = open_menu(_read(base.path), base.source, base.name)
     if base.source != "game":
         say(f"Building on the menu file of {base.name}.")
+    try:
+        old_base = (modman.read_json(os.path.join(lib.mods_dir, MOD_ID, INFO_FILE)) or {}).get("base") or {}
+    except modman.ModmanError:
+        old_base = {}
+    if old_base.get("source") and old_base["source"] != base.source:
+        notes.append(f"Note: it was made over the menu file of {old_base.get('name') or old_base['source']} before; "
+                     f"now over {base.name}'s.")
     numbers = parse_sets(args.sets, len(menu.model.sets))
     limit, more = size_limit(game, base, wc.resource_path("", menu.archive_name))
     notes += more
@@ -3000,11 +3223,16 @@ def cmd_set(args) -> int:
         shutil.rmtree(tmp, ignore_errors=True)
     what = sets_text(numbers, len(menu.model.sets))
     deployed, lines = deploy_now(lib, args.no_deploy)
-    if deployed:
+    instead = title_note(title_choice(lib))
+    if deployed and not instead:
         say(f"Done: your picture is on the main menu ({what}).")
-        say("Deployed. Start the game to see it.")
+        say("Deployed. Start the game to see it: python tools/modman.py run")
     else:
         say(f"Done: the menu picture is in your library ({what}).")
+        if instead:
+            say(instead)
+        if deployed:
+            say("Deployed.")
     for line in lines + notes:
         say(line)
     say(f"Took {took(time.monotonic() - t0)}.")
@@ -3020,7 +3248,15 @@ def cmd_reset(args) -> int:
     modman.remove_mod(lib, MOD_ID)
     deployed, lines = deploy_now(lib, args.no_deploy)
     say("Done: the menu picture is gone from your library.")
-    if deployed:
+    choice = title_choice(lib)
+    if choice is not None:
+        pic, who = choice
+        say(f"Your title picture {pic} stays on the menu. Remove it in the Mods page to get the game's own menu back."
+            if who == "you" else f"The title picture of {who} ({pic}) stays on the menu. Turn that mod off to get the "
+            "game's own menu back.")
+        if deployed:
+            say("Deployed.")
+    elif deployed:
         say("Deployed. The game's own menu is back.")
     for line in lines:
         say(line)
@@ -3031,14 +3267,27 @@ def cmd_status(args) -> int:
     root = modman.resolve_library(args.library)
     lib = modman.Library.load(root)
     entry = next((m for m in (lib.mods if lib else []) if m["id"] == MOD_ID), None)
+    choice = title_choice(lib)
+    instead = title_note(choice)
     if entry is None:
         say("No menu picture in the library.")
+        if choice is not None:
+            pic, who = choice
+            say(f"Your title picture {pic} is on the menu." if who == "you"
+                else f"The title picture of {who} ({pic}) is on the menu.")
         return 0
     info = modman.read_json(os.path.join(lib.mods_dir, MOD_ID, INFO_FILE)) or {}
     pics = ", ".join(p.get("name", "?") for p in info.get("pictures", [])) or "?"
     total = info.get("slideshow") or len(info.get("sets") or [])
     what = sets_text(info.get("sets") or [], total) if info.get("sets") else "?"
     say(f"Menu picture: {'on' if entry['enabled'] else 'off'}, mode {info.get('mode', '?')}, {what}, picture: {pics}.")
+    if instead and entry["enabled"]:
+        say(instead)
+    if modman.version_key(str(info.get("version") or "0")) < modman.version_key(TOOL_VERSION):
+        say("It was made with an older version of this tool. Run set again to get the fixed menu.")
+    why = base_changed(lib, info)
+    if why:
+        say(f"{why} Run set again.")
     pos = lib.mods.index(entry)
     later = []
     for m in lib.mods[pos + 1:]:
@@ -3149,6 +3398,12 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as e:
         say(f"Error: {e}")
         return 2
+    except MemoryError:
+        say("Not enough memory for this. Use a smaller picture (for example 1920 x 1080), or close other programs.")
+        return 2
+    except ValueError as e:
+        say(f"Error: a file couldn't be read ({e}).")
+        return 2
     except KeyboardInterrupt:
         say("Stopped.")
         return 130
@@ -3248,7 +3503,7 @@ def _gui_run(parent, cmd: list[str], size: int, t: dict, done) -> None:
     top = tk.Toplevel(parent, bg=t["bg"], padx=20, pady=16)
     top.title("Menu picture")
     top.transient(parent)
-    head = tk.Label(top, text="Making your menu picture. This takes about 2 minutes.", font=("Segoe UI", size, "bold"),
+    head = tk.Label(top, text="Making your menu picture. This takes 1 to 2 minutes.", font=("Segoe UI", size, "bold"),
                     bg=t["bg"], fg=t["fg"], anchor="w", justify="left", wraplength=size * 40)
     head.pack(fill="x")
     text = tk.Text(top, font=("Segoe UI", size), bg=t["bg"], fg=t["fg"], height=10, width=60, wrap="word",

@@ -24,7 +24,8 @@ files over 10 MB. It can't spot links, so check those yourself.
 
 Breathalyzer is also the launcher for Savage Wind. There are two downloads:
 
-- **Breathalyzer** (`breathalyzer-<version>.zip`): the launcher and mod manager, no mods.
+- **Breathalyzer** (`breathalyzer-<version>.zip`): the launcher and mod manager with no bundled mods. With an empty
+  mod list it plays the plain game; mods you add yourself are played too (both downloads share your mod list).
 - **Breathalyzer Plus** (`breathalyzer-plus-<version>.zip`): the same, plus our own mods. Before your first Play
   you pick which ones are on; each has a title and a short description, and mods that change the game start off.
 

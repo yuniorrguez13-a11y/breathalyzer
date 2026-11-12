@@ -367,6 +367,28 @@ class _Break:
 _BREAK = _Break()
 
 
+class FrozenMap(dict):
+    """A CBOR map used as a map key (UKMM keys save data flags by {name, hash}): it reads as the map, and can be a key
+    because it can't change. Its values are frozen too (lists as tuples, maps as FrozenMaps)."""
+
+    def __hash__(self):
+        return hash(frozenset(self.items()))
+
+    def _read_only(self, *a, **k):
+        raise TypeError("a map used as a key can't change")
+
+    __setitem__ = __delitem__ = update = pop = popitem = clear = setdefault = _read_only
+
+
+def frozen(v):
+    """A CBOR value as a map key: lists become tuples and maps FrozenMaps, all the way down."""
+    if isinstance(v, dict):
+        return FrozenMap((frozen(k), frozen(x)) for k, x in v.items())
+    if isinstance(v, (list, tuple)):
+        return tuple(frozen(x) for x in v)
+    return v
+
+
 def cbor_decode(data: bytes, pos: int = 0, depth: int = 0):
     """(value, next position) of the CBOR item at pos."""
     if depth > 200:
@@ -436,8 +458,8 @@ def cbor_decode(data: bytes, pos: int = 0, depth: int = 0):
                     break
                 raise UkmmError("resource data isn't valid CBOR")
             v, pos = cbor_decode(data, pos, depth + 1)
-            if isinstance(key, list):
-                key = tuple(key)
+            if isinstance(key, (list, dict)):
+                key = frozen(key)   # (a list or map as a key: UKMM's save data flags are keyed by {name, hash})
             out[key] = v
             k += 1
         return out, pos
@@ -1297,10 +1319,201 @@ class ModelListFile:
         return bnp.aamp_write(_pio(objs, {h("ModelData"): bnp.PList(md, {}), h("AnmTarget"): bnp.PList(at, {})}))
 
 
+# ------------------------------------------------------------------------------------- game data and save data
+# UKMM's GameDataPack (Bootup.pack//GameData/gamedata.ssarc) and SaveDataPack (//GameData/savedataformat.ssarc) diffs:
+# flags added or changed are merged into the game's files; a flag the diff deletes is kept and named (UKMM diffs a
+# mod against the game version its maker had, so a delete of a game flag is most often that version's difference,
+# and a missing flag the game's code reads is worse than a spare one).
+
+BYML_TAGS = {"Bool": bool, "I32": int, "Float": float, "String": str}
+
+
+def byml_from(v, depth: int = 0):
+    """roead's Byml in serde form ({"I32": 0}, {"Array": [...]}, "Null"...) -> tools/bcml_data.py's BYML values."""
+    import bcml_data
+    if depth > 64:
+        raise UkmmError("BYML data nests too deep")
+    if v is None or v == "Null":
+        return None
+    if not isinstance(v, dict) or len(v) != 1:
+        raise UkmmError("BYML data UKMM wrote in a form this loader doesn't know")
+    tag, x = next(iter(v.items()))
+    if tag in BYML_TAGS and isinstance(x, BYML_TAGS[tag]) and not (tag != "Bool" and isinstance(x, bool)):
+        return bcml_data.f32(x) if tag == "Float" else x
+    if tag == "Float" and isinstance(x, int) and not isinstance(x, bool):
+        return bcml_data.f32(float(x))
+    if tag in ("U32", "I64", "U64") and isinstance(x, int) and not isinstance(x, bool):
+        return {"U32": bcml_data.U32, "I64": bcml_data.I64, "U64": bcml_data.U64}[tag](x)
+    if tag == "Double" and isinstance(x, (int, float)) and not isinstance(x, bool):
+        return bcml_data.F64(x)
+    if tag == "Array" and isinstance(x, list):
+        return [byml_from(i, depth + 1) for i in x]
+    if tag in ("Map", "HashMap", "ValueHashMap") and isinstance(x, dict):
+        return {str(k): byml_from(i, depth + 1) for k, i in x.items()}
+    if tag in ("BinaryData", "FileData") and isinstance(x, (list, bytes)):
+        return bytes(x)
+    raise UkmmError(f"BYML data of a kind this loader doesn't know ({tag})")
+
+
+FLAG_FIELDS = (("category", "Category"), ("data_name", "DataName"), ("delete_rev", "DeleteRev"),
+               ("hash_value", "HashValue"), ("init_value", "InitValue"), ("is_event_associated", "IsEventAssociated"),
+               ("is_one_trigger", "IsOneTrigger"), ("is_program_readable", "IsProgramReadable"),
+               ("is_program_writable", "IsProgramWritable"), ("is_save", "IsSave"), ("max_value", "MaxValue"),
+               ("min_value", "MinValue"), ("reset_type", "ResetType"))
+BYML_FIELDS = {"init_value", "max_value", "min_value"}
+
+
+class GameDataFile:
+    """Game data flags (UKMM's GameDataPack): turned into a gamedata.yml change and merged by tools/bcml_data.py."""
+
+    def __init__(self):
+        self.notes: list[str] = []
+
+    def parse(self, data: bytes):
+        return data
+
+    def load(self, v):
+        if not isinstance(v, dict):
+            raise UkmmError("game data UKMM wrote in a form this loader doesn't know")
+        diff: dict = {}
+        kept: list[str] = []
+        for part in v.values():
+            if not isinstance(part, dict):
+                raise UkmmError("game data UKMM wrote in a form this loader doesn't know")
+            t = str(part.get("data_type") or "")
+            for name, (flag, removed) in _delete_map(part.get("flags")).items():
+                if removed:
+                    kept.append(str(name))
+                    continue
+                if not isinstance(flag, dict):
+                    raise UkmmError("a game data flag UKMM wrote in a form this loader doesn't know")
+                entry = {}
+                for src, dst in FLAG_FIELDS:
+                    if src not in flag or (src == "category" and flag[src] is None):
+                        continue
+                    entry[dst] = byml_from(flag[src]) if src in BYML_FIELDS else flag[src]
+                diff.setdefault(t, {"add": {}, "del": []})["add"][str(name)] = entry
+        if kept:
+            self.notes.append(f"game data: {len(kept)} flag(s) the mod deletes kept ({_some(sorted(kept), 3)}): "
+                              "most likely they differ only in the game version it was made on")
+        return diff
+
+    def merge(self, base, diff):
+        import bcml_data
+        if not diff:
+            return base
+        out, notes = bcml_data.merge("gamedata.yml", base, [[diff]])
+        self.notes += notes
+        return out
+
+    def write(self, model) -> bytes:
+        return model
+
+
+SAVE_FILE = re.compile(r"^(?P<pre>.*?saveformat_)(?P<n>\d+)(?P<ext>\.bgsvdata)$")
+SAVE_ORDER = ("game_data.sav", "caption.sav", "option.sav")
+SAVE_CHUNK = 8192
+
+
+class SaveDataFile:
+    """Save data flags (UKMM's SaveDataPack): the flags of game_data.sav, caption.sav and option.sav, each added to
+    the game's list of that file when missing (UKMM's merge, without its deletes: see above)."""
+
+    def __init__(self):
+        self.notes: list[str] = []
+
+    def parse(self, data: bytes):
+        import bcml_data
+        s = wc.sarc_parse(data)
+        if s.order != wc.LE or any(not n.attr >> 24 for n in s.nodes):
+            raise UkmmError("the game's save data list isn't a Switch pack with named files")
+        files: dict[str, dict] = {}
+        pre = ext = None
+        for n in sorted(s.nodes, key=lambda n: int(SAVE_FILE.match(n.name)["n"]) if SAVE_FILE.match(n.name) else 0):
+            m = SAVE_FILE.match(n.name)
+            if not m:
+                raise UkmmError(f"{n.name} isn't a save data format file")
+            pre, ext = m["pre"], m["ext"]
+            doc = bcml_data.byml_load(data[s.data_offset + n.start:s.data_offset + n.end])
+            fl = doc.get("file_list") if isinstance(doc, dict) else None
+            if not (isinstance(fl, list) and len(fl) == 2 and isinstance(fl[0], dict) and isinstance(fl[1], list)):
+                raise UkmmError(f"{n.name} isn't a save data format file")
+            f = files.setdefault(str(fl[0].get("file_name")), {"doc": doc, "flags": {}})
+            for e in fl[1]:
+                hv = e.get("HashValue") if isinstance(e, dict) else None
+                if not isinstance(hv, int) or isinstance(hv, bool):
+                    raise UkmmError("a save data entry without a HashValue")
+                f["flags"][bcml_data._signed(hv)] = e
+        return {"files": files, "pre": pre or "/saveformat_", "ext": ext or ".bgsvdata", "key": s.hash_key,
+                "changed": False}
+
+    def load(self, v):
+        if not isinstance(v, dict):
+            raise UkmmError("save data UKMM wrote in a form this loader doesn't know")
+        out: dict[str, dict] = {}
+        for fname, part in v.items():
+            flags = part.get("flags") if isinstance(part, dict) else None
+            if flags is None:
+                continue
+            if not isinstance(flags, dict):
+                raise UkmmError("save data flags UKMM wrote in a form this loader doesn't know")
+            add, dels = {}, []
+            for flag, removed in flags.items():
+                if not (isinstance(flag, dict) and isinstance(flag.get("name"), str) and isinstance(flag.get("hash"), int)):
+                    raise UkmmError("a save data flag UKMM wrote in a form this loader doesn't know")
+                if removed:
+                    dels.append(flag["name"])
+                else:
+                    add[flag["hash"]] = flag["name"]
+            out[str(fname)] = {"add": add, "del": dels}
+        return out
+
+    def merge(self, base, diff):
+        import bcml_data
+        kept = []
+        for fname, part in diff.items():
+            kept += part["del"]
+            f = base["files"].get(fname)
+            if f is None:
+                if part["add"]:
+                    self.notes.append(f"save data: your game has no {fname} list, so {len(part['add'])} flag(s) for "
+                                      "it are left out")
+                continue
+            for hv, name in part["add"].items():
+                hv = bcml_data._signed(hv)
+                if hv not in f["flags"]:
+                    f["flags"][hv] = {"DataName": name, "HashValue": hv}
+                    base["changed"] = True
+        if kept:
+            self.notes.append(f"save data: {len(kept)} flag(s) the mod deletes kept ({_some(sorted(kept), 3)}): most "
+                              "likely they differ only in the game version it was made on")
+        return base
+
+    def write(self, m) -> bytes:
+        import bcml_data
+        if not m["changed"]:
+            raise _Unchanged()
+        items = []
+        names = [n for n in SAVE_ORDER if n in m["files"]] + [n for n in m["files"] if n not in SAVE_ORDER]
+        for fname in names:
+            f = m["files"][fname]
+            ordered = [f["flags"][hv] for hv in sorted(f["flags"])]
+            for i in range(0, max(len(ordered), 1), SAVE_CHUNK):
+                doc = dict(f["doc"])
+                doc["file_list"] = [f["doc"]["file_list"][0], ordered[i:i + SAVE_CHUNK]]
+                items.append((f"{m['pre']}{len(items)}{m['ext']}", bcml_data.byml_dump(doc), 4))
+        return bnp.sarc_build(items, m["key"])
+
+
+class _Unchanged(Exception):
+    """A merge that left the game's file as it was: its own copy is used."""
+
+
 _AAMP = AampFile()
 MERGEABLE = {"GenericAamp": _AAMP, "GeneralParamList": _AAMP, "UMii": _AAMP, "DamageParam": _AAMP,
              "Awareness": _AAMP, "Lod": _AAMP, "Demo": _AAMP, "WorldInfo": _AAMP,
-             "ActorLink": ActorLinkFile(), "ASList": ASListFile(), "ModelList": ModelListFile()}
+             "ActorLink": ActorLinkFile(), "ASList": ASListFile(), "ModelList": ModelListFile(),
+             "GameDataPack": GameDataFile(), "SaveDataPack": SaveDataFile()}
 KIND_NAMES = {"Physics": "physics", "AnimSeq": "animation sequences", "Recipe": "recipes", "ShopData": "shop data",
               "AIProgram": "AI programs", "AISchedule": "AI schedules", "DropTable": "drop tables",
               "LifeCondition": "life conditions", "Chemical": "chemistry", "BoneControl": "bone control",
@@ -1489,6 +1702,7 @@ class Builder:
         self._siblings: list[dict[str, list[tuple[int, str]]]] = []    # the game packs being rebuilt: kind -> files
         self.used_dict = False
         self._dict_looked = False
+        self.wiiu: WiiuBinaries | None = None   # a Wii U package's binary resources, converted (prepare_wiiu)
         self.wanted: set[str] = set()       # canonical paths of the resources the chosen layers hold
         self.resources = 0                  # and how many resources that is
         for name in pkg.files:
@@ -1523,7 +1737,10 @@ class Builder:
         return False
 
     # -- the package's versions of a resource (base first, then each chosen option)
-    def versions(self, canon: str) -> list[Res]:
+    def versions(self, canon: str, raw: bool = False) -> list[Res]:
+        """The package's versions of a resource. One that can't be read is named ("needs attention") and left out,
+        so the rest of the package still installs; only a missing zstd dictionary ends the install. A Wii U
+        package's binary resources come converted (raw: as stored)."""
         out = []
         for layer in self.layers:
             rel = layer.prefix + canon
@@ -1534,7 +1751,16 @@ class Builder:
                     if self.dictionary is None and not self._dict_looked:
                         self._dict_looked = True               # (looked for once, only when a resource needs it)
                         self.dictionary, _ = find_dictionary()
-                out.append(load_resource(raw, self.dictionary, f"{layer.label + '/' if layer.label else ''}{canon}"))
+                where = f"{layer.label + '/' if layer.label else ''}{canon}"
+                try:
+                    out.append(load_resource(raw, self.dictionary, where))
+                except UkmmError as e:
+                    if "dictionary" in str(e) and "can't be read" not in str(e):
+                        raise
+                    self.broken.append(f"{e} Left out: the game's copy is used")
+                    self.left_out.add(where)
+        if self.wiiu is not None and not raw:
+            out = self.wiiu.versions(canon, out)
         return out
 
     # -- the game's files
@@ -1694,6 +1920,8 @@ class Builder:
                 vanilla = self.elsewhere(canon)
                 if vanilla is not None:
                     self.res.from_game += 1
+            if vanilla is None and self.wiiu is not None and canon in self.wiiu.failed:
+                self.left_out.add(where)    # (Wii U data that can't be converted, and the game has no copy: named)
             if vanilla is None or not bnp.is_packish(name) or not self.touches(vanilla, aoc):
                 return vanilla
             # (the game's pack, with files inside it the package changes: UKMM rebuilds it from its own list)
@@ -1747,6 +1975,8 @@ class Builder:
         for v in vers:
             for n, removed in v.files.items():
                 names[n] = removed
+        if self.wiiu is not None:
+            names = self.wiiu.pack_names(names, aoc)
         min_align = vers[0].align if game_pack is None else (vers[0].align or 4)
         items = []
         same = game_pack is not None                  # (nothing of the package's in it so far)
@@ -1788,7 +2018,10 @@ class Builder:
             self.left_out.add(where)
             self.unmerged[canon] = (mtype, len(vers))
             return None
+        notes = getattr(handler, "notes", None)
         try:
+            if raw_v is None and isinstance(handler, (GameDataFile, SaveDataFile)):
+                raise UkmmError("your game has no copy to add the flags to")
             model = handler.parse(raw_v) if raw_v is not None else None
             for v in vers:
                 if v.mtype != mtype:
@@ -1796,11 +2029,142 @@ class Builder:
                 diff = handler.load(v.value)
                 model = diff if model is None else handler.merge(model, diff)
             out = handler.write(model)
+        except _Unchanged:
+            return None
         except (UkmmError, wc.FormatError, struct.error, KeyError, TypeError, ValueError, AttributeError) as e:
             self.broken.append(f"{where} ({KIND_NAMES.get(mtype, mtype)}): can't be merged ({e})")
             self.left_out.add(where)
             return None
+        finally:
+            if notes:
+                self.res.notes += [f"{where}: {n}" for n in notes]
+                notes.clear()
+        if raw_v is not None and out == raw_v:
+            return None                     # (the merge changed nothing: the game's copy is used)
         self.res.merged += 1
+        return out
+
+
+TEX1_RE = re.compile(r"\.Tex1(\.s?bfres)$", re.I)
+TEX2_RE = re.compile(r"\.Tex2(\.s?bfres)$", re.I)
+
+
+class WiiuBinaries:
+    """A Wii U package's binary resources (models, textures, icons, BYML, MSBT, packs...) converted to the Switch's
+    formats by tools/wiiu_convert.py, in memory, with the game's files (vanilla materials, mipmaps, TexInfo.txt):
+    X.Tex1 + X.Tex2 become X.Tex (renamed in the manifests and pack lists). A file that can't be converted (Havok,
+    sounds...) gives way to the game's copy of the same path (the pack's twin, else the game's actor packs: Havok
+    cloth in a new armor pack is a copy of a vanilla one), else it is left out and named. Parsed resources (parameter
+    files, game data...) and pack lists are the same on both consoles and are used as they are."""
+
+    def __init__(self, builder: Builder):
+        self.b = builder
+        self.converted: dict[str, bytes] = {}    # canonical path -> Switch bytes (never Yaz0)
+        self.renamed: dict[str, str] = {}        # canonical path of an X.Tex1 -> its X.Tex's
+        self.dropped: set[str] = set()           # X.Tex2 (joined into X.Tex)
+        self.failed: dict[str, str] = {}         # canonical path -> why the game's copy is used (or none)
+        self.extras: dict[str, bytes] = {}       # real name -> your vanilla model written again (a new TexInfo.txt)
+        self.made: set[str] = set()              # canonical paths only the conversion has (X.Tex, those models)
+        self.sizes: dict[str, int] = {}          # size table entries the model converter worked out
+        self.lines: list[str] = []               # what happened, for the notes
+
+    @staticmethod
+    def member(canon: str) -> str:
+        return ("aoc/0010/" + canon[len(AOC):]) if canon.startswith(AOC) else "content/" + canon
+
+    @staticmethod
+    def canon_of(target: str) -> str:
+        if target.startswith(wc.DLC_OUT + "/"):
+            return AOC + canonical(target[len(wc.DLC_OUT) + 1:])
+        return canonical(target[len(wc.BASE_OUT) + 1:] if target.startswith(wc.BASE_OUT + "/") else target)
+
+    def prepare(self, real: dict[str, str], say=print) -> None:
+        """Convert every binary resource of the chosen layers (the latest layer's version of each). real: canonical
+        path -> real name of the manifests' files (DLC ones under Aoc/0010/), so models keep their .sbfres names."""
+        files: dict[str, bytes] = {}
+        source: dict[str, str] = {}
+        for canon in sorted(self.b.wanted):
+            vers = self.b.versions(canon, raw=True)
+            if vers and vers[-1].kind == "binary":
+                name = self.member(real.get(canon, canon))
+                files[name] = vers[-1].data
+                source[name] = canon
+        if not files:
+            return
+        say(f"  converting {len(files)} Wii U file(s) to the Switch's formats...")
+        romfs = os.path.join(self.b.game, "romfs")
+        try:
+            game = wc.GameFiles(romfs) if os.path.isdir(os.path.join(romfs, "Model")) else None
+        except wc.ConvertError:
+            game = None
+        out: dict[str, bytes] = {}
+        src = wc.MemSource(files)
+        try:
+            rep = wc._run("Wii U package", wc.Converter(wc.LE, models=wc.ModelJob(game)),
+                          opened=(src, wc.plan_layout(src.files)), collect=out)
+        except wc.ConvertError as e:
+            raise UkmmError(f"Not added: its Wii U files can't be converted ({e}).") from None
+        targets = set()
+        bad: dict[str, list[str]] = {}
+        for f in rep.files:
+            canon = source[f["path"]]
+            target = f["target"]
+            new = self.canon_of(target)
+            if target in out and f["status"] not in (wc.CANT, wc.BROKEN):
+                targets.add(target)
+                self.converted[new] = out[target]
+                if new != canon:
+                    self.renamed[canon] = new
+            elif TEX2_RE.search(canon) and f["status"] in wc.OK:
+                self.dropped.add(canon)        # (joined into its X.Tex)
+            else:
+                self.failed[canon] = f"{f['kind']}" + (f": {f['detail']}" if f["detail"] else "")
+                bad.setdefault(f["kind"], []).append(canon)
+        for target, data in out.items():       # (your vanilla models written again with a new TexInfo.txt)
+            if target not in targets and target.startswith(wc.BASE_OUT + "/"):
+                self.extras[target[len(wc.BASE_OUT) + 1:]] = data
+                self.converted.setdefault(self.canon_of(target), data)
+                self.made.add(self.canon_of(target))
+        self.made |= set(self.renamed.values())
+        self.b.wanted |= self.made
+        st = rep.by_status()
+        self.lines.append(f"Wii U package: {len(files)} binary file(s) converted for the Switch ("
+                          + ", ".join(f"{wc.LABEL[s]} {st[s]}" for s in wc.STATUS_ORDER if st[s]) + ")")
+        self.lines += [f"  {x}" for x in rep.model_lines()]
+        if bad:
+            self.lines.append("Wii U data that can't be converted (" + "; ".join(
+                f"{k}: {_some(v, 2)}" for k, v in sorted(bad.items())) + "): your game's copy of each is used where it "
+                "has one, the others are left out")
+        att = rep.attention()
+        if att:
+            self.lines.append(f"{len(att)} converted model/texture file(s) to check in game ("
+                              + _some([n.path.split('//')[-1] for n in att], 3) + ")")
+        r = (rep.models or {}).get("rstb") or {}
+        self.sizes = dict(r.get("sizes") or {})
+
+    def versions(self, canon: str, vers: list[Res]) -> list[Res]:
+        if not vers:
+            data = self.converted.get(canon) if canon in self.made else None
+            return [Res("binary", data=data)] if data is not None else []
+        if vers[-1].kind != "binary":
+            return vers
+        if canon in self.converted:
+            return [*vers[:-1], Res("binary", data=self.converted[canon])]
+        return []                             # (can't be converted, or joined into an X.Tex: the game's copy)
+
+    def real_name(self, aoc: bool, rel: str) -> str | None:
+        """A manifest file's real name on the Switch (X.Tex1 -> X.Tex), or None for one left out (X.Tex2)."""
+        canon = (AOC if aoc else "") + canonical(rel)
+        if canon in self.dropped:
+            return None
+        return TEX1_RE.sub(r".Tex\1", rel) if canon in self.renamed else rel
+
+    def pack_names(self, names: dict[str, bool], aoc: bool) -> dict[str, bool]:
+        out = {}
+        for n, removed in names.items():
+            new = self.real_name(aoc, n)
+            if new is not None:
+                out[new] = removed and out.get(new, True)
         return out
 
 
@@ -1839,11 +2203,7 @@ def install(src: str, stage: str, game: str, *, meta: Meta, picks: list[str] = (
     """Build the package's game files into stage (a Switch-layout mod: 01007EF00011E000/romfs/..., the DLC's under
     01007EF00011F001/romfs/...) from the game (`game`: Savage Wind's extracted folder, only read)."""
     name = meta.name or os.path.basename(src)
-    if meta.platform == "wiiu":
-        raise UkmmError(f"Not added: {name} is a Wii U UKMM package, and Savage Wind is the Switch game (its models "
-                        "and textures are Wii U formats). To use it: install it in UKMM (Wii U mode), deploy there, "
-                        "then add UKMM's output folder (modman add converts what it can from Wii U).")
-    if meta.platform not in ("switch", "any"):
+    if meta.platform not in ("switch", "any", "wiiu"):
         raise UkmmError(f"Not added: {name}'s meta.yml names a platform this loader doesn't know "
                         f"({meta.platform or 'none'}).")
     if not os.path.isdir(os.path.join(game, "romfs")):
@@ -1873,6 +2233,21 @@ def install(src: str, stage: str, game: str, *, meta: Meta, picks: list[str] = (
             res.not_merged.append(f"texts ({_some(texts, 2)}) not merged: UKMM builds them from the game's language "
                                   "pack, which this loader doesn't do yet; the game's texts are used")
         jobs = [(aoc, rel) for (aoc, _), rel in todo.items() if rel not in texts or aoc]
+        if meta.platform == "wiiu":
+            # (a Wii U package: its binary files converted first, X.Tex1 + X.Tex2 named X.Tex as the Switch's)
+            b.wiiu = WiiuBinaries(b)
+            b.wiiu.prepare({(AOC if aoc else "") + canonical(rel): (AOC if aoc else "") + rel for aoc, rel in jobs},
+                           say)
+            renamed = {}
+            for aoc, rel in jobs:
+                new = b.wiiu.real_name(aoc, rel)
+                if new is not None:
+                    renamed.setdefault((aoc, new.lower()), (aoc, new))
+            jobs = list(renamed.values())
+            for real_name, data in sorted(b.wiiu.extras.items()):
+                if (False, real_name.lower()) not in renamed:
+                    jobs.append((False, real_name))
+            res.notes += b.wiiu.lines
         os.makedirs(stage, exist_ok=True)
         step = max(1, len(jobs) // 5)
         for k, (aoc, rel) in enumerate(jobs):
@@ -1909,7 +2284,10 @@ def install(src: str, stage: str, game: str, *, meta: Meta, picks: list[str] = (
             res.not_merged.append(f"{len(files)} {KIND_NAMES.get(mtype, mtype)} file(s) ({_some(files, 2)}) not "
                                   f"merged: this loader can't read UKMM's {mtype} data yet; the game's copies are "
                                   "used, and new ones are left out (UKMM can merge them)")
-        res.not_merged += b.broken
+        res.not_merged += list(dict.fromkeys(b.broken))
+        if b.wiiu is not None:
+            for k, v in b.wiiu.sizes.items():   # (the model converter's sizes for converted models and textures)
+                b.entries[k] = max(v, b.entries.get(k, 0))
         if b.missing:
             res.not_merged.append(f"{len(b.missing)} file(s) neither the package nor your game has "
                                   f"({_some(b.missing, 2)}): left out, so the parts of the mod that use them may not "

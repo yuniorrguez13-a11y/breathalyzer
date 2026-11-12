@@ -60,7 +60,8 @@ It checks, and says what to do when one fails (one plain screen each, the techni
 | Your mod list can be read | **Start a fresh list** (the old one is kept as a backup; your mods stay in the mods folder) |
 
 Then it uses your mod list next to Savage Wind (`modloader`), or makes one. Breathalyzer Plus then shows the mod
-picker: each of our mods with **ON** or **OFF**, its title, what it does and notes like "Changes gameplay"; **Save**
+picker: each of our mods with **ON** or **OFF**, its title, what it does, notes like "Changes how the game plays"
+and why it starts on or off; **Save**
 adds them to your list (a mod built from your game files is built when you turn it on). Settings > Our mods >
 **Pick again** shows it again.
 
@@ -81,8 +82,15 @@ adds them to your list (a mod built from your game files is built when you turn 
 
 Your Savage Wind folder (**Change...**, **Check**, **Open**), the frame rate the game uses (only read from
 `savagewind.ini`; change it in the game: F1, Video, or with **Game settings**), your mod list (**Open**), text size,
-dark, hide this window while you play, the cheats' port (7777), a desktop shortcut (**Make one**), and in
+dark, hide this window while you play, **Developer commands**, a desktop shortcut (**Make one**), and in
 Breathalyzer Plus the mod picker again.
+
+- **Developer commands** (OFF at first): some commands you type in the game's command box (F12) only work in the
+  game's developer mode, like `up` (Teleport Up) and `infstamina off` (Infinite Stamina). While a mod that needs
+  them is ON, Play turns developer mode on by itself, and Settings says so ("OFF, but ON while Teleport Up is on").
+  **Turn on** keeps it on for every Play. Developer mode opens the game's control port 7777 on this PC only.
+- **Make one** puts a shortcut to `Start Breathalyzer.exe` on your desktop. After you unpack a new Breathalyzer,
+  make it again from the new one.
 
 Tk windows don't work with screen readers yet.
 
@@ -94,6 +102,9 @@ Tk windows don't work with screen readers yet.
   same thing.
 - **"Breathalyzer can't find its files"**: you opened it from inside the zip, or some files are missing. Unpack the
   whole zip again.
+- **"Breathalyzer couldn't start"**: a file it needs couldn't be loaded (an antivirus may have taken one away).
+  Unpack the zip again, or allow Breathalyzer in your antivirus. What went wrong is in
+  `%LOCALAPPDATA%\Breathalyzer\launcher-error.txt` (attach it to a bug report).
 
 ## What's in the folder
 
@@ -136,6 +147,12 @@ you use it, connects only to the friend you choose.
   `docs` are where they are in the repo.
 - The mod picker reads `app\bundled-mods.json`: its format, and how the zips, the runtime and the starter are built
   and checked, are in [release](release.md).
+- When the window can't start (an import error, Tk can't open, tkinter missing), `launcher.py` writes the traceback
+  to `launcher-error.txt` in the settings folder and shows a Windows message box (ctypes, no Tk). It drops
+  `TCL_LIBRARY` and `TK_LIBRARY` before Tk loads (another program's would break it).
+- Developer mode: Play passes `--port 7777` to `modman run` when Settings > Developer commands is ON, while a mod
+  that needs it is ON (`developer = true` in `bundled-mods.toml`, or `DEV_MODS` in `modman_gui.py`), or with
+  `--port`; else `modman run` opens the port only for cheats.
 - From the repo: `python tools/launcher.py [--library <folder>] [--size N] [--dark] [--port N]`. The launcher's
   choices go to `%LOCALAPPDATA%\Breathalyzer\launcher.json`, or to the folder `BREATHALYZER_HOME` names (use one
   for tests). `--search-in <folder>` looks for Savage Wind only there and one level below. One window per
