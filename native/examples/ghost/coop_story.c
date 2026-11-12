@@ -1,16 +1,24 @@
 // co-op: story flags through the game's own flag manager (docs/coop.md "Story together").
 //
-// Included by ghost.c (one DLL: modhost runs one frame job per game, so co-op shares the ghost's). NOT YET RUN IN THE
-// GAME: probe run B checks the getter's arguments, the setter, the string object and the busy bit first.
+// Included by ghost.c (one DLL: modhost runs one frame job per game, so co-op shares the ghost's). In the game
+// (probe run B, 2026-11-12): the setter and the string object work (through `coop probe`); the getter guess crashed
+// (reads are off). Not yet run in the game: the safe-point gate, live-only names and set-again after a load (0.7.1).
 //
 // What it does, on the game thread (the frame job tick) only:
 // - reads every name of the loaded story list through the game's get-bool-by-name, COOP_READS_PER_TICK a frame, and
 //   keeps the bits (`coop story get`: ready, seq, bits; seq goes up when a full pass sees a change);
 // - adds queued bits (`coop story add <hex>`) through the game's set-bool-by-name, value 1 only: never a 0, never a
 //   name outside the list, never a bit the game already has; COOP_ADDS_PER_TICK a frame;
-// - waits (and tries again next frame) while there is no world, while the manager's busy bit is set (it refuses
-//   anyway), or when the setter says no.
-// Commands only fill buffers under the lock; the tick does every game call.
+// - adds LIVE only towers and memories (MapTower_*, IsGet_MemoryPhoto_*): a beast, shrine, quest step or cutscene
+//   flag set while the player is inside it or in its event can skip event steps, so those are dropped here ("held")
+//   and wait for the next join's save merge (tools/mp/story.py);
+// - adds only at a safe point: the world is up, the manager's busy bit is down, and Link is free (his real position
+//   is found: not loading, no cutscene, not riding; no pause menu) for COOP_SETTLE_TICKS frames in a row;
+// - after any time that wasn't safe (a load, a death, a cutscene...) it sets again what it added (a load can bring
+//   back the save's 0): setting a 1 to 1 changes nothing;
+// - waits (and tries again next frame) when the setter says no.
+// Commands only fill buffers under the lock; the tick does every game call. A list load bumps a generation number;
+// an add parsed for an older list is refused (its bits would mean other names).
 
 // (no C library here: the list file is read with Windows' own calls; CloseHandle is declared in ghost.c)
 __declspec(dllimport) void *__stdcall CreateFileA(const char *path, unsigned long access, unsigned long share,
@@ -32,6 +40,7 @@ static uint64_t g_coop_get_fn = COOP_GET_BOOL;  // (the selftest points it at it
 #define COOP_NAME 64
 #define COOP_READS_PER_TICK 48         // 1,075 names in 23 frames (under a second at 30 fps)
 #define COOP_ADDS_PER_TICK 8
+#define COOP_SETTLE_TICKS 60           // Link free this many frames in a row (2 s at 30 fps) before an add
 #define COOP_BYTES (COOP_MAX / 8)
 
 typedef struct {
@@ -48,16 +57,24 @@ static uint8_t g_coop_have[COOP_BYTES];        // (tick) what the game has, as r
 static uint8_t g_coop_last[COOP_BYTES];        // (tick) what seq was last raised for
 static uint8_t g_coop_pass[COOP_BYTES];        // (tick) this pass's reads
 static uint8_t g_coop_want[COOP_BYTES];        // (tick) bits to add
+static uint8_t g_coop_ours[COOP_BYTES];        // (tick) bits this list's adds set (set again after an unsafe time)
+static uint8_t g_coop_live[COOP_BYTES];        // (tick) names that may be added live (towers, memories)
 static uint8_t g_coop_req[COOP_BYTES];         // (under the lock) bits a command asked to add
 static int g_coop_req_new;
+static uint32_t g_coop_gen;                    // (under the lock) +1 on every list load
 static int g_coop_cursor, g_coop_seen_pass, g_coop_pass_fails;
+static int g_coop_stable, g_coop_was_unsafe;   // (tick) safe frames in a row; an unsafe time since the last add
+static int g_coop_settle = COOP_SETTLE_TICKS;  // (the selftest makes it short)
 static uint64_t g_coop_mgr_slot = COOP_FLAG_MGR;  // (the selftest points it at its own memory)
 static int coop_world_real(void) { return botw_time_of_day(api) >= 0.0f; }
 static int (*g_coop_world)(void) = coop_world_real;
+// Link is free: his real position is found (not loading, no cutscene, not riding) and no pause menu is open.
+static int coop_free_real(void) { return botw_player_real_pos(api) != 0 && !botw_paused(api); }
+static int (*g_coop_free)(void) = coop_free_real;
 
 typedef struct {
-    int n, ready;
-    int64_t seq, reads, read_fails, sets, set_refused, busy_waits, no_world_waits, pending;
+    int n, ready, safe;
+    int64_t seq, reads, read_fails, sets, set_refused, busy_waits, no_world_waits, pending, held, unsafe_waits;
     uint8_t bits[COOP_BYTES];
 } CoopPub;
 static CoopPub g_coop_pub;                     // (under the lock) what `coop story get|status` shows
@@ -82,6 +99,13 @@ static uint64_t coop_mgr(void) {
     return m;
 }
 
+// A name that may be added while the game runs: a tower or a memory (story.py LIVE_KINDS).
+static int coop_live_name(const char *s) {
+    if (!strncmp(s, "MapTower_", 9)) return 1;
+    if (!strncmp(s, "IsGet_MemoryPhoto_", 18)) return 1;
+    return 0;
+}
+
 // One name -> 0 or 1, or -1 if the game didn't answer.
 static int coop_read(struct Cpu *c, uint64_t mgr, StrObj *obj) {
     if (!g_coop_get_fn) return -1;  // (no known getter: see COOP_GET_BOOL)
@@ -90,19 +114,26 @@ static int coop_read(struct Cpu *c, uint64_t mgr, StrObj *obj) {
     return ok ? (g_coop_out[0] & 1) : -1;
 }
 
+#define BIT_CLR(b, i) ((b)[(i) >> 3] &= (uint8_t)~(1u << ((i) & 7)))
+
 static void coop_tick(struct Cpu *c) {
     lock();
     if (g_coop_swap) {
         g_coop_list = g_coop_next;
         g_coop_swap = 0;
         unlock();
-        for (int i = 0; i < g_coop_list.n; i++)
+        memset(g_coop_live, 0, sizeof g_coop_live);
+        for (int i = 0; i < g_coop_list.n; i++) {
             g_coop_obj[i].vptr = STRING_OBJ_VPTR, g_coop_obj[i].str = P(g_coop_list.names[i]);
+            if (coop_live_name(g_coop_list.names[i])) BIT_SET(g_coop_live, i);
+        }
         memset(g_coop_have, 0, sizeof g_coop_have);
         memset(g_coop_last, 0, sizeof g_coop_last);
         memset(g_coop_pass, 0, sizeof g_coop_pass);
         memset(g_coop_want, 0, sizeof g_coop_want);
+        memset(g_coop_ours, 0, sizeof g_coop_ours);
         g_coop_cursor = 0, g_coop_seen_pass = 0, g_coop_pass_fails = 0;
+        g_coop_stable = 0, g_coop_was_unsafe = 0;
         memset(&t_coop, 0, sizeof t_coop);
         t_coop.n = g_coop_list.n;
         lock();
@@ -116,11 +147,22 @@ static void coop_tick(struct Cpu *c) {
     unlock();
 
     int n = g_coop_list.n;
+    for (int i = 0; i < n; i++)  // not a tower or a memory: never live (it waits for the next join's save merge)
+        if (BIT_GET(g_coop_want, i) && !BIT_GET(g_coop_live, i)) BIT_CLR(g_coop_want, i), t_coop.held++;
+    // Is it a safe point? (every frame, list or not: `coop story status` "safe" also tells the agent when to set time)
+    uint64_t mgr = 0;
+    int world = g_coop_world() && (mgr = coop_mgr()) != 0;
+    int busy = world && (*(volatile const uint8_t *)(uintptr_t)(mgr + COOP_BUSY_OFF) & COOP_BUSY_BIT);
+    if (world && !busy && g_coop_free()) {
+        if (g_coop_stable < 1 << 30) g_coop_stable++;
+    } else {
+        g_coop_stable = 0, g_coop_was_unsafe = 1;
+        if (world && !busy && n > 0) t_coop.unsafe_waits++;
+    }
     if (n > 0 || probe) {
-        uint64_t mgr = 0;
-        if (!g_coop_world() || !(mgr = coop_mgr())) {
+        if (!world) {
             t_coop.no_world_waits++;
-        } else if (*(volatile const uint8_t *)(uintptr_t)(mgr + COOP_BUSY_OFF) & COOP_BUSY_BIT) {
+        } else if (busy) {
             t_coop.busy_waits++;
         } else {
             if (probe) {
@@ -157,25 +199,34 @@ static void coop_tick(struct Cpu *c) {
                     t_coop.ready = 1;
                 }
             }
-            int added = 0;  // add: only 0 -> 1, only listed names
-            for (int i = 0; i < n && added < COOP_ADDS_PER_TICK; i++) {
-                if (!BIT_GET(g_coop_want, i)) continue;
-                if (BIT_GET(g_coop_have, i)) {
-                    g_coop_want[i >> 3] &= (uint8_t)~(1u << (i & 7));
-                    continue;
+            if (g_coop_stable >= g_coop_settle) {  // a safe point: Link free for a while
+                if (g_coop_was_unsafe) {  // (after a load the save's 0 may be back: set ours again; 1 to 1 is no change)
+                    for (int k = 0; k < COOP_BYTES; k++)
+                        g_coop_want[k] |= g_coop_ours[k], g_coop_have[k] &= (uint8_t)~g_coop_ours[k];
+                    g_coop_was_unsafe = 0;
                 }
-                added++;
-                if (gcall(c, COOP_SET_BOOL, mgr, 1, P(&g_coop_obj[i]), 0, 0, 0, 0) & 1) {
-                    t_coop.sets++;
-                    BIT_SET(g_coop_have, i);
-                    g_coop_want[i >> 3] &= (uint8_t)~(1u << (i & 7));
-                } else {
-                    t_coop.set_refused++;
-                    break;  // (busy after all: next frame)
+                int added = 0;  // add: only 0 -> 1, only listed live names
+                for (int i = 0; i < n && added < COOP_ADDS_PER_TICK; i++) {
+                    if (!BIT_GET(g_coop_want, i)) continue;
+                    if (BIT_GET(g_coop_have, i)) {
+                        BIT_CLR(g_coop_want, i);
+                        continue;
+                    }
+                    added++;
+                    if (gcall(c, COOP_SET_BOOL, mgr, 1, P(&g_coop_obj[i]), 0, 0, 0, 0) & 1) {
+                        t_coop.sets++;
+                        BIT_SET(g_coop_have, i);
+                        BIT_SET(g_coop_ours, i);
+                        BIT_CLR(g_coop_want, i);
+                    } else {
+                        t_coop.set_refused++;
+                        break;  // (busy after all: next frame)
+                    }
                 }
             }
         }
     }
+    t_coop.safe = g_coop_stable >= g_coop_settle;
     if (g_coop_seen_pass && memcmp(g_coop_have, g_coop_last, sizeof g_coop_last)) {  // a change (the game's or ours)
         t_coop.seq++;
         memcpy(g_coop_last, g_coop_have, sizeof g_coop_last);
@@ -224,6 +275,7 @@ static int coop_load_text(const char *text, int dlc) {
     lock();
     g_coop_next = next;
     g_coop_swap = 1;
+    g_coop_gen++;                              // (an add parsed for the old list is refused: coop_add_hex)
     memset(g_coop_req, 0, sizeof g_coop_req);  // (adds asked for the old list mean nothing for this one)
     g_coop_req_new = 0;
     unlock();
@@ -237,11 +289,14 @@ static int hexval(char ch) {
 }
 
 // Queue a story line's bits to add. Returns how many bits it has, or -1 (not the list's exact length of lowercase
-// hex, a bit past the list, or no list yet).
+// hex, a bit past the list, no list yet, or a list loaded while it was being read: its bits would be other names).
+static void (*g_coop_between)(void);  // (the selftest loads a list here, between reading the count and queuing)
 static int coop_add_hex(const char *hex) {
     lock();
     int n = g_coop_swap ? g_coop_next.n : g_coop_list.n;
+    uint32_t gen = g_coop_gen;
     unlock();
+    if (g_coop_between) g_coop_between();
     size_t want_len = 2 * (size_t)((n + 7) / 8);
     if (n <= 0 || strlen(hex) != want_len) return -1;
     uint8_t b[COOP_BYTES] = {0};
@@ -255,6 +310,10 @@ static int coop_add_hex(const char *hex) {
         if (BIT_GET(b, i)) return -1;
     for (int i = 0; i < n; i++) count += BIT_GET(b, i);
     lock();
+    if (gen != g_coop_gen) {  // (a list was loaded meanwhile)
+        unlock();
+        return -1;
+    }
     for (size_t k = 0; k < want_len / 2; k++) g_coop_req[k] |= b[k];
     g_coop_req_new = 1;
     unlock();
@@ -316,7 +375,10 @@ static void cmd_coop(int argc, char **argv, SwModReply *r) {
             api->reply_int(r, "set_refused", pub.set_refused);
             api->reply_int(r, "busy_waits", pub.busy_waits);
             api->reply_int(r, "no_world_waits", pub.no_world_waits);
+            api->reply_int(r, "unsafe_waits", pub.unsafe_waits);
             api->reply_int(r, "pending", pub.pending);
+            api->reply_int(r, "held", pub.held);
+            api->reply_bool(r, "safe", pub.safe != 0);
         }
         return;
     }

@@ -11,13 +11,21 @@ Limits per client: 10 s to say hello, 30 messages a second (more are dropped; mu
 8 players per room. Names and rooms are checked.
 
 Co-op and base security (docs/coop.md; tools/mp/session.py, security.py), used when the host's agent runs the relay:
-- `host_secret`: only the connection on 127.0.0.1 whose hello carries the matching `host_proof` is the room's host.
-  time, weather, story, rules, kick, ban, end and code are host-only: from anyone else they are dropped, and 3 in
-  10 s get that player kicked. Every relayed co-op line carries "from" (the sender's id), written by the relay.
-- `room_code`: 3 words; wrong ones are refused, 5 a minute from one address make it wait 10 minutes.
-- `bans` (security.BanList): banned or kicked keys and addresses can't join. `lan_only`: home-network addresses only.
+- `host_secret`: only the connection on 127.0.0.1 whose hello carries the matching `host_proof` is the room's host
+  (checked before the ban list). time, weather, story, rules, kick, ban, end and code are host-only: from anyone else
+  they are dropped, and 3 in 10 s get that player cut off and kicked. Every relayed co-op line carries "from" (the
+  sender's id), written by the relay.
+- `room_code`: 3 words. With a code set, every new connection first gets {"type":"challenge","nonce":..}; the hello
+  answers with "cnonce" and "code_proof" (security.code_proof: the code is never sent) and the welcome carries
+  "code_ok" (security.code_answer) so the friend knows this relay has the code. A plain "code" (older clients) still
+  works. A hello with no code is told "this world needs a room code" (no strike); wrong ones are refused, 5 a minute
+  from one address make it wait 10 minutes.
+- `bans` (security.BanList): banned or kicked keys and addresses can't join (never loopback by address). A kick or
+  ban closes every connection of that player in every room (same key, same address, or on this PC the same name).
+  `lan_only`: home-network addresses only.
 - Per kind: state 25/s (new clients), story 2/s, time 2/s, weather 1/s, story_offer 1/s; 4 not-yet-hello connections
-  per address. A friend's `story_offer` reaches the host only if the host's rules allow it (off by default).
+  per address. A room with a host (co-op) takes no states (ghosts use their own room). A friend's `story_offer`
+  reaches the host only if the host's rules allow it (off by default). Cut off for flooding = kicked too.
 - A client without "features" in its hello is a visitor: states, join and leave only, never time or story.
 Without host_secret and room_code it works as before: anyone who can reach the port can join.
 """
@@ -44,7 +52,8 @@ MAX_BUFFER = 256 * 1024    # bytes waiting to go to one client before it counts 
 
 class _Conn:
     __slots__ = ("id", "name", "room", "bot", "writer", "peer", "tokens", "stamp", "flood", "warned",
-                 "state", "state_at", "closing", "joined", "hello_by", "features", "host", "key", "kinds", "ip")
+                 "state", "state_at", "closing", "joined", "hello_by", "features", "host", "key", "kinds", "ip",
+                 "nonce")
 
     def __init__(self, writer, rate, now, hello_by=float("inf")):
         self.writer = writer
@@ -66,6 +75,7 @@ class _Conn:
         self.key = None            # player key fingerprint (bans)
         self.kinds = None          # security.KindLimiter (per message kind)
         self.ip = self.peer[0] if isinstance(self.peer, tuple) and self.peer else None
+        self.nonce = security.new_nonce()   # (the room code challenge)
 
     def has(self, feature: str) -> bool:
         return self.features is not None and feature in self.features
@@ -102,6 +112,7 @@ class Relay:
         self.room_info: dict[str, dict] = {}   # room -> {"host": _Conn|None, "time", "weather", "story", "rules"}
         self._wrong_codes = security.WrongCodeGuard(clock)
         self._host_only = security.Strikes(security.HOST_ONLY_STRIKES, security.HOST_ONLY_WINDOW, clock)
+        self.remote_joins = 0   # joins from another PC (the host's agent says when none came: a firewall hint)
 
     # -- life cycle --
 
@@ -177,6 +188,13 @@ class Relay:
         self._send(conn, {"type": "error", "error": error})
         self._kick(conn)
 
+    def _cut_off(self, conn: _Conn, error: str) -> None:
+        """Close a misbehaving client and keep it out for a while (a kick: never this PC by address), so it can't
+        reconnect at once and do it again."""
+        if conn.joined and not conn.host:
+            self.bans.kick(conn.key, conn.ip)
+        self._fail(conn, error)
+
     def _kick(self, conn: _Conn) -> None:
         conn.closing = True
         try:
@@ -204,7 +222,7 @@ class Relay:
         conn.flood += 1.0
         if conn.flood > FLOOD_FACTOR * self.rate:
             self._say(f"{conn.name or conn.peer} sent far too many messages; disconnecting")
-            self._fail(conn, "too many messages; disconnected")
+            self._cut_off(conn, "too many messages; disconnected")
         elif now - conn.warned >= 1.0:
             conn.warned = now
             self._send(conn, {"type": "error", "error": f"too many messages (max {self.rate:g} a second); some were dropped"})
@@ -272,6 +290,8 @@ class Relay:
             self._fail(conn, "too many connections from your address")
             return
         self._conns.add(conn)
+        if self.room_code:   # (prove the code without sending it: security.code_proof)
+            self._send(conn, {"type": "challenge", "nonce": conn.nonce})
         lines = self._lines(reader, conn)
         try:
             async for line in lines:
@@ -322,18 +342,29 @@ class Relay:
             self._fail(conn, f"room {room} is full ({self.room_cap} players)")
             return
         key = security.valid_fingerprint(msg.get("key"))
-        if self.bans.blocked(key, conn.ip):
-            self._fail(conn, "you can't join this session")
-            return
         info = self.room_info.get(room)
-        is_host = (self.host_secret is not None and conn.ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+        is_host = (self.host_secret is not None and security.is_loopback(conn.ip)
                    and security.host_proof_matches(self.host_secret, room, msg.get("host_proof"))
                    and (info is None or info.get("host") is None))
+        if not is_host and self.bans.blocked(key, conn.ip):   # (the host's own agent: never refused)
+            self._fail(conn, "you can't join this session")
+            return
+        code_ok = None
         if self.room_code and not is_host:
             if self._wrong_codes.blocked(conn.ip):
                 self._fail(conn, "too many wrong room codes; try again in 10 minutes")
                 return
-            if not security.code_matches(self.room_code, msg.get("code")):
+            proof, cnonce, plain = msg.get("code_proof"), msg.get("cnonce"), msg.get("code")
+            if proof is None and not plain:
+                self._fail(conn, "this world needs a room code")   # (no strike: nothing was tried)
+                return
+            if proof is not None:
+                ok = security.proof_matches(self.room_code, conn.nonce, cnonce, proof)
+                if ok:
+                    code_ok = security.code_answer(self.room_code, conn.nonce, cnonce)
+            else:   # (an older client sends the code itself)
+                ok = security.code_matches(self.room_code, plain)
+            if not ok:
                 self._wrong_codes.wrong(conn.ip)
                 self._fail(conn, "wrong room code")
                 return
@@ -366,10 +397,15 @@ class Relay:
         if conn.features is not None:
             host = info.get("host")
             welcome.update(features=list(session.FEATURES), host=host.id if host is not None else None,
+                           host_key=host.key if host is not None else None,
                            rules=dict(info["rules"]), you_host=conn.host, code=bool(self.room_code))
+            if code_ok is not None:
+                welcome["code_ok"] = code_ok
             for kind in ("time", "weather", "story"):
                 if info.get(kind) is not None and conn.has(session.FEATURE_OF[kind]):
                     welcome[kind] = info[kind]
+        if not security.is_loopback(conn.ip):
+            self.remote_joins += 1
         self._send(conn, welcome)
         join = {"type": "join", "id": conn.id, "name": name, "bot": conn.bot}
         for other in list(members.values()):
@@ -386,6 +422,9 @@ class Relay:
         if kind == "state":
             if conn.features is not None and conn.kinds is not None and not conn.kinds.allow("state"):
                 return
+            info = self.room_info.get(conn.room)
+            if info is not None and info.get("host") is not None:
+                return   # (a co-op room: no ghosts there, so a state flood can't slow the agents down)
             state = clean_state(msg)
             if state is None:
                 self._send(conn, {"type": "error", "error": "bad state (needs finite t, x, y, z)"})
@@ -409,7 +448,7 @@ class Relay:
         if kind in security.HOST_ONLY and not conn.host:
             if self._host_only.hit(conn):
                 self._say(f"{conn.name} sent host-only messages; disconnecting")
-                self._fail(conn, "sent host-only messages; disconnected")
+                self._cut_off(conn, "sent host-only messages; disconnected")
             else:
                 self._send(conn, {"type": "error", "error": f"only the host can send {kind!r}"})
             return
@@ -447,17 +486,10 @@ class Relay:
             self._broadcast_feature(conn, "coop1", dict(info["rules"], type="rules", **sender))
         elif kind in ("kick", "ban"):
             target = self.rooms.get(conn.room, {}).get(session.clean_target(msg) or 0)
-            if target is None or target is conn:
+            if target is None or target is conn or target.host:
                 self._send(conn, {"type": "error", "error": f"no such player to {kind}"})
                 return
-            done = "banned" if kind == "ban" else "kicked"
-            if kind == "ban":
-                self.bans.ban(target.key, target.ip, target.name or "")
-            else:
-                self.bans.kick(target.key, target.ip)
-            self._say(f"{conn.name} {done} {target.name}")
-            self._send(target, {"type": "bye", "reason": f"{done} by the host"})
-            self._kick(target)
+            self.remove(target, ban=kind == "ban", by=conn.name)
         elif kind == "code":
             code = msg.get("code")
             norm = security.normalize_code(code) if code else None
@@ -473,6 +505,54 @@ class Relay:
                     self._send(other, {"type": "bye", "reason": f"{conn.name} ended the session"})
                     self._kick(other)
 
+    # -- the host's kick and ban (by message, or from the host's agent in this process) --
+
+    def _same_player(self, a: _Conn, b: _Conn) -> bool:
+        """b is a connection of the player a: the same key, the same address (another PC), or on this PC (where
+        every player shares 127.0.0.1) the same name."""
+        if b.host:
+            return False
+        if a.key and b.key == a.key:
+            return True
+        if a.ip and b.ip == a.ip:
+            return not security.is_loopback(a.ip) or (a.name is not None and b.name == a.name)
+        return False
+
+    def remove(self, target: _Conn, ban: bool = False, by: str = "the host") -> int:
+        """Kick (10 minutes) or ban a player: every connection of his in every room is closed (his ghost connection
+        too). Never the host; never this PC by address. Returns how many connections were closed."""
+        if target.host:
+            return 0
+        done = "banned" if ban else "kicked"
+        if ban:
+            self.bans.ban(target.key, target.ip, target.name or "")
+        else:
+            self.bans.kick(target.key, target.ip)
+        closed = 0
+        for other in list(self._conns):
+            if other is target or self._same_player(target, other):
+                self._send(other, {"type": "bye", "reason": f"{done} by the host"})
+                self._kick(other)
+                closed += 1
+        self._say(f"{by} {done} {target.name}")
+        return closed
+
+    def find_player(self, name_or_id, room: str | None = None) -> _Conn | None:
+        """A joined player by id or (case-insensitive) name; the host never."""
+        for members in ([self.rooms.get(room, {})] if room else list(self.rooms.values())):
+            for c in list(members.values()):
+                if c.host:
+                    continue
+                if (isinstance(name_or_id, int) and c.id == name_or_id) or \
+                        (isinstance(name_or_id, str) and c.name and c.name.lower() == name_or_id.strip().lower()):
+                    return c
+        return None
+
+    def players(self) -> list[dict]:
+        """Everyone joined, for the host's `players` command."""
+        return [{"id": c.id, "name": c.name, "room": c.room, "host": c.host, "address": c.ip}
+                for members in self.rooms.values() for c in members.values()]
+
     def _broadcast_feature(self, conn: _Conn, feature: str, msg: dict) -> None:
         """Send to the others in the room that speak `feature` (never to visitors)."""
         for other in list(self.rooms.get(conn.room, {}).values()):
@@ -480,6 +560,7 @@ class Relay:
                 self._send(other, msg)
 
     def _leave(self, conn: _Conn) -> None:
+        self._host_only.clear(conn)
         if not conn.joined:
             return
         conn.joined = False

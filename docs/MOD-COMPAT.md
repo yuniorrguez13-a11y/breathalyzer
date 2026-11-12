@@ -22,12 +22,15 @@ python tools/mod_inspect.py "<mod folder or .zip>"
 | Mod type | Verdict | How |
 |---|---|---|
 | Native mod for this loader (`mod.toml`, a DLL using `native/modhost/swmod.h`) | works | `tools/modman.py` adds and deploys it ([mod-format](mod-format.md)). Tested in game |
-| Switch RomFS mod (`romfs/`, `01007EF00011E000/romfs`) | works | `tools/romfs_mods.py` fills Savage Wind's overlay folder (`SAVAGEWIND_ROMFS_OVERLAY`). Tested in game. Files in folders the game doesn't have are skipped, and the size table (RSTB) isn't fixed for you: merge with UKMM first when a mod adds or grows files |
+| Switch RomFS mod (`romfs/`, `01007EF00011E000/romfs`) | works | `tools/romfs_mods.py` fills Savage Wind's overlay folder (`SAVAGEWIND_ROMFS_OVERLAY`). Tested in game. Files in folders the game doesn't have are skipped, and the size table (RSTB) isn't fixed for you: merge with UKMM first when a mod adds or grows files. Bare RomFS folders (`Pack/`, `Model/`... with no `romfs/`) work too: a few files' headers say they are Switch files (Wii U ones go in a `content` folder to be converted). Image and 3D editor files (`.dds`, `.gtx`, `.png`...) are left out, and a `Pack/*.pack` copied whole from another game version gets the files it lacks from your game at `add` ([bnp](bnp.md)) |
 | UKMM package, Switch or cross-platform | partial | `tools/modman.py add` builds it from the game's files ([ukmm](ukmm.md)): its options, packs, plain files, actor links, model lists, animation lists, general and other plain parameter files, and a size table (merged with other mods' at deploy). Needs UKMM installed (its zstd dictionary is read from `ukmm.exe`). Physics, animation sequences (`.bas`), texts, actor info, game data, maps and the other UKMM kinds aren't merged yet: left out, and `add` and `tools/ukmm.py info` say first how many of the package's resources that is. In the one real Switch package tried (Sheikah Run) the animation sequences, which are the mod, aren't merged; a cross-platform package holds only mergeable data, mostly of kinds not merged yet. Not tried in the game yet; merging several mods still needs UKMM (Switch mode) |
 | BCML `.bnp`, Switch | works | `tools/modman.py add` installs it ([bnp](bnp.md)): its options, its packs filled from the game, every BCML 3 log merged (actor parameters, animation lists, game and save data, actor info, events, area data, residents, texts in every language, drops, shops, maps, quests) and a size table (merged with other mods' at deploy). Packs aren't merged between two packages yet: the later one's wins and *Needs attention* says what the earlier loses. A BCML 2 package's own logs (`savedata.sarc`, `deepmerge.yml`, `texts_*`) aren't merged: `partial`. The data logs were tried on made-up packages and the game's files only, the whole thing not in the game yet |
-| Wii U data that can be merged (BYML, AAMP, MSBT, maps, actor params) | convert | Converts with `tools/wiiu_convert.py` (text, maps, actor data, and models below; audio not yet), on the player's PC ([wiiu-mods](wiiu-mods.md)). `tools/modman.py add` does it for you. A converted Wii U text mod was tested in game. Several mods that change the same file still need UKMM (Switch mode) to merge them. A Wii U UKMM package or packed `.bnp` is not converted: merge it in UKMM first |
-| Wii U models and textures (`.sbfres` models with their animations, `X.Tex1` + `X.Tex2`, item icons) | convert | `tools/wiiu_convert.py` converts them with `tools/wiiu_model` ([wiiu-models](wiiu-models.md)); `tools/modman.py add` passes the game's own files for vanilla materials, mipmaps, `TexInfo.txt`, packs and the size table. Proven by round trips on the player's own Switch files only: no real Wii U model mod tried yet, nor any converted model in game. An `X.Tex2` without its `X.Tex1` stays Wii U data. A Wii U UKMM package with models is still "later" (UKMM keeps them as its own data) |
-| Wii U audio, Havok physics, UI layouts, effects, event flows | later | Not converted yet: `tools/wiiu_convert.py` keeps them as Wii U data, which the game can't read (a mod with only these is refused by `modman add` and by `wiiu_convert.py`, which then writes nothing; its RSTB doesn't count). A Wii U UKMM package with these is "later" too: deploy it in UKMM (Wii U mode) and add that output to use the rest |
+| Wii U data that can be merged (BYML, AAMP, MSBT, maps, actor params) | convert | Converts with `tools/wiiu_convert.py` (text, maps, actor data, and models below; audio not yet), on the player's PC ([wiiu-mods](wiiu-mods.md)). `tools/modman.py add` does it for you. A converted Wii U text mod was tested in game. Several mods that change the same file still need UKMM (Switch mode) to merge them |
+| BCML `.bnp`, Wii U | partial | `tools/modman.py add` puts the chosen options together, converts them with `tools/wiiu_convert.py`, makes the logs the Switch's (paths, new actors' instance sizes, text choice sizes; sizes worked out again) and installs it as a Switch `.bnp` ([bnp](bnp.md#wii-u-packages)). What doesn't convert (voice lines, models the converter can't read yet) gives way to the game's files and is named. Tried on 4 real packages (2026-11-12, scratch library), not in the game yet |
+| UKMM package, Wii U | partial | `tools/modman.py add` converts its plain files first (models, textures, icons, BYML, packs; Havok from the game's twin) and builds it as a Switch package ([ukmm](ukmm.md)). The UKMM kinds not merged yet (actor info, physics, recipes, texts...) are left out as for a Switch package, so new armors don't exist in the game yet |
+| Wii U models and textures (`.sbfres` models with their animations, `X.Tex1` + `X.Tex2`, item icons) | convert | `tools/wiiu_convert.py` converts them with `tools/wiiu_model` ([wiiu-models](wiiu-models.md)); `tools/modman.py add` passes the game's own files for vanilla materials, mipmaps, `TexInfo.txt`, packs and the size table. Proven by round trips on the player's own Switch files only: no real Wii U model mod tried yet, nor any converted model in game. An `X.Tex2` without its `X.Tex1` stays Wii U data. Models in Wii U UKMM packages and `.bnp`s convert the same way |
+| Wii U event flows (`.bfevfl`) | works | Little-endian on both consoles: used as they are (2026-11-12) |
+| Wii U audio, Havok physics, UI layouts, effects | later | Not converted yet: `tools/wiiu_convert.py` keeps them as Wii U data, which the game can't read (a mod with only these is refused by `modman add` and by `wiiu_convert.py`, which then writes nothing; its RSTB doesn't count). In a Wii U package (`.bnp` or UKMM) they give way to the game's file of the same path (Havok cloth in a new armor's pack is a vanilla copy), else they are left out and named |
 | ExeFS patch (`.ips`, `.pchtxt`) for 1.9.0 | works | `tools/exefs_patch.py`. Patches to data need no rebuild (tested in game); patches to code need `tools/sw_rebuild.py` (10-20 min) |
 | ExeFS patch for another version (usually 1.6.0) | retarget | Find the same code in 1.9.0 with masked patterns, as Savage Wind's `game_sites.py` does |
 | Atmosphère cheats for 1.9.0 | works (data cheats) | `tools/cheats.py` through Savage Wind's control port (tested in game). Cheats that write game code do nothing; button-combo conditions count as not pressed unless mapped to keys with `--hotkeys` |
@@ -36,11 +39,33 @@ python tools/mod_inspect.py "<mod folder or .zip>"
 | Cemu shader pack (`*_ps.txt`, `*_vs.txt`) | rewrite | Cemu-only. Savage Wind has its own graphics options |
 | Cemu settings preset (rules.txt only) | rewrite | Not needed: Savage Wind's own options |
 
+## Packed downloads
+
+`tools/modman.py add` unpacks a `.rar`, a `.7z` that isn't a `.bnp`, and a `.zip` holding archives (at most 3
+archives deep, every name and size checked, nothing run), keeps the 1.9.0 folder of game version folders, and adds
+the one mod inside; with several, it lists them and `--option "<name>"` picks one ([bnp](bnp.md)). The test
+downloads (2026-11-12, scratch library, not in the game): Shrek Hinox (`.rar`, bare `Model/`) and No Rain Slip
+(bare `Pack/TitleBG.pack` from an older version: filled from the game) are added; the Multi Patch `.rar` asks which
+of its 3 mods (its ExeFS patch, needing a rebuild, with exlaunch code that can't run; or one of two UKMM packages);
+the Linkle dialogue fix `.7z` unpacks but holds two region copies of a Wii U text pack, which `wiiu_convert.py`
+refuses as "several mods" (a text merge is planned for it).
+
+## Wii U packages (2026-11-12, scratch library, not in the game yet)
+
+| Package | Result |
+|---|---|
+| Unofficial Linkle 3.0 Armor Icons (`.bnp`) | all 890 icons convert; they replace the game's, no size changes needed |
+| Linkle Dialogue Mod 1.1.8 (`.bnp`; Linkle's Diary + Riju "Linkle 3" sleepover) | event packs, texts (every language gets its English lines), event info, game data, map and statics merge; the diary actor gets a Switch instance size (34,632 -> 103,896). Its 138 voice lines stay the game's (Wii U audio), and its DLC pack does nothing without the DLC |
+| Fierce Deity Set 1.3.1 (`.bnp`) | 15 armor actors, icons, texts, shop and actor info install (Havok cloth from the game), but its armor model `Armor_666` can't be converted yet: the armor won't show until the model converter handles it |
+| Girly Animation Pack 1.0.9 (`.bnp`) | installs (base, and with options: their `TitleBG.pack` copies merged in Wii U form); clashes with Linkle 3.0.1 on `TitleBG.pack` (the later mod wins) |
+| Bokoblin Slayer (UKMM, Wii U) | installs: 82 of 93 plain files convert (164 textures), Havok from the game; its 7 armor models can't be converted yet and its actor info, recipes and texts aren't merged, so the new armors don't exist in the game yet |
+| Guardians of the Kingdom (UKMM, Switch) | installs now (it stopped at its save data before); 5 resources of kinds not merged yet are named |
+
 ## First check on the user's own mods (2026-11-06)
 
 - 26 UKMM Wii U mods: 4 can be merged (merge: install them in UKMM, Switch mode); 22 need model or texture
-  conversion (mostly character and armor models). Neither converter takes a UKMM package itself: deploy it in UKMM
-  (Wii U mode), then add UKMM's output folder, whose models `wiiu_convert.py` converts now.
+  conversion (mostly character and armor models). Since 2026-11-12 `modman add` takes a Wii U UKMM package itself
+  (converted, see above); deploying it in UKMM (Wii U mode) and adding UKMM's output folder still works too.
 - 15 Cemu packs under "Mods": 14 are code patches or shaders (rewrite); 1 is UKMM's deployed output (Wii U data,
   convert).
 

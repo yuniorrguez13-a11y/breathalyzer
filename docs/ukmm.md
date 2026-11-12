@@ -30,18 +30,31 @@ kinds (BYML, texts, game data, actor info, maps) aren't merged here yet.
 - **Not merged yet** (named under *Needs attention*; the game's copy is used, and a new file of that kind is left
   out of its pack): physics, animation sequences (`Actor/AS/*.bas`), recipes, shop data, AI programs and schedules,
   drop tables, life conditions, chemistry, bone control, attention clients, ragdoll files, animation info, actor
-  info (so new actors get no `ActorInfo` entry), game and save data flags, texts (`Bootup_XXxx.pack` is left out),
-  maps, events, quests, tips, area data, status effects, cooking data, fonts, UI layouts and other BYML files.
+  info (so new actors get no `ActorInfo` entry), texts (`Bootup_XXxx.pack` is left out), maps, events, quests,
+  tips, area data, status effects, cooking data, fonts, UI layouts and other BYML files.
+- **Game data and save data flags** (`Bootup.pack//GameData/gamedata.ssarc`, `savedataformat.ssarc`): flags the
+  package adds or changes are merged into the game's (game data by `tools/bcml_data.py`; save data for all three
+  lists: `game_data.sav`, `caption.sav`, `option.sav`). A flag the package deletes is kept and named: UKMM diffs a
+  mod against the game version its maker had, so such a delete is most often that version's difference (the
+  Guardians package "deletes" `DisplaySpecialOnce`), and a flag the game reads that is gone is worse than a spare one.
+- **Wii U packages** (2026-11-12): their plain files (models, textures, icons, BYML, texts, packs) are converted to
+  the Switch's formats first, in memory, by `tools/wiiu_convert.py` with your game files (`X.Tex1` + `X.Tex2` become
+  `X.Tex`, renamed in the manifests and pack lists too). A file that stays Wii U data (Havok, sounds, effects) gives
+  way to your game's copy of the same path (the pack's twin, else the game's actor packs: Havok cloth in a new armor
+  pack is a copy of a vanilla one), else it is left out and named. Parsed resources and pack lists are the same on
+  both consoles. Models the converter can't read yet (see [wiiu-models](wiiu-models.md)) are left out and named.
   UKMM stores these in its own data model; reading each kind back is its own piece of work. The merges themselves
   exist now for BCML packages (game data, save data, actor info, events, area data, status effects, residents,
   texts, drops, shops, maps, quests: `tools/bcml_data.py`, `bcml_texts.py`, `bcml_maps.py`); what UKMM packages
   still need is a reader that turns UKMM's own data for each of these kinds into their input. Animation sequences
   also need UKMM's list of animation resource type names, which is game-derived and not in this repo.
-- **Refused:** Wii U packages (Savage Wind is the Switch game, and their models and textures are Wii U formats):
-  install them in UKMM (Wii U mode), deploy there, and add UKMM's output folder (modman converts what it can from
-  Wii U). A `meta.yml` with no platform or one UKMM doesn't write. A damaged package (a zstd frame cut short, a pack
-  alignment that isn't a power of two up to `0x2000`, YAML nested more than 64 deep...): a message, never a
-  traceback.
+- **Refused:** a `meta.yml` with no platform or one UKMM doesn't write. A damaged package (a zstd frame cut short,
+  data cut short, a pack alignment that isn't a power of two up to `0x2000`, YAML nested more than 64 deep...): a
+  message, never a traceback.
+- **Named, the rest installs:** a resource in a form this loader can't read (a kind it doesn't know, or data its
+  decoder can't hold): the game's copy of that file is used. (Before 2026-11-12 one such resource ended the whole
+  install: the Guardians package stopped at `GameData/savedataformat.sarc`, whose flags are keyed by `{name, hash}`
+  maps. CBOR allows a map as a key, Python's dicts don't; such keys are now read as frozen maps.)
 - **Named, not refused:** a package made on top of another mod (`masters` in `meta.yml`): its packs and parameter
   files list only what it changes against that mod, and are built on the plain game here, so what it relies on from
   that mod is missing. Install the two together in UKMM (Switch mode) and add its output folder.
@@ -123,6 +136,11 @@ is used. Merge such mods in UKMM (Switch mode) and add its output folder instead
 - Packs and parameter files are rebuilt by this tool: the same files, but not byte for byte what UKMM writes.
 - Not tried in the game yet.
 - A package made on top of another mod (`masters`) is built on the plain game (named).
+- Wii U packages: as for any Wii U mod, sounds, Havok, effects and UI layouts don't convert (the game's copies are
+  used), and new actors need the actor info kind, which isn't merged yet, so a Wii U package that adds armors
+  installs but its new armors don't exist in the game yet.
+- Game and save data: a flag the package deletes is kept (named); new `revival_*` flags go into the plain lists (as
+  with BCML's logs).
 
 ## Tested
 
@@ -130,6 +148,15 @@ is used. Merge such mods in UKMM (Switch mode) and add its output folder instead
   and FSE tables, a dictionary trained on made-up text) and frames made by hand, damaged frames, CBOR and byte
   arrays, `meta.yml` and manifests, options, packs (files added, removed, nested, shared with the game, missing),
   every merged kind, Yaz0, the size table, `modman add` (options from the command line too), `deploy` and `info`.
+- Made-up packages in `tests/test_wiiu_packages.py`: maps as map keys, save data (all three lists) and game data
+  flags merged, deletes kept and named, one unreadable resource named while the rest installs, a Wii U package's
+  BYML converted and its Havok swapped for the game's twin (or left out), `X.Tex1`/`X.Tex2` names.
+- 2026-11-12, scratch library (`out\wiiu-bnp-lib`), not in the game: Guardians of the Kingdom (Switch) now installs
+  (it stopped at its save data before): 108 files, 107 parameter files merged; its save and game data flags are
+  all in your game already (its one "delete" kept), and 5 resources of kinds not merged yet are named (3 drop
+  tables, 1 AI program, 1 UI layout). Bokoblin Slayer (Wii U) installs: 82 of 93 plain files convert (164
+  textures), 4 Havok files come from the game, but its 7 armor models can't be converted yet and its actor info,
+  recipes, physics and texts aren't merged, so its new armors don't exist in the game yet.
 - 2026-11-07, the user's own 26 Wii U UKMM packages (read only, in UKMM's own folder): `info` reads each; every one
   of the 4,167 parameter files of the kinds above loads, 453 of them merge with the game's own copy and are written
   back as valid parameter files. The pure-Python decoder gives the same bytes as Python 3.14's zstd for all 16,090

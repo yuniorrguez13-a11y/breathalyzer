@@ -51,7 +51,9 @@ folder or a Cemu graphic pack (`<pack>/rules.txt` + `<pack>/content/`). You can 
 itself. Files outside those folders (readme, `rules.txt`, preview pictures) are left out. A download with several
 options (two packs with their own `content/`) is refused: convert the one you want. Switch mods, UKMM packages,
 packed BCML packages (`info.json` with `logs/`) and Cemu graphic packs made for another game (no BotW title id in
-`rules.txt`) are refused too (Switch mods need no conversion; install the packages in UKMM). A game file whose name
+`rules.txt`) are refused too by this command (Switch mods need no conversion). `modman add` installs Wii U BCML
+packages (`.bnp`, [bnp](bnp.md#wii-u-packages)) and Wii U UKMM packages ([ukmm](ukmm.md)) itself: it puts the
+chosen options together, converts them with this tool and merges their logs or data. A game file whose name
 Windows can't use, or that could lead out of the output folder (`..`, `C:`, a `\`, a trailing dot or space,
 `con`...), is left out and listed in the report: nothing is written outside `--out`, and no file is written over.
 
@@ -66,6 +68,7 @@ Windows can't use, or that could lead out of the output folder (`..`, `C:`, a `\
 | AAMP | actor parameters (`.bxml`, `.bphysics`, `.bgparamlist`...) | Nothing to do: AAMP is little-endian on both consoles. Its header flags say so (bit 0), and all 102,260 AAMP files in the 7,211 actor packs of the Switch game have flags 3. A big-endian one is reported. Used as is |
 | BFRES models | `Model/X.sbfres`, `X_Animation.sbfres` (loose or in packs) | Rebuilt as Switch BFRES 0.5.0.3 by `tools/wiiu_model`: skeleton, vertex data, meshes, materials (on your vanilla ones with `--game`), user data, skeletal and material animations, `TexInfo.txt` ([wiiu-models](wiiu-models.md)) |
 | BFRES textures | `Model/X.Tex1.sbfres` + `X.Tex2.sbfres`, `UI/StockItem/*.sbitemico` | Untiled from the Wii U GPU layout and tiled for the Switch: Tex1 + Tex2 become one `X.Tex.sbfres` (the Tex2 is not written; in a pack, the pack is built again with the new names) |
+| Event flows | `.bfevfl`, `.bfevtm` (loose or in `Event/*.sbeventpack`) | Used as is when little-endian (byte order mark `FF FE` at 0x0C): BotW's are, on the Wii U too (a Wii U mod's `Common.bfevfl` is byte for byte the Switch game's; all 92 flows in a sample of the game's event packs are). A big-endian one is reported |
 | Text | `.txt`, `.xml`, `.json`, `.yml`... | Used as is |
 | Empty files | any | Used as is (an empty file is the same on both consoles) |
 
@@ -84,7 +87,7 @@ them: where the mod uses them it may crash or look wrong.
 | Audio (`.bfstm`, `.bars`, `.bfwav`, `.bfsar`...) | Encoded differently for each console |
 | Havok physics (`.hk*`, `.shk*`, also inside actor packs) | Built for each console |
 | Shaders, effects (`.ptcl`, `.sesetlist`), fonts, movies | Built for each console's GPU or video player |
-| UI layouts (`.bflyt`, `.bflan`), event flows (`.bfevfl`), ELink/SLink, PrOD (`.blwp`), terrain, ecosystem | Byte order differs, but this tool doesn't convert them yet |
+| UI layouts (`.bflyt`, `.bflan`), big-endian event flows (none seen), ELink/SLink, PrOD (`.blwp`), terrain, ecosystem | Byte order differs, but this tool doesn't convert them yet |
 | RSTB (`ResourceSizeTable.product.srsizetable`) | Left out. The byte order converts, but its sizes are Wii U sizes and the Switch's differ (64-bit). The game's own RSTB is used: merge with UKMM if the mod adds or grows files. With `--game`, converted models and textures that need more get your game's RSTB with their entries raised |
 | Unknown formats | Kept as they are |
 

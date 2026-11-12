@@ -1,12 +1,20 @@
 """Base security for player-hosted sessions (docs/coop.md): the host alone controls the shared world.
 
-    room codes      3 words from WORDS (256 simple words), shown big, picked with word wheels; never in discovery
+    room codes      3 words from WORDS (256 simple words), shown big, picked with word wheels; never in discovery and
+                    never sent as text: the relay sends a nonce ("challenge"), the friend answers code_proof() (an
+                    HMAC keyed by the code), and the relay proves it knows the code back (code_answer() in the
+                    welcome) before the friend trusts the host with anything
     host secret     <library>/mp/host.json: 32 random bytes that never leave the PC; the host's own client proves it
                     over 127.0.0.1, and only that connection is the host
     player key      <library>/mp/player.json: 128 random bits per install; only a fingerprint is ever sent
-    bans            <library>/mp/bans.json (key fingerprint + address); kicks keep a player out for 10 minutes
+    bans            <library>/mp/bans.json (key fingerprint + address); kicks keep a player out for 10 minutes;
+                    loopback addresses (this PC) are never kicked or banned by address
     limits          per message kind (KIND_RATES), wrong room codes (5 a minute from one address = 10 minutes out),
                     host-only messages from anyone else (3 in 10 s = kicked)
+
+Honest limits: a 3-word code is 16.7 million choices. It keeps strangers out and off the wire, but a fake host on
+your own network that gets one join answer can try every code on a fast PC. Check words help tell hosts apart; they
+don't prove who a host is (a fake host can copy them). Play on networks you trust.
 
 There are no project servers: everything here runs on the players' own PCs.
 """
@@ -90,6 +98,52 @@ def code_matches(expected: str | None, given) -> bool:
     return hmac.compare_digest((norm or "").encode(), normalize_code(expected).encode())
 
 
+NONCE_HEX = 32   # 16 random bytes
+
+
+def new_nonce() -> str:
+    return secrets.token_hex(NONCE_HEX // 2)
+
+
+def valid_nonce(v) -> str | None:
+    return v if isinstance(v, str) and len(v) == NONCE_HEX and _HEX_RE.fullmatch(v) else None
+
+
+def _code_mac(code: str, text: str) -> str:
+    return hmac.new(normalize_code(code).encode(), text.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def code_proof(code: str, nonce: str, cnonce: str) -> str:
+    """A friend's answer to the relay's challenge: proves the room code without sending it."""
+    return _code_mac(code, f"breathalyzer-join:{nonce}:{cnonce}")
+
+
+def code_answer(code: str, nonce: str, cnonce: str) -> str:
+    """The relay's proof (in the welcome) that it knows the room code too: a fake host without it can't make it."""
+    return _code_mac(code, f"breathalyzer-host:{cnonce}:{nonce}")
+
+
+def proof_matches(code: str | None, nonce: str | None, cnonce, given) -> bool:
+    if not code or not nonce or valid_nonce(cnonce) is None or not isinstance(given, str):
+        return False
+    return hmac.compare_digest(given.encode(), code_proof(code, nonce, cnonce).encode())
+
+
+def answer_matches(code: str | None, nonce, cnonce: str | None, given) -> bool:
+    if not code or valid_nonce(nonce) is None or not cnonce or not isinstance(given, str):
+        return False
+    return hmac.compare_digest(given.encode(), code_answer(code, nonce, cnonce).encode())
+
+
+def code_hello(code: str | None, nonce: str | None) -> tuple[dict, str | None]:
+    """The hello fields for a room code (none without a code or a challenge: the code itself is never sent) and the
+    friend's own nonce, to check the welcome's code_answer with."""
+    if not code or valid_nonce(nonce) is None or normalize_code(code) is None:
+        return {}, None
+    cnonce = new_nonce()
+    return {"cnonce": cnonce, "code_proof": code_proof(code, nonce, cnonce)}, cnonce
+
+
 # -- the host secret and player keys --
 
 def _load_or_make(path: Path, field: str, nbytes: int) -> str:
@@ -139,9 +193,18 @@ def valid_fingerprint(v) -> str | None:
     return v if isinstance(v, str) and len(v) == 16 and _HEX_RE.fullmatch(v) else None
 
 
+def is_loopback(ip) -> bool:
+    try:
+        addr = ipaddress.ip_address(str(ip).split("%")[0])
+    except ValueError:
+        return False
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return (mapped or addr).is_loopback
+
+
 def check_words(fp: str, n: int = 4) -> str:
-    """Words to compare by eye (the Join list and the host's screen show the same ones): a fake host can't match
-    them without the host's key."""
+    """Words to tell hosts apart (the Join list and the host's screen show the same ones; a friend's copy is kept
+    per host by them). Not a proof: they are in every discovery answer, so a fake host can copy them."""
     digest = hashlib.sha256(("breathalyzer-check:" + fp).encode()).digest()
     return " ".join(WORDS[b] for b in digest[:n])
 
@@ -188,6 +251,11 @@ class BanList:
         os.replace(tmp, self.path)
 
     def ban(self, key: str | None, address: str | None, name: str = "") -> None:
+        """Ban a key and an address. A loopback address (this PC: the host's own agent, or a test) is never
+        banned; then only the key is."""
+        address = None if is_loopback(address) else address
+        if key is None and address is None:
+            return
         self.bans.append({"key": key, "addr": address, "name": name[:20], "at": int(time.time())})
         self._save()
 
@@ -200,10 +268,16 @@ class BanList:
         return before - len(self.bans)
 
     def kick(self, key: str | None, address: str | None) -> None:
+        address = None if is_loopback(address) else address   # (never this PC by address)
+        if key is None and address is None:
+            return
         self.kicks.append((self.clock() + KICK_WAIT, key, address))
 
     def blocked(self, key: str | None, address: str | None) -> str | None:
-        """Why this player can't join ("banned", "kicked"), or None."""
+        """Why this player can't join ("banned", "kicked"), or None. A loopback address is never blocked by address
+        (an old bans.json may hold one)."""
+        if is_loopback(address):
+            address = None
         for b in self.bans:
             if (key and b.get("key") == key) or (address and b.get("addr") == address):
                 return "banned"

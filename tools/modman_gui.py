@@ -1567,7 +1567,8 @@ class View(BigText):
 LAUNCH_BUSY = {"prepare": "Getting ready", "apply": "Using your changes from the game's Mods page",
                "deploy": "Getting your mods ready", "add": "Adding the mod", "remove": "Removing the mod",
                "check": "Checking", "tool": "Building the mod from your game files", "enable": "Turning it on",
-               "disable": "Turning it off"}
+               "disable": "Turning it off", "breath": "Checking the .breath file",
+               "export": "Making the .breath file"}
 REBUILD_LINE = "Rebuilding the game code"      # (what modman deploy prints before the 10-20 minute rebuild)
 REBUILD_SAY = "Building the game code for your code mods: about 10-20 minutes, only this time."
 # The Mod Manager's words, as the launcher says them (it has no Deploy button: Play deploys)
@@ -1577,6 +1578,7 @@ LAUNCH_WORDS = ((PRESS_DEPLOY, "Play uses the change."), ("Press Deploy to use i
 HOME_ROWS = 3          # the mod list always has room for this many
 ABOUT_LINES = 2        # the selected mod's text under the list: this many lines (longer text is cut with "...")
 GAME_POLL_TICKS = 25   # while the game is open, ask whether it still runs every this many ticks (2.5 s)
+OPEN_POLL_TICKS = 5    # look for .breath files a second start handed over every this many ticks (0.5 s)
 
 
 def wrap_text(text: str, font, width: int) -> list[str]:
@@ -1734,6 +1736,8 @@ class LaunchController(Controller):
         self.first_time = False
         self.installing: list[str] | None = None   # while the picked mods are added: the ones that failed
         self.install_total = 0
+        self.breath = None                          # a checked .breath (breath.Received): "Add this mod?" asks
+        self.adding_breath = None                   # (job, breath.Received) while modman adds it
         super().__init__(backend, clock, port)
 
     def _first_status(self) -> Status:
@@ -1812,6 +1816,10 @@ class LaunchController(Controller):
             self._plan(who, value)
         elif kind == "game":
             self._game_state(value)
+        elif kind == "breath":
+            self._breath_checked(who, value)
+        elif kind == "exported":
+            self._exported(who, value)
 
     def _plan(self, job: Job, facts: dict) -> None:
         if self.jobs.get("main") is job:
@@ -1888,6 +1896,8 @@ class LaunchController(Controller):
     def _done(self, job: Job, code: int) -> None:
         super()._done(job, code)
         self.status = launcher_words(self.status)
+        if self.adding_breath is not None and self.adding_breath[0] is job:
+            self._breath_added(job, code)
         if job is not self.step:
             return
         self.step = None
@@ -2016,6 +2026,120 @@ class LaunchController(Controller):
         else:
             self.status = Status("ok", ["Your mods are ready.", "Press Play. You can turn them on or off below."])
 
+    # --- .breath files (tools/breath.py): add one, make one
+
+    def open_breath(self, path: str, received: str) -> None:
+        """A .breath to add (Add a .breath, or a double-click on one): checked and unpacked in the background into a
+        new folder under `received`, every file's SHA-256 verified; then self.breath holds it and the window asks
+        "Add this mod?". One that fails a check is refused here, in plain words."""
+        if not self.free("add"):
+            return
+        self.drop_breath(quiet=True)
+        name = os.path.basename(path)
+        job = Job("breath", [path], name=name, started=self.clock())
+        self.jobs["main"] = job
+        self.status = Status("busy", [f"Checking {name}...", "Every file in it is checked before you are asked."])
+
+        def work():
+            try:
+                import breath as br
+                br.sweep(received)
+                value = br.unpack(path, os.path.join(received, br.new_name()))
+            except Exception as e:  # (BreathError says it in plain words; anything else is shown as it is)
+                value = e
+            self.events.put(("breath", job, value))
+
+        threading.Thread(target=work, daemon=True, name="launcher breath").start()
+
+    def _breath_checked(self, job: Job, value) -> None:
+        if self.jobs.get("main") is job:
+            del self.jobs["main"]
+        job.ended = self.clock()
+        if isinstance(value, Exception):
+            job.code = 1
+            job.lines = [str(value)]
+            self.details_job = job
+            text = str(value) if type(value).__name__ == "BreathError" else f"{type(value).__name__}: {value}"
+            self.status = Status("error", [f"{job.name} wasn't added.", plain(text)])
+            return
+        job.code = 0
+        self.breath = value
+        self.status = Status("info", ["Add this mod?", value.manifest.title])
+
+    def add_breath(self) -> None:
+        """Add this mod: modman add with the .breath's mod files (or its original package), under its title."""
+        rec = self.breath
+        if rec is None or not self.free("add"):
+            return
+        self.breath = None
+        title = rec.manifest.title
+        job = Job("add", ["add", rec.payload, "--name", title], name=title)
+        self.adding_breath = (job, rec)
+        self._start(job)
+        self.status = Status("busy", [f"Adding {title}...", "A big mod takes a minute."])
+
+    def drop_breath(self, quiet: bool = False) -> None:
+        """Not now: nothing of it is kept."""
+        rec, self.breath = self.breath, None
+        if rec is None:
+            return
+        import breath as br
+        br.dropped(rec)
+        if not quiet:
+            self.status = Status("info", ["Not added.", f"{rec.manifest.title} wasn't added. Nothing of it was kept."])
+
+    def _breath_added(self, job: Job, code: int) -> None:
+        _, rec = self.adding_breath
+        self.adding_breath = None
+        import breath as br
+        if code == 0:
+            br.added(rec)
+        else:
+            br.dropped(rec)
+
+    def export_breath(self, mod_id: str | None, dest: str, recipes=()) -> None:
+        """Make a .breath file of a mod (in the background: a big mod takes a while)."""
+        row = self._ready("export", mod_id)
+        if row is None:
+            return
+        job = Job("export", [dest], name=row.name, mod_id=row.id, started=self.clock())
+        self.jobs["main"] = job
+        self.status = Status("busy", [f"Making {os.path.basename(dest)}...", "A big mod takes a minute."])
+        backend = self.backend
+
+        def work():
+            try:
+                import breath as br
+                with backend.files:
+                    lib = backend.mm.Library.load(backend.root)
+                entry = next((m for m in (lib.mods if lib is not None else []) if m.get("id") == mod_id), None)
+                if entry is None:
+                    raise br.BreathError(f"{row.name} isn't in your mod list any more.")
+                value = br.export(backend.root, entry, dest, recipes=recipes,
+                                  install=getattr(lib, "install", None) or backend.install)
+            except Exception as e:  # (said in the window, never a crash)
+                value = e
+            self.events.put(("exported", job, value))
+
+        threading.Thread(target=work, daemon=True, name="launcher export").start()
+
+    def _exported(self, job: Job, value) -> None:
+        if self.jobs.get("main") is job:
+            del self.jobs["main"]
+        job.ended = self.clock()
+        self.details_job = job
+        if isinstance(value, Exception):
+            job.code = 1
+            text = str(value) if type(value).__name__ == "BreathError" else f"{type(value).__name__}: {value}"
+            job.lines = [text]
+            self.status = Status("error", ["The .breath file wasn't made.", plain(text)])
+            return
+        job.code = 0
+        job.lines = [f"Wrote {value.path}", *value.notes]
+        self.status = Status("ok", [f"Made {os.path.basename(value.path)}.",
+                                    f"It is in {os.path.dirname(value.path)}. Send it to a friend: Add a .breath (or "
+                                    "a double-click on it) adds the mod.", *value.notes[:1]])
+
     # --- while the game is open
 
     def watch(self) -> None:
@@ -2054,8 +2178,18 @@ class LauncherView(BigText):
     goes through launcher.FirstRun."""
 
     def __init__(self, root, settings: la.Settings, settings_file: str, *, first_run: la.FirstRun | None = None,
-                 make_backend=None, port: int | None = None, library: str | None = None, app_dir: str = la.REPO):
+                 make_backend=None, port: int | None = None, library: str | None = None, app_dir: str = la.REPO,
+                 reg_base: str = la.CLASSES, running=None):
         self.root = root
+        self.app_dir = app_dir
+        self.reg_base = reg_base         # where the .breath file type goes (HKEY_CURRENT_USER; tests: a test key)
+        self.running = running or la.game_running   # (Settings' frame rate changes only while the game is closed)
+        home = os.path.dirname(os.path.abspath(settings_file))
+        self.open_dir = os.path.join(home, la.OPEN_DIR)       # .breath files a second start hands to this window
+        self.received_dir = os.path.join(home, "received")   # .breath files unpacked for "Add this mod?"
+        self.pending_breath: list[str] = []                   # .breath files waiting until Home is open
+        self.breath_buttons: list = []
+        self.fps_note = ""                                    # Settings' frame rate line after a change
         self.bundled_key, self.bundled = la.read_bundled(app_dir)   # (Breathalyzer Plus: our mods for the picker)
         self.picks: dict[str, bool] = {}
         self.pick_buttons: dict[str, object] = {}
@@ -2140,13 +2274,14 @@ class LauncherView(BigText):
         self.label(top, self.head, text="Breathalyzer").grid(row=0, column=0, sticky="w")
         self.sw_label = self.label(top, anchor="e")
         self.sw_label.grid(row=0, column=1, sticky="e")
-        self.frames = {name: tk.Frame(r, bg=t["bg"]) for name in ("home", "setup", "settings", "picker")}
+        self.frames = {name: tk.Frame(r, bg=t["bg"]) for name in ("home", "setup", "settings", "picker", "breath")}
         for f in self.frames.values():
             f.columnconfigure(0, weight=1)
         self.build_home()
         self.build_setup()
         self.build_settings()
         self.build_picker()
+        self.build_breath()
         self.style_tree()
         self.list_version = -1
 
@@ -2216,13 +2351,14 @@ class LauncherView(BigText):
         self.by_action = {}
         group: list = []
         for action, text, command in (
-                ("toggle", "Turn off", self.on_toggle), ("add", "Add mod", self.on_add),
+                ("toggle", "Turn off", self.on_toggle), ("export", "Export as .breath", self.on_export),
+                ("add", "Add mod", self.on_add), ("breath", "Add a .breath", self.on_add_breath),
                 ("mods_folder", "Open mods folder", self.on_open_mods),
                 ("settings", "Settings", lambda: self.show_settings()), ("more", "More...", self.on_more)):
             b = self.make_button(self.flow.frame, text, command, group, width=8 if action == "toggle" else 0)
             self.flow.items.append(b.ring)
             self.by_action[action] = b
-        self.flow_all = list(self.flow.items)   # (render hides Turn off while there are no mods)
+        self.flow_all = list(self.flow.items)   # (render hides Turn off and Export while there are no mods)
         self.tree.bind("<Configure>", lambda e: self.fit_cells(), add="+")
 
     def build_setup(self) -> None:
@@ -2273,6 +2409,24 @@ class LauncherView(BigText):
         self.tree.column("on", width=self.bold.measure("On/Off") + zero * 3, minwidth=zero * 4)
         self.tree.column("about", width=zero * 30, minwidth=zero * 8)
         self.size_columns()
+        self.style_combo()
+
+    def style_combo(self) -> None:
+        """Settings' dropdowns (the frame rate): the same big text and colours as the buttons, and so is the list
+        they open."""
+        t, s = self.t, self.style
+        line = self.font.metrics("linespace")
+        s.configure("Big.TCombobox", foreground=t["fg"], fieldbackground=t["bg"], background=t["button"],
+                    arrowcolor=t["fg"], bordercolor=t["line"], lightcolor=t["button"], darkcolor=t["button"],
+                    arrowsize=max(16, int(line * 0.9)), padding=(self.size // 2, self.size // 5))
+        s.map("Big.TCombobox", fieldbackground=[("readonly", t["bg"]), ("disabled", t["bg"])],
+              foreground=[("disabled", t["disabled"]), ("readonly", t["fg"])],
+              selectbackground=[("readonly", t["bg"])], selectforeground=[("readonly", t["fg"])],
+              background=[("active", t["active"]), ("readonly", t["button"])],
+              arrowcolor=[("disabled", t["disabled"])])
+        for opt, val in (("font", self.font), ("background", t["bg"]), ("foreground", t["fg"]),
+                         ("selectBackground", t["sel_bg"]), ("selectForeground", t["sel_fg"])):
+            self.root.option_add(f"*TCombobox*Listbox.{opt}", val)   # (the list it opens)
 
     def size_columns(self) -> None:
         """The Mod column as wide as the longest name, up to 45% of the list (What it does gets the rest)."""
@@ -2324,8 +2478,11 @@ class LauncherView(BigText):
             self.fit()   # (a screen that needs more room than the last one makes the window bigger)
 
     def back(self) -> str:
-        """Esc: back to Home (from Settings, the mod picker, Check my setup, or a folder change that is left)."""
-        if self.ctl is not None and self.screen != "home":
+        """Esc: back to Home (from Settings, the mod picker, Check my setup, or a folder change that is left); on
+        "Add this mod?" it is Not now."""
+        if self.screen == "breath":
+            self.on_breath_skip()
+        elif self.ctl is not None and self.screen != "home":
             self.setup_mode = "first"
             self.show("home")
             self.play.focus_set()
@@ -2534,6 +2691,9 @@ class LauncherView(BigText):
             self.sw_label.configure(text=f"Savage Wind {rep.version}  ✓", fg=self.t["ok"])
         else:
             self.sw_label.configure(text="")
+        if self.ctl is not None and self.ctl.breath is not None and self.screen in ("home", "settings"):
+            self.show_breath()   # (a .breath was checked: "Add this mod?")
+            return
         if self.screen != "home" or self.ctl is None:
             return
         ctl, t = self.ctl, self.t
@@ -2548,7 +2708,8 @@ class LauncherView(BigText):
                             bg=t["play"] if ctl.can("play") else t["button"])
         self.plain_button.configure(state="normal" if ctl.can("play_plain") else "disabled")
         empty = not ctl.listing.rows and not ctl.listing.error   # (no mods: one Play, no Play without mods, no Turn off)
-        self.show_flow([r for r in self.flow_all if not (empty and r is self.by_action["toggle"].ring)])
+        per_mod = {self.by_action["toggle"].ring, self.by_action["export"].ring}
+        self.show_flow([r for r in self.flow_all if not (empty and r in per_mod)])
         if ctl.can("cancel"):
             items = [self.cancel_button.ring]
         else:
@@ -2565,7 +2726,8 @@ class LauncherView(BigText):
                 w.pack(side="left", fill="y", padx=(8, 0))
             self.side_items = items
         for action, b in self.by_action.items():
-            gate = {"toggle": "toggle", "add": "add", "more": "more"}.get(action, "settings")
+            gate = {"toggle": "toggle", "add": "add", "more": "more", "export": "add", "breath": "add"}.get(
+                action, "settings")
             b.configure(state="normal" if ctl.can(gate) else "disabled")
         self.render_line()
         self.render_about()
@@ -2606,6 +2768,11 @@ class LauncherView(BigText):
             return
         try:
             self.ticks += 1
+            if self.ticks % OPEN_POLL_TICKS == 0:
+                for path in la.take_files(self.open_dir):   # (a double-click while this window is open)
+                    self.open_breath(path)
+            if self.pending_breath:
+                self.next_breath()
             if self.ctl is not None:
                 changed = self.ctl.poll()
                 if self.ctl.game_open and self.ticks % GAME_POLL_TICKS == 0:
@@ -2613,6 +2780,8 @@ class LauncherView(BigText):
                 playing = self.ctl.game_open or "play" in self.ctl.jobs
                 if playing != self.was_open:
                     self.was_open = playing
+                    if playing:
+                        self.fps_note = ""   # (the game reads the new frame rate now: "next start" is over)
                     self.hide_while_playing(playing)
                 if changed:
                     self.render()
@@ -2713,15 +2882,162 @@ class LauncherView(BigText):
                                            mustexist=True)
         elif what == "file":
             path = filedialog.askopenfilename(parent=self.root, title="Pick the mod file", initialdir=self.last_dir,
-                                              filetypes=[("Mods", "*.zip *.bnp *.ips *.pchtxt *.txt *.dll"),
+                                              filetypes=[("Mods", "*.breath *.zip *.bnp *.ips *.pchtxt *.txt *.dll"),
                                                          ("All files", "*.*")])
         else:
             return None
         if path:
             path = os.path.normpath(path)
             self.last_dir = os.path.dirname(path)
-            self.after_action(lambda: self.ctl.add(path))
+            if path.lower().endswith(la.BREATH_EXT):
+                self.open_breath(path)
+            else:
+                self.after_action(lambda: self.ctl.add(path))
         return None
+
+    # --- .breath files: add one, make one
+
+    def on_add_breath(self) -> None:
+        if not self.ctl.can("add"):
+            return self.after_action(lambda: self.ctl.free("add"))
+        path = filedialog.askopenfilename(parent=self.root, title="Pick the .breath file", initialdir=self.last_dir,
+                                          filetypes=[(".breath files", "*" + la.BREATH_EXT), ("All files", "*.*")])
+        if path:
+            path = os.path.normpath(path)
+            self.last_dir = os.path.dirname(path)
+            self.open_breath(path)
+        return None
+
+    def open_breath(self, path: str) -> None:
+        """A .breath to add (Add a .breath, Add mod, a double-click): checked as soon as Home is open and nothing
+        else runs, then "Add this mod?"."""
+        self.pending_breath.append(path)
+        self.next_breath()
+
+    def next_breath(self) -> None:
+        ctl = self.ctl
+        if not self.pending_breath or ctl is None or self.closed or ctl.breath is not None \
+                or self.screen not in ("home", "settings") or not ctl.can("add"):
+            return
+        path = self.pending_breath.pop(0)
+        if self.screen != "home":
+            self.show("home")
+        with contextlib.suppress(tk.TclError):   # (a minimized window comes back; a hidden one stays hidden)
+            state = self.root.state()
+            if state == "iconic":
+                self.root.deiconify()
+            if state != "withdrawn":
+                self.root.lift()
+        self.after_action(lambda: ctl.open_breath(path, self.received_dir))
+
+    def on_export(self) -> None:
+        """Export as .breath: the selected mod in one file to share (a mod built from your game files can't be)."""
+        if not self.ctl.can("add"):
+            return self.after_action(lambda: self.ctl.free("add"))
+        row = self.ctl.row(self.selected_id())
+        if row is None:
+            self.ctl.status = Status("info", ["Pick a mod in the list first.", "Then press Export as .breath."])
+            return self.render()
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', " ", row.name).strip(" .") or "mod"
+        desktop = la.known_folders().get("Desktop", "")
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title=f"Save {row.name} as a .breath file", defaultextension=la.BREATH_EXT,
+            initialfile=name + la.BREATH_EXT, initialdir=desktop if os.path.isdir(desktop) else self.last_dir,
+            filetypes=[(".breath files", "*" + la.BREATH_EXT)])
+        if not path:
+            return None
+        path = os.path.normpath(path)
+        recipes = {m["id"] for m in self.bundled if m.get("kind") == "recipe"}
+        self.after_action(lambda: self.ctl.export_breath(row.id, path, recipes))
+        return None
+
+    def build_breath(self) -> None:
+        """The "Add this mod?" screen (show_breath fills it)."""
+        t, f = self.t, self.frames["breath"]
+        self.label(f, self.big, text="Add this mod?").grid(row=0, column=0, sticky="w", padx=PAD, pady=(8, 6))
+        self.breath_body = tk.Frame(f, bg=t["bg"])
+        self.breath_body.grid(row=1, column=0, sticky="ew", padx=PAD)
+        self.breath_body.columnconfigure(1, weight=1)
+        self.breath_flow = Flow(f, gap=4, bg=t["bg"])
+        self.flows.append(self.breath_flow)
+        self.breath_flow.frame.grid(row=2, column=0, sticky="ew", padx=PAD, pady=(14, PAD))
+        if self.screen == "breath" and self.ctl is not None and self.ctl.breath is not None:
+            self.fill_breath()   # (built again for another theme or text size while it was open)
+
+    def show_breath(self) -> None:
+        self.fill_breath()
+        self.show("breath")
+        if self.breath_buttons:
+            self.breath_buttons[self.breath_focus].focus_set()
+
+    def fill_breath(self) -> None:
+        """The title big, who made it and its version, what it does, what it is, the file, and for a mod with code
+        a warning in red; then Add this mod and Not now (focused for a mod with code)."""
+        t, body, rec = self.t, self.breath_body, self.ctl.breath
+        import breath as br
+        man = rec.manifest
+        for w in body.winfo_children():
+            w.destroy()
+        for w in self.breath_flow.frame.winfo_children():
+            w.destroy()
+        self.wraps = [(w, s) for w, s in self.wraps if w.winfo_exists()]
+        self.breath_buttons, self.breath_flow.items = [], []
+        row = 0
+
+        def line(text: str, font=None, fg=None, pady=(0, 4)) -> None:
+            nonlocal row
+            self.wrap_label(body, font, text=text, fg=fg or t["fg"]).grid(row=row, column=0, columnspan=2,
+                                                                           sticky="w", pady=pady)
+            row += 1
+
+        line(man.title, self.head, pady=(0, 6))
+        by = [f"By {man.author}" if man.author else "Author not given", f"Version {man.version}" if man.version
+              else ""]
+        line(". ".join(x for x in by if x) + ".")
+        line(man.description or "No description.", pady=(4, 8))
+        line(man.what())
+        have = {r.id: r for r in self.ctl.listing.rows}
+        if man.id in have:
+            line(f"You already have this mod ({have[man.id].name}). To use this copy, remove yours first (More...).",
+                 self.bold, t["warn"])
+        line(f"{os.path.basename(rec.source)}, {br.size_text(man.size)}. Checked: every file in it is as it was "
+             "made.", fg=t["disabled"], pady=(4, 8))
+        code = list(dict.fromkeys(rec.code))
+        if code:
+            box = tk.Frame(body, bg=t["bg"])
+            box.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6, 4))
+            box.columnconfigure(1, weight=1)
+            tk.Frame(box, width=10, bg=t["error"]).grid(row=0, column=0, rowspan=2, sticky="ns", padx=(0, 14))
+            names = ", ".join(c.rsplit("/", 1)[-1] for c in code[:4]) + (f" and {len(code) - 4} more"
+                                                                         if len(code) > 4 else "")
+            self.wrap_label(box, self.head, share=0.9, text=f"Careful: this mod has code ({names}).",
+                            fg=t["error"]).grid(row=0, column=1, sticky="w")
+            self.wrap_label(box, self.bold, share=0.9, text="Code runs on your PC like a program, with your rights. "
+                            "Only add it if you trust the person who made it.").grid(row=1, column=1, sticky="w")
+            row += 1
+        self.breath_focus = 1 if code else 0
+        for k, (text, command) in enumerate((("Add this mod", self.on_breath_add), ("Not now", self.on_breath_skip))):
+            b = self.make_button(self.breath_flow.frame, text, command, self.breath_buttons, bold=k == 0)
+            self.breath_flow.items.append(b.ring)
+        self.breath_flow.shape = None
+        self.root.after_idle(lambda: self.breath_flow.frame.winfo_exists() and self.breath_flow.reflow(force=True))
+        self.rewrap()
+
+    def on_breath_add(self) -> None:
+        if self.ctl is None:
+            return
+        self.ctl.add_breath()
+        self.show("home")
+        self.play.focus_set()
+        self.render()
+
+    def on_breath_skip(self) -> None:
+        if self.ctl is None:
+            return
+        self.ctl.drop_breath()
+        self.show("home")
+        self.play.focus_set()
+        self.render()
 
     def on_check(self) -> None:
         """Check my setup (Settings > Check): the first run's checks, on the Savage Wind folder in use."""
@@ -2910,17 +3226,35 @@ class LauncherView(BigText):
         install = (self.ctl.backend.install if self.ctl else None) or s.install or ""
         library = (self.ctl.backend.root if self.ctl else None) or s.library or ""
         rep = getattr(self, "home_report", None)
-        fps = la.frame_rate(install) if install else None
+        has_ini, fps, fps_raw = la.read_fps(install) if install else (False, None, None)
+        playing = self.game_open_now()
+        if not install:
+            fps_text = "Not set"
+        elif not has_ini:
+            fps_text = "Start Savage Wind once first."
+        elif playing:
+            fps_text = "Close the game to change it."
+        elif self.fps_note:
+            fps_text = self.fps_note
+        elif fps is None:
+            fps_text = f"Your settings say {fps_raw}: pick one."
+        else:
+            fps_text = "Also in the game: F1, Video."
         tool = os.path.join(install, la.CONFIG_EXE) if install else ""
         sw = [("path", install)] if install else [("text", "Not set")]
         if rep is not None and rep.version:
             sw.append(("text", "Game files: OK" if rep.game_build == la.GAME_BUILD else "Game files: not 1.9.0"))
+        state = la.breath_state(self.reg_base, la.breath_command(self.app_dir)[0]) if os.name == "nt" else None
+        breath = {"here": ("ON: a double-click adds one", [("Unregister .breath", self.on_unregister)]),
+                  "other": ("ON, for another Breathalyzer folder", [("Register .breath", self.on_register),
+                                                                    ("Unregister .breath", self.on_unregister)]),
+                  None: ("OFF: a double-click does nothing", [("Register .breath", self.on_register)])}[state]
         rows = [
             ("Savage Wind", sw, [("Change...", self.on_change_folder), ("Check", self.on_check),
                                  ("Open", lambda: la.open_path(install))]),
-            ("Frame rate", [("text", f"{fps} frames a second (in the game: F1, Video)" if fps
-                                     else "In the game: F1, Video")],
-             [("Game settings", lambda: la.open_path(tool))] if os.path.isfile(tool) else []),
+            ("Frame rate", [("text", fps_text)],
+             [("widget", lambda parent: self.fps_box_for(parent, fps, fps_raw, has_ini and not playing))]
+             + ([("Game settings", lambda: la.open_path(tool))] if os.path.isfile(tool) else [])),
             ("Mod library", [("path", library)] if library else [("text", "Not set")],
              [("Open", lambda: la.open_path(la.nearest_existing(library)))] if library else []),
             ("Text size", [("text", f"{self.size} pt")], [("Smaller", lambda: self.set_size(self.size - 2)),
@@ -2931,6 +3265,7 @@ class LauncherView(BigText):
             ("Developer commands", [("text", self.dev_text())],
              [("Turn off" if s.dev else "Turn on", self.on_dev)]),
             ("Shortcut", [("text", "On your desktop")], [("Make one", self.on_shortcut)]),
+            (".breath files", [("text", breath[0])], breath[1]),
         ]
         if self.bundled:
             rows.append(("Our mods", [("text", f"{len(self.bundled)} come with Breathalyzer")],
@@ -2951,6 +3286,9 @@ class LauncherView(BigText):
             value_label = self.label(line)
             value_label.pack(side="left", fill="x")
             for text, command in buttons:
+                if text == "widget":   # (the frame rate's dropdown)
+                    command(cell).pack(side="left")
+                    continue
                 b = self.make_button(cell, text, command, self.settings_buttons)
                 b.configure(pady=0)   # (a Tk button has room of its own: nine rows must fit at big text sizes)
                 b.ring.pack(side="left")
@@ -3032,6 +3370,78 @@ class LauncherView(BigText):
                  f"{path}\n\nIt starts this copy of Breathalyzer. After you unpack a new one, make it again there.",
                  [("OK", None)])
 
+    # --- Settings: the frame rate, .breath files
+
+    def game_open_now(self) -> bool:
+        ctl = self.ctl
+        if ctl is not None and (ctl.game_open or "play" in ctl.jobs):
+            return True
+        try:
+            return bool(self.running())
+        except Exception:  # (then it counts as open: the frame rate is never written under the game)
+            return True
+
+    def fps_box_for(self, parent, value: str | None, raw: str | None, enabled: bool):
+        """The frame rate's dropdown: 30, 60, 90, 120 fps or No limit (Savage Wind's own choices), showing what
+        savagewind.ini says now. Greyed out while the game is open (it writes the file itself)."""
+        t = self.t
+        ring = tk.Frame(parent, bg=t["bg"])
+        labels = [label for _, label in la.FPS_CHOICES]
+        box = ttk.Combobox(ring, values=labels, state="readonly" if enabled else "disabled", font=self.font,
+                           width=max(len(x) for x in labels) + 1, style="Big.TCombobox", takefocus=1)
+        box.set(la.fps_label(value) if value else (raw or ""))
+        box.pack(padx=5, pady=5)
+        box.bind("<FocusIn>", lambda e: ring.configure(bg=t["focus"]), add="+")
+        box.bind("<FocusOut>", lambda e: ring.configure(bg=t["bg"]), add="+")
+        # (Settings is built again after a pick: not inside the dropdown's own event)
+        box.bind("<<ComboboxSelected>>", lambda e: self.root.after_idle(self.on_fps, box.get()))
+        for key in ("<Return>", "<space>", "<KP_Enter>"):   # (open the list from the keyboard too)
+            box.bind(key, lambda e: (box.event_generate("<Down>"), "break")[1])
+        self.fps_box = box
+        return ring
+
+    def on_fps(self, label: str) -> None:
+        """A frame rate picked: written into savagewind.ini (only that line) while the game is closed."""
+        value = next((k for k, text in la.FPS_CHOICES if text == label), None)
+        install = (self.ctl.backend.install if self.ctl else None) or self.settings.install
+        if value is None or not install:
+            return
+        try:
+            changed = la.set_frame_rate(install, value, running=self.game_open_now)
+        except la.FpsError as e:
+            self.fps_note = ""
+            self.show_settings()
+            self.ask("Frame rate", "The frame rate wasn't changed.", str(e), [("OK", None)])
+            return
+        if changed:
+            self.fps_note = f"{label}. Used from your next start."
+        self.show_settings()
+        with contextlib.suppress(tk.TclError, AttributeError):
+            self.fps_box.focus_set()
+
+    def on_register(self) -> None:
+        """Register .breath: a double-click on a .breath file opens this Breathalyzer with it (this Windows user
+        only, no admin)."""
+        try:
+            command, icon = la.breath_command(self.app_dir)
+            la.register_breath(command, icon, self.reg_base)
+        except OSError as e:
+            self.ask(".breath files", "That didn't work.", str(e), [("OK", None)])
+            return
+        self.show_settings()
+        self.ask(".breath files", "Done.", "A double-click on a .breath file now opens Breathalyzer, which asks "
+                 "before it adds the mod. Only for your Windows user. Unregister .breath undoes it.", [("OK", None)])
+
+    def on_unregister(self) -> None:
+        try:
+            la.unregister_breath(self.reg_base)
+        except OSError as e:
+            self.ask(".breath files", "That didn't work.", str(e), [("OK", None)])
+            return
+        self.show_settings()
+        self.ask(".breath files", "Done.", "A double-click on a .breath file doesn't open Breathalyzer any more. "
+                 "Add a .breath on Home still adds one.", [("OK", None)])
+
     def ask_text(self, title: str, message: str, detail: str, value: str) -> str | None:
         """One line of text in the same big text; None when left with Cancel or Esc."""
         t = self.t
@@ -3078,7 +3488,7 @@ class LauncherView(BigText):
         if self.screen == "picker":
             self.size_picker()
         for group in (self.home_buttons, list(self.by_action.values()), self.setup_buttons, self.settings_buttons,
-                      self.picker_buttons):
+                      self.picker_buttons, self.breath_buttons):
             flat = group is self.settings_buttons
             for b in group:
                 with contextlib.suppress(tk.TclError):
@@ -3117,7 +3527,8 @@ class LauncherView(BigText):
             self.size_picker()   # (its cards take what the screen leaves at this width)
         self.root.update_idletasks()
         top = self.sw_label.master.winfo_reqheight() + PAD + 4
-        return top + max(f.winfo_reqheight() for k, f in self.frames.items() if k != "picker" or self.screen == k)
+        return top + max(f.winfo_reqheight() for k, f in self.frames.items()
+                         if k not in ("picker", "breath") or self.screen == k)
 
     def fit(self, shrink: bool = False) -> bool:
         """Make the window as big as the text needs, up to the screen. False when it doesn't fit; with shrink, the
@@ -3185,7 +3596,10 @@ def launcher_main(args) -> int:
         raise RuntimeError(f"Python's tkinter couldn't be loaded ({TK_ERROR or 'no reason given'}).")
     path = la.settings_path()
     settings, note = la.load_settings(path)
+    breath_file = os.path.abspath(args.file) if getattr(args, "file", None) else None
     if la.single_instance(os.path.dirname(path)) is None:
+        if breath_file:   # (a double-click on a .breath while the window is open: that window asks)
+            la.pass_file(breath_file, os.path.join(os.path.dirname(path), la.OPEN_DIR))
         return 0   # (the open window came to the front)
     la.set_app_id()
     dpi_aware()
@@ -3214,6 +3628,8 @@ def launcher_main(args) -> int:
     first = la.FirstRun(settings, places=places, library=args.library)
     starting.destroy()
     view = LauncherView(root, settings, path, first_run=first, port=args.port, library=args.library)
+    if breath_file:   # (asked once Home is open: now, or after the first-run screens)
+        view.open_breath(breath_file)
     if note:   # (on Home now, or on Home after the first-run screens: never dropped)
         view.note = note
         if view.ctl is not None:

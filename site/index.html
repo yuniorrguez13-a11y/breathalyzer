@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Breathalyzer: mods and multiplayer for Savage Wind</title>
+  <meta name="description" content="Breathalyzer is a free mod loader and launcher for Savage Wind, the native PC version of Breath of the Wild (Switch 1.9.0). Switch and Wii U mods, a big Play button, an in-game Mods page and LAN multiplayer.">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0b1013">
+  <link rel="icon" href="img/breathalyzer.svg" type="image/svg+xml">
+  <link rel="icon" href="img/breathalyzer.png" type="image/png" sizes="256x256">
+  <link rel="apple-touch-icon" href="img/breathalyzer.png">
+  <link rel="preload" href="fonts/FiraSans-Medium.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="stylesheet" href="css/style.css">
+  <script>
+    /* Runs before the page draws, so a saved light theme does not flash dark first. */
+    (function () {
+      var d = document.documentElement;
+      d.className += ' js';
+      var t = null;
+      try { t = localStorage.getItem('blz-theme'); } catch (e) {}
+      if (t === 'light' || t === 'dark') d.setAttribute('data-theme', t);
+      /* No saved choice: follow the computer's own light or dark setting. */
+      else if (window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) d.setAttribute('data-theme', 'light');
+    })();
+  </script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="#top">
+      <img src="img/breathalyzer.svg" width="44" height="44" alt="">
+      <span>Breathalyzer</span>
+    </a>
+
+    <nav id="site-nav" class="site-nav" aria-label="Main">
+      <ul>
+        <li><a href="#features">Features</a></li>
+        <li><a href="#start">How to start</a></li>
+        <li><a href="#download">Download</a></li>
+        <li><a href="#faq">FAQ</a></li>
+        <li><a href="#credits">Credits</a></li>
+      </ul>
+    </nav>
+
+    <div class="header-tools">
+      <button class="icon-btn theme-toggle" type="button" hidden>
+        <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4.5"/><path d="M12 1.5v3M12 19.5v3M1.5 12h3M19.5 12h3M4.6 4.6l2.1 2.1M17.3 17.3l2.1 2.1M4.6 19.4l2.1-2.1M17.3 6.7l2.1-2.1"/></svg>
+        <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>
+        <span class="theme-toggle-text">Light</span>
+      </button>
+      <button class="icon-btn nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" hidden>
+        <svg class="i-menu" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+        <svg class="i-close" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 5l14 14M19 5L5 19"/></svg>
+        <span class="nav-toggle-text">Menu</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ============ HERO ============ -->
+  <section class="hero" id="top" aria-labelledby="hero-title">
+    <svg class="hero-traces" viewBox="0 0 1200 720" preserveAspectRatio="xMidYMid slice" aria-hidden="true" focusable="false">
+      <!-- Shown from 1040px only (style.css), where every line stays clear of the words. -->
+      <g class="trace" fill="none" stroke-width="3" stroke-linecap="round">
+        <path pathLength="1" d="M1220 560 H1010 L970 600 H860"/>
+        <path pathLength="1" d="M-20 660 H150 L190 700 H430 L470 660 H1220"/>
+        <path pathLength="1" d="M1220 140 H990 L950 180 H830 L790 220 H720"/>
+        <path pathLength="1" d="M1220 470 H1080 L1040 430 V330 L1010 300 H930"/>
+        <path pathLength="1" d="M-20 90 H120 L160 50 H380"/>
+      </g>
+      <g class="trace-nodes" fill="none" stroke-width="3">
+        <circle cx="848" cy="600" r="10"/><circle cx="708" cy="220" r="10"/>
+        <circle cx="918" cy="300" r="10"/><circle cx="392" cy="50" r="10"/>
+      </g>
+    </svg>
+
+    <div class="wrap hero-inner">
+      <div class="hero-text" data-reveal>
+        <p class="kicker">Mod loader + launcher for <span class="nowrap">Savage Wind</span></p>
+        <h1 id="hero-title">
+          <span class="line">Bring your mods.</span>
+          <span class="line">Bring a friend.</span>
+          <span class="line accent">Press Play.</span>
+        </h1>
+        <p class="lead">
+          Breathalyzer runs your Switch and Wii&nbsp;U mods on <strong>Savage Wind</strong>, the native PC version of
+          <cite>Breath of the Wild</cite>. One big Play button, an in-game Mods page, and LAN multiplayer with a friend.
+        </p>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="#download">
+            Download free
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4v12M6 11l6 6 6-6M5 20h14"/></svg>
+          </a>
+          <!-- TODO trailer: once the video exists, make this "Watch the trailer" linking to #trailer. -->
+          <a class="btn btn-ghost" href="#features">See what it does</a>
+        </div>
+        <ul class="hero-facts" aria-label="At a glance">
+          <li>Free</li>
+          <li>Windows</li>
+          <li>No Python needed</li>
+          <li>No game files included</li>
+        </ul>
+      </div>
+
+      <div class="hero-art" aria-hidden="true">
+        <!-- The icon, inline so its traces can draw in and its orange node can pulse. Same art as img/breathalyzer.svg. -->
+        <svg class="hero-icon" viewBox="0 0 256 256" focusable="false">
+          <defs>
+            <filter id="blz-glow" x="-20%" y="-20%" width="140%" height="140%">
+              <feGaussianBlur in="SourceGraphic" stdDeviation="4.5" result="b"/>
+              <feComponentTransfer in="b" result="g"><feFuncA type="linear" slope="0.85"/></feComponentTransfer>
+              <feMerge><feMergeNode in="g"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+          </defs>
+          <rect x="8" y="8" width="240" height="240" rx="48" fill="#11161a"/>
+          <rect x="8" y="8" width="235" height="235" rx="46" fill="#56646d"/>
+          <rect x="13" y="13" width="230" height="230" rx="43" fill="#242d33"/>
+          <path d="M98 8 L106 13 L118 13 L124 8Z" fill="#242d33"/>
+          <path d="M8 150 L13 144 L13 166 L8 160Z" fill="#242d33"/>
+          <path d="M20 58 L50 44 L82 52 L70 78 L36 84 L20 76Z" fill="#29333a"/>
+          <path d="M150 190 L196 176 L230 196 L222 226 L176 232 L156 214Z" fill="#20282e"/>
+          <g fill="#1a2126">
+            <circle cx="30" cy="128" r="2.5"/><circle cx="216" cy="94" r="2"/>
+            <circle cx="96" cy="224" r="2.5"/><circle cx="186" cy="28" r="2"/>
+          </g>
+          <g fill="none" stroke="#161c20" stroke-width="2.5">
+            <path d="M206 13 L199 26 L205 34 L196 48"/>
+            <path d="M13 102 L24 109 L27 122"/>
+          </g>
+          <g transform="translate(6,0)" filter="url(#blz-glow)">
+            <g class="icon-trace" fill="none" stroke="#4ee6f5" stroke-width="12" stroke-linecap="round">
+              <path pathLength="1" d="M53 108 H84 L96 96 H158 L176 78 V62 L162 48 H144 L132 60"/>
+              <path pathLength="1" d="M73 136 H120 L132 124 H190"/>
+              <path pathLength="1" d="M49 164 H96 L108 176 H146 L160 190 V198 L150 208 H136 L128 200"/>
+            </g>
+            <g fill="none" stroke="#4ee6f5" stroke-width="6">
+              <circle cx="44" cy="108" r="9"/>
+              <circle cx="64" cy="136" r="9"/>
+              <circle cx="40" cy="164" r="9"/>
+            </g>
+            <g fill="#4ee6f5">
+              <circle cx="132" cy="60" r="8"/>
+              <circle cx="128" cy="200" r="7.5"/>
+            </g>
+            <circle class="node-pulse" cx="200" cy="124" r="10" fill="none" stroke="#ff9a3c" stroke-width="4"/>
+            <circle cx="200" cy="124" r="10" fill="#ff9a3c"/>
+          </g>
+        </svg>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ FEATURES ============ -->
+  <section class="section band" id="features" aria-labelledby="features-title">
+    <div class="wrap">
+      <div class="section-head" data-reveal>
+        <p class="eyebrow"><span class="eyebrow-num">01</span> What works today</p>
+        <h2 id="features-title">Everything in one place</h2>
+        <p class="section-lead">
+          Tested in the real game with <span class="nowrap">Savage Wind 0.4.1-alpha.4</span>, except where marked
+          <span class="new">New</span>.
+        </p>
+      </div>
+
+      <article class="feature" data-reveal>
+        <figure class="feature-media">
+          <a class="shot" href="img/linkle.webp">
+            <img src="img/linkle.webp" width="960" height="720" loading="lazy" decoding="async"
+                 alt="Game screenshot: Linkle, from a mod by other modders, standing in tall grass with the Temple of Time behind her.">
+            <span class="sr-only">(opens the full-size picture)</span>
+          </a>
+          <figcaption>A Linkle mod by other modders, played through Breathalyzer.</figcaption>
+        </figure>
+        <div class="feature-text">
+          <p class="tag">Your mods</p>
+          <h3>Switch and Wii&nbsp;U mods, together</h3>
+          <p>Keep the mods you already love. Breathalyzer works out what each one is and makes them play nicely.</p>
+          <ul class="ticks">
+            <li>Switch mods: game files, code patches and cheats</li>
+            <li>
+              <strong>.bnp packages</strong> with log merging: texts, maps, game and save data, actor info.
+              Shops and drops: <span class="new">New</span>
+            </li>
+            <li><strong>UKMM packages</strong>, in part <span class="new">New</span></li>
+            <li>
+              <strong>Wii&nbsp;U mods converted</strong> on your PC: data. Models and textures:
+              <span class="new">New</span> (not seen in the game yet)
+            </li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="feature feature-wide" data-reveal>
+        <div class="feature-text">
+          <p class="tag">Launcher</p>
+          <h3>A launcher anyone can use</h3>
+          <p>
+            It looks for Savage Wind, checks it, and gives you one big <strong>Play</strong> button. Turn mods on
+            or off with large buttons and plain words. It brings its own Python, so there is nothing to install.
+          </p>
+        </div>
+        <div class="duo">
+          <figure>
+            <a class="shot" href="img/launcher-home.webp">
+              <img src="img/launcher-home.webp" width="1094" height="796" loading="lazy" decoding="async"
+                   alt="The Breathalyzer launcher in dark mode: a big green Play button, a Play without mods button, and a list of mods with On or Off and what each one does.">
+              <span class="sr-only">(opens the full-size picture)</span>
+            </a>
+            <figcaption>Home: press Play. <span class="hint"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5M10.5 7.5v6M7.5 10.5h6"/></svg>Tap or click the picture for full size.</span></figcaption>
+          </figure>
+          <figure>
+            <a class="shot" href="img/launcher-picker.webp">
+              <img src="img/launcher-picker.webp" width="1094" height="796" loading="lazy" decoding="async"
+                   alt="The Pick your mods screen: each mod has a large ON or OFF button, a title and a one-line description, and a Save button at the bottom.">
+              <span class="sr-only">(opens the full-size picture)</span>
+            </a>
+            <figcaption>Pick your mods before you play. <span class="hint"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5M10.5 7.5v6M7.5 10.5h6"/></svg>Tap or click the picture for full size.</span></figcaption>
+          </figure>
+        </div>
+      </article>
+
+      <article class="feature feature-flip" data-reveal>
+        <figure class="feature-media">
+          <a class="shot" href="img/mods-page.webp">
+            <img src="img/mods-page.webp" width="900" height="630" loading="lazy" decoding="async"
+                 alt="Game screenshot: the game's Options menu with a Mods page. Each mod has an ON and OFF switch, with Change order and How to use changes below.">
+            <span class="sr-only">(opens the full-size picture)</span>
+          </a>
+          <figcaption>Options, then Mods: right in the game. <span class="hint"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5M10.5 7.5v6M7.5 10.5h6"/></svg>Tap or click the picture for full size.</span></figcaption>
+        </figure>
+        <div class="feature-text">
+          <p class="tag">In the game</p>
+          <h3>A Mods page inside the game</h3>
+          <p>
+            Open <strong>Options</strong> and you will find a <strong>Mods</strong> page. Turn mods on or off and
+            change their order, from the title screen or the pause menu. It works with a controller, keyboard or mouse.
+            Changes apply the next time you start the game.
+          </p>
+        </div>
+      </article>
+
+      <article class="feature" data-reveal>
+        <figure class="feature-media">
+          <a class="shot" href="img/lan-friend-items.webp">
+            <img src="img/lan-friend-items.webp" width="880" height="495" loading="lazy" decoding="async"
+                 alt="Game screenshot: two Links side by side in a grassy field below a volcano. The second Link is the multiplayer ghost, moved by a test bot, with a shield and a weapon on his back.">
+            <span class="sr-only">(opens the full-size picture)</span>
+          </a>
+          <figcaption>The other player's Link, with the items they carry (test run on one PC).</figcaption>
+        </figure>
+        <div class="feature-text">
+          <p class="tag">Multiplayer</p>
+          <h3>Play together on your LAN</h3>
+          <p>
+            See your friend as Link in your world. Their moves, attacks and held items are synced: swords, shields
+            and bows. One of you hosts; there are no accounts and no servers of ours in the middle.
+          </p>
+          <p class="note">Tested on one PC so far. A test between two PCs comes before release.</p>
+        </div>
+      </article>
+
+      <ul class="mini-grid" role="list">
+        <li class="card" data-reveal>
+          <svg class="card-icon" viewBox="0 0 48 48" aria-hidden="true" focusable="false"><path d="M18 14 8 24l10 10M30 14l10 10-10 10"/></svg>
+          <h3>Write mods in C</h3>
+          <p>Mod Studio is a small window for making code mods. Build, and your mod hot loads into the running game.</p>
+        </li>
+        <li class="card" data-reveal>
+          <svg class="card-icon" viewBox="0 0 48 48" aria-hidden="true" focusable="false"><rect x="7" y="10" width="34" height="28"/><path d="m7 32 10-9 8 7 6-5 10 8"/><circle cx="32" cy="18" r="3"/></svg>
+          <h3>Your own menu picture</h3>
+          <p>Put any picture you like on the game's main menu, with one tool.</p>
+        </li>
+        <li class="card" data-reveal>
+          <svg class="card-icon" viewBox="0 0 48 48" aria-hidden="true" focusable="false"><path d="M8 34a16 16 0 1 1 32 0"/><path d="m24 34 8-12"/></svg>
+          <h3>Performance presets</h3>
+          <p>Low, Medium, High or Original: more frames per second on a weak PC.</p>
+        </li>
+      </ul>
+
+      <div class="coming" data-reveal>
+        <h3>Coming next</h3>
+        <p class="coming-sub">Being built now. Not in the beta yet.</p>
+        <ul class="coming-list" role="list">
+          <li><span>Play the story together in <span class="nowrap">co-op</span></span></li>
+          <li><span>Shared enemies</span></li>
+          <li><span>Character selector</span></li>
+          <li><span>Emotes</span></li>
+          <li><span>And more</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ TRAILER (a one-line strip until the video exists) ============ -->
+  <!-- TODO trailer: when the video exists, turn this strip back into a full section ("06 Trailer" or move it up
+       right after the hero), with a self-hosted video, for example
+         <video class="trailer-video" controls preload="none" poster="img/trailer-poster.webp" width="1280" height="720">
+           <source src="video/breathalyzer-trailer.mp4" type="video/mp4">
+           <track kind="captions" src="video/breathalyzer-trailer.en.vtt" srclang="en" label="English">
+         </video>
+       and change the hero's second button back to "Watch the trailer" (href="#trailer").
+       No third-party embeds: they track visitors. -->
+  <div class="trailer-strip" id="trailer">
+    <div class="wrap">
+      <p class="frame trailer-line" data-reveal>
+        <img src="img/breathalyzer.svg" width="48" height="48" alt="">
+        <span><strong>Trailer coming soon.</strong> Until then, the screenshots above are from our own testing.</span>
+      </p>
+    </div>
+  </div>
+
+  <!-- ============ HOW TO START ============ -->
+  <section class="section" id="start" aria-labelledby="start-title">
+    <div class="wrap">
+      <div class="section-head" data-reveal>
+        <p class="eyebrow"><span class="eyebrow-num">02</span> How to start</p>
+        <h2 id="start-title">Three steps to Play</h2>
+      </div>
+      <ol class="steps" role="list">
+        <li class="step" data-reveal>
+          <span class="step-num" aria-hidden="true">1</span>
+          <h3>Get your game ready</h3>
+          <p>
+            Dump <cite>Breath of the Wild</cite> (Switch, version 1.9.0) from your own console, and set up
+            <a href="https://github.com/Revivedx/SavageWindRecomp">Savage Wind</a>.
+            We can't give you game files.
+          </p>
+        </li>
+        <li class="step" data-reveal>
+          <span class="step-num" aria-hidden="true">2</span>
+          <h3>Download and unzip</h3>
+          <p>
+            Pick a download below and unzip it anywhere. Open <strong>Start Breathalyzer</strong>. If it can't find
+            Savage Wind, show it the folder once.
+          </p>
+        </li>
+        <li class="step" data-reveal>
+          <span class="step-num" aria-hidden="true">3</span>
+          <h3>Pick mods, press Play</h3>
+          <p>Turn the mods you want on, then press the big <strong>Play</strong> button. That's it.</p>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============ DOWNLOAD ============ -->
+  <section class="section band" id="download" aria-labelledby="download-title">
+    <div class="wrap">
+      <div class="section-head" data-reveal>
+        <p class="eyebrow"><span class="eyebrow-num">03</span> Download</p>
+        <h2 id="download-title">Pick your download</h2>
+        <p class="section-lead">All three are free and for Windows. None of them has game files. You can switch later: they share your mod list.</p>
+      </div>
+
+      <!-- TODO downloads: the three links below are PLACEHOLDERS. Replace OWNER (and the repo name if it changes)
+           once the GitHub repo exists, or point each card at its own release file, e.g.
+           https://github.com/OWNER/breathalyzer/releases/latest/download/breathalyzer-plus-0.2.0-beta.1.zip -->
+      <ul class="downloads" role="list">
+        <li class="dl card" data-reveal>
+          <p class="dl-tag">Just the essentials</p>
+          <h3>Breathalyzer</h3>
+          <p>The launcher and mod manager, with no mods inside. Play the plain game, or add mods of your own.</p>
+          <ul class="ticks">
+            <li>Launcher with the big Play button</li>
+            <li>Mod manager for Switch and Wii&nbsp;U mods</li>
+            <li>No Python to install</li>
+          </ul>
+          <a class="btn btn-ghost dl-btn" href="https://github.com/OWNER/breathalyzer/releases/latest">Download<span class="sr-only"> Breathalyzer</span></a>
+        </li>
+        <li class="dl card dl-featured" data-reveal>
+          <p class="dl-tag">Recommended</p>
+          <h3>Breathalyzer <span class="plus">+ Mods</span></h3>
+          <p>Everything in Breathalyzer, plus our own mods. You pick which ones are on before you play.</p>
+          <ul class="ticks">
+            <li>Each mod has a title and a short description</li>
+            <li>Mods that change how the game plays start off</li>
+            <li>Change your picks any time</li>
+          </ul>
+          <a class="btn btn-primary dl-btn" href="https://github.com/OWNER/breathalyzer/releases/latest">Download<span class="sr-only"> Breathalyzer + Mods</span></a>
+        </li>
+        <li class="dl card" data-reveal>
+          <p class="dl-tag">For streamers</p>
+          <h3>Breathalyzer <span class="plus">+ Mods + Streamer Pack</span></h3>
+          <!-- TODO streamer pack: say what is in the pack once its mod list is final. -->
+          <p>Everything in Breathalyzer + Mods, plus the Streamer Pack.</p>
+          <ul class="ticks">
+            <li>All of our own mods</li>
+            <li>The Streamer Pack</li>
+            <li>Same picker: choose before you play</li>
+          </ul>
+          <a class="btn btn-ghost dl-btn" href="https://github.com/OWNER/breathalyzer/releases/latest">Download<span class="sr-only"> Breathalyzer + Mods + Streamer Pack</span></a>
+        </li>
+      </ul>
+      <p class="dl-note" data-reveal>
+        Version <span class="nowrap">0.2.0-beta.1</span>. Needs your own game and
+        <span class="nowrap">Savage Wind 0.4.1-alpha.4</span>.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ FAQ ============ -->
+  <section class="section" id="faq" aria-labelledby="faq-title">
+    <div class="wrap faq-layout">
+      <div class="section-head faq-head" data-reveal>
+        <p class="eyebrow"><span class="eyebrow-num">04</span> Questions</p>
+        <h2 id="faq-title">FAQ</h2>
+        <p class="section-lead">Short answers. Press a question to open it.</p>
+      </div>
+      <div class="faq" data-reveal>
+        <div class="qa card"><details>
+          <summary>Do I need my own copy of the game?</summary>
+          <p>
+            Yes. You need your own <cite>Breath of the Wild</cite> for Switch (version 1.9.0), dumped legally from
+            your own console, and Savage Wind. We never ship game files, keys or firmware, and we can't help you get them.
+          </p>
+        </details></div>
+        <div class="qa card"><details>
+          <summary>Is this made by Nintendo or by Savage Wind's developers?</summary>
+          <p>
+            No. Breathalyzer is a fan project by giruka. It is not affiliated with, or endorsed by, Nintendo or the
+            developers of Savage Wind.
+          </p>
+        </details></div>
+        <div class="qa card"><details>
+          <summary>Do you run servers? Is my data sent anywhere?</summary>
+          <p>
+            No. We run no servers. Multiplayer is hosted by players on their own network, with no accounts.
+            Breathalyzer never goes online by itself, and this website has no trackers or analytics.
+          </p>
+        </details></div>
+        <div class="qa card"><details>
+          <summary>Will my existing mods work?</summary>
+          <p>
+            Most will. Switch mods work, including .bnp packages (with log merging) and, in part, UKMM packages.
+            Wii&nbsp;U mods are converted on your PC: data, and new this beta, models and textures (not audio yet).
+            If a mod can't be used, Breathalyzer tells you why. See the
+            <!-- TODO links: placeholder repo address, like the download links above (replace OWNER). -->
+            <a href="https://github.com/OWNER/breathalyzer/blob/main/docs/MOD-COMPAT.md">mod compatibility list</a>.
+          </p>
+        </details></div>
+        <div class="qa card"><details>
+          <summary>Do I need to install Python or anything else?</summary>
+          <p>No. The download brings its own Python. Unzip it, open Start Breathalyzer, and play.</p>
+        </details></div>
+        <div class="qa card"><details>
+          <summary>Windows says "Windows protected your PC". What now?</summary>
+          <p>
+            Start Breathalyzer is new and not signed yet, so Windows doesn't know it. Press <strong>More info</strong>,
+            then <strong>Run anyway</strong>. If your antivirus holds it back, open
+            <span class="path">app\Start Breathalyzer (backup).cmd</span> instead.
+          </p>
+        </details></div>
+        <div class="qa card"><details>
+          <summary>Can we play the story together yet?</summary>
+          <p>
+            Not yet. Today you see your friend as Link, with synced moves, attacks and held items (tested on one PC so
+            far). Playing the story together, shared enemies, a character selector and emotes are coming.
+          </p>
+        </details></div>
+        <div class="qa card"><details>
+          <summary>Is it free?</summary>
+          <p>Yes. Breathalyzer's own code is under the MIT license. That covers our code only, not Nintendo's game.</p>
+        </details></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CREDITS ============ -->
+  <section class="section band" id="credits" aria-labelledby="credits-title">
+    <div class="wrap">
+      <div class="section-head" data-reveal>
+        <p class="eyebrow"><span class="eyebrow-num">05</span> Credits</p>
+        <h2 id="credits-title">Who made this</h2>
+      </div>
+      <ul class="credits" role="list">
+        <li class="card" data-reveal>
+          <h3>Breathalyzer</h3>
+          <p>Made by <strong>giruka</strong>: the launcher, the mod loader, the tools and our own mods.</p>
+        </li>
+        <li class="card" data-reveal>
+          <h3>Savage Wind</h3>
+          <p>
+            The native PC recomp that Breathalyzer runs on, by
+            <a href="https://github.com/Revivedx/SavageWindRecomp">its developers</a>.
+          </p>
+        </li>
+        <li class="card" data-reveal>
+          <h3>Mods by other people</h3>
+          <p>Each one credits its own authors in its own info. Thank you, modders.</p>
+        </li>
+        <li class="card" data-reveal>
+          <h3>Fira Sans</h3>
+          <p>
+            The font on this page, by the Mozilla Foundation and Telefonica, under the
+            <a href="fonts/FiraSans-OFL.txt">SIL Open Font License</a>.
+          </p>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap footer-inner">
+    <p class="footer-brand">
+      <img src="img/breathalyzer.svg" width="36" height="36" alt="">
+      <span>Breathalyzer, by giruka</span>
+    </p>
+    <p>
+      A fan project. Not affiliated with Nintendo or with Savage Wind's developers.
+      <cite>The Legend of Zelda: Breath of the Wild</cite> is a trademark of Nintendo.
+      Screenshots are from our own testing.
+    </p>
+    <p>This site has no trackers, no analytics and no outside scripts.</p>
+    <p><a href="#top">Back to top</a></p>
+  </div>
+</footer>
+
+<script src="js/main.js" defer></script>
+</body>
+</html>

@@ -6,7 +6,12 @@ A host answers (only addresses on a home network, at most once a second each, ne
     {"t":"brz","v":1,"name":"Ana","world":"Ana's world","players":2,"max":8,"code":true,"port":7788,
      "ver":"0.7.0","check":"apple river stone moon"}
 The room code itself is never in the answer (only whether one is needed). Answers over QUERY_SIZE bytes, bad names
-and more than MAX_HOSTS hosts are dropped; a host is gone after GONE_AFTER seconds without an answer.
+and more than MAX_HOSTS hosts are dropped, and one device (address) holds at most PER_ADDRESS rows (its newest); a
+host is gone after GONE_AFTER seconds without an answer.
+
+Where queries go: 255.255.255.255 (on Windows it leaves through one network adapter only) and each of this PC's
+home-network adapters' own subnet broadcast (x.y.z.255 of a /24, the usual home network), so a Hyper-V, WSL or VPN
+adapter can't hide the host.
 """
 from __future__ import annotations
 
@@ -21,7 +26,9 @@ from .security import WORDS, address_allowed
 DISCOVERY_PORT = DEFAULT_RELAY_PORT   # (UDP; the relay is TCP on the same number)
 QUERY_SIZE = 512
 MAX_HOSTS = 16
+PER_ADDRESS = 2
 GONE_AFTER = 6.0
+MAX_TARGETS = 8
 _WORLD_RE = re.compile(r"[\w .'-]{1,32}")
 _VER_RE = re.compile(r"[\w.+-]{1,24}")
 
@@ -93,6 +100,10 @@ class HostTable:
         if not address_allowed(address):
             return False
         key = (address, info["port"])
+        if key not in self.hosts:   # (one device can't fill the list: its newest PER_ADDRESS rows only)
+            mine = sorted((t, k) for k, (t, _) in self.hosts.items() if k[0] == address)
+            for _, k in mine[:max(0, len(mine) - PER_ADDRESS + 1)]:
+                del self.hosts[k]
         if key not in self.hosts and len(self.hosts) >= MAX_HOSTS:
             self.expire()
             if len(self.hosts) >= MAX_HOSTS:
@@ -156,11 +167,40 @@ def open_responder_socket(port: int = DISCOVERY_PORT, host: str = "") -> socket.
     return s
 
 
-def search(seconds: float = 2.0, port: int = DISCOVERY_PORT, targets=("255.255.255.255",),
+def local_addresses() -> list[str]:
+    """This PC's IPv4 addresses (every adapter), from the system's own name lookup. No network traffic."""
+    found = []
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+    except OSError:
+        infos = []
+    for *_, sockaddr in infos:
+        ip = sockaddr[0]
+        if ip not in found:
+            found.append(ip)
+    return found
+
+
+def broadcast_targets(addresses=None) -> list[str]:
+    """Where Join sends its query: the limited broadcast, then each home-network adapter's /24 subnet broadcast
+    (not loopback or link-local), at most MAX_TARGETS."""
+    out = ["255.255.255.255"]
+    for ip in local_addresses() if addresses is None else addresses:
+        parts = ip.split(".")
+        if len(parts) != 4 or not address_allowed(ip) or ip.startswith(("127.", "169.254.")):
+            continue
+        b = ".".join(parts[:3] + ["255"])
+        if b not in out:
+            out.append(b)
+    return out[:MAX_TARGETS]
+
+
+def search(seconds: float = 2.0, port: int = DISCOVERY_PORT, targets=None,
            table: HostTable | None = None) -> list[dict]:
-    """Broadcast queries each second for `seconds` and collect answers. `targets`: where to send (a unicast address
-    works too: the tests use 127.0.0.1)."""
+    """Broadcast queries each second for `seconds` and collect answers. `targets`: where to send (default
+    broadcast_targets(); a unicast address works too: the tests use 127.0.0.1)."""
     table = table or HostTable()
+    targets = broadcast_targets() if targets is None else targets
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)

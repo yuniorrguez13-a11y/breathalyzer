@@ -124,11 +124,12 @@ class Source:
 
     def __init__(self, files: list[str]):
         files = sorted(files)
-        # Archives often wrap everything in one folder: look inside it, but keep folders that mean something.
+        # Archives often wrap everything in one folder: look inside it, but keep folders that mean something
+        # (romfs/, a title id, and Pack/ or Model/ of a bare RomFS tree).
         self.prefix = ""
         while files and all("/" in f for f in files):
             top = {f.split("/", 1)[0] for f in files}
-            if len(top) != 1 or next(iter(top)).lower() in STRUCTURAL:
+            if len(top) != 1 or next(iter(top)).lower() in STRUCTURAL | ROMFS_TOP:
                 break
             self.prefix += top.pop() + "/"
             files = [f.split("/", 1)[1] for f in files]
@@ -459,8 +460,8 @@ def sniff_platform(src: Source, files: list[str]) -> tuple[int, int]:
 def _bare_tree(src: Source, low: list[str]) -> Finding | None:
     """A Switch (or Wii U) mod as bare RomFS folders (Pack/TitleBG.pack, Model/X.sbfres) with no romfs/ or
     content/ folder: tools/romfs_mods.py deploys it from the folder that holds them."""
-    if any(ANCHOR_RE.search(p) for p in low):
-        return None
+    if any(ANCHOR_RE.search(p) or WIIU_DATA_RE.search(p) for p in low):
+        return None  # (romfs/ or content/; aoc/ on its own is Wii U DLC, next to bare folders a Switch overlay)
     root = bare_root(src.files)
     if root is None:
         return None
@@ -562,11 +563,12 @@ def inspect(src: Source) -> list[Finding]:
     if bnp and bnp.verdict == MERGE:
         return findings + [bnp]  # its packs hold only the changes: none of its files is used as it is
     overlay = _overlay(low)
-    romfs = _switch_romfs(low, overlay) or (None if bnp else _bare_tree(src, low))
+    packs = _graphic_packs(src, low)   # (a Cemu graphic pack's folder isn't a bare RomFS tree, whatever its name)
+    romfs = _switch_romfs(low, overlay) or (None if bnp or packs else _bare_tree(src, low))
     for f in (bnp, _wiiu_data(low, overlay[1]), romfs, _code_mods(low)):
         if f:
             findings.append(f)
-    findings += _graphic_packs(src, low) + _exefs_patches(src, low) + _cheats(low)
+    findings += packs + _exefs_patches(src, low) + _cheats(low)
     return findings
 
 

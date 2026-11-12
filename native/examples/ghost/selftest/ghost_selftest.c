@@ -934,13 +934,14 @@ static void items_setup(void) {
 #define FF_N 6
 #define FF_GET 0x70000000f0ull  // the fake getter's address (the game's getter is not known yet: COOP_GET_BOOL is 0)
 static const char *const FF_NAMES[FF_N] = {"FirstTower_Activated", "MapTower_01", "Clear_Dungeon000",
-                                            "IsGet_PlayerStole2", "IsGet_Obj_Camera", "Outside_The_List"};
+                                            "IsGet_MemoryPhoto_001", "IsGet_Obj_Camera", "Outside_The_List"};
 static int g_ff_val[FF_N];
 static int64_t g_ff_sets, g_ff_set_zero, g_ff_set_unlisted, g_ff_gets, g_ff_refuse_next;
 static _Alignas(16) uint8_t g_ff_mgr[0x1000];
 static _Alignas(16) uint64_t g_ff_slot;
-static int g_ff_world = 1;
+static int g_ff_world = 1, g_ff_free = 1;
 static int ff_world(void) { return g_ff_world; }
+static int ff_free(void) { return g_ff_free; }
 
 static int ff_find(uint64_t obj) {
     const StrObj *o = (const StrObj *)(uintptr_t)obj;
@@ -982,90 +983,138 @@ static void coop_ticks(int n) {
     for (int k = 0; k < n; k++) coop_tick((struct Cpu *)(void *)g_cpu);
 }
 
-static void check_coop(void) {
-    g_coop_mgr_slot = P(&g_ff_slot);
-    g_ff_slot = P(g_ff_mgr);
-    g_coop_world = ff_world;
-    g_coop_get_fn = FF_GET;
-    memset(g_ff_val, 0, sizeof g_ff_val);
-    g_ff_val[0] = 1;  // FirstTower_Activated already set
-    g_ff_val[5] = 0;
-    const char *list = "# Story list (names only), built from this PC's own game files by tools/mp/story.py\n"
-                       "base FirstTower_Activated\r\nbase MapTower_01\nbase Clear_Dungeon000\n"
-                       "base IsGet_PlayerStole2\ndlc IsGet_Obj_Camera\n";
-    int n = coop_load_text(list, 0);
-    check("coop", "load", n == 4, "n %d (the dlc line left out)", n);
-    check("coop", "bad_list", coop_load_text("base Bad-Name\n", 0) < 0, "a bad name refused");
-    n = coop_load_text(list, 1);
-    check("coop", "load_dlc", n == 5, "n %d", n);
-    coop_ticks(1);
+static CoopPub coop_pub_now(void) {
     CoopPub pub;
     lock();
     pub = g_coop_pub;
     unlock();
+    return pub;
+}
+
+static const char *const COOP_LIST = "# Story list (names only), built from this PC's own game files by tools/mp/story.py\n"
+                                     "base FirstTower_Activated\r\nbase MapTower_01\nbase Clear_Dungeon000\n"
+                                     "base IsGet_MemoryPhoto_001\ndlc IsGet_Obj_Camera\n";
+static void coop_load_between(void) {  // (a list load between an add's count and its queue)
+    g_coop_between = NULL;
+    coop_load_text(COOP_LIST, 1);
+}
+
+static void check_coop(void) {
+    g_coop_mgr_slot = P(&g_ff_slot);
+    g_ff_slot = P(g_ff_mgr);
+    g_coop_world = ff_world;
+    g_coop_free = ff_free;
+    g_coop_settle = 1;
+    g_coop_get_fn = FF_GET;
+    memset(g_ff_val, 0, sizeof g_ff_val);
+    g_ff_val[0] = 1;  // FirstTower_Activated already set
+    int n = coop_load_text(COOP_LIST, 0);
+    check("coop", "load", n == 4, "n %d (the dlc line left out)", n);
+    check("coop", "bad_list", coop_load_text("base Bad-Name\n", 0) < 0, "a bad name refused");
+    n = coop_load_text(COOP_LIST, 1);
+    check("coop", "load_dlc", n == 5, "n %d", n);
+    coop_ticks(1);
+    CoopPub pub = coop_pub_now();
     char hex[2 * COOP_BYTES + 1];
     coop_bits_hex(pub.bits, pub.n, hex);
     check("coop", "reads", pub.ready && pub.seq == 1 && !strcmp(hex, "01"), "ready %d seq %lld bits %s", pub.ready,
           (long long)pub.seq, hex);
     coop_ticks(3);
-    lock();
-    pub = g_coop_pub;
-    unlock();
+    pub = coop_pub_now();
     check("coop", "seq_steady", pub.seq == 1, "seq %lld after passes with no change", (long long)pub.seq);
 
     check("coop", "bad_hex", coop_add_hex("20") < 0 && coop_add_hex("0") < 0 && coop_add_hex("0A") < 0 &&
           coop_add_hex("0001") < 0, "a bit past the list, odd, upper case, too long: refused");
     int64_t sets0 = g_ff_sets;
-    int q = coop_add_hex("1f");  // all five; FirstTower is already 1
+    int q = coop_add_hex("1f");  // all five; FirstTower is already 1; only the tower and the memory go live
     coop_ticks(2);
-    check("coop", "adds_only", q == 5 && g_ff_val[1] && g_ff_val[2] && g_ff_val[3] && g_ff_val[4] &&
-          g_ff_sets - sets0 == 4 && !g_ff_set_zero && !g_ff_set_unlisted && !g_ff_val[5],
-          "queued %d, sets %lld, set to 0 %lld, unlisted %lld", q, (long long)(g_ff_sets - sets0),
-          (long long)g_ff_set_zero, (long long)g_ff_set_unlisted);
+    pub = coop_pub_now();
+    check("coop", "adds_live_only", q == 5 && g_ff_val[1] && g_ff_val[3] && !g_ff_val[2] && !g_ff_val[4] &&
+          g_ff_sets - sets0 == 2 && !g_ff_set_zero && !g_ff_set_unlisted && !g_ff_val[5],
+          "queued %d, sets %lld, shrine %d, rune %d, set to 0 %lld, unlisted %lld", q, (long long)(g_ff_sets - sets0),
+          g_ff_val[2], g_ff_val[4], (long long)g_ff_set_zero, (long long)g_ff_set_unlisted);
+    check("coop", "held", pub.held == 3, "held %lld (the quest step, the shrine and the rune)", (long long)pub.held);
     coop_ticks(2);
-    lock();
-    pub = g_coop_pub;
-    unlock();
+    pub = coop_pub_now();
     coop_bits_hex(pub.bits, pub.n, hex);
-    check("coop", "get_hex", !strcmp(hex, "1f") && pub.seq == 2 && pub.pending == 0, "bits %s seq %lld pending %lld",
+    check("coop", "get_hex", !strcmp(hex, "0b") && pub.seq == 2 && pub.pending == 0, "bits %s seq %lld pending %lld",
           hex, (long long)pub.seq, (long long)pub.pending);
 
     // busy: nothing read or set while the busy bit is up; done once it is down
-    coop_load_text(list, 1);
+    coop_load_text(COOP_LIST, 1);
     coop_ticks(1);
     memset(g_ff_val, 0, sizeof g_ff_val);
     coop_ticks(1);
     g_ff_mgr[COOP_BUSY_OFF] |= COOP_BUSY_BIT;
     int64_t gets0 = g_ff_gets;
     sets0 = g_ff_sets;
-    coop_add_hex("04");
+    coop_add_hex("08");
     coop_ticks(3);
-    lock();
-    pub = g_coop_pub;
-    unlock();
-    check("coop", "busy_waits", g_ff_gets == gets0 && g_ff_sets == sets0 && pub.busy_waits >= 3 && pub.pending == 1,
-          "gets %lld sets %lld busy waits %lld pending %lld", (long long)(g_ff_gets - gets0),
-          (long long)(g_ff_sets - sets0), (long long)pub.busy_waits, (long long)pub.pending);
+    pub = coop_pub_now();
+    check("coop", "busy_waits", g_ff_gets == gets0 && g_ff_sets == sets0 && pub.busy_waits >= 3 && pub.pending == 1 &&
+          !pub.safe, "gets %lld sets %lld busy waits %lld pending %lld safe %d", (long long)(g_ff_gets - gets0),
+          (long long)(g_ff_sets - sets0), (long long)pub.busy_waits, (long long)pub.pending, pub.safe);
     g_ff_mgr[COOP_BUSY_OFF] &= (uint8_t)~COOP_BUSY_BIT;
     g_ff_refuse_next = 1;  // the setter says no once: tried again next frame
     coop_ticks(1);
-    int after_refuse = g_ff_val[2];
+    int after_refuse = g_ff_val[3];
     coop_ticks(1);
-    lock();
-    pub = g_coop_pub;
-    unlock();
-    check("coop", "retry", !after_refuse && g_ff_val[2] == 1 && pub.set_refused == 1, "after refuse %d, now %d, "
-          "refused %lld", after_refuse, g_ff_val[2], (long long)pub.set_refused);
+    pub = coop_pub_now();
+    check("coop", "retry", !after_refuse && g_ff_val[3] == 1 && pub.set_refused == 1, "after refuse %d, now %d, "
+          "refused %lld", after_refuse, g_ff_val[3], (long long)pub.set_refused);
 
     // no world: nothing at all
     g_ff_world = 0;
     gets0 = g_ff_gets;
-    coop_add_hex("08");
+    coop_add_hex("02");
     coop_ticks(2);
-    check("coop", "no_world", g_ff_gets == gets0 && g_ff_val[3] == 0, "gets %lld", (long long)(g_ff_gets - gets0));
+    check("coop", "no_world", g_ff_gets == gets0 && g_ff_val[1] == 0, "gets %lld", (long long)(g_ff_gets - gets0));
     g_ff_world = 1;
     coop_ticks(2);
-    check("coop", "world_back", g_ff_val[3] == 1, "set after the world is back");
+    check("coop", "world_back", g_ff_val[1] == 1, "set after the world is back");
+
+    // Link not free (loading, a cutscene, riding, the pause menu): no add; then only after he is free for a while
+    coop_load_text(COOP_LIST, 1);
+    coop_ticks(1);
+    memset(g_ff_val, 0, sizeof g_ff_val);
+    coop_ticks(1);
+    g_coop_settle = 3;
+    g_ff_free = 0;
+    sets0 = g_ff_sets;
+    coop_add_hex("02");
+    coop_ticks(3);
+    pub = coop_pub_now();
+    check("coop", "not_free_waits", g_ff_sets == sets0 && pub.unsafe_waits >= 3 && !pub.safe && pub.pending == 1,
+          "sets %lld unsafe waits %lld safe %d pending %lld", (long long)(g_ff_sets - sets0),
+          (long long)pub.unsafe_waits, pub.safe, (long long)pub.pending);
+    g_ff_free = 1;
+    coop_ticks(2);
+    check("coop", "settles_first", g_ff_val[1] == 0, "set after %d free frames (needs %d)", 2, g_coop_settle);
+    coop_ticks(1);
+    pub = coop_pub_now();
+    check("coop", "after_settle", g_ff_val[1] == 1 && pub.safe, "set %d safe %d", g_ff_val[1], pub.safe);
+
+    // a load puts the save's 0 back: what we added is set again once it is safe (no getter: we can't see it)
+    g_coop_get_fn = COOP_GET_BOOL;
+    g_ff_world = 0;
+    coop_ticks(1);
+    g_ff_val[1] = 0;
+    g_ff_world = 1;
+    coop_ticks(2);
+    int before_settle = g_ff_val[1];
+    coop_ticks(1);
+    check("coop", "set_again", !before_settle && g_ff_val[1] == 1 && !g_ff_set_zero, "before %d after %d",
+          before_settle, g_ff_val[1]);
+    g_coop_get_fn = FF_GET;
+    g_coop_settle = 1;
+
+    // a list loaded while an add is read: refused (its bits would mean other names)
+    g_coop_between = coop_load_between;
+    int stale = coop_add_hex("02");
+    coop_ticks(2);
+    pub = coop_pub_now();
+    check("coop", "gen_refused", stale < 0 && pub.pending == 0, "returned %d pending %lld", stale,
+          (long long)pub.pending);
 
     // the developer probe: one read on the next tick
     lock();
@@ -1089,7 +1138,7 @@ static void check_coop(void) {
     check("coop", "no_getter_no_call", g_coop_probe.done && !g_coop_probe.ok && g_ff_gets == gets,
           "done %d ok %lld gets %lld", g_coop_probe.done, (long long)g_coop_probe.ok, (long long)(g_ff_gets - gets));
     // ... and a list read without a getter never says "ready" (every read failed: its zeros mean nothing)
-    coop_load_text(list, 0);
+    coop_load_text(COOP_LIST, 0);
     coop_ticks(10);
     lock();
     int no_get_ready = g_coop_pub.ready;
@@ -1098,6 +1147,8 @@ static void check_coop(void) {
     check("coop", "no_getter_not_ready", !no_get_ready && no_get_fails > 0 && g_ff_gets == gets,
           "ready %d read_fails %lld gets %lld", no_get_ready, (long long)no_get_fails, (long long)(g_ff_gets - gets));
     g_coop_world = coop_world_real;
+    g_coop_free = coop_free_real;
+    g_coop_settle = COOP_SETTLE_TICKS;
     g_coop_mgr_slot = COOP_FLAG_MGR;
     coop_load_text("", 0);
     coop_ticks(1);

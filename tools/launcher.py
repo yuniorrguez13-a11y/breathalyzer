@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """Breathalyzer, the launcher: install it, point it at Savage Wind once, and press Play.
 
-    python tools/launcher.py [--library <folder>] [--size N] [--dark] [--port N]
+    python tools/launcher.py [--library <folder>] [--size N] [--dark] [--port N] [<file.breath>]
 
 The first start finds Savage Wind (or asks for its folder), checks it (version, game files, room to write) and finds
 or makes your mod list. After that the window (tools/modman_gui.py, LauncherView) opens on Home: one big Play button
 and your mods with their titles, what they do, and ON/OFF. Play does everything: it uses the changes from the game's
-Mods page, gets your mods ready (modman deploy) when they changed, and starts the game (modman run).
-docs/launcher.md explains it all.
+Mods page, gets your mods ready (modman deploy) when they changed, and starts the game (modman run). A .breath file
+(tools/breath.py) given on the command line, as a double-click on one gives it, is offered for adding ("Add this
+mod?"); with the window already open, it goes to that window. docs/launcher.md explains it all.
 
 What the launcher remembers (the Savage Wind folder, the mod library and the window's choices; nothing else) is in
 %LOCALAPPDATA%\\Breathalyzer\\launcher.json; the BREATHALYZER_HOME variable names another folder (tests use it).
-It never goes online: no update check, nothing sent anywhere. It never changes the Savage Wind folder.
+It never goes online: no update check, nothing sent anywhere. In the Savage Wind folder it changes one thing, only
+when the player picks it in Settings and the game is closed: savagewind.ini's frame_rate line (the file as it was is
+kept once as savagewind.ini.breathalyzer-backup).
 
 This file holds the parts without a window (each tested on its own in tests/test_launcher.py): the settings file,
 finding and checking Savage Wind, the first-run steps, the mod descriptions, the running-game check, one window only,
-and desktop shortcuts.
+desktop shortcuts, the frame rate, and the .breath file type (this Windows user only: HKEY_CURRENT_USER, set and
+removed with Settings' buttons).
 """
 from __future__ import annotations
 
@@ -915,16 +919,100 @@ def describe_mod(library: str, entry: dict) -> tuple[str, str]:
 # ---------------------------------------------------------------- what a Savage Wind folder says about itself
 
 def frame_rate(install: str) -> str | None:
-    """savagewind.ini's frame_rate (only read: the game owns the file)."""
+    """savagewind.ini's frame_rate as it is written there (None: no file, or no such line)."""
     try:
-        with open(os.path.join(install, INI), encoding="utf-8", errors="replace") as f:
-            for line in f:
-                k, _, v = line.partition("=")
-                if k.strip() == "frame_rate" and v.strip():
-                    return v.strip()
+        with open(os.path.join(install, INI), "rb") as f:
+            data = f.read(MAX_INI + 1)
     except OSError:
-        pass
-    return None
+        return None
+    found = [m.group("value").decode("utf-8", "replace").strip() for m in FPS_LINE.finditer(data)]
+    found = [v for v in found if v]
+    return found[-1] if found else None
+
+
+# ---------------------------------------------------------------- the frame rate (Settings > Frame rate)
+
+FPS_KEY = "frame_rate"
+# Savage Wind's own choices: its README says "60 fps by default, or 30, 90, 120 or no limit"; the game writes
+# "frame_rate = off" for no limit, and its set command takes 0 ("unlimited") for it too.
+FPS_CHOICES = (("30", "30 fps"), ("60", "60 fps"), ("90", "90 fps"), ("120", "120 fps"), ("off", "No limit"))
+FPS_DEFAULT = "60"
+FPS_OFF = ("off", "unlimited", "0")
+INI_BACKUP = INI + ".breathalyzer-backup"   # the file as it was before Breathalyzer first changed it (made once)
+MAX_INI = 1 << 20
+FPS_LINE = re.compile(rb"(?m)^(?P<head>(?:\xef\xbb\xbf)?[ \t]*frame_rate[ \t]*=[ \t]*)(?P<value>[^\r\n]*?)"
+                      rb"(?P<tail>[ \t]*\r?)$")
+
+
+class FpsError(Exception):
+    """The frame rate can't be changed now. The message is for the player."""
+
+
+def fps_value(raw: str | None) -> str | None:
+    """One of FPS_CHOICES' values for what savagewind.ini says (None: something else)."""
+    v = (raw or "").strip().lower()
+    if v in FPS_OFF:
+        return "off"
+    return v if v in {k for k, _ in FPS_CHOICES} else None
+
+
+def fps_label(value: str | None) -> str:
+    return dict(FPS_CHOICES).get(value or "", "")
+
+
+def read_fps(install: str) -> tuple[bool, str | None, str | None]:
+    """(savagewind.ini is there, the frame rate's value from FPS_CHOICES or None, what the file says). A file
+    without the line means the game's default, 60."""
+    path = os.path.join(install, INI)
+    if not os.path.isfile(path):
+        return False, None, None
+    raw = frame_rate(install)
+    return True, fps_value(raw) if raw is not None else FPS_DEFAULT, raw
+
+
+def set_frame_rate(install: str, value: str, running=None) -> bool:
+    """Write the frame rate into savagewind.ini: only the frame_rate line changes (every other byte stays as it is;
+    a file without the line gets it at the end). Only while Savage Wind is closed (it writes the file itself). The
+    file as it was is kept once, as savagewind.ini.breathalyzer-backup. True when the file changed."""
+    if value not in {k for k, _ in FPS_CHOICES}:
+        raise FpsError(f"{value!r} isn't a frame rate Savage Wind has.")
+    running = running or game_running
+    path = os.path.join(install, INI)
+    if running():
+        raise FpsError("Close Savage Wind first: it writes its settings file when it closes.")
+    try:
+        with open(path, "rb") as f:
+            data = f.read(MAX_INI + 1)
+    except FileNotFoundError:
+        raise FpsError("Start Savage Wind once first: it makes its settings file then.") from None
+    except OSError as e:
+        raise FpsError(f"Savage Wind's settings file can't be read: {e.strerror or e}.") from None
+    if len(data) > MAX_INI:
+        raise FpsError("Savage Wind's settings file is far too big: it may be damaged.")
+    new_value = value.encode("ascii")
+    if FPS_LINE.search(data):
+        new = FPS_LINE.sub(lambda m: m.group("head") + new_value + m.group("tail"), data)
+    else:
+        nl = b"\r\n" if b"\r\n" in data else b"\n"
+        new = data + (nl if data and not data.endswith(b"\n") else b"") + FPS_KEY.encode() + b" = " + new_value + nl
+    if new == data:
+        return False
+    backup = os.path.join(install, INI_BACKUP)
+    tmp = f"{path}.breathalyzer-{os.getpid()}.tmp"
+    try:
+        if not os.path.exists(backup):
+            shutil.copy2(path, backup)
+        with open(tmp, "wb") as f:
+            f.write(new)
+        if running():   # (started meanwhile: never write under it)
+            raise FpsError("Close Savage Wind first: it writes its settings file when it closes.")
+        os.replace(tmp, path)
+    except OSError as e:
+        raise FpsError(f"Savage Wind's settings file can't be changed: {e.strerror or e}.") from None
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+    return True
 
 
 def game_env(base: dict, clear: tuple[str, ...]) -> dict:
@@ -1068,6 +1156,168 @@ def shortcut_parts(app_dir: str = REPO, python: str | None = None) -> tuple[str,
         else ""
 
 
+# ---------------------------------------------------------------- .breath files: a double-click adds the mod
+
+BREATH_EXT = ".breath"
+BREATH_PROGID = "Breathalyzer.Mod"
+BREATH_TYPE_NAME = "Breathalyzer mod"
+CLASSES = r"Software\Classes"     # under HKEY_CURRENT_USER: this Windows user only, no admin (tests use another key)
+OPEN_DIR = "open"                 # in home_dir(): .breath files a second start passes to the open window
+MAX_OPEN_REQUEST = 4096
+OPEN_REQUEST_AGE = 120            # seconds: a handed-over .breath older than this is left over (dropped)
+
+
+def breath_command(app_dir: str = REPO, python: str | None = None) -> tuple[str, str]:
+    """(the command a double-click on a .breath runs, its icon): Start Breathalyzer.exe "<file>" in the player zips,
+    else this Python with tools\\launcher.py."""
+    target, args, _, icon = shortcut_parts(app_dir, python)
+    cmd = f'"{target}"' + (f" {args}" if args else "") + ' "%1"'
+    return cmd, f'"{icon or target}",0'
+
+
+def _winreg():
+    if sys.platform != "win32":
+        raise OSError("file types are set on Windows only")
+    import winreg
+    return winreg
+
+
+def _delete_tree(reg, root, path: str) -> None:
+    """Delete a registry key and everything under it (only keys Breathalyzer made)."""
+    try:
+        with reg.OpenKey(root, path, 0, reg.KEY_READ | reg.KEY_WRITE) as k:
+            while True:
+                try:
+                    sub = reg.EnumKey(k, 0)
+                except OSError:
+                    break
+                _delete_tree(reg, root, f"{path}\\{sub}")
+    except FileNotFoundError:
+        return
+    reg.DeleteKey(root, path)
+
+
+def _read_default(reg, root, path: str) -> str | None:
+    try:
+        with reg.OpenKey(root, path) as k:
+            value, _ = reg.QueryValueEx(k, "")
+            return value if isinstance(value, str) else None
+    except OSError:
+        return None
+
+
+def breath_state(base: str = CLASSES, command: str | None = None) -> str | None:
+    """Whether a double-click on a .breath opens Breathalyzer: "here" (this copy), "other" (another Breathalyzer
+    folder, an older one), None (not set, or set to another program). Only reads."""
+    try:
+        reg = _winreg()
+    except OSError:
+        return None
+    root = reg.HKEY_CURRENT_USER
+    if _read_default(reg, root, f"{base}\\{BREATH_EXT}") != BREATH_PROGID:
+        return None
+    have = _read_default(reg, root, f"{base}\\{BREATH_PROGID}\\shell\\open\\command")
+    if not have:
+        return None
+    want = command if command is not None else breath_command()[0]
+    return "here" if os.path.normcase(have) == os.path.normcase(want) else "other"
+
+
+def register_breath(command: str, icon: str, base: str = CLASSES) -> None:
+    """Make a double-click on a .breath file run `command` (it ends in "%1"), for this Windows user only
+    (HKEY_CURRENT_USER\\Software\\Classes: no admin). Raises OSError when it can't."""
+    reg = _winreg()
+    root = reg.HKEY_CURRENT_USER
+    with reg.CreateKeyEx(root, f"{base}\\{BREATH_EXT}", 0, reg.KEY_WRITE) as k:
+        reg.SetValueEx(k, "", 0, reg.REG_SZ, BREATH_PROGID)
+    with reg.CreateKeyEx(root, f"{base}\\{BREATH_EXT}\\OpenWithProgids", 0, reg.KEY_WRITE) as k:
+        reg.SetValueEx(k, BREATH_PROGID, 0, reg.REG_SZ, "")
+    with reg.CreateKeyEx(root, f"{base}\\{BREATH_PROGID}", 0, reg.KEY_WRITE) as k:
+        reg.SetValueEx(k, "", 0, reg.REG_SZ, BREATH_TYPE_NAME)
+    with reg.CreateKeyEx(root, f"{base}\\{BREATH_PROGID}\\DefaultIcon", 0, reg.KEY_WRITE) as k:
+        reg.SetValueEx(k, "", 0, reg.REG_SZ, icon)
+    with reg.CreateKeyEx(root, f"{base}\\{BREATH_PROGID}\\shell\\open\\command", 0, reg.KEY_WRITE) as k:
+        reg.SetValueEx(k, "", 0, reg.REG_SZ, command)
+    if base == CLASSES:
+        shell_changed()
+
+
+def unregister_breath(base: str = CLASSES) -> bool:
+    """Undo register_breath: Breathalyzer's file type goes, and .breath too when it names Breathalyzer (a .breath
+    another program took over is left to it). True when something was removed."""
+    reg = _winreg()
+    root = reg.HKEY_CURRENT_USER
+    ext = f"{base}\\{BREATH_EXT}"
+    gone = _read_default(reg, root, f"{base}\\{BREATH_PROGID}") is not None
+    _delete_tree(reg, root, f"{base}\\{BREATH_PROGID}")
+    with contextlib.suppress(OSError):
+        with reg.OpenKey(root, f"{ext}\\OpenWithProgids", 0, reg.KEY_WRITE) as k:
+            reg.DeleteValue(k, BREATH_PROGID)
+            gone = True
+    with contextlib.suppress(OSError):
+        with reg.OpenKey(root, f"{ext}\\OpenWithProgids", 0, reg.KEY_READ) as k:
+            empty = reg.QueryInfoKey(k)[:2] == (0, 0)
+        if empty:
+            reg.DeleteKey(root, f"{ext}\\OpenWithProgids")
+    if _read_default(reg, root, ext) == BREATH_PROGID:
+        with reg.OpenKey(root, ext, 0, reg.KEY_WRITE) as k:
+            reg.DeleteValue(k, "")
+        gone = True
+    with contextlib.suppress(OSError):
+        with reg.OpenKey(root, ext, 0, reg.KEY_READ) as k:
+            empty = reg.QueryInfoKey(k)[:2] == (0, 0)
+        if empty:
+            reg.DeleteKey(root, ext)
+    if base == CLASSES:
+        shell_changed()
+    return gone
+
+
+def shell_changed() -> None:
+    """Tell Explorer that file types changed (the .breath icon shows at once)."""
+    w = _win()
+    if w is not None:
+        with contextlib.suppress(AttributeError, OSError):
+            w[0].windll.shell32.SHChangeNotify(0x08000000, 0, None, None)   # SHCNE_ASSOCCHANGED, SHCNF_IDLIST
+
+
+def pass_file(path: str, folder: str) -> str:
+    """Hand a .breath file to the open launcher window (a second start, from a double-click): a small request file
+    in `folder` that the window picks up. Returns its path."""
+    os.makedirs(folder, exist_ok=True)
+    name = f"{time.time_ns()}-{os.getpid()}.txt"
+    tmp = os.path.join(folder, name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(os.path.abspath(path))
+    os.replace(tmp, os.path.join(folder, name))
+    return os.path.join(folder, name)
+
+
+def take_files(folder: str, now: float | None = None) -> list[str]:
+    """The .breath files passed with pass_file, oldest first; each request is removed once read. One older than
+    OPEN_REQUEST_AGE (left over: the window had closed meanwhile) is dropped, never asked about later."""
+    try:
+        names = sorted(n for n in os.listdir(folder) if n.endswith(".txt"))
+    except OSError:
+        return []
+    now = time.time() if now is None else now
+    out = []
+    for n in names:
+        p = os.path.join(folder, n)
+        try:
+            fresh = now - os.path.getmtime(p) <= OPEN_REQUEST_AGE
+            with open(p, encoding="utf-8") as f:
+                text = f.read(MAX_OPEN_REQUEST + 1).strip()
+        except (OSError, UnicodeDecodeError):
+            fresh, text = False, ""
+        with contextlib.suppress(OSError):
+            os.remove(p)
+        if fresh and text and len(text) <= MAX_OPEN_REQUEST and "\n" not in text \
+                and text.lower().endswith(BREATH_EXT):
+            out.append(text)
+    return out
+
+
 # ---------------------------------------------------------------- command line
 
 def size_arg(text: str) -> int:
@@ -1100,6 +1350,7 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--port", type=port_arg, help="control port for the cheats (default 7777)")
     ap.add_argument("--search-in", action="append", metavar="FOLDER",
                     help="look for Savage Wind only in these folders and one level below (for tests)")
+    ap.add_argument("file", nargs="?", help="a .breath file to add (what a double-click on one passes)")
     return ap
 
 

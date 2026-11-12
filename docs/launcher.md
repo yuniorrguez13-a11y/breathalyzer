@@ -73,17 +73,35 @@ adds them to your list (a mod built from your game files is built when you turn 
 - **Play without mods** starts Savage Wind as it is. Your mods stay as they are for next time.
 - **Your mods**: ON or OFF, the mod's name and what it does; the whole text of the selected mod is under the list.
   **Space** (or a click on ON/OFF) turns a mod on or off. The next Play uses the change.
-- **Add mod**, **Open mods folder**, **Settings**, and **More...**: the Mod Manager window (order, remove, check,
-  details) for the same mods.
+- **Export as .breath**: the selected mod in one `.breath` file, to send to a friend (saved on your Desktop at
+  first). A mod built from your own game files can't be exported.
+- **Add mod**, **Add a .breath** (or a double-click on a `.breath` file), **Open mods folder**, **Settings**, and
+  **More...**: the Mod Manager window (order, remove, check, details) for the same mods.
+- **Add this mod?**: a `.breath` file is checked first (every file in it must be as it was made), then its title,
+  who made it, its version and what it does are shown, with **Add this mod** and **Not now** (Esc). A mod with code
+  (a DLL) gets a red warning, "Careful: this mod has code", and Not now is picked first. Not now keeps nothing. A
+  `.breath` that fails a check is refused in plain words ("... wasn't added"). [The .breath file](breath-format.md)
+  has the details.
 - After something failed, **Details** shows what happened, with **Copy** for a bug report (your home folder is
   written as `%USERPROFILE%`, so the report doesn't carry your name).
 
 ### Settings
 
-Your Savage Wind folder (**Change...**, **Check**, **Open**), the frame rate the game uses (only read from
-`savagewind.ini`; change it in the game: F1, Video, or with **Game settings**), your mod list (**Open**), text size,
-dark, hide this window while you play, **Developer commands**, a desktop shortcut (**Make one**), and in
-Breathalyzer Plus the mod picker again.
+Your Savage Wind folder (**Change...**, **Check**, **Open**), the **Frame rate**, your mod list (**Open**), text
+size, dark, hide this window while you play, **Developer commands**, a desktop shortcut (**Make one**), **.breath
+files**, and in Breathalyzer Plus the mod picker again.
+
+- **Frame rate**: a big dropdown with Savage Wind's own choices: 30, 60, 90 or 120 fps, or No limit. It shows what
+  `savagewind.ini` says now (no `frame_rate` line: 60, the game's default). A pick writes only the `frame_rate` line
+  of `savagewind.ini` (No limit is `off`, as the game writes it); every other byte of the file stays as it was. The
+  first change keeps the file as it was in `savagewind.ini.breathalyzer-backup`, once. It says "Used from your next
+  start". While Savage Wind is open the dropdown is grey ("Close the game to change it."): the game writes the file
+  itself when it closes. Without `savagewind.ini` it says "Start Savage Wind once first." You can still change it in
+  the game too (F1, Video), or with **Game settings**.
+- **.breath files**: **Register .breath** makes a double-click on a `.breath` file open this Breathalyzer, which
+  asks before it adds the mod. Only for your Windows user (no admin rights). **Unregister .breath** undoes it. The
+  line says ON, OFF, or "ON, for another Breathalyzer folder" (after you unpacked a new one: press Register .breath
+  again).
 
 - **Developer commands** (OFF at first): some commands you type in the game's command box (F12) only work in the
   game's developer mode, like `up` (Teleport Up) and `infstamina off` (Infinite Stamina). While a mod that needs
@@ -121,15 +139,19 @@ Tk windows don't work with screen readers yet.
 Your own things are not in this folder:
 
 - your mods and mod list: the `modloader` folder next to your Savage Wind folder;
-- the launcher's choices (your Savage Wind folder, your mod list, the window's text size): `%LOCALAPPDATA%\Breathalyzer`.
+- the launcher's choices (your Savage Wind folder, your mod list, the window's text size): `%LOCALAPPDATA%\Breathalyzer`,
+  with `received\` (`.breath` files being added, and the packages added from them) and `open\` (a double-clicked
+  `.breath` on its way to the open window).
 
 ## Update or remove
 
 - **Update**: unpack the new zip and use it; delete the old folder when the new one works. Your mods and choices
   stay, because they aren't in Breathalyzer's folder.
-- **Remove**: delete the Breathalyzer folder. To remove your mods too, delete the `modloader` folder next to
-  Savage Wind (Savage Wind itself is never changed). `%LOCALAPPDATA%\Breathalyzer` holds only the launcher's
-  choices.
+- **Remove**: press Settings > **Unregister .breath** if you registered it, then delete the Breathalyzer folder. To
+  remove your mods too, delete the `modloader` folder next to Savage Wind. In the Savage Wind folder Breathalyzer
+  changes only the `frame_rate` line of `savagewind.ini`, and only when you pick a frame rate in Settings
+  (`savagewind.ini.breathalyzer-backup` is the file as it was). `%LOCALAPPDATA%\Breathalyzer` holds only the
+  launcher's choices and the `.breath` files being added.
 
 ## Privacy
 
@@ -153,13 +175,21 @@ you use it, connects only to the friend you choose.
 - Developer mode: Play passes `--port 7777` to `modman run` when Settings > Developer commands is ON, while a mod
   that needs it is ON (`developer = true` in `bundled-mods.toml`, or `DEV_MODS` in `modman_gui.py`), or with
   `--port`; else `modman run` opens the port only for cheats.
-- From the repo: `python tools/launcher.py [--library <folder>] [--size N] [--dark] [--port N]`. The launcher's
-  choices go to `%LOCALAPPDATA%\Breathalyzer\launcher.json`, or to the folder `BREATHALYZER_HOME` names (use one
-  for tests). `--search-in <folder>` looks for Savage Wind only there and one level below. One window per
-  settings folder: a second start brings the open one to the front (a named mutex).
+- From the repo: `python tools/launcher.py [--library <folder>] [--size N] [--dark] [--port N] [<file.breath>]`.
+  The launcher's choices go to `%LOCALAPPDATA%\Breathalyzer\launcher.json`, or to the folder `BREATHALYZER_HOME`
+  names (use one for tests). `--search-in <folder>` looks for Savage Wind only there and one level below. One window
+  per settings folder: a second start brings the open one to the front (a named mutex), and hands a `.breath` file
+  over through `open\` (`la.pass_file`, `la.take_files`).
+- The frame rate: `la.read_fps`, `la.set_frame_rate` (`FPS_CHOICES`; only the `frame_rate` line, a temp file and a
+  rename, never while `savagewind.exe` runs). The `.breath` file type: `la.register_breath`,
+  `la.unregister_breath`, `la.breath_state` (a `base` key other than `Software\Classes` for tests). The format and
+  its checks: `tools/breath.py`, [the .breath file](breath-format.md).
 - `tools/launcher.py` has the parts without a window: finding and checking Savage Wind, the first-run steps
   (`FirstRun`), the settings file, the mod texts (mod.toml's `description`, else what the mod holds), the running
   game check (the process list, no `tasklist`), shortcuts (Windows' own shell link object, no PowerShell) and
   `read_bundled`. The window is `LauncherView` in `tools/modman_gui.py`; Play's steps are `LaunchController`
   (`modmenu.py apply` when the game's Mods page has changes, else `modman deploy` when the mods changed, then
-  `modman run`). Tests: `tests/test_launcher.py`.
+  `modman run`). Tests: `tests/test_launcher.py` and `tests/test_breath.py`. The window tests in
+  `tests/test_breath.py` use a hidden window (`root.withdraw()`) and always run. The ones that put a see-through
+  window on the screen (`Window` in `tests/test_launcher.py`, `Layout` in `tests/test_modman_gui.py`) run only with
+  `BREATHALYZER_WINDOW_TESTS=1`: never while someone uses the PC (the window can take the focus from their game).

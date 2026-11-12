@@ -119,6 +119,16 @@ class MapPaths(unittest.TestCase):
         self.assertEqual(s["notes.txt"], rm.R_OUTSIDE)
         self.assertEqual(layouts, ["RomFS folders"])
 
+    def test_image_and_3d_editor_files_are_left_out(self):
+        # (Shrek Hinox ships its texture work next to the models: the game reads none of it)
+        t, s, _ = self.targets(["shrek/Model/Enemy_Giant.sbfres", "shrek/Model/1_FTEX/Body_Alb.dds",
+                                "shrek/Model/1_FTEX/Body_Alb.gtx"])
+        self.assertEqual(list(t), ["shrek/Model/Enemy_Giant.sbfres"])
+        self.assertEqual(s["shrek/Model/1_FTEX/Body_Alb.dds"], rm.R_EDITING)
+        self.assertEqual(s["shrek/Model/1_FTEX/Body_Alb.gtx"], rm.R_EDITING)
+        t, s, _ = self.targets(["romfs/UI/Album/pict_000.jpg", "romfs/UI/a.PNG"])
+        self.assertEqual((list(t), s), (["romfs/UI/Album/pict_000.jpg"], {"romfs/UI/a.PNG": rm.R_EDITING}))
+
     def test_overlay_style_tree_with_dlc(self):
         t, _, _ = self.targets(["aoc/0010/Map/G.txt", "Pack/H.txt"])
         self.assertEqual(t, {"aoc/0010/Map/G.txt": "aoc/0010/Map/G.txt", "Pack/H.txt": "Pack/H.txt"})

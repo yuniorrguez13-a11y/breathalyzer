@@ -82,7 +82,7 @@
 #include "swmod.h"
 #include "botw.h"  // (only BOTW_ADDR_MAIN and BOTW_ADDR_GUEST_END: the guest window for `ghost self`'s pointer check)
 
-#define GHOST_VERSION "0.7.0"  // (the same as mod.toml)
+#define GHOST_VERSION "0.7.1"  // (the same as mod.toml)
 
 // ---- Win32 / C runtime (declared here: the zig that ships with Savage Wind has no windows.h or stdio.h)
 __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);

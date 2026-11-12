@@ -35,7 +35,7 @@ class LobbyTests(unittest.TestCase):
         self.assertEqual(lb.lines()[0], "Share story progress with Ana?")
         plan = lb.key("enter")
         self.assertEqual(plan, {"mode": "join", "address": "192.168.1.20", "port": 7788, "world": "Ana's world",
-                                "code": lb.code(), "share": True})
+                                "code": lb.code(), "share": True, "check": "apple river stone moon"})
 
     def test_join_no_code_story_no_and_back(self):
         lb = lobby.Lobby()
@@ -77,6 +77,27 @@ class WorldTests(unittest.TestCase):
         again = worlds.joined_copy(self.own, self.lib, "Ana's world", processes=[])   # reused, not copied again
         self.assertEqual((again / "save_0" / "0" / story.SAVE_NAME).read_bytes(), b"changed")
         self.assertEqual((self.own / "save_0" / "0" / story.SAVE_NAME).read_bytes(), before)
+
+    def test_one_copy_per_host(self):
+        """Two hosts with the same world name never share a friend's copy (it is keyed by their check words too),
+        and the source's lock file is never made (the source is only read)."""
+        a = worlds.joined_copy(self.own, self.lib, "Ana's world", check="apple river stone moon", processes=[])
+        b = worlds.joined_copy(self.own, self.lib, "Anas world", check="bear cake drum egg", processes=[])
+        self.assertEqual(a.name, "Anas_world-apple_river_stone_moon")
+        self.assertNotEqual(a, b)
+        self.assertEqual(story.read_mark(a)["check"], "apple river stone moon")
+        self.assertFalse(story.lock_path(self.own).exists())
+
+    def test_copy_waits_for_a_game_on_the_source(self):
+        story.lock_path(self.own).write_bytes(b"")       # (the game's lock file, as a game leaves it)
+        game = story.SaveLock(self.own).acquire()
+        try:
+            with self.assertRaises(story.GameRunning):
+                worlds.joined_copy(self.own, self.lib, "Ana's world", processes=[])
+        finally:
+            game.release()
+        self.assertFalse((self.lib / "joined").exists())
+        worlds.joined_copy(self.own, self.lib, "Ana's world", processes=[])   # closed: fine
 
     def test_refusals(self):
         with self.assertRaises(OSError):

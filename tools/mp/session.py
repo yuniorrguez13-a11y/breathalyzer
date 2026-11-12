@@ -1,11 +1,14 @@
 """The shared session layer (docs/coop.md): one hello for co-op and story, by features, so older clients still work.
 
+    challenge {"type":"challenge","nonce":"<32 hex>"}   the relay's first line when the world has a room code
     hello    {"type":"hello","version":1,"name":"Ben","room":"default",
               "features":["coop1","story1"], "caps":{"ghost":"0.7.0","game":"1.9.0","sw":"0.4.1-alpha.4","dlc":0},
-              "story":{"v":1,"base":"9f3a10c2","dlc":null}, "code":"apple river stone", "key":"<16 hex>",
-              "host_proof":"<32 hex>" (only the host's own client, over 127.0.0.1)}
-    welcome  adds "features" (the relay's), "host" (the host's id or null), "rules", each peer's "features", and for
-             a late joiner the host's last "time", "weather" and "story"
+              "story":{"v":1,"base":"9f3a10c2","dlc":null}, "cnonce":"<32 hex>", "code_proof":"<32 hex>",
+              "key":"<16 hex>", "host_proof":"<32 hex>" (only the host's own client, over 127.0.0.1)}
+              (an older client sends "code":"apple river stone" instead of cnonce + code_proof)
+    welcome  adds "features" (the relay's), "host" (the host's id or null), "host_key" (his key fingerprint),
+             "rules", "code" (a code is needed), "code_ok" (the relay's proof that it has the code), each peer's
+             "features", and for a late joiner the host's last "time", "weather" and "story"
 
 Protocol version stays 1: new things are features. A client without "features" is a visitor (sees ghosts; never gets
 time or story). A relay without "features" in its welcome is an older one: ghosts only.
@@ -70,8 +73,13 @@ def clean_story_hello(v) -> dict | None:
 
 
 def hello(name: str, room: str, *, features=FEATURES, caps: dict | None = None, story: dict | None = None,
-          code: str | None = None, key: str | None = None, host_proof: str | None = None, bot: bool = False) -> dict:
+          code: str | None = None, key: str | None = None, host_proof: str | None = None, bot: bool = False,
+          extra: dict | None = None) -> dict:
+    """A hello. `code`: the room code as text (older relays only: new clients send `extra` = security.code_hello()'s
+    proof instead, so the code never goes on the wire)."""
     msg = {"type": "hello", "version": 1, "name": name, "room": room, "features": list(features)}
+    if extra:
+        msg.update(extra)
     if caps:
         msg["caps"] = caps
     if story:

@@ -40,6 +40,13 @@ from control import DEFAULT_PORT as GAME_PORT, Control, ControlError  # noqa: E4
 from mp import (DEFAULT_RELAY_PORT, DEFAULT_ROOM, ITEM_KEYS, PROTOCOL_VERSION, REL_KEYS, clean_state,  # noqa: E402
                 decode, encode, parse_hostport, safe_console, safe_name, valid_anim, valid_name, valid_on_back,
                 valid_rel, valid_room)
+from mp import security  # noqa: E402
+
+# The relay's answers that trying again can't change (a wrong or missing room code, kicked, banned, another version):
+# the client stops instead of retrying (retrying wrong codes would lock the friend's whole address out).
+GIVE_UP = ("wrong room code", "needs a room code", "too many wrong room codes", "can't join this session",
+           "version mismatch", "bad name", "bad room", "kicked by the host", "banned by the host",
+           "doesn't know the room code")
 
 DEFAULT_HZ = 20.0
 DEFAULT_DELAY = 0.1       # how far behind real time other players are drawn (s)
@@ -676,7 +683,8 @@ class RelayLink:
                  on_message=None, log=print, retry: float = 2.0, ping_every: float = 5.0, clock=time.monotonic,
                  code: str | None = None):
         self.host, self.port, self.name, self.room, self.bot = host, port, name, room, bot
-        self.code = code   # a co-op host's room code (docs/coop.md), sent in the hello
+        self.code = code   # a co-op host's room code (docs/coop.md): proved in the hello, never sent as text
+        self.gave_up: str | None = None   # the relay refused us for good (GIVE_UP): no more retries
         self.on_message = on_message
         self.log, self.retry, self.ping_every, self.clock = log, retry, ping_every, clock
         self.connected = False
@@ -739,6 +747,9 @@ class RelayLink:
                 self._deliver({"type": "disconnected"})
             if stop.is_set():
                 break
+            if self.gave_up:
+                self.log(f"Not trying again: {self.gave_up}.")
+                break
             if failed:
                 self.error = "error from the relay"
                 if failed != self._failed_said:   # (the same error again and again: once)
@@ -753,20 +764,48 @@ class RelayLink:
         hello = {"type": "hello", "name": self.name, "room": self.room, "version": PROTOCOL_VERSION}
         if self.bot:
             hello["bot"] = True
-        if self.code:
-            hello["code"] = self.code
-        writer.write(encode(hello))
-        await writer.drain()
-        line = await asyncio.wait_for(reader.readline(), 10.0)
-        msg = decode(line) if line else None
+        nonce = cnonce = None
+        msg = None
+        if self.code:   # (a world with a code asks first: {"type":"challenge"}; the code itself is never sent)
+            try:
+                first = await asyncio.wait_for(reader.readline(), 3.0)
+            except asyncio.TimeoutError:
+                first = None
+            if first is not None:
+                got = decode(first) if first else None
+                if got is None:
+                    self.error = "no answer from the relay"
+                    return self.retry
+                if got["type"] == "challenge":
+                    nonce = security.valid_nonce(got.get("nonce"))
+                elif got["type"] == "error":
+                    msg = got
+            extra, cnonce = security.code_hello(self.code, nonce)
+            hello.update(extra)
+        if msg is None:
+            writer.write(encode(hello))
+            await writer.drain()
+            while True:
+                line = await asyncio.wait_for(reader.readline(), 10.0)
+                msg = decode(line) if line else None
+                if msg is None or msg["type"] != "challenge":
+                    break
         if msg is None:
             self.error = "no answer from the relay"
             return self.retry
         if msg["type"] == "error":
             self.error = str(msg.get("error"))[:200]
+            if any(g in self.error for g in GIVE_UP):
+                self.gave_up = self.error
+                self.log(f"The relay said no: {self.error}.")
+                return self.retry
             self.log(f"The relay said no: {self.error}. Trying again in 10 s.")
             return max(self.retry, 10.0)
         if msg["type"] != "welcome":
+            return self.retry
+        if msg.get("code") is True and self.code and not security.answer_matches(self.code, nonce, cnonce,
+                                                                                msg.get("code_ok")):
+            self.gave_up = self.error = "this host doesn't know the room code: it may not be your friend's world"
             return self.retry
         self.my_id, self.room, self.error = msg.get("id"), msg.get("room", self.room), None
         self.peer_count = len(msg.get("peers") or [])
@@ -800,6 +839,9 @@ class RelayLink:
                         self._last_error = (text, at)
                 elif kind == "bye":
                     self.log(f"The relay closed ({msg.get('reason') or 'no reason'}).")
+                    reason = str(msg.get("reason") or "")
+                    if any(g in reason for g in GIVE_UP):
+                        self.gave_up = reason
                 self._deliver(msg)
         finally:
             closer.cancel()
@@ -1277,6 +1319,8 @@ class Runner:
         next_print = self.clock() + (self.print_every or 0.0)
         try:
             while not self._stop.is_set():
+                if relay_task.done() and self.relay.gave_up:   # (refused for good: stop, take the ghost away)
+                    break
                 started = self._loop.time()
                 await self.tick(executor, rec)
                 if self.print_every and self.clock() >= next_print:

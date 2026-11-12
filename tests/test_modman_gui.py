@@ -227,6 +227,16 @@ class Clock:
         return self.now
 
 
+WINDOW_TESTS = "BREATHALYZER_WINDOW_TESTS"   # =1: also the tests that put a (see-through) window on the screen
+
+
+def need_screen(test: unittest.TestCase) -> None:
+    """Skip a test that puts a window on the screen (see-through, but it can still take the focus from a game the
+    player is in) unless BREATHALYZER_WINDOW_TESTS=1. The hidden-window tests (root.withdraw()) always run."""
+    if os.environ.get(WINDOW_TESTS) != "1":
+        test.skipTest(f"puts a window on the screen: set {WINDOW_TESTS}=1 to run it (never while someone uses the PC)")
+
+
 def close(root, view=None):
     """Destroy a test window without its timers (they would fire in the next test's window)."""
     if view is not None:
@@ -808,9 +818,11 @@ EIGHT = [{"id": f"m{i}", "name": f"Made-up mod {i}", "enabled": True, "kinds": [
 
 
 class Layout(Base):
-    """The window on screen (see-through, so nothing shows): text that wraps, bigger text, Tab."""
+    """The window on screen (see-through, only with BREATHALYZER_WINDOW_TESTS=1): text that wraps, bigger text,
+    Tab."""
 
     def window(self, size=18, mods=EIGHT, gate=None):
+        need_screen(self)
         if gui.tk is None:
             self.skipTest("no tkinter")
         try:

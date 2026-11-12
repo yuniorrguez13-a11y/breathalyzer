@@ -99,6 +99,7 @@ the path); a listed path skips every check.
 | `native/` | The native mod host, its mod API header (`swmod.h`), the [game basics](docs/game-basics.md) header (`botw.h`) and the example mods (hello, stamina_hook, ghost, basics_show_pos, basics_inf_stamina, basics_teleport_up, settings_demo), and the recipes `tools/quality.py` builds its performance mods from (perf_effects, perf_shadows) |
 | `tools/` | Python tools (standard library only; Pillow, when installed, adds JPG and WEBP pictures and font mods) |
 | `tests/` | Tests built from dummy files |
+| `site/` | The project's web page: static `index.html`, CSS and a small script, no trackers (design: [site/DESIGN.md](site/DESIGN.md)) |
 | `out/`, `build/` | What the tools make on your PC (ignored by git; never commit) |
 | `upstream/` | Local clone of Savage Wind's `test` branch. Ignored by git; not part of this repo |
 

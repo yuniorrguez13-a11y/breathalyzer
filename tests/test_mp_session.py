@@ -95,14 +95,25 @@ class SessionRelayTests(unittest.IsolatedAsyncioTestCase):
         self.relay = relay.Relay("127.0.0.1", 0, **kw)
         _, self.port = await self.relay.start()
 
-    async def join(self, name, room="default", *, host=False, features=FEATS, expect="welcome", **extra):
+    async def join(self, name, room="default", *, host=False, features=FEATS, expect="welcome", proof_code=None,
+                   **extra):
+        """Join; with a room code set the relay's first line is a challenge (kept as p.nonce). proof_code: answer
+        it with security.code_hello (the way new clients do: the code itself is never sent)."""
         p = await Peer.open(self.port)
         self.peers.append(p)
+        p.nonce = p.cnonce = None
+        if self.relay.room_code:
+            first = await p.recv()
+            self.assertEqual(first["type"], "challenge", first)
+            p.nonce = first["nonce"]
         msg = {"type": "hello", "version": 1, "name": name, "room": room}
         if features is not None:
             msg["features"] = features
         if host:
             msg["host_proof"] = security.host_proof(SECRET, room)
+        if proof_code is not None:
+            fields, p.cnonce = security.code_hello(proof_code, p.nonce)
+            msg.update(fields)
         msg.update(extra)
         await p.send(msg)
         w = await p.recv()
@@ -196,7 +207,7 @@ class SessionRelayTests(unittest.IsolatedAsyncioTestCase):
     async def test_room_code(self):
         await self.start(room_code="Apple River Stone")
         await self.join("Ana", host=True)                    # the host needs no code
-        ok = await self.join("Ben", code="apple river stone")
+        ok = await self.join("Ben", code="apple river stone")   # (an older client: the code as text still works)
         self.assertEqual(ok.welcome["code"], True)
         bad = await self.join("Eve", code="apple river rock", expect="error")
         self.assertEqual(bad.welcome["error"], "wrong room code")
@@ -207,24 +218,103 @@ class SessionRelayTests(unittest.IsolatedAsyncioTestCase):
         self.clock.now += security.WRONG_CODE_WAIT + 1
         await self.join("Eve10", code="apple river stone")
 
+    async def test_room_code_proof_never_sends_the_code(self):
+        """New clients answer the challenge with a proof; the welcome proves the relay has the code too."""
+        await self.start(room_code="apple river stone")
+        await self.join("Ana", host=True)
+        ben = await self.join("Ben", proof_code="apple river stone")
+        self.assertTrue(security.answer_matches("apple river stone", ben.nonce, ben.cnonce, ben.welcome["code_ok"]))
+        self.assertFalse(security.answer_matches("apple river rock", ben.nonce, ben.cnonce, ben.welcome["code_ok"]))
+        bad = await self.join("Eve", proof_code="apple river rock", expect="error")
+        self.assertEqual(bad.welcome["error"], "wrong room code")
+        replay = await self.join("Eve2", expect="error", cnonce=ben.cnonce,     # an old proof on a new challenge
+                                 code_proof=security.code_proof("apple river stone", ben.nonce, ben.cnonce))
+        self.assertEqual(replay.welcome["error"], "wrong room code")
+
+    async def test_no_code_is_not_a_strike(self):
+        """A hello without any code (a ghost client started without --code) is told so, and never locks the
+        address out (5 of those, then the right code still gets in)."""
+        await self.start(room_code="apple river stone")
+        await self.join("Ana", host=True)
+        for i in range(6):
+            p = await self.join(f"Ben{i}", expect="error")
+            self.assertEqual(p.welcome["error"], "this world needs a room code")
+        await self.join("Ben", proof_code="apple river stone")
+
     async def test_kick_and_ban(self):
         bans = security.BanList(clock=self.clock)
         await self.start(bans=bans)
         host = await self.join("Ana", host=True)
         ben = await self.join("Ben", key="ab" * 8)
+        ghost = await self.join("Ben", room="ghosts", features=None)    # his ghost connection: no key, same name
+        await host.until_pong()
         await host.send({"type": "kick", "id": ben.id})
         bye = await ben.recv()
         self.assertEqual(bye, {"type": "bye", "reason": "kicked by the host"})
         self.assertTrue(await ben.closed())
-        p = await Peer.open(self.port)                       # same address: out for 10 minutes
-        self.peers.append(p)
-        await p.send({"type": "hello", "version": 1, "name": "Ben", "room": "default", "features": FEATS})
-        self.assertEqual((await p.recv())["type"], "error")
+        self.assertTrue(await ghost.closed())                # every connection of his, in every room
+        again = await self.join("Ben", key="ab" * 8, expect="error")   # his key: out for 10 minutes
+        self.assertEqual(again.welcome["error"], "you can't join this session")
+        await self.join("Dee", key="ee" * 8)                 # this PC (127.0.0.1) is never kicked by address
         self.clock.now += security.KICK_WAIT + 1
         cid = await self.join("Cid", key="cd" * 8)
         await host.send({"type": "ban", "id": cid.id})
         self.assertTrue(await cid.closed())
         self.assertEqual(bans.blocked("cd" * 8, None), "banned")
+        self.assertIsNone(bans.bans[-1]["addr"])             # never 127.0.0.1 in bans.json
+        await host.send({"type": "kick", "id": host.id})     # never the host
+        got = await host.until_pong()
+        self.assertTrue(any("no such player" in m.get("error", "") for m in got), got)
+
+    async def test_host_is_checked_before_the_ban_list(self):
+        """A ban that names the host's own key (or an old bans.json with 127.0.0.1) never keeps the host's agent out."""
+        bans = security.BanList(clock=self.clock)
+        bans.bans.append({"key": "aa" * 8, "addr": "127.0.0.1", "name": "x"})
+        await self.start(bans=bans)
+        host = await self.join("Ana", host=True, key="aa" * 8)
+        self.assertTrue(host.welcome["you_host"])
+        late = await self.join("Ben", key="bb" * 8)          # (the old 127.0.0.1 entry blocks nobody)
+        self.assertEqual(late.welcome["host_key"], "aa" * 8)
+
+    async def test_remove_by_name_from_the_host_agent(self):
+        bans = security.BanList(clock=self.clock)
+        await self.start(bans=bans)
+        await self.join("Ana", host=True)
+        ben = await self.join("Ben", key="ab" * 8)
+        target = self.relay.find_player("ben")
+        self.assertIsNotNone(target)
+        self.assertIsNone(self.relay.find_player("Ana"))    # the host can't be picked
+        self.assertEqual(self.relay.remove(target, ban=True), 1)
+        self.assertTrue(await ben.closed())
+        self.assertEqual(bans.blocked("ab" * 8, None), "banned")
+
+    async def test_cut_off_counts_as_a_kick(self):
+        await self.start()
+        host = await self.join("Ana", host=True)
+        ben = await self.join("Ben", key="ab" * 8)
+        await host.until_pong()
+        for _ in range(3):
+            await ben.send({"type": "end"})
+        self.assertTrue(await ben.closed())
+        again = await self.join("Ben", key="ab" * 8, expect="error")
+        self.assertEqual(again.welcome["error"], "you can't join this session")
+        await asyncio.sleep(0.1)
+        self.assertFalse(self.relay._host_only.times)        # (strikes dropped when he left)
+
+    async def test_no_states_in_a_hosted_room(self):
+        await self.start()
+        host = await self.join("Ana", "coop", host=True)
+        ben = await self.join("Ben", "coop")
+        await host.until_pong()
+        await ben.send({"type": "state", "t": 1.0, "x": 1.0, "y": 2.0, "z": 3.0})
+        await ben.until_pong()
+        self.assertFalse([m for m in await host.until_pong() if m["type"] == "state"])
+        a = await self.join("A", "default")                  # a ghost room (no host) still passes states
+        b = await self.join("B", "default")
+        await a.until_pong()
+        await b.send({"type": "state", "t": 1.0, "x": 1.0, "y": 2.0, "z": 3.0})
+        await b.until_pong()
+        self.assertTrue([m for m in await a.until_pong() if m["type"] == "state"])
 
     async def test_end_only_by_host(self):
         await self.start()
@@ -279,6 +369,18 @@ class SessionRelayTests(unittest.IsolatedAsyncioTestCase):
         stop.set()
         await asyncio.wait_for(task, 5)
         self.assertTrue(any(m.get("type") == "welcome" for m in got), got)
+        self.assertIsNone(link.gave_up)
+
+    async def test_ghost_client_stops_on_a_wrong_code(self):
+        """A ghost client with a wrong (or no) code stops instead of retrying: retries would lock the friend's whole
+        address out for 10 minutes."""
+        from mp import client
+        await self.start(room_code="apple river stone")
+        for code in ("apple river rock", None):
+            link = client.RelayLink("127.0.0.1", self.port, "Ben", "default", log=quiet, code=code, retry=0.05)
+            await asyncio.wait_for(link.run(asyncio.Event()), 10)   # (returns by itself: it gave up)
+            self.assertIn("room code", link.gave_up)
+        self.assertFalse(self.relay._wrong_codes.blocked("127.0.0.1"))   # one strike only, not a lock-out
 
     async def test_lan_only_allows_loopback(self):
         await self.start(lan_only=True)
@@ -331,6 +433,31 @@ class SecurityTests(unittest.TestCase):
             self.assertEqual(again.blocked(None, "192.168.1.9"), "banned")
             self.assertEqual(again.unban("Eve"), 1)
             self.assertIsNone(security.BanList(path).blocked("ab" * 8, None))
+
+    def test_never_this_pc_by_address(self):
+        b = security.BanList()
+        b.ban(None, "127.0.0.1", "Eve")                     # nothing to ban: no key, and never loopback
+        b.kick(None, "::1")
+        self.assertEqual((b.bans, b.kicks), ([], []))
+        b.kick("ab" * 8, "127.0.0.1")
+        self.assertIsNone(b.blocked(None, "127.0.0.1"))
+        self.assertEqual(b.blocked("ab" * 8, "127.0.0.1"), "kicked")
+        self.assertTrue(security.is_loopback("::ffff:127.0.0.1"))
+        self.assertFalse(security.is_loopback("192.168.1.2"))
+
+    def test_code_proof(self):
+        nonce = security.new_nonce()
+        fields, cnonce = security.code_hello("Apple river STONE", nonce)
+        self.assertNotIn("apple", json.dumps(fields))       # the code itself is never in the hello
+        self.assertTrue(security.proof_matches("apple river stone", nonce, cnonce, fields["code_proof"]))
+        self.assertFalse(security.proof_matches("apple river rock", nonce, cnonce, fields["code_proof"]))
+        self.assertFalse(security.proof_matches("apple river stone", security.new_nonce(), cnonce,
+                                                fields["code_proof"]))
+        answer = security.code_answer("apple river stone", nonce, cnonce)
+        self.assertNotEqual(answer, fields["code_proof"])   # (the two directions differ)
+        self.assertTrue(security.answer_matches("apple river stone", nonce, cnonce, answer))
+        self.assertEqual(security.code_hello("apple river stone", None), ({}, None))   # no challenge: nothing sent
+        self.assertEqual(security.code_hello(None, nonce), ({}, None))
 
     def test_limiter_and_strikes(self):
         clock = FakeClock()
@@ -409,6 +536,25 @@ class DiscoveryTests(unittest.TestCase):
         self.assertFalse(t.add("8.8.8.8", info))
         clock.now += discovery.GONE_AFTER + 0.1
         self.assertEqual(t.list(), [])
+
+    def test_one_device_cant_fill_the_list(self):
+        clock = FakeClock()
+        t = discovery.HostTable(clock)
+        info = discovery.parse_answer(discovery.make_answer({"name": "Ana"}))
+        t.add("192.168.1.20", info)                                             # the real host
+        for port in range(1000, 1016):                                          # one device, 16 ports
+            clock.now += 0.01
+            t.add("192.168.1.66", dict(info, port=port, name="Eve"))
+        rows = t.list()
+        self.assertEqual(len([r for r in rows if r["address"] == "192.168.1.66"]), discovery.PER_ADDRESS)
+        self.assertEqual({r["port"] for r in rows if r["address"] == "192.168.1.66"}, {1014, 1015})   # its newest
+        self.assertIn("192.168.1.20", [r["address"] for r in rows])
+
+    def test_broadcast_targets(self):
+        got = discovery.broadcast_targets(["192.168.1.133", "172.24.80.1", "127.0.0.1", "169.254.3.4", "8.8.8.8",
+                                           "192.168.1.7"])
+        self.assertEqual(got, ["255.255.255.255", "192.168.1.255", "172.24.80.255"])
+        self.assertEqual(discovery.broadcast_targets([])[0], "255.255.255.255")
 
     def test_search_on_loopback(self):
         sock = discovery.open_responder_socket(0, "127.0.0.1")

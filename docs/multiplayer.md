@@ -193,13 +193,15 @@ with a sword attack and the sword's name read in the game):
 `python tools\mp\ghost_ingame_check.py --link --spot -1033.6 252.3 1809.3 132 --give-weapon`. While the Link body is deployed,
 every ghost uses it, and if it ever crashes the game, every use of the ghost does (no crash so far).
 
-## Co-op: story together, shared time, host-only control (checked in the game 2026-11-12; live story reads off)
+## Co-op: story together, shared time, host-only control (one PC checked in the game 2026-11-12; two PCs not yet)
 
-[docs/coop.md](coop.md): the host owns the story and a friend's co-op save gets it **added** (backup first, only 0 to 1,
-asked every session), the host's hour is everyone's, hosts on your home network are found without typing
-(`python tools/mp/coop_agent.py find`), and only the host can change time, the story, kick, ban or end the session
-(room code, limits per message kind). The relay keeps working for older clients: they join as visitors and see the
-ghosts only. Built and tested without the game (2026-11-12); the game checks are listed there.
+[docs/coop.md](coop.md): the host owns the story and a friend's co-op save gets it **added** before his game loads
+(whole pieces only: freed beasts, finished quests; backup first, only 0 to 1, asked every session), the host's hour
+is everyone's, hosts on your home network are found without typing (`python tools/mp/coop_agent.py find`), and only
+the host can change time, the story, kick, ban or end the session (`kick <name>` / `ban <name>` on the host's
+terminal; a room code proved without sending it; limits per message kind). Story comes from the host's world save,
+not live. Ghost clients join a world with a room code only with `--code`; a wrong or missing code stops them instead
+of retrying. Checked in the game on one PC with the bot as host; the two-PC test steps are in coop.md.
 
 ## Limits
 

@@ -744,8 +744,8 @@ class Install(Base):
         self.assertFalse((stage / R / "Pack/Bootup_USen.pack").exists())
 
     def test_wii_u_unknown_platform_and_missing_game(self):
-        with self.assertRaisesRegex(ukmm.UkmmError, "Wii U UKMM package"):
-            self.install(package(META.replace("!Specific Switch", "!Specific Wii U")))
+        res, _ = self.install(package(META.replace("!Specific Switch", "!Specific Wii U")))
+        self.assertIn("Wii U package: ", "\n".join(res.summary()))      # (converted: see test_wiiu_packages.py)
         with self.assertRaisesRegex(ukmm.UkmmError, "platform this loader doesn't know"):
             self.install(package(META.replace("!Specific Switch", "Moon")))
         mm.remove_tree(str(self.game / "romfs"))
@@ -889,15 +889,15 @@ class Modman(Base):
         self.assertFalse(any(".ukmm" in str(p) for p in overlay.rglob("*")))
         self.assertTrue(any("physics" in a for a in launch["attention"]))
 
-    def test_cli_options_and_wii_u_refusal(self):
+    def test_cli_options_and_wii_u_package(self):
         src = make_zip(self.tmp / "downloads" / "made_up.zip", package())
         _, out = quiet(mm.main, ["--library", str(self.libdir), "add", str(src), "--no-options", "--option", "Red"])
         self.assertEqual(self.lib.mods[-1]["ukmm"]["options"], ["Red"])
         wiiu = make_zip(self.tmp / "downloads" / "wiiu.zip", package(META.replace("!Specific Switch",
                                                                                   "!Specific Wii U")))
-        code, out = quiet(mm.main, ["--library", str(self.libdir), "add", str(wiiu)])
-        self.assertEqual(code, 2)
-        self.assertIn("Wii U UKMM package", out)
+        code, out = quiet(mm.main, ["--library", str(self.libdir), "add", str(wiiu), "--name", "Wii U one"])
+        self.assertEqual(code, 0)
+        self.assertIn("Wii U package: ", out)
 
     def test_info_command(self):
         src = make_zip(self.tmp / "downloads" / "made_up.zip", package())

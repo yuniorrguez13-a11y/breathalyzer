@@ -82,10 +82,13 @@ class GhostNative(unittest.TestCase):
         0 -> 1 and only listed names, a bad line is refused, nothing is read or set while the busy bit is up or
         there is no world, a refused set is tried again, and the developer probe reads one flag. With no known getter
         (the game's, today: the first guess crashed the game in probe run B) nothing is called for a read and the list
-        never says "ready"."""
-        self.group("coop", ["load", "bad_list", "load_dlc", "reads", "seq_steady", "bad_hex", "adds_only", "get_hex",
-                            "busy_waits", "retry", "no_world", "world_back", "probe_read", "no_getter_no_call",
-                            "no_getter_not_ready"])
+        never says "ready". 0.7.1: only towers and memories are added live (the rest is "held" for the next join's
+        save merge), only once Link is free (no loading, cutscene, riding or pause menu) for a few frames in a row,
+        what was added is set again after a load, and an add read while another list was loaded is refused."""
+        self.group("coop", ["load", "bad_list", "load_dlc", "reads", "seq_steady", "bad_hex", "adds_live_only", "held",
+                            "get_hex", "busy_waits", "retry", "no_world", "world_back", "not_free_waits",
+                            "settles_first", "after_settle", "set_again", "gen_refused", "probe_read",
+                            "no_getter_no_call", "no_getter_not_ready"])
 
     def test_nothing_else_failed(self):
         self.assertEqual(self.fails, 0, self.report)

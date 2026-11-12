@@ -47,6 +47,33 @@ class InspectTests(unittest.TestCase):
         kinds, _ = self.run_on({"MyMod/romfs/Pack/Bootup.pack": b"x"})
         self.assertIn("Bootup.pack", kinds["Switch RomFS files"].detail)
 
+    def test_bare_romfs_tree(self):
+        # no romfs/ folder: Pack/ at the top (No Rain Slip), which isn't taken for a wrapper folder
+        kinds, overall = self.run_on({"Pack/TitleBG.pack": wc.sarc_build([("A.txt", b"a")], wc.LE)})
+        f = kinds["Switch RomFS files"]
+        self.assertEqual((f.verdict, overall), (mi.WORKS, mi.VERDICTS[mi.WORKS]))
+        self.assertEqual(f.detail, "1 file(s) in bare RomFS folders (Pack) with no romfs/ folder: used through the "
+                                   "mod overlay (Switch files, checked)")
+
+    def test_bare_tree_in_a_folder_with_editing_files(self):
+        # (Shrek Hinox: a Yaz0 Switch model, and texture work the game doesn't read)
+        kinds, _ = self.run_on({"shrek/Model/Enemy_Giant.sbfres": wc.yaz0_compress(b"FRES    " + bytes(56)),
+                                "shrek/Model/1_FTEX/Body_Alb.dds": b"x", "shrek/INSTALL.txt": "x"})
+        detail = kinds["Switch RomFS files"].detail
+        self.assertTrue(detail.startswith("2 file(s) in bare RomFS folders (Model)"), detail)
+        self.assertIn("(Switch files, checked). 1 of them are image or 3D editor files", detail)
+
+    def test_bare_tree_of_wiiu_files(self):
+        kinds, overall = self.run_on({"Pack/TitleBG.pack": wc.sarc_build([("A.txt", b"a")], wc.BE),
+                                      "Model/x.txt": "x"})
+        f = kinds[mi.BARE_WIIU]
+        self.assertEqual((set(kinds), f.platform, f.verdict), ({mi.BARE_WIIU}, "wiiu", mi.LATER))
+        self.assertIn("put those folders in a folder named content", f.detail)
+
+    def test_bare_tree_whose_platform_nothing_shows(self):
+        kinds, _ = self.run_on({"Model/x.txt": "x"})
+        self.assertIn("(taken as Switch files: none of them shows its platform)", kinds["Switch RomFS files"].detail)
+
     def test_wiiu_data_with_models(self):
         # Wii U models and textures convert (tools/wiiu_model); other model/texture formats stay Wii U data
         kinds, overall = self.run_on({"content/Actor/a.sbactorpack": b"x", "content/Model/b.sbfres": b"x",

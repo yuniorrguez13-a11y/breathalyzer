@@ -1852,12 +1852,11 @@ def add_mod(lib: Library, src: str, name: str | None = None, *, convert: bool = 
     if lib.install and (_inside(src, os.path.join(lib.install, "extracted")) or _inside(lib.install, src)):
         raise ModmanError("That is Savage Wind's own folder or game files, not a mod.")
     given = one_line(name or "").strip()
-    findings, names = _inspect_source(src)
-    if not download and bnp.packed_download(src, findings, names):
+    magic = None if download else bnp.archive_magic(src)
+    packed = magic in ("7z", "rar") and bnp.packed_download(src)  # (before inspecting: a .rar can look like a .zip)
+    findings, names = ([], []) if packed else _inspect_source(src)
+    if packed or (magic == "zip" and bnp.packed_download(src, findings, names)):
         return add_download(lib, src, name, convert=convert, bnp_options=bnp_options, bnp_no_options=bnp_no_options)
-    bare = next((f for f in findings if f.kind == mi.BARE_WIIU), None)
-    if bare:  # (romfs_mods would deploy them as Switch files)
-        raise ModmanError(f"Not added: {given or default_name(src)} has {bare.detail}.")
     pkg = bnp.package_kind(src, findings, names)  # (a BCML package: installed by tools/bnp.py)
     upkg = None if pkg else ukmm.package_kind(src, findings, names)  # (a UKMM package: tools/ukmm.py)
     try:
@@ -1867,6 +1866,11 @@ def add_mod(lib: Library, src: str, name: str | None = None, *, convert: bool = 
     wiiu = convert and not pkg and not upkg and is_wiiu_mod(src, findings)
     name = given or one_line(_wiiu_name(src) if wiiu else (info.name if info and info.name else default_name(src))
                              ).strip() or "mod"
+    bare = next((f for f in findings if f.kind == mi.BARE_WIIU and not wiiu), None)
+    if bare:  # (bare Wii U folders: romfs_mods would deploy them as Switch files)
+        if convert:
+            raise ModmanError(f"Not added: {name} has {bare.detail}.")
+        findings = [f for f in findings if f is not bare]   # (--no-convert: refused below, as before)
     if other_game_pack(src, findings):
         raise ModmanError(f"Not added: {name} is a Cemu graphic pack made for another game, not BotW (its rules.txt "
                           "has no BotW title id).")
@@ -1923,6 +1927,8 @@ def add_mod(lib: Library, src: str, name: str | None = None, *, convert: bool = 
         else:
             os.makedirs(stage, exist_ok=True)
             store_file(src, stage)
+        if not (pkg or upkg or wiiu):  # (a Pack/*.pack copied whole from another game version: filled from yours)
+            notes += bnp.fill_old_packs(stage, game_romfs(lib))
         note = example_dll(src, stage)
         if note:
             notes.append(note)

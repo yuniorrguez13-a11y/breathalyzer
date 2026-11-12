@@ -19,9 +19,10 @@ of:
              general parameters and other plain parameter files). The others are named ("needs attention"): the
              game's copy is used, or the file is missing when the game has none.
 
-Installing one here: checks the platform (Switch or cross-platform; a Wii U package is refused), picks options (the
-package's defaults, or the player's), builds every listed file from the game's own files (extracted\\romfs, only
-read) and the package's resources (a game pack nothing of the package's gets into is left as the game's), writes a
+Installing one here: checks the platform (Switch, cross-platform, or Wii U: a Wii U package's plain files are
+converted to the Switch's formats first, see WiiuBinaries), picks options (the package's defaults, or the player's),
+builds every listed file from the game's own files (extracted\\romfs, only read) and the package's resources (a game
+pack nothing of the package's gets into is left as the game's; game data and save data flags merged too), writes a
 size table (RSTB) when that changes the game's (grown entries for the files that got bigger; for new files, entries
 estimated from the game's files of the same kind nearest in size; a new file nothing can be estimated from is named),
 and keeps .ukmm/ukmm.json (what was installed and what wasn't merged) in the library copy. Nothing in the package is
@@ -958,13 +959,23 @@ def load_resource(raw: bytes, dictionary: zstdec.Dictionary | None, where: str) 
                     raise UkmmError("an override without its bytes")
                 return Res("binary", data=bytes(inner[0]))
             return Res("merge", mtype=str(mtype), value=inner)
-        raise UkmmError(f"unknown resource kind {key!r}")
+        raise UnknownResource(f"unknown resource kind {key!r}")
+    except UnknownResource as e:
+        raise UnknownResource(f"{where} can't be read ({e}): made by a UKMM version this loader doesn't know?") \
+            from None
     except UkmmError as e:
         if "dictionary" in str(e):
             raise
         raise UkmmError(f"{where} can't be read ({e}): made by a UKMM version this loader doesn't know?") from None
     except (IndexError, ValueError, TypeError, struct.error) as e:
-        raise UkmmError(f"{where} can't be read ({e}): made by a UKMM version this loader doesn't know?") from None
+        raise UnknownResource(f"{where} can't be read ({e}): made by a UKMM version this loader doesn't know?") \
+            from None
+
+
+class UnknownResource(UkmmError):
+    """A resource in a form this loader doesn't read (a kind it doesn't know, or data its decoder can't hold): named
+    and left out, the rest of the package installs. Damaged data (cut short, out-of-range values, a damaged zstd
+    frame) is a plain UkmmError: the whole package is refused."""
 
 
 def resource_kind(raw: bytes, dictionary: zstdec.Dictionary | None) -> str:
@@ -1678,6 +1689,125 @@ def unmerged_share(n: int, total: int, kinds: dict[str, int]) -> str:
             "they make are left out")
 
 
+class Sizer:
+    """Size table entries for files the game doesn't have, estimated from the game's files of the same kind nearest
+    in size (estimate), and where the game's actor packs hold each file (look). tools/bnp.py sizes the new files of a
+    converted Wii U package with it too."""
+
+    def __init__(self, game: str, rstb: bnp.Rstb | None, say=print):
+        self.romfs = os.path.join(game, "romfs")
+        self.aoc_dirs = bnp._aoc_dirs(game)
+        self.rstb, self.say = rstb, say
+        self.index: dict[str, tuple[str, list[str]]] | None = None
+        self._kin: dict[tuple[bool, str], list[tuple[int, str]]] = {}  # (DLC?, kind) -> (size, canonical name) of
+        #                                     the files in the game's actor packs (filled with the index)
+        self._folders: dict[tuple, list[tuple[int, int]]] = {}         # a game folder's files of a kind: (size, entry)
+        self.siblings: list[dict[str, list[tuple[int, str]]]] = []     # the game packs being rebuilt: kind -> files
+
+    def look(self) -> dict[str, tuple[str, list[str]]]:
+        """Canonical name -> (game file, the pack names on the way) of every file in the game's actor packs (and the
+        actor packs in TitleBG.pack), read once from their headers."""
+        if self.index is None:
+            self.say("  looking through the game's actor packs (once)...")
+            self.index = {}
+            for aoc, roots in ((False, [self.romfs]), (True, self.aoc_dirs)):
+                for root in roots:
+                    folder = os.path.join(root, "Actor", "Pack")
+                    try:
+                        names = sorted(os.listdir(folder))
+                    except OSError:
+                        continue
+                    for n in names:
+                        p = os.path.join(folder, n)
+                        try:
+                            with open(p, "rb") as f:
+                                head = f.read(1 << 16)
+                        except OSError:
+                            continue
+                        for inner, size in sarc_entries(head):
+                            self._note(canonical((AOC if aoc else "") + inner), (p, [inner]), inner, size, aoc)
+            tbg = os.path.join(self.romfs, "Pack", "TitleBG.pack")
+            if os.path.isfile(tbg):
+                try:
+                    blob = bnp.Blob(bnp._read(tbg))
+                    for n, (content, _) in blob.open().items():
+                        if n.startswith("Actor/Pack/") and isinstance(content, (bytes, bytearray)):
+                            for inner, size in sarc_entries(content):
+                                self._note(canonical(inner), (tbg, [n, inner]), inner, size, False)
+                except (wc.FormatError, struct.error, IndexError):
+                    pass
+        return self.index
+
+    def _note(self, key: str, where: tuple[str, list[str]], inner: str, size: int, aoc: bool) -> None:
+        if key in self.index:
+            return
+        self.index[key] = where
+        if not compressed_name(inner):
+            self._kin.setdefault((aoc, _kind(inner)), []).append((size, inner))
+
+    def kin(self, name: str, aoc: bool, depth: int) -> list[tuple[int, int]]:
+        """(size unpacked, size table entry) of game files of the same kind as `name` (by extension; textures and
+        other models apart): for a file in a pack, the other files of the game's pack being rebuilt around it,
+        else those in the game's actor packs; for a file at the top, the files of its game folder."""
+        rstb, kind = self.rstb, _kind(name)
+        if depth:
+            def entries(files: list[tuple[int, str]]) -> list[tuple[int, int]]:
+                got = [(size, rstb.get(n) if rstb.get(n) is not None or not aoc else rstb.get(bnp.DLC_CANON + n))
+                       for size, n in files]
+                return [(size, e) for size, e in got if e is not None]
+            for sib in reversed(self.siblings):
+                got = entries(sib.get(kind, []))
+                if got:
+                    return got
+            self.look()
+            return entries(self._kin.get((aoc, kind), []))
+        folder = name.rpartition("/")[0]
+        key = (aoc, folder.lower(), kind)
+        if key not in self._folders:
+            out = []
+            for root in (self.aoc_dirs if aoc else [self.romfs]):
+                d = os.path.join(root, *folder.split("/")) if folder else root
+                try:
+                    names = sorted(e.name for e in os.scandir(d) if e.is_file())
+                except OSError:
+                    continue
+                for n in names:
+                    if _kind(n) != kind:
+                        continue
+                    if len(out) >= KIN_FILES:
+                        break
+                    try:
+                        with open(os.path.join(d, n), "rb") as f:
+                            head = f.read(16)
+                            if head[:4] != b"Yaz0" or len(head) < 16:
+                                f.seek(0, 2)
+                                head = b"raw!" + struct.pack(">I", f.tell())
+                    except OSError:
+                        continue
+                    rel = f"{folder}/{n}" if folder else n
+                    entry = rstb.get((bnp.DLC_CANON if aoc else "") + bnp.canon(rel, head))
+                    if entry is not None:
+                        out.append((struct.unpack_from(">I", head, 4)[0], entry))
+            self._folders[key] = out
+        return self._folders[key]
+
+    def estimate(self, name: str, new_len: int, pack: bool, aoc: bool, depth: int) -> int | None:
+        """A size table entry for a file the game doesn't have (new_len bytes unpacked; depth 0 at the top, else
+        inside packs): the largest estimate from the KIN_NEAR game files of its kind nearest to it in size (see
+        estimate_entry; only those within 4 times its size count in proportion), plus KIN_MARGIN (not for a pack,
+        sized exactly). None when there is no table, or nothing of its kind to go by."""
+        if self.rstb is None:
+            return None
+        refs = self.kin(name, aoc, depth)
+        if not refs:
+            return None
+        far = lambda r: abs(math.log2(max(r[0], 1) / max(new_len, 1)))  # noqa: E731
+        near = sorted(refs, key=far)[:KIN_NEAR]
+        # (a file 4 times bigger or smaller isn't sized in proportion: its overhead is a different share of it)
+        need = max(estimate_entry(size, entry, new_len, pack or far((size, entry)) > 2) for size, entry in near)
+        return need if pack else bnp.round32(math.ceil(need * KIN_MARGIN))
+
+
 class Builder:
     """Builds the package's files from the game's own and its resources, as UKMM's deploy does for one mod."""
 
@@ -1695,11 +1825,7 @@ class Builder:
         #                                     it) of a kind not merged
         self.new_sized: set[str] = set()    # size table entries estimated for new files
         self.unsized: list[str] = []        # new files no entry could be estimated for
-        self._index: dict[str, tuple[str, list[str]]] | None = None
-        self._kin: dict[tuple[bool, str], list[tuple[int, str]]] = {}  # (DLC?, kind) -> (size, canonical name) of
-        #                                     the files in the game's actor packs (filled with _index)
-        self._folders: dict[tuple, list[tuple[int, int]]] = {}         # a game folder's files of a kind: (size, entry)
-        self._siblings: list[dict[str, list[tuple[int, str]]]] = []    # the game packs being rebuilt: kind -> files
+        self.sizer = Sizer(game, self.game_rstb, say)
         self.used_dict = False
         self._dict_looked = False
         self.wiiu: WiiuBinaries | None = None   # a Wii U package's binary resources, converted (prepare_wiiu)
@@ -1737,10 +1863,10 @@ class Builder:
         return False
 
     # -- the package's versions of a resource (base first, then each chosen option)
-    def versions(self, canon: str, raw: bool = False) -> list[Res]:
+    def versions(self, canon: str, as_stored: bool = False) -> list[Res]:
         """The package's versions of a resource. One that can't be read is named ("needs attention") and left out,
         so the rest of the package still installs; only a missing zstd dictionary ends the install. A Wii U
-        package's binary resources come converted (raw: as stored)."""
+        package's binary resources come converted (unless as_stored)."""
         out = []
         for layer in self.layers:
             rel = layer.prefix + canon
@@ -1754,12 +1880,10 @@ class Builder:
                 where = f"{layer.label + '/' if layer.label else ''}{canon}"
                 try:
                     out.append(load_resource(raw, self.dictionary, where))
-                except UkmmError as e:
-                    if "dictionary" in str(e) and "can't be read" not in str(e):
-                        raise
-                    self.broken.append(f"{e} Left out: the game's copy is used")
+                except UnknownResource as e:    # (damaged data, or no dictionary: the whole package is refused)
+                    self.broken.append(f"{str(e).rstrip('.?')}; left out, the game's copy is used")
                     self.left_out.add(where)
-        if self.wiiu is not None and not raw:
+        if self.wiiu is not None and not as_stored:
             out = self.wiiu.versions(canon, out)
         return out
 
@@ -1774,36 +1898,7 @@ class Builder:
     def elsewhere(self, canon: str) -> bytes | None:
         """A game file that isn't in the pack the mod puts it in, found by its canonical name in the game's actor
         packs (UKMM leaves out of its packages the files a new pack shares with the game)."""
-        if self._index is None:
-            self.say("  looking through the game's actor packs (once)...")
-            self._index = {}
-            for aoc, roots in ((False, [self.romfs]), (True, self.aoc_dirs)):
-                for root in roots:
-                    folder = os.path.join(root, "Actor", "Pack")
-                    try:
-                        names = sorted(os.listdir(folder))
-                    except OSError:
-                        continue
-                    for n in names:
-                        p = os.path.join(folder, n)
-                        try:
-                            with open(p, "rb") as f:
-                                head = f.read(1 << 16)
-                        except OSError:
-                            continue
-                        for inner, size in sarc_entries(head):
-                            self._note(canonical((AOC if aoc else "") + inner), (p, [inner]), inner, size, aoc)
-            tbg = os.path.join(self.romfs, "Pack", "TitleBG.pack")
-            if os.path.isfile(tbg):
-                try:
-                    blob = bnp.Blob(bnp._read(tbg))
-                    for n, (content, _) in blob.open().items():
-                        if n.startswith("Actor/Pack/") and isinstance(content, (bytes, bytearray)):
-                            for inner, size in sarc_entries(content):
-                                self._note(canonical(inner), (tbg, [n, inner]), inner, size, False)
-                except (wc.FormatError, struct.error, IndexError):
-                    pass
-        hit = self._index.get(canon)
+        hit = self.sizer.look().get(canon)
         if hit is None:
             return None
         path, chain = hit
@@ -1820,78 +1915,20 @@ class Builder:
             return None
         return entry[0].data() if isinstance(entry[0], bnp.Blob) else entry[0]
 
-    def _note(self, key: str, where: tuple[str, list[str]], inner: str, size: int, aoc: bool) -> None:
-        if key in self._index:
-            return
-        self._index[key] = where
-        if not compressed_name(inner):
-            self._kin.setdefault((aoc, _kind(inner)), []).append((size, inner))
-
-    # -- size table entries for new files: estimated from the game's files most like them
+    # -- size table entries for new files: estimated from the game's files most like them (Sizer)
     def kin(self, name: str, aoc: bool, depth: int) -> list[tuple[int, int]]:
-        """(size unpacked, size table entry) of game files of the same kind as `name` (by extension; textures and
-        other models apart): for a file in a pack, the other files of the game's pack being rebuilt around it,
-        else those in the game's actor packs; for a file at the top, the files of its game folder."""
-        rstb, kind = self.game_rstb, _kind(name)
-        if depth:
-            def entries(files: list[tuple[int, str]]) -> list[tuple[int, int]]:
-                got = [(size, rstb.get(n) if rstb.get(n) is not None or not aoc else rstb.get(bnp.DLC_CANON + n))
-                       for size, n in files]
-                return [(size, e) for size, e in got if e is not None]
-            for sib in reversed(self._siblings):
-                got = entries(sib.get(kind, []))
-                if got:
-                    return got
-            if self._index is None:
-                self.elsewhere("")                     # (fills _kin: the game's actor packs, looked at once)
-            return entries(self._kin.get((aoc, kind), []))
-        folder = name.rpartition("/")[0]
-        key = (aoc, folder.lower(), kind)
-        if key not in self._folders:
-            out = []
-            for root in (self.aoc_dirs if aoc else [self.romfs]):
-                d = os.path.join(root, *folder.split("/")) if folder else root
-                try:
-                    names = sorted(e.name for e in os.scandir(d) if e.is_file())
-                except OSError:
-                    continue
-                for n in names:
-                    if _kind(n) != kind:
-                        continue
-                    if len(out) >= KIN_FILES:
-                        break
-                    try:
-                        with open(os.path.join(d, n), "rb") as f:
-                            head = f.read(16)
-                            if head[:4] != b"Yaz0" or len(head) < 16:
-                                f.seek(0, 2)
-                                head = b"raw!" + struct.pack(">I", f.tell())
-                    except OSError:
-                        continue
-                    rel = f"{folder}/{n}" if folder else n
-                    entry = rstb.get((bnp.DLC_CANON if aoc else "") + bnp.canon(rel, head))
-                    if entry is not None:
-                        out.append((struct.unpack_from(">I", head, 4)[0], entry))
-            self._folders[key] = out
-        return self._folders[key]
+        return self.sizer.kin(name, aoc, depth)
 
     def new_size(self, names: list[str], name: str, new_len: int, pack: bool, aoc: bool, depth: int,
                  where: str) -> None:
-        """A size table entry for a file the game doesn't have: the largest estimate from the KIN_NEAR game files
-        of its kind nearest to it in size (see estimate_entry; only those within 4 times its size count in
-        proportion), plus KIN_MARGIN. Named when the game has nothing of its kind to go by."""
+        """A size table entry for a file the game doesn't have (Sizer.estimate). Named when the game has nothing of
+        its kind to go by."""
         if self.game_rstb is None or any(self.game_rstb.get(n) is not None for n in names):
             return                                   # (no table to add to, or the game's lists it already)
-        refs = self.kin(name, aoc, depth)
-        if not refs:
+        need = self.sizer.estimate(name, new_len, pack, aoc, depth)
+        if need is None:
             self.unsized.append(where)
             return
-        far = lambda r: abs(math.log2(max(r[0], 1) / max(new_len, 1)))  # noqa: E731
-        near = sorted(refs, key=far)[:KIN_NEAR]
-        # (a file 4 times bigger or smaller isn't sized in proportion: its overhead is a different share of it)
-        need = max(estimate_entry(size, entry, new_len, pack or far((size, entry)) > 2) for size, entry in near)
-        if not pack:
-            need = bnp.round32(math.ceil(need * KIN_MARGIN))
         for n in names:
             self.entries[n] = max(need, self.entries.get(n, 0))
             self.new_sized.add(n)
@@ -1985,7 +2022,7 @@ class Builder:
         for n, (content, _) in game_files.items():
             data = content.data() if isinstance(content, bnp.Blob) else content
             sib.setdefault(_kind(n), []).append((unpacked_size(data), bnp.canon(n, data)))
-        self._siblings.append(sib)
+        self.sizer.siblings.append(sib)
         try:
             for n in sorted(k for k, removed in names.items() if not removed):
                 entry = game_files.get(n)
@@ -2004,7 +2041,7 @@ class Builder:
                     same = False
                 items.append((n, data, entry[1] if entry is not None else new_alignment(n, data, min_align)))
         finally:
-            self._siblings.pop()
+            self.sizer.siblings.pop()
         if same and len(items) == len(game_files):
             self.res.from_game = from_game
             return raw_v                              # (the game's own pack: build() uses its copy)
@@ -2084,7 +2121,7 @@ class WiiuBinaries:
         files: dict[str, bytes] = {}
         source: dict[str, str] = {}
         for canon in sorted(self.b.wanted):
-            vers = self.b.versions(canon, raw=True)
+            vers = self.b.versions(canon, as_stored=True)
             if vers and vers[-1].kind == "binary":
                 name = self.member(real.get(canon, canon))
                 files[name] = vers[-1].data
@@ -2104,14 +2141,13 @@ class WiiuBinaries:
                           opened=(src, wc.plan_layout(src.files)), collect=out)
         except wc.ConvertError as e:
             raise UkmmError(f"Not added: its Wii U files can't be converted ({e}).") from None
-        targets = set()
+        targets = {f["target"] for f in rep.files}
         bad: dict[str, list[str]] = {}
         for f in rep.files:
             canon = source[f["path"]]
             target = f["target"]
             new = self.canon_of(target)
             if target in out and f["status"] not in (wc.CANT, wc.BROKEN):
-                targets.add(target)
                 self.converted[new] = out[target]
                 if new != canon:
                     self.renamed[canon] = new
@@ -2130,7 +2166,7 @@ class WiiuBinaries:
         st = rep.by_status()
         self.lines.append(f"Wii U package: {len(files)} binary file(s) converted for the Switch ("
                           + ", ".join(f"{wc.LABEL[s]} {st[s]}" for s in wc.STATUS_ORDER if st[s]) + ")")
-        self.lines += [f"  {x}" for x in rep.model_lines()]
+        self.lines += [f"  {x}" for x in rep.model_lines() if not x.startswith("size table:")]  # (sized below)
         if bad:
             self.lines.append("Wii U data that can't be converted (" + "; ".join(
                 f"{k}: {_some(v, 2)}" for k, v in sorted(bad.items())) + "): your game's copy of each is used where it "
@@ -2138,7 +2174,7 @@ class WiiuBinaries:
         att = rep.attention()
         if att:
             self.lines.append(f"{len(att)} converted model/texture file(s) to check in game ("
-                              + _some([n.path.split('//')[-1] for n in att], 3) + ")")
+                              + _some([n.path.split('//')[-1].split('/', 1)[-1] for n in att], 3) + ")")
         r = (rep.models or {}).get("rstb") or {}
         self.sizes = dict(r.get("sizes") or {})
 

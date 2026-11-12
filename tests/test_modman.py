@@ -1178,13 +1178,15 @@ class WiiUMods(Base):
         self.assertEqual(os.listdir(self.libdir / "mods"), [])
 
     def test_what_is_not_converted(self):
-        # a Switch overlay folder (bare aoc/0010 next to Pack/) is a Switch mod; a Wii U UKMM package goes to UKMM
+        # a Switch overlay folder (bare aoc/0010 next to Pack/) is a Switch mod; a Wii U UKMM package goes to
+        # tools/ukmm.py (converted there: tests/test_wiiu_packages.py), not to wiiu_convert.py: this made-up one's
+        # manifest is a list, not UKMM's map, so ukmm.py refuses it for that
         e = self.mod("Overlay", {"Pack/Title.txt": "t", "aoc/0010/Map/MainField/New.txt": "d"})
         self.assertEqual(e["kinds"], ["romfs", "dlc-romfs"])
         self.assertNotIn("wiiu", e)
         with self.assertRaises(mm.ModmanError) as cm:
             self.mod("Ukmm WiiU", {"meta.yml": "platform: !Specific Wii U\n", "manifest.yml": "- Actor/A.byml\n"})
-        self.assertIn("install it in UKMM", str(cm.exception))
+        self.assertIn("isn't a UKMM manifest", str(cm.exception))
 
     def test_list_status_and_deploy_show_it(self):
         self.mod("Armor Mod", wiiu_files())

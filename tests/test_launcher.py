@@ -1,6 +1,8 @@
 """Tests for tools/launcher.py and the launcher's window (tools/modman_gui.py: LaunchBackend, LaunchController,
 LauncherView). Everything runs on made-up folders in a temp folder and a fake modman: never the real Savage Wind,
-mod library, settings or game. The window tests open a see-through window (skipped without a display)."""
+mod library, settings or game. The window tests (class Window) put a see-through window on the screen, so they
+run only with BREATHALYZER_WINDOW_TESTS=1 (never while someone uses the PC); tests/test_breath.py tests the window
+hidden."""
 import contextlib
 import gc
 import io
@@ -9,6 +11,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import launcher as la  # noqa: E402
 import modman_gui as gui  # noqa: E402
-from test_modman_gui import MODS, ROOT, Clock, FakeModman, FakeSpawn, close, wait_for  # noqa: E402
+from test_modman_gui import MODS, ROOT, Clock, FakeModman, FakeSpawn, close, need_screen, wait_for  # noqa: E402
 
 GOOD = la.GAME_BUILD
 
@@ -274,6 +277,170 @@ class Checks(Temp):
         self.assertEqual(la.frame_rate(str(sw)), "60")
         self.assertEqual(ini.read_bytes(), before)
         self.assertIsNone(la.frame_rate(str(self.tmp)))
+
+
+# ---------------------------------------------------------------- Settings > Frame rate (a made-up savagewind.ini)
+
+class FrameRate(Temp):
+    INI = (b"\xef\xbb\xbf# Savage Wind settings (edited from the in-game menu)\r\nsettings_version = 3\r\n"
+           b"fullscreen = 0\r\nframe_rate = 30  \r\nvsync = fast\r\n# frame_rate = 999 (a comment)\r\n"
+           b"volume = 1.00")   # (CRLF, a BOM, spaces after the value, no line end at the end)
+
+    def ini(self, data: bytes = INI) -> Path:
+        self.sw = make_install(self.tmp / "SW", set_up=False)
+        self.assertNotEqual(os.path.normcase(str(self.sw)), os.path.normcase(la.REPO))
+        return write(self.sw / la.INI, data)
+
+    def test_choices_are_savage_winds(self):
+        self.assertEqual([v for v, _ in la.FPS_CHOICES], ["30", "60", "90", "120", "off"])
+        self.assertEqual([t for _, t in la.FPS_CHOICES], ["30 fps", "60 fps", "90 fps", "120 fps", "No limit"])
+        for raw, value in (("30", "30"), ("120", "120"), ("off", "off"), ("OFF", "off"), ("0", "off"),
+                           ("unlimited", "off"), ("45", None), ("", None), (None, None)):
+            self.assertEqual(la.fps_value(raw), value, raw)
+
+    def test_read(self):
+        self.ini()
+        self.assertEqual(la.read_fps(str(self.sw)), (True, "30", "30"))
+        write(self.sw / la.INI, "vsync = fast\n")
+        self.assertEqual(la.read_fps(str(self.sw)), (True, "60", None))   # (no line: the game's default)
+        write(self.sw / la.INI, "frame_rate = 45\n")
+        self.assertEqual(la.read_fps(str(self.sw)), (True, None, "45"))
+        self.assertEqual(la.read_fps(str(self.tmp / "nothing")), (False, None, None))
+
+    def test_only_the_frame_rate_changes(self):
+        ini = self.ini()
+        self.assertTrue(la.set_frame_rate(str(self.sw), "120", running=lambda: False))
+        self.assertEqual(ini.read_bytes(), self.INI.replace(b"frame_rate = 30  ", b"frame_rate = 120  "))
+        self.assertEqual(la.read_fps(str(self.sw))[1], "120")
+        backup = self.sw / la.INI_BACKUP
+        self.assertEqual(backup.read_bytes(), self.INI)
+        self.assertTrue(la.set_frame_rate(str(self.sw), "off", running=lambda: False))
+        self.assertEqual(ini.read_bytes(), self.INI.replace(b"frame_rate = 30  ", b"frame_rate = off  "))
+        self.assertEqual(backup.read_bytes(), self.INI)   # (made once: the file as it was before Breathalyzer)
+        self.assertFalse(la.set_frame_rate(str(self.sw), "off", running=lambda: False))   # (already so)
+        self.assertEqual(sorted(os.listdir(self.sw)), sorted([la.EXE, la.INI, la.INI_BACKUP]))   # (no temp file)
+
+    def test_a_file_without_the_line_gets_it_at_the_end(self):
+        ini = self.ini(b"fullscreen = 0\nvsync = fast")
+        self.assertTrue(la.set_frame_rate(str(self.sw), "90", running=lambda: False))
+        self.assertEqual(ini.read_bytes(), b"fullscreen = 0\nvsync = fast\nframe_rate = 90\n")
+
+    def test_never_while_the_game_runs(self):
+        ini = self.ini()
+        with self.assertRaises(la.FpsError) as cm:
+            la.set_frame_rate(str(self.sw), "60", running=lambda: True)
+        self.assertIn("Close Savage Wind first", str(cm.exception))
+        started = iter([False, True])   # (started while the new file was written)
+        with self.assertRaises(la.FpsError):
+            la.set_frame_rate(str(self.sw), "60", running=lambda: next(started))
+        self.assertEqual(ini.read_bytes(), self.INI)
+        self.assertNotIn(".tmp", " ".join(os.listdir(self.sw)))
+
+    def test_refusals(self):
+        self.ini()
+        for bad in ("45", "", "60\nfullscreen = 1"):
+            with self.assertRaises(la.FpsError):
+                la.set_frame_rate(str(self.sw), bad, running=lambda: False)
+        with self.assertRaises(la.FpsError) as cm:
+            la.set_frame_rate(str(self.tmp / "nothing"), "60", running=lambda: False)
+        self.assertIn("Start Savage Wind once first", str(cm.exception))
+        write(self.sw / la.INI, b"x" * (la.MAX_INI + 1))
+        with self.assertRaises(la.FpsError):
+            la.set_frame_rate(str(self.sw), "60", running=lambda: False)
+
+
+# ---------------------------------------------------------------- .breath files: the file type and the hand-over
+
+TEST_KEY = "Software\\BreathalyzerTest-{}"   # (under HKEY_CURRENT_USER; each test's own, deleted afterwards)
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows only")
+class BreathFileType(Temp):
+    def setUp(self):
+        super().setUp()
+        import secrets
+        import winreg
+        self.reg = winreg
+        self.top = TEST_KEY.format(secrets.token_hex(4))
+        self.base = self.top + "\\Classes"
+        self.addCleanup(self.delete)
+        self.real = self.read(f"{la.CLASSES}\\{la.BREATH_EXT}")
+        changed = mock.patch.object(la, "shell_changed")
+        self.changed = changed.start()
+        self.addCleanup(changed.stop)
+
+    def delete(self):
+        with contextlib.suppress(OSError):
+            la._delete_tree(self.reg, self.reg.HKEY_CURRENT_USER, self.top)
+        self.assertIsNone(self.read(self.top + "\\Classes\\" + la.BREATH_EXT))
+        # (the real file types are never touched by tests)
+        self.assertEqual(self.read(f"{la.CLASSES}\\{la.BREATH_EXT}"), self.real)
+
+    def read(self, path):
+        return la._read_default(self.reg, self.reg.HKEY_CURRENT_USER, path)
+
+    def test_register_and_unregister(self):
+        cmd, icon = la.breath_command()
+        self.assertTrue(cmd.endswith(' "%1"'))
+        self.assertIsNone(la.breath_state(self.base, cmd))
+        la.register_breath(cmd, icon, self.base)
+        self.assertEqual(self.read(f"{self.base}\\.breath"), la.BREATH_PROGID)
+        self.assertEqual(self.read(f"{self.base}\\{la.BREATH_PROGID}"), la.BREATH_TYPE_NAME)
+        self.assertEqual(self.read(f"{self.base}\\{la.BREATH_PROGID}\\shell\\open\\command"), cmd)
+        self.assertEqual(self.read(f"{self.base}\\{la.BREATH_PROGID}\\DefaultIcon"), icon)
+        self.assertEqual(la.breath_state(self.base, cmd), "here")
+        self.assertEqual(la.breath_state(self.base, '"C:\\Other\\Start Breathalyzer.exe" "%1"'), "other")
+        self.assertTrue(la.unregister_breath(self.base))
+        self.assertIsNone(la.breath_state(self.base, cmd))
+        self.assertIsNone(self.read(f"{self.base}\\{la.BREATH_PROGID}"))
+        with self.assertRaises(OSError):
+            self.reg.OpenKey(self.reg.HKEY_CURRENT_USER, f"{self.base}\\.breath").Close()
+        self.assertFalse(la.unregister_breath(self.base))
+        self.changed.assert_not_called()   # (only for the real key)
+
+    def test_another_programs_breath_is_left_to_it(self):
+        la.register_breath(*la.breath_command(), self.base)
+        with self.reg.CreateKeyEx(self.reg.HKEY_CURRENT_USER, f"{self.base}\\.breath", 0, self.reg.KEY_WRITE) as k:
+            self.reg.SetValueEx(k, "", 0, self.reg.REG_SZ, "Other.Program")   # (another program took it since)
+        self.assertIsNone(la.breath_state(self.base))
+        self.assertTrue(la.unregister_breath(self.base))
+        self.assertIsNone(self.read(f"{self.base}\\{la.BREATH_PROGID}"))
+        self.assertEqual(self.read(f"{self.base}\\.breath"), "Other.Program")
+
+    def test_command_starts_the_starter_in_a_player_zip(self):
+        top = self.tmp / "Breathalyzer Plus"
+        write(top / la.STARTER, "made up")
+        (top / "app").mkdir()
+        cmd, icon = la.breath_command(str(top / "app"))
+        self.assertEqual(cmd, f'"{top / la.STARTER}" "%1"')
+        self.assertEqual(icon, f'"{top / la.STARTER}",0')
+        cmd, _ = la.breath_command(la.REPO)
+        self.assertIn(" -I ", cmd)
+        self.assertTrue(cmd.endswith('launcher.py" "%1"'))
+
+
+class HandOver(Temp):
+    def test_a_second_start_hands_the_file_over(self):
+        folder = str(self.tmp / "open")
+        a = la.pass_file(str(self.tmp / "A Mod.breath"), folder)
+        la.pass_file(str(self.tmp / "B.breath"), folder)
+        write(Path(folder) / "999-junk.txt", "C:\\x\\not-a-mod.exe")
+        self.assertTrue(os.path.isfile(a))
+        self.assertEqual(la.take_files(folder), [str(self.tmp / "A Mod.breath"), str(self.tmp / "B.breath")])
+        self.assertEqual(os.listdir(folder), [])
+        self.assertEqual(la.take_files(folder), [])
+        self.assertEqual(la.take_files(str(self.tmp / "none")), [])
+
+    def test_left_over_requests_are_dropped(self):
+        folder = str(self.tmp / "open")
+        la.pass_file(str(self.tmp / "Old.breath"), folder)
+        self.assertEqual(la.take_files(folder, now=time.time() + la.OPEN_REQUEST_AGE + 5), [])
+        self.assertEqual(os.listdir(folder), [])
+
+    def test_command_line_takes_a_file(self):
+        a = la.parser().parse_args(["C:\\Downloads\\Cool Mod.breath"])
+        self.assertEqual(a.file, "C:\\Downloads\\Cool Mod.breath")
+        self.assertIsNone(la.parser().parse_args([]).file)
 
 
 # ---------------------------------------------------------------- the first run
@@ -814,6 +981,7 @@ class Window(Temp):
     """The launcher window, see-through (nothing shows): the first-run screens, Home, Settings, bigger text."""
 
     def open(self, settings=None, near=(), mods=MODS, size=None, app_dir=la.REPO):
+        need_screen(self)   # (see-through, but on the screen: only with BREATHALYZER_WINDOW_TESTS=1)
         if gui.tk is None:
             self.skipTest("no tkinter")
         try:

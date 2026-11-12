@@ -11,7 +11,8 @@ word, left/right move between wheels); then the story question (Enter = Yes, Esc
 
 `Lobby` is the menu as a state machine (no window: the launcher's window and the in-game screen draw its `lines()`
 and send it keys). `choose()` shows it in a small window and returns the plan:
-    {"mode": "solo"} | {"mode": "host"} | {"mode": "join", "address", "port", "world", "code", "share"}
+    {"mode": "solo"} | {"mode": "host"} | {"mode": "join", "address", "port", "world", "code", "share", "check"}
+("check": the host's check words: the friend's co-op copy is kept per host by them.)
 The launcher (another job's file) is to call choose() before Play when the multiplayer mod is on.
 """
 from __future__ import annotations
@@ -73,7 +74,8 @@ class Lobby:
             if k in ("enter", "esc", "y", "n"):
                 h = self.host
                 self.plan = {"mode": "join", "address": h["address"], "port": h["port"], "world": h["world"],
-                             "code": self.code() if h.get("code") else None, "share": k in ("enter", "y")}
+                             "code": self.code() if h.get("code") else None, "share": k in ("enter", "y"),
+                             "check": h.get("check") or None}
         if self.plan is not None:
             self.screen = "done"
         return self.plan

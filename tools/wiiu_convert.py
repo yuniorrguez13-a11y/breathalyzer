@@ -16,8 +16,9 @@ SARC packs (inside Yaz0 too, and nested), BYML (maps, actor info, game data...),
 parameters) are little-endian on both, so they are used as they are. Models (X.sbfres, with their skeletal and
 material animations), textures (X.Tex1 + X.Tex2 become one X.Tex.sbfres) and item icons go through tools/wiiu_model;
 --game (your game's RomFS, read only; modman passes it) adds your vanilla materials, mipmaps, TexInfo.txt, packs and
-size table entries. Audio, Havok physics, shaders, effects, fonts, movies, layouts and event flows are made
-differently for each console: they are kept unchanged and reported, as are files of unknown formats. The Wii U size
+size table entries. Event flows are little-endian on both consoles (used as they are). Audio, Havok physics,
+shaders, effects, fonts, movies and layouts are made differently for each console: they are kept unchanged and
+reported, as are files of unknown formats. The Wii U size
 table (RSTB) is left out: its sizes are Wii U sizes. UKMM (Switch mode) stays the better route for merging mods.
 """
 from __future__ import annotations

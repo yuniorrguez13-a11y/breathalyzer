@@ -28,6 +28,9 @@ can't be used as they are. Installing one here (each step in install()):
 6. names every log it can't merge (BCML 2's, unknown or damaged ones, parts a merger leaves out): modman shows them as
    "Needs attention".
 
+A Wii U package (files in content/ and aoc/0010/) is put together and converted to the Switch's formats first, its
+logs made the Switch's, and then installed the same way (install_wiiu).
+
 The library copy keeps .bnp/ next to the mod's files (info.json, the logs, bnp.json, rstb.json): `deploy` merges
 the size table changes of several enabled mods into one table (the larger size wins) instead of using the last one.
 Packs and the files the logs made are not merged between mods yet: the later mod's copy wins, and deploy names what
@@ -719,6 +722,44 @@ def _find_mods(folder: str, label: str, level: int, work: str, dl: Download, say
         _find_mods(dest, os.path.basename(dest), level + 1, work, dl, say)
 
 
+def fill_old_packs(root: str, romfs: str | None) -> list[str]:
+    """For a plain Switch mod stored at root (a library stage folder): each whole pack in Pack/ (TitleBG.pack,
+    Bootup.pack...) that lacks files the game's own copy has, as a copy taken from another game version does, gets
+    those files from the game's copy (romfs: the game's RomFS, read only); the mod's own files win, and the files it
+    changes are named. Each such pack is written as a new file (never through a hard link to the player's own
+    copy). Returns notes for the player."""
+    if not romfs:
+        return []
+    try:
+        mod = rm.load_mod(root)
+    except (rm.DeployError, OSError, ValueError):
+        return []
+    notes = []
+    for e in mod.entries:
+        low = e.rel.lower()
+        if e.dlc or not e.src or not low.startswith("pack/") or low.count("/") != 1 or not low.endswith(".pack"):
+            continue
+        game = os.path.join(romfs, *e.rel.split("/"))
+        if not os.path.isfile(game):
+            continue
+        try:
+            upper, lower = Blob(_read(e.src)), Blob(_read(game))
+            have, want = upper.open(), lower.open()
+            missing = [n for n in want if n not in have]
+            if not missing:
+                continue
+            changed = sorted(n for n, (c, _) in have.items() if n in want and c != want[n][0])
+            fill(upper, lower)
+            _write_new(e.src, upper.data())
+        except (wc.FormatError, ValueError, struct.error, OSError, MemoryError) as ex:
+            notes.append(f"{e.rel}: couldn't be compared with your game's ({ex}): used as it is")
+            continue
+        notes.append(f"{e.rel} looks like a whole copy from another game version: the {len(missing)} file(s) it lacks "
+                     f"({_some(missing)}) come from your game. It changes {len(changed)} file(s)"
+                     + (f" ({_some(changed)}): some may be that version's, not the mod's" if changed else ""))
+    return notes
+
+
 # ---------------------------------------------------------------------------------------------------- the package
 
 @dataclass
@@ -827,11 +868,14 @@ def find_info(files: list[str]) -> str | None:
 
 def package_kind(src: str, findings: list = (), names: list[str] = ()) -> str | None:
     """What modman add installs with this module: "archive" (a .bnp: any 7-Zip archive), "folder" or "zip" (an
-    extracted Switch BCML package: mod_inspect's BCML finding, and logs/ among `names`), else None. A BCML folder
-    without logs/ is used as it is, and a Wii U one goes to tools/wiiu_convert.py as before. Reads only."""
+    extracted BCML package, Switch or Wii U: mod_inspect's BCML finding, and logs/ among `names`, or options/ for a
+    Wii U one), else None. Another BCML folder is used as it is (a Wii U one goes to tools/wiiu_convert.py). Reads
+    only."""
     if os.path.isfile(src) and is_archive(src):
         return "archive"
-    if any(getattr(f, "kind", "") == "BCML mod (BNP)" and getattr(f, "platform", "") != "wiiu" for f in findings)             and any(n.lower().startswith("logs/") for n in names):
+    bcml = [f for f in findings if getattr(f, "kind", "") == "BCML mod (BNP)"]
+    wiiu = any(getattr(f, "platform", "") == "wiiu" for f in bcml)
+    if bcml and any(n.lower().startswith("logs/") or (wiiu and n.lower().startswith("options/")) for n in names):
         return "zip" if os.path.isfile(src) else "folder"
     return None
 
@@ -1940,9 +1984,8 @@ def install(src_root: str, stage: str, game: str, *, info: Info, picks: list[str
     chosen options over them, the packs filled from the game (`game`: Savage Wind's extracted folder, only read),
     deepmerge.aamp and aslist.aamp applied, and a size table for the mod. move: take the files out of src_root (a
     folder made for this) instead of linking or copying them."""
-    if "wii" in info.platform or any(os.path.isdir(os.path.join(src_root, d)) for d in ("content", "aoc")):
-        raise BnpError(f"Not added: {info.name or 'this package'} is a Wii U BCML package, and modman installs "
-                       "Switch ones. Install it in UKMM (Switch mode), deploy there, then add UKMM's output folder.")
+    if is_wiiu(info, src_root):
+        return install_wiiu(src_root, stage, game, info=info, picks=picks, no_defaults=no_defaults, say=say)
     if not os.path.isdir(os.path.join(game, "romfs")):
         raise BnpError("Savage Wind's game files aren't set up (no extracted\\romfs), and a BCML package is filled "
                        "from them. Set them up in Savage Wind first.")
@@ -2124,6 +2167,614 @@ def install(src_root: str, stage: str, game: str, *, info: Info, picks: list[str
         "rstb_entries": res.rstb_entries,
         "not_merged": res.not_merged, "notes": res.notes})
     return res
+
+
+# ---------------------------------------------------------------------------------------------------- Wii U packages
+# A Wii U .bnp (info.json's platform "wiiu"; its files in content/ and aoc/0010/) is installed as a Switch one by
+# install_wiiu: the chosen layers are put together in their Wii U form (a pack both have merged, the option's files
+# winning), converted once by tools/wiiu_convert.py with the game's files (so a model in one option and its textures in
+# another still pair up), Wii U data left in packs gives way to the game's file of that path, the logs are made the
+# Switch's (paths and keys; new actors' instance sizes; size entries worked out again from the Switch files, never the
+# Wii U ones), and install() then fills, merges and sizes it like any Switch package.
+
+WIIU_DROPPED_LOGS = {"rstb.json": "Wii U sizes", "packs.json": "a pack list"}
+INST_SIZE_FLOOR = 3       # a new actor's instance size is at least this times its Wii U one (the Switch's are 2-3x)
+PACKS_KIN = 24            # game packs looked into to size a new file of a kind only packs hold
+WIIU_KEEP = {wc.CANT, wc.BROKEN}   # statuses of files that are still Wii U data after converting
+
+
+def is_wiiu(info: Info, src_root: str) -> bool:
+    """A Wii U BCML package: its info.json says so, or it has content/ or aoc/ folders."""
+    return "wii" in info.platform or any(os.path.isdir(os.path.join(src_root, d)) for d in ("content", "aoc"))
+
+
+def _wiiu_files(root: str) -> dict[str, str]:
+    """A layer's game files (content/..., aoc/0010/...: as spelled from there on) -> file. Files right in content/
+    or aoc/0010/ are left out: the game has none there (a mod's readme, say)."""
+    out = {}
+    for rel, path in _walk(root).items():
+        low = rel.lower()
+        if low.startswith("content/") and "/" in rel[8:]:
+            out["content/" + rel[8:]] = path
+        elif low.startswith("aoc/0010/") and "/" in rel[9:]:
+            out["aoc/0010/" + rel[9:]] = path
+    return out
+
+
+def _sarc_bytes(data: bytes) -> bool:
+    return (_yaz0_head(data) if data[:4] == b"Yaz0" and len(data) >= 16 else data[:4]) == b"SARC"
+
+
+def merge_pack_bytes(lower: bytes, upper: bytes, depth: int = 0) -> bytes:
+    """Two copies of one pack as one, in their own byte order (Wii U or Switch; Yaz0 or not, as upper is): upper's
+    files win, and a pack both hold is merged the same way (how BCML lays a package's options over its base)."""
+    if depth > 8:
+        raise wc.FormatError("packs nest too deep")
+    lraw = unyaz0(lower)[0] if lower[:4] == b"Yaz0" else lower
+    uy = upper[:4] == b"Yaz0" and len(upper) >= 16
+    uraw, ualign = unyaz0(upper) if uy else (upper, 0)
+    ls, us = wc.sarc_parse(lraw), wc.sarc_parse(uraw)
+    if ls.order != us.order:
+        raise wc.FormatError("one copy is a Wii U pack, the other a Switch one")
+    if any(not n.attr >> 24 for n in ls.nodes + us.nodes):
+        raise wc.FormatError("a pack with unnamed files")
+
+    def files(raw: bytes, s) -> dict[str, tuple[bytes, int]]:
+        return {n.name: (raw[s.data_offset + n.start:s.data_offset + n.end], wc._alignment_of(s.data_offset + n.start))
+                for n in s.nodes}
+    out = files(lraw, ls)
+    for name, (data, align) in files(uraw, us).items():
+        if name in out and is_packish(name) and _sarc_bytes(out[name][0]) and _sarc_bytes(data):
+            try:
+                data = merge_pack_bytes(out[name][0], data, depth + 1)
+            except (wc.FormatError, struct.error, IndexError):
+                pass   # (the option's copy is used as it is)
+        out[name] = (data, max(align, out[name][1]) if name in out else align)
+    built = wc.sarc_build([(n, d) for n, (d, _) in out.items()], us.order,
+                          name_align={n: a for n, (_, a) in out.items()}, hash_key=us.hash_key)
+    if not uy:
+        return built
+    import ukmm  # (it imports this module)
+    return ukmm.yaz0(built, ualign)
+
+
+def compose_wiiu(layers: list[Layer], dest: str, notes: list[str], bad: list[str]) -> dict[str, str]:
+    """Put the layers' game files together in dest in their Wii U form: the base, then each option over it (a pack
+    both have merged, the option's files winning). Returns {path in dest: the label of the layer that gave it last}."""
+    placed: dict[str, str] = {}          # lowercase path -> as spelled in dest
+    origin: dict[str, str] = {}
+    merged = 0
+    for layer in layers:
+        for rel, path in sorted(_wiiu_files(layer.root).items()):
+            key = rel.lower()
+            out_rel = placed.get(key, rel)
+            dst = os.path.join(dest, *out_rel.split("/"))
+            if key in placed and is_packish(rel):
+                try:
+                    _write_new(dst, merge_pack_bytes(_read(dst), _read(path)))
+                    merged += 1
+                    origin[out_rel] = layer.label
+                    continue
+                except (wc.FormatError, struct.error, IndexError) as e:
+                    bad.append(f"{layer.label}/{rel}: can't be merged with the base package's copy ({e}); the "
+                               "option's copy is used")
+            _put(path, dst, False)
+            placed.setdefault(key, rel)
+            origin[out_rel] = layer.label
+    if merged:
+        notes.append(f"{merged} pack(s) of the options merged with the base package's (in their Wii U form)")
+    return origin
+
+
+def wiiu_log_path(path: str) -> str:
+    """A path in a Wii U log (content/..., aoc/0010/...) as the Switch's (01007EF00011E000/romfs/..., the DLC's)."""
+    p = path.replace("\\", "/")
+    low = p.lower()
+    if low.startswith("content/"):
+        return f"{BASE_TID}/romfs/{p[8:]}"
+    if low.startswith("aoc/0010/"):
+        return f"{DLC_TID}/romfs/{p[9:]}"
+    return path
+
+
+def translate_aamp_log(data: bytes) -> tuple[bytes, int]:
+    """A Wii U deepmerge.aamp or aslist.aamp as a Switch one: each file table path made the Switch's, and its changes
+    keyed by the CRC-32 of the new path (how install() finds them). Returns (the log, paths changed)."""
+    pio = aamp_read(data)
+    obj = pio.root.objs.get(FILE_TABLE)
+    if not obj:
+        return data, 0
+    n = 0
+    for k, (t, v) in list(obj.params.items()):
+        if t not in AAMP_STRING:
+            continue
+        old = v.split(b"\0", 1)[0].decode("utf-8", "replace")
+        new = wiiu_log_path(old)
+        if new == old:
+            continue
+        obj.params[k] = (t, new.encode())
+        sub = pio.root.lists.pop(zlib.crc32(old.encode()), None)
+        if sub is not None:
+            pio.root.lists[zlib.crc32(new.encode())] = sub
+        n += 1
+    return (aamp_write(pio), n) if n else (data, 0)
+
+
+_ACTORS: dict[str, tuple[tuple, dict]] = {}
+
+
+def game_actors(game: str) -> dict[int, dict]:
+    """The game's ActorInfo entries by the CRC-32 of their name (read once while the file stays the same)."""
+    import bcml_data
+    p = os.path.join(game, "romfs", "Actor", "ActorInfo.product.sbyml")
+    try:
+        st = os.stat(p)
+    except OSError:
+        return {}
+    stamp = (st.st_mtime_ns, st.st_size)
+    hit = _ACTORS.get(p)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    data = _read(p)
+    root = bcml_data.byml_load(unyaz0(data)[0] if data[:4] == b"Yaz0" else data)
+    actors = root.get("Actors") if isinstance(root, dict) else None
+    out = {zlib.crc32(bcml_data._enc(a["name"])): a for a in actors or []
+           if isinstance(a, dict) and isinstance(a.get("name"), str)}
+    _ACTORS[p] = (stamp, out)
+    return out
+
+
+def _int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def fix_inst_sizes(log: dict, actors: dict[int, dict]) -> list[str]:
+    """A Wii U actorinfo.yml log's instance sizes made safe for the Switch (64-bit: its actors need 2-3 times more
+    memory). A new actor gets the largest size of the game's actors with the same model (bfres) and profile, else
+    the median of its profile's, and never less than INST_SIZE_FLOOR times its Wii U size; an actor of the game's
+    never gets less than the game's own size. Changes `log` (actor hash -> its entry); returns what was estimated."""
+    by_twin: dict[tuple, list[int]] = {}
+    by_profile: dict[str, list[int]] = {}
+    for a in actors.values():
+        if _int(a.get("instSize")):
+            by_twin.setdefault((a.get("bfres"), a.get("profile")), []).append(a["instSize"])
+            by_profile.setdefault(a.get("profile"), []).append(a["instSize"])
+    out = []
+    for h, e in log.items():
+        size = e.get("instSize") if isinstance(e, dict) else None
+        if not _int(size):
+            continue
+        g = actors.get(h)
+        if g is not None:
+            if _int(g.get("instSize")) and size < g["instSize"]:
+                e["instSize"] = g["instSize"]
+            continue
+        twins = by_twin.get((e.get("bfres"), e.get("profile"))) if e.get("bfres") else None
+        same = sorted(by_profile.get(e.get("profile"), []))
+        est = max(twins) if twins else same[len(same) // 2] if same else 0
+        e["instSize"] = max(est, size * INST_SIZE_FLOOR)
+        out.append(f"{e.get('name') or h} {size} -> {e['instSize']}")
+    return out
+
+
+def fix_wiiu_texts(data: bytes) -> tuple[bytes, int]:
+    """A Wii U texts.json with its choice controls sized as the Switch's: msyt keeps a choice's size field as its
+    "unknown" value, and the Wii U's is 2 more than the Switch's (2 labels: 8, the Switch's 6, as all 1,619 of the
+    game's two-way choices are). Returns (the log, controls changed)."""
+    log = json.loads(data.decode("utf-8-sig"))
+    n = 0
+    stack = [log]
+    while stack:
+        v = stack.pop()
+        if isinstance(v, dict):
+            c = v.get("control")
+            if isinstance(c, dict) and c.get("kind") == "choice" and isinstance(c.get("choice_labels"), list):
+                want = 2 * len(c["choice_labels"]) + 2
+                if c.get("unknown") != want:
+                    c["unknown"] = want
+                    n += 1
+            stack += v.values()
+        elif isinstance(v, list):
+            stack += v
+    return (json.dumps(log, ensure_ascii=False, indent=2).encode(), n) if n else (data, 0)
+
+
+def translate_wiiu_logs(layers: list[Layer], nx: str, game: str, notes: list[str], bad: list[str]) -> set[str]:
+    """Each layer's logs as a Switch package's (nx/logs, nx/options/<folder>/logs): rstb.json and packs.json left
+    out (Wii U sizes; size entries are worked out again from the converted files), deepmerge.aamp and aslist.aamp
+    with Switch paths, actorinfo.yml with Switch-safe instance sizes, the others as they are (their values are the
+    same on both consoles). Returns the log names the package has."""
+    import bcml_data
+    names: set[str] = set()
+    estimated: list[str] = []
+    for layer in layers:
+        where = f"{layer.label}/logs/" if layer.label else "logs/"
+        dest = os.path.join(nx, *(layer.label.split("/") if layer.label else []), "logs")
+        os.makedirs(dest, exist_ok=True)       # (an option without logs still needs its folder)
+        for name, path in sorted(layer.logs.items()):
+            if name in WIIU_DROPPED_LOGS:
+                continue
+            names.add(name)
+            data = _read(path)
+            try:
+                if name in ("deepmerge.aamp", "aslist.aamp"):
+                    data, _ = translate_aamp_log(data)
+                elif name == "texts.json":
+                    data, _ = fix_wiiu_texts(data)
+                elif name == "actorinfo.yml":
+                    log = bcml_data.read_log(name, data)
+                    got = fix_inst_sizes(log, game_actors(game))
+                    if got:
+                        estimated += got
+                        data = bcml_data.to_text({str(h): e for h, e in log.items()}).encode()
+            except (wc.FormatError, struct.error, bcml_data.LogError, ValueError, TypeError, KeyError) as e:
+                bad.append(f"{where}{name} ({LOG_NAMES.get(name, 'a BCML log')}) can't be made the Switch's ({e}); "
+                           "it is used as the Wii U package has it")
+            _write_new(os.path.join(dest, *name.split("/")), data)
+    if estimated:
+        notes.append(f"instance sizes estimated for the Switch for {len(estimated)} new actor(s) "
+                     f"({_some(estimated, 3)})")
+    return names
+
+
+def drop_logged(nx: str, names: set[str], notes: list[str]) -> None:
+    """Take out of the converted files the ones a log of the package rebuilds (event info, game data, save data,
+    actor info, status effects...; texts): the Wii U copy is a whole file of the Wii U game's version, and the log
+    is merged into the player's own Switch file instead."""
+    targets = [t for n, t in fixed_targets().items() if n in names]
+    files = {r.lower(): r for r in _walk(nx)} if os.path.isdir(nx) else {}
+    if "texts.json" in names:
+        for low, rel in files.items():
+            m = re.fullmatch(rf"{BASE_TID.lower()}/romfs/pack/bootup_([a-z]{{4}})\.pack", low)
+            if m:
+                lang = rel[-9:-5]
+                targets.append(f"Pack/Bootup_{lang}.pack//Message/Msg_{lang}.product.ssarc")
+    dropped = []
+    for target in targets:
+        parts = target.split("//")
+        rel = files.get(f"{BASE_TID}/romfs/{parts[0]}".lower())
+        path = os.path.join(nx, *rel.split("/")) if rel else ""
+        if not rel or not os.path.isfile(path):
+            continue                            # (the mod has no such file, or it held only what was taken out)
+        if len(parts) == 1:
+            os.unlink(path)
+            dropped.append(target)
+            continue
+        try:
+            top = Blob(_read(path))
+            chain, blob = [top], top
+            for name in parts[1:-1]:
+                blob = blob.child(name) if blob.is_sarc() else None
+                if blob is None:
+                    break
+                chain.append(blob)
+            if blob is None or not blob.is_sarc() or parts[-1] not in blob.open():
+                continue
+            del blob.open()[parts[-1]]
+            for b in chain:
+                b.changed = True
+            if top.open():
+                _write_new(path, top.data())
+            else:
+                os.unlink(path)
+            dropped.append(target)
+        except (wc.FormatError, struct.error, IndexError):
+            continue
+    if dropped:
+        notes.append(f"{len(dropped)} file(s) the logs rebuild taken from your game instead of the Wii U package "
+                     f"({_some([t.split('//')[-1] for t in dropped], 3)}), then the logs merged into them")
+
+
+def settle_wiiu_leftovers(nx: str, rep, game: str, sizer, notes: list[str], bad: list[str]) -> None:
+    """Files inside converted packs that are still Wii U data (Havok, sound, effects...): each gives way to the game's
+    file of the same path (the pack's twin in the game, else the game's actor packs: Havok cloth in a new armor's
+    pack is a copy of a vanilla one), else it is taken out of its pack. Loose ones were left out by the converter."""
+    tops = {f["path"]: f["target"] for f in rep.files}
+    todo: dict[str, list[list[str]]] = {}
+    for n in rep.problems():
+        parts = n.path.split("//")
+        if len(parts) < 2 or n.status not in WIIU_KEEP or parts[0] not in tops:
+            continue
+        todo.setdefault(tops[parts[0]], []).append(parts[1:])
+    replaced, removed = [], []
+    for target, inners in sorted(todo.items()):
+        rel = (f"{BASE_TID}/{target}" if target.startswith(wc.BASE_OUT + "/") else target)
+        path = os.path.join(nx, *rel.split("/"))
+        if not os.path.isfile(path):
+            continue
+        try:
+            top = Blob(_read(path))
+            gpath = _game_file(game, rel)
+            gtop = Blob(_read(gpath)) if gpath else None
+            for inner in inners:
+                chain, blob, gblob = [top], top, gtop
+                for name in inner[:-1]:
+                    blob = blob.child(name) if blob is not None and blob.is_sarc() else None
+                    gblob = gblob.child(name) if gblob is not None and gblob.is_sarc() else None
+                    chain.append(blob)
+                if blob is None or not blob.is_sarc() or inner[-1] not in blob.open():
+                    continue
+                twin = gblob.open().get(inner[-1]) if gblob is not None and gblob.is_sarc() else None
+                data = (twin[0].data() if isinstance(twin[0], Blob) else twin[0]) if twin else None
+                if data is None:
+                    import ukmm  # (it imports this module)
+                    hit = sizer.look().get(ukmm.canonical(inner[-1]))
+                    if hit is not None:
+                        try:
+                            b = Blob(_read(hit[0]))
+                            for name in hit[1][:-1]:
+                                b = b.child(name)
+                            e = b.open().get(hit[1][-1]) if b is not None else None
+                            data = (e[0].data() if isinstance(e[0], Blob) else e[0]) if e else None
+                        except (OSError, wc.FormatError, struct.error, IndexError, AttributeError):
+                            data = None
+                where = f"{_target(rel)}//{'//'.join(inner)}"
+                if data is not None:
+                    blob.set(inner[-1], data)
+                    replaced.append(where)
+                else:
+                    del blob.open()[inner[-1]]
+                    removed.append(where)
+                for b in chain:
+                    if b is not None:
+                        b.changed = True
+            _write_new(path, top.data())
+        except (wc.FormatError, struct.error, IndexError) as e:
+            bad.append(f"{_target(rel)}: its Wii U files can't be swapped for your game's ({e}); the pack is used as "
+                       "converted, so the game may crash where it loads them")
+    if replaced:
+        notes.append(f"{len(replaced)} file(s) in packs that are Wii U data (Havok, sound...) replaced by your game's "
+                     f"file of the same path ({_some([r.split('//')[-1] for r in replaced], 3)})")
+    if removed:
+        bad.append(f"{len(removed)} file(s) in packs are Wii U data that can't be converted and your game has no "
+                   f"file of their path ({_some([r.split('//')[-1] for r in removed], 3)}): left out of their "
+                   "packs, so the parts of the mod that use them may not work")
+
+
+def converted_sizes(nx: str, game: str, rstb: Rstb | None, sizer) -> tuple[dict[str, int], list[str]]:
+    """Size table entries for a converted package's own files (the Wii U package's are Wii U sizes): a file the game
+    has grows its entry as install() grows a rebuilt one's; a new file (inside new packs too) gets ukmm's estimate
+    from the game's files of the same kind nearest in size. Returns (entries, files nothing could be estimated
+    for)."""
+    import ukmm  # (it imports this module)
+    entries: dict[str, int] = {}
+    unsized: list[str] = []
+    if rstb is None or not os.path.isdir(nx):
+        return entries, unsized
+
+    def put(names: list[str], need: int) -> None:
+        for k in names:
+            entries[k] = max(need, entries.get(k, 0))
+
+    folder_kin: dict[tuple, dict] = {}
+
+    def packs_kin(top: str, dlc: bool) -> dict[str, list[tuple[int, str]]]:
+        """The files in a few of the game's packs in the folder of `top` (a RomFS path), by kind: for a new file of
+        a kind only packs hold (event flows in Event/*.sbeventpack)."""
+        folder = top.rpartition("/")[0]
+        key = (dlc, folder.lower())
+        if key not in folder_kin:
+            sib: dict[str, list[tuple[int, str]]] = {}
+            for root in (_aoc_dirs(game) if dlc else [os.path.join(game, "romfs")]):
+                d = os.path.join(root, *folder.split("/")) if folder else root
+                try:
+                    names = sorted(n for n in os.listdir(d) if is_packish(n))[:PACKS_KIN]
+                except OSError:
+                    continue
+                for n in names:
+                    try:
+                        for fn, (c, _) in Blob(_read(os.path.join(d, n))).open().items():
+                            dd = c.data() if isinstance(c, Blob) else c
+                            sib.setdefault(ukmm._kind(fn), []).append((ukmm.unpacked_size(dd), canon(fn, dd)))
+                    except (OSError, wc.FormatError, struct.error, IndexError):
+                        continue
+            folder_kin[key] = sib
+        return folder_kin[key]
+
+    def guess(name: str, new_len: int, pack: bool, dlc: bool, depth: int, top: str) -> int | None:
+        need = sizer.estimate(name, new_len, pack, dlc, depth)
+        if need is None:
+            sizer.siblings.append(packs_kin(top, dlc))
+            try:
+                need = sizer.estimate(name, new_len, pack, dlc, max(depth, 1))
+            finally:
+                sizer.siblings.pop()
+        return need
+
+    def inside(blob: Blob, gblob: Blob | None, dlc: bool, depth: int, where: str) -> None:
+        try:
+            files = blob.open()
+            gfiles = gblob.open() if gblob is not None and gblob.is_sarc() else {}
+        except (wc.FormatError, struct.error, IndexError):
+            return
+        sib: dict[str, list[tuple[int, str]]] = {}
+        for n, (c, _) in gfiles.items():
+            d = c.data() if isinstance(c, Blob) else c
+            sib.setdefault(ukmm._kind(n), []).append((ukmm.unpacked_size(d), canon(n, d)))
+        sizer.siblings.append(sib)
+        try:
+            for n in list(files):
+                child = blob.child(n)
+                cname = canon(n, child.orig)
+                names = [cname, DLC_CANON + cname] if dlc else [cname]
+                new_len = ukmm.unpacked_size(child.orig)
+                g = next((rstb.get(x) for x in names if rstb.get(x) is not None), None)
+                gchild = gblob.child(n) if gfiles and n in gfiles else None
+                if gchild is not None and child.orig == gchild.orig:
+                    continue                   # (the game's own file: its entry stands)
+                if g is not None:
+                    old_len = ukmm.unpacked_size(gchild.orig) if gchild is not None else None
+                    if old_len is not None and new_len > old_len:
+                        put(names, needed_size(g, old_len, new_len, child.is_sarc()))
+                elif gchild is None:            # (a file the game has without an entry keeps having none)
+                    need = guess(n, new_len, child.is_sarc(), dlc, depth, where.split("//", 1)[0])
+                    if need is None:
+                        unsized.append(f"{where}//{n}")
+                    else:
+                        put(names, need)
+                if depth < 4 and is_packish(n) and child.is_sarc():
+                    inside(child, gchild, dlc, depth + 1, f"{where}//{n}")
+        finally:
+            sizer.siblings.pop()
+
+    for rel, path in sorted(_walk(nx).items()):
+        parts = rel.split("/")
+        if len(parts) < 3 or parts[1].lower() != "romfs" or parts[0].upper() not in (BASE_TID, DLC_TID):
+            continue
+        dlc = parts[0].upper() == DLC_TID
+        if dlc and not _aoc_dirs(game):
+            continue                    # (no DLC set up: its files aren't loaded, and install() names them)
+        inner = "/".join(parts[2:])
+        data = _read(path)
+        blob = Blob(data)
+        name = canon(inner, data, dlc)
+        gpath = _game_file(game, rel)
+        gdata = _read(gpath) if gpath else None
+        g = rstb.get(name)
+        new_len = ukmm.unpacked_size(data)
+        try:
+            pack = blob.is_sarc()
+        except (wc.FormatError, struct.error, IndexError):
+            pack = False
+        if g is not None and gdata is not None:
+            old_len = ukmm.unpacked_size(gdata)
+            if new_len > old_len:
+                put([name], needed_size(g, old_len, new_len, pack))
+        elif g is None and gdata is None:
+            need = guess(inner, new_len, pack, dlc, 0, inner)
+            if need is None:
+                unsized.append(_target(rel))
+            else:
+                put([name], need)
+        if pack and is_packish(inner):
+            inside(blob, Blob(gdata) if gdata is not None else None, dlc, 1, _target(rel))
+    return entries, unsized
+
+
+def install_wiiu(src_root: str, stage: str, game: str, *, info: Info, picks: list[str] = (),
+                 no_defaults: bool = False, say=print) -> Result:
+    """Install a Wii U BCML package (extracted in src_root) as a Switch mod in stage: see the comment above. The work
+    folders sit next to stage (named like it: a cut-short add's are swept) and are removed afterwards."""
+    import ukmm  # (it imports this module)
+    if not os.path.isdir(os.path.join(game, "romfs")):
+        raise BnpError("Savage Wind's game files aren't set up (no extracted\\romfs), and a Wii U BCML package is "
+                       "converted and filled from them. Set them up in Savage Wind first.")
+    chosen = choose(info, picks, no_defaults)
+    layers = _layers(src_root, chosen, info)
+    wiiu, nx = stage + ".bnp-wiiu", stage + ".bnp-nx"
+    notes: list[str] = []
+    bad: list[str] = []
+    report = ""
+    for p in (wiiu, nx):
+        _remove(p)
+    try:
+        # 1. the chosen layers in their Wii U form, 2. converted once
+        say("Converting it from Wii U (models, textures, packs, texts...): a big package takes a while...")
+        origin = compose_wiiu(layers, wiiu, notes, bad)
+        if not origin and any(r.upper().startswith((BASE_TID, DLC_TID)) for layer in layers
+                              for r in _layer_files(layer)):
+            raise BnpError(f"Not added: {info.name or 'the package'} says it is a Wii U package, but its files are in "
+                           "the Switch's layout (01007EF00011E000/romfs): its info.json is wrong, so it isn't known "
+                           "which console its files are for.")
+        rep = None
+        if origin:
+            romfs = os.path.join(game, "romfs")
+            try:
+                rep = wc.convert_mod(wiiu, nx, drop_unconverted=True,
+                                     game=romfs if os.path.isdir(os.path.join(romfs, "Model")) else None)
+            except wc.ConvertError as e:
+                raise BnpError(f"Not added: {info.name or 'the package'}'s Wii U files can't be converted ({e}).") \
+                    from None
+        os.makedirs(nx, exist_ok=True)
+        if os.path.isdir(os.path.join(nx, wc.BASE_OUT)):
+            os.makedirs(os.path.join(nx, BASE_TID), exist_ok=True)
+            os.replace(os.path.join(nx, wc.BASE_OUT), os.path.join(nx, BASE_TID, "romfs"))
+        rpt = os.path.join(nx, wc.REPORT)
+        if os.path.isfile(rpt):
+            with open(rpt, encoding="utf-8") as f:
+                report = f.read()
+            os.unlink(rpt)
+        shipped = os.path.join(nx, *RSTB_REL.split("/"))
+        if os.path.lexists(shipped):
+            os.unlink(shipped)              # (the converter's table: its entries are taken below)
+        game_rstb = load_game_rstb(game)
+        sizer = ukmm.Sizer(game, game_rstb, say)
+        if rep is not None:
+            notes.append(wiiu_summary(rep))
+            settle_wiiu_leftovers(nx, rep, game, sizer, notes, bad)
+            bad += option_model_notes(rep, origin, chosen, game)
+        # 3. the logs made the Switch's; files they rebuild taken out; size entries for the Switch files
+        names = translate_wiiu_logs(layers, nx, game, notes, bad)
+        drop_logged(nx, names, notes)
+        sizes, unsized = converted_sizes(nx, game, game_rstb, sizer)
+        for k, v in (((rep.models or {}).get("rstb") or {}).get("sizes") or {}).items() if rep else ():
+            sizes[k] = max(v, sizes.get(k, 0))
+        if unsized:
+            bad.append(f"{len(unsized)} new file(s) got no size table entry ({_some(unsized, 2)}): your game has no "
+                       "file of their kind to estimate one from, so they may fail to load")
+        write_json(os.path.join(nx, "logs", "rstb.json"), dict(sorted(sizes.items())))
+        # 4. installed as the Switch package it now is
+        nx_info = Info(info.name, info.version, "switch",
+                       [Option(o.name, o.folder, o.desc, True, o.group, o.required) for o in chosen],
+                       {**info.raw, "platform": "switch", "converted_from": "wiiu"})
+        res = install(nx, stage, game, info=nx_info, move=True, say=say)
+        res.info, res.chosen = info, chosen
+        res.notes[:0] = notes
+        res.not_merged[:0] = bad
+        meta = os.path.join(stage, META)
+        if report:
+            with open(os.path.join(meta, wc.REPORT), "w", encoding="utf-8", newline="\n") as f:
+                f.write(report)
+        try:
+            with open(os.path.join(meta, "bnp.json"), encoding="utf-8") as f:
+                stored_json = json.load(f)
+            stored_json.update({"converted_from": "wiiu", "not_merged": res.not_merged, "notes": res.notes})
+            write_json(os.path.join(meta, "bnp.json"), stored_json)
+        except (OSError, ValueError):
+            pass
+        return res
+    finally:
+        for p in (wiiu, nx):
+            if not _remove(p):
+                say(f"  the work folder {p} couldn't be removed (a file in it is in use?): delete it yourself")
+
+
+def wiiu_summary(rep) -> str:
+    """One line: what the converter made of the package's files."""
+    st = rep.by_status()
+    parts = [f"{wc.LABEL[s]} {st[s]}" for s in wc.STATUS_ORDER if st[s] and s != wc.LEFT_OUT]
+    line = f"converted from Wii U: {len(rep.files)} game file(s) ({', '.join(parts) or 'none'})"
+    if rep.dropped:
+        line += (f"; {len(rep.dropped)} that stay Wii U data left out, your game's used where it has them "
+                 f"({_some([d.rsplit('/', 1)[-1] for d in rep.dropped], 3)})")
+    return line
+
+
+def option_model_notes(rep, origin: dict[str, str], chosen: list[Option], game: str) -> list[str]:
+    """Models and textures that couldn't be converted, by the layer they came from: where your game has the file
+    its own is used (that option only half works: its textures on the game's model, say); a new one is missing (the
+    armor or object that uses it may not show, or crash the game)."""
+    labels = {f"options/{o.folder}": o.name for o in chosen}
+    targets = {f["path"]: f["target"] for f in rep.files}
+    by: dict[tuple[str, bool], list[str]] = {}
+    for n in rep.notes:
+        if n.kind not in (*wc.MODEL_KINDS, "model/texture") or \
+                n.status not in (wc.REPLACED, wc.LEFT_OUT, wc.CANT, wc.BROKEN):
+            continue
+        top = n.path.split("//", 1)[0]
+        if n.status == wc.REPLACED or "//" in n.path:
+            has = n.status == wc.REPLACED
+        else:
+            t = targets.get(top, "")
+            has = _game_file(game, f"{BASE_TID}/{t}" if t.startswith(wc.BASE_OUT + "/") else t) is not None
+        by.setdefault((origin.get(top, ""), has), []).append(n.path.split("//")[-1].rsplit("/", 1)[-1])
+    out = []
+    for (label, has), files in sorted(by.items()):
+        who = f"option '{labels.get(label, label)}'" if label else "the base package"
+        out.append(f"{who}: {len(files)} model/texture file(s) can't be converted from Wii U yet ({_some(files, 2)}): "
+                   + ("your game's are used in their place, so that part of the mod is lost" if has else
+                      "your game has none, so what uses them may not show, or may crash the game"))
+    return out
 
 
 # The data logs in the order they are merged (texts last: 16 languages, the slowest)

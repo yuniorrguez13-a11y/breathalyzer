@@ -136,9 +136,76 @@ merged). A damaged `bnp.json` is named under *Needs attention* (add the mod agai
   overlay over every mod's copy (`romfs_mods.add_generated`, which today leaves out a file that needs a size entry:
   the merged table from the hook already holds them).
 
+## Packed downloads (.7z, .rar, archives inside)
+
+`tools/modman.py add` also takes a download it can't use as it is: a `.rar`, a `.7z` without a BCML `info.json`
+(so not a `.bnp`), or a `.zip` that holds archives (and isn't a BCML or UKMM package itself)
+(`bnp.packed_download`). `bnp.unpack_download` unpacks it into `modloader\mods\.adding-<name>.unpack\`, which is
+removed when the add ends (or by the next add, if one was cut short):
+
+- **Safety, at every level:** the same tools and checks as a `.bnp` (`extract()`: names, links, `-` names, free
+  space), plus: each file must come out the size the archive lists; the archives together may list at most
+  `MAX_MEMBERS` files and `MAX_UNPACKED` bytes; an archive listing over 1000 times its own size, above 1 GB, is
+  refused before anything is written; at most 3 archives one inside the other (a 4th is refused). A `.rar` needs
+  7-Zip (Windows' `tar.exe` isn't tried for it). Nothing from the download is run.
+- **What is a mod in it:** the folder's own files when `mod_inspect` finds a mod in them (archives in it are moved
+  out first), and each archive in it: a `.bnp`, a UKMM package or a mod `.zip` as it is (added the usual way), any
+  other one opened in turn. Wrapper folders are looked through.
+- **Game version folders:** of two or more folders side by side named for game versions (`1.6.0/`, `1.9.0/`, `For
+  Switch v1.6.0`), or whose patches name a known build, only the 1.9.0 one is kept (else the newest, said); the
+  others are named as left out. A mod's own version in a folder name (`Armor v1.2.0`) doesn't count.
+- **One mod:** added as any other, named after its folder (or the package's own name), with the download as its
+  source. **Several:** `add` stops and lists them; add the download again with `--option "<name>"` (or a part of the
+  name only one has) for each one wanted. The other `--option`s go to that mod's own options.
+- Bare Wii U folders (`Pack/`... in Wii U byte order, no `content/`) are moved into a `content` folder, so they are
+  converted as a Wii U mod (`tools/wiiu_convert.py`).
+
+Plain Switch mods (packed or not) get one more step at `add` (`bnp.fill_old_packs`): a `Pack/*.pack` that lacks
+files your game's copy has, as a whole copy from another game version does, gets them from your game (the mod's own
+files win), and `add` names the files it changes (some may be that version's rather than the mod's).
+
+## Wii U packages
+
+A Wii U `.bnp` (`platform: wiiu` in `info.json`, its files in `content/` and `aoc/0010/`) installs as a Switch mod
+(2026-11-12; `bnp.install_wiiu`). An extracted one (a folder or `.zip` with `info.json`, and `logs/` or `options/`)
+goes the same way.
+
+1. **Put together in Wii U form:** the base's game files, then each chosen option's over them; a pack both have is
+   merged (the option's files win), still in Wii U byte order. Files right in `content/` (a readme) and outside it
+   (thumbnails, notes) are left out. Composing first and converting once matters: Fierce Deity has its model in one
+   option and its textures in another, and the model converter pairs them only inside one mod.
+2. **Converted once** by `tools/wiiu_convert.py` with your game files (models, textures, icons, packs, BYML, texts;
+   event flows are the same on both consoles). A loose file that stays Wii U data (voice lines, say) is left out, so
+   the game's file is used. A file inside a pack that stays Wii U data (Havok, sound, effects) gives way to your
+   game's file of the same path (the pack's twin in the game, else the game's actor packs: Havok cloth in a new
+   armor's pack is a copy of a vanilla one), else it is taken out of the pack and named.
+3. **Logs made the Switch's:** `deepmerge.aamp` and `aslist.aamp` name `content/...` paths and key their changes by
+   the CRC-32 of the path: both are rewritten for `01007EF00011E000/romfs/...` (`aoc/0010/` for the DLC's).
+   `actorinfo.yml`: a new actor's instance size is a Wii U one, 2-3 times too small for the 64-bit Switch (the heap
+   would be too small: crash or no spawn), so it gets the largest size of your game's actors with the same model and
+   profile, else its profile's median, never less than 3 times the Wii U size; an actor of the game's never gets less
+   than the game's own. `texts.json`: a choice's size field (msyt keeps it as `unknown`) is 2 more on the Wii U (a
+   two-way choice: 8, the Switch's 6, as all 1,619 of the game's are), so it is set to the Switch's. `rstb.json` and
+   `packs.json` are left out (Wii U sizes). The other logs are values and names, the same on both consoles, and
+   merge as for a Switch package.
+4. **Files the logs rebuild** (event info, game data, save data, actor info, status effects, area data, residents,
+   statics, quests; texts) are taken out of the converted files: the Wii U copy is a whole file of the Wii U game's
+   version, and the log is merged into your own Switch file instead.
+5. **Size table:** worked out again from the Switch files, never from the Wii U package's: a file the game has grows
+   its entry as a rebuilt one does; a new file (and each new file inside a new pack) gets UKMM's estimate (the game's
+   files of the same kind nearest in size, see [ukmm](ukmm.md); event flows from a few of the game's event packs);
+   models and textures get the model converter's sizes.
+6. Then it **installs** like a Switch package (packs filled, logs merged, size table). The library copy keeps the
+   converter's report in `.bnp\wiiu-convert-report.txt`, and `bnp.json` says `"converted_from": "wiiu"`.
+
+`add` lists what the conversion did, and under *Needs attention* each option whose models couldn't be converted
+(your game's model is used, so that part of the mod is lost or only half there).
+
 ## Limits
 
-- Wii U packages are refused (install them in UKMM, Switch mode, and add its output).
+- Wii U packages: what `wiiu_convert.py` can't convert stays out (voice lines and other sounds, Havok without a game
+  twin, effects, UI layouts; models it can't read yet). Their texts are merged; a Wii U package's texts in fewer
+  languages work as any package's (see above).
 - BCML 2 logs (`savedata.sarc`, `deepmerge.yml`, `texts_*`) aren't merged (named, see above).
 - None of the data logs has been tried with a real package yet (the one real package here has none of them). In the
   game, a made-up package's texts, map, game data, save data and actor info logs work (2026-11-12, below); the other
@@ -171,6 +238,11 @@ merged). A damaged `bnp.json` is named under *Needs attention* (add the mod agai
 
 ## Tested
 
+- Wii U packages: made up ones in `tests/test_wiiu_packages.py` (options merged in Wii U form, the conversion, a Wii
+  U Havok file swapped for the game's twin or left out, log paths and keys, instance sizes, text choice sizes, the
+  size table worked out again); and 4 real ones in a scratch library on 2026-11-12, not in the game yet (Linkle
+  armor icons, Linkle dialogue with the diary and the Riju "Linkle 3" options, Fierce Deity, Girly Animation Pack:
+  results in [MOD-COMPAT](MOD-COMPAT.md#wii-u-packages-2026-11-12-scratch-library-not-in-the-game-yet)).
 - Made-up packages only, in `tests/test_bnp.py`: listing and extracting with 7-Zip and with `tar.exe`, refused names
   (`..`, names starting with `-`, names twice, names beyond ASCII with `tar.exe`) and links (junctions too), reading
   a file by the archive's own name with the tool that listed it, read-only files, options, packs filled (nested
