@@ -2,5 +2,16 @@ AK-47.glb in this folder:
 
   "PSX style AK-47 Model" by Plewr - https://plewr.itch.io/psx-style-ak-47-model
   Licence: CC0 (public domain dedication; no credit required, credited anyway with thanks).
-  Downloaded 2026-11-12 (free, no login). SHA-256 05d275574ec0e8d719ddb8e27c6d0b280d0acecbb429b6bfa6a519c4682cd51c
-  The file is unchanged. tools/ak47_build.py turns it into a Switch weapon model on the player's PC.
+  Downloaded 2026-11-12 (free, no login). The download's SHA-256:
+    05d275574ec0e8d719ddb8e27c6d0b280d0acecbb429b6bfa6a519c4682cd51c
+
+  Changed here: the wood picture (the stock's texture, "wood", a photo whose source isn't known) is replaced with
+  our own procedural wood, drawn by tools/ak47_build.py (wood_picture; `python tools/ak47_build.py rewood`). The
+  meshes, the metal texture and everything else are the download's. This file's SHA-256:
+    88b73d00b97cd9e28c596ed1ff66ca1456086d51685cc8b3cc9e50aa840206dd
+
+  The metal texture ("image (8)", 900x332): the U.S. Department of Defense photo DM-ST-89-01131 of an AK-47,
+  public domain (a work of the U.S. federal government).
+  The wood texture: drawn by tools/ak47_build.py (Breathalyzer, giruka), under this repo's licence.
+
+tools/ak47_build.py turns it into a Switch weapon model on the player's PC.

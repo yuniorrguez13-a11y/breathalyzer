@@ -164,7 +164,8 @@ files written, no C runtime: it uses only kernel32 and user32. Run from inside t
 | `kind = "code"` | a DLL: `manifest` (its mod.toml) and `dll` (under `build/native`) |
 | `kind = "recipe"` | built on the player's PC from their own game files when first turned on: `folder` (the recipe, shipped in `app\` anyway) and `build` (our tool commands, in order) |
 | `after_add` | our tool commands to run once the mod is in the library |
-| `egg` | `true`: an easter egg. Secret: the picker and Home never list it; one switch "Enable easter eggs?" (OFF at first) turns every `egg = true` mod on or off together. An egg always starts OFF |
+| `after_on`, `after_on_makes` | our tool commands that build a bonus of the mod (the mod `after_on_makes` names) from the player's game files, run when the mod is turned on while the library has no `after_on_makes` yet: the picker's Save with the mod ON, else the next Play (after Home or the game's Mods page turned it on). A player who never turns the mod on never builds it; Details never shows its id |
+| `egg` | `true`: an easter egg. Secret: the picker and Home never list it; one switch "Enable easter eggs?" (OFF at first) turns every `egg = true` mod on or off together. An egg always starts OFF, and stays out of the library until the switch is ON (so the game's Mods page never lists it either); its mod.toml should say `[mod] secret = true`. Its folder in the zip is `bundled-mods/egg-<n>`, and Details never shows its id or title |
 
 Rules make_release checks: every path is a file git tracks or a DLL in `build\native`; never anything from `out\`
 (stress-lib, showcase-lib), never another folder; the mod.toml's id matches; the DLL is ours (64-bit, exports

@@ -2702,7 +2702,7 @@ def deploy_now(lib: modman.Library, no_deploy: bool) -> tuple[bool, list[str]]:
     if modman.game_running():
         return False, ["Close the game, then deploy: python tools/modman.py deploy"]
     try:
-        dry = modman.deploy(lib, dry_run=True)
+        dry = modman.deploy(lib, dry_run=True, merge=False)   # (only the game code is asked about: no pack merge)
         parts = dry.get("parts") or {}
         if (parts.get("exefs") or {}).get("rebuild") == "build" or \
                 (parts.get("hooks") or {}).get("rebuild") == "build":

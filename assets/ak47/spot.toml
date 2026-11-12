@@ -1,0 +1,12 @@
+# The second mod tools/ak47_build.py builds (see mod.toml next to this file): where the extra lies on the map.
+# part_of: it is used only while the multiplayer mod is on (docs/mod-format.md); the item itself (mod.toml) stays.
+
+[mod]
+id = "giruka.ak47-spot"
+name = "Extra item spot"
+version = "0.2.0"
+authors = ["giruka"]
+description = "Where a hidden extra lies. Used only while Ghost multiplayer is on."
+game_versions = ["1.9.0"]
+part_of = "botw-mod-loader.ghost"
+secret = true

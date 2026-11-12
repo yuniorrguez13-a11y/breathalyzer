@@ -307,7 +307,7 @@ class Row:
     position: int | None        # 1-based among the listed mods (None: hidden)
     wanted_position: int | None
     rebuild: bool               # hooks or code patches: the next start can take 10-20 minutes
-    hidden: bool                # the Mod menu mod itself
+    hidden: bool                # the Mod menu mod itself, or a secret mod ([mod] secret)
     wiiu: bool
 
     @property
@@ -375,7 +375,10 @@ def describe_mods(lib: mm.Library) -> list[Row]:
     rows, pos = [], 0
     for m in lib.mods:
         man = mans[m["id"]]
-        hidden = m["id"] == MOD_ID or bool(man and man.id == MOD_ID)
+        # (never listed: the Mod menu mod itself, and a secret mod ([mod] secret: an easter egg, a hidden extra's
+        # parts), which only the launcher's switch turns on or off)
+        hidden = m["id"] == MOD_ID or bool(man and man.id == MOD_ID) or m.get("secret") is True \
+            or bool(man and getattr(man, "secret", False))
         root = os.path.join(lib.mods_dir, m["id"])
         rebuild = bool(man and man.hooks) or _has_code_patches(lib, root, m.get("kinds", []))
         extra = []

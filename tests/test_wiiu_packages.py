@@ -264,7 +264,9 @@ class WiiuBnpInstall(Base):
         self.assertEqual(logged, [f"{R}/Actor/Pack/Hero.sbactorpack//Actor/Physics/Hero.bphysics"])
         text = "\n".join(res.summary())
         self.assertIn("converted from Wii U", text)
-        self.assertIn("replaced by your game's file", text)
+        self.assertIn("needs attention: 1 file(s) in packs are Wii U data (Havok, sound...) that can't be converted: "
+                      "your game's file of the same path is used (Physics/Cloth/Hero.hkcl), so that part of the mod is "
+                      "lost", text)
         self.assertIn("instance sizes estimated for the Switch for 1 new actor(s)", text)
         self.assertFalse(list((self.tmp / "mods").glob("*.bnp-*")))      # (work folders removed)
 
@@ -276,6 +278,41 @@ class WiiuBnpInstall(Base):
         self.assertNotIn("Physics/Cloth/New.hkcl", new)
         self.assertIn("Actor/Misc/N.byml", new)
         self.assertIn("left out of their packs", "\n".join(res.summary()))
+
+    def test_loose_files_that_stay_wii_u_data_need_attention(self):
+        """Loose Wii U files the converter can't convert are left out: one that changes a game file loses that part
+        of the mod (the game's is used), a new one is missing. Both under Needs attention, not only in the notes."""
+        write(self.game, {"romfs/Physics/Cloth/Lost.hkcl": HAVOK + b" the game's loose cloth"})
+        res, stage = self.install(wiiu_package(**{"content/Physics/Cloth/Lost.hkcl": HAVOK + b" wii u lost",
+                                                  "content/Physics/Cloth/Gone.hkcl": HAVOK + b" wii u new"}))
+        bad = "\n".join(res.not_merged)
+        self.assertRegex(bad, r"1 file\(s\) stay Wii U data and are left out \(1 [^)]*\): your game's are used "
+                              r"\(Lost\.hkcl\), so that part of the mod is lost")
+        self.assertRegex(bad, r"1 new file\(s\) stay Wii U data and your game has none \(1 [^;]*; Gone\.hkcl\): "
+                              r"missing, so what uses them may fail")
+        files = {p.relative_to(stage).as_posix() for p in stage.rglob("*") if p.is_file()}
+        self.assertFalse(any(f.endswith((".hkcl",)) and "Cloth/" in f and "Pack" not in f for f in files))
+
+    def test_entries_for_files_the_game_keeps_in_another_pack(self):
+        """A file the size table lists but the game holds only in another pack: a shared file changed in a new actor
+        pack (Hero.bxml in NewThing's pack), an actor pack shipped loose that the game keeps only in TitleBG.pack.
+        Their entries grow from the game's copy found there, never left at the game's smaller one."""
+        inside = sarc({"Actor/ActorLink/Inside.bxml": aamp({"Link": {"Model": (STR64, b"Inside")}})})
+        crcs = dict(bnp.Rstb((self.game / "romfs" / rm.RSTB).read_bytes()).crc)
+        crcs[crc("Actor/Pack/Inside.bactorpack")] = len(inside) + 0x400
+        write(self.game, {"romfs/Pack/TitleBG.pack": sarc({"Actor/Pack/Inside.sbactorpack": yaz0(inside)}),
+                          f"romfs/{rm.RSTB}": yaz0(b"RSTB" + struct.pack("<II", len(crcs), 0) + b"".join(
+                              struct.pack("<II", k, crcs[k]) for k in sorted(crcs)))})
+        big = aamp({"Link": {"Model": (STR64, b"Hero"), **{f"P{k}": (STR64, b"x" * 40) for k in range(40)}}})
+        bigger = be_sarc({"Actor/ActorLink/Inside.bxml": aamp({"Link": {f"Q{k}": (STR64, b"y" * 40)
+                                                                         for k in range(40)}}),
+                          "Actor/Misc/More.byml": be_byml({"More": "z" * 4000})})
+        res, stage = self.install(wiiu_package(**{
+            "content/Actor/Pack/NewThing.sbactorpack": yaz0(be_sarc({"Actor/ActorLink/Hero.bxml": big})),
+            "content/Actor/Pack/Inside.sbactorpack": yaz0(bigger)}))
+        out = bnp.Rstb((stage / R / rm.RSTB).read_bytes())
+        self.assertGreater(out.get("Actor/ActorLink/Hero.bxml"), 600)        # (the game's: 600, for a smaller file)
+        self.assertGreater(out.get("Actor/Pack/Inside.bactorpack"), len(inside) + 0x400)
 
     def test_switch_layout_under_a_wii_u_info_is_refused(self):
         files = {"info.json": json.dumps({"name": "W", "platform": "wiiu"}), f"{R}/Model/A.txt": "x"}
@@ -476,6 +513,11 @@ class Ukmm(unittest.TestCase):
         text = "\n".join(res.summary())
         self.assertIn("Wii U package: 3 binary file(s) converted for the Switch", text)
         self.assertIn("Havok physics", text)
+        # (the Wii U data that can't be converted: under Needs attention, not only in the notes)
+        self.assertIn("needs attention: 1 file(s) are Wii U data that can't be converted (1 Havok physics): your "
+                      "game's are used (Hero.hkcl), so that part of the mod is lost", text)
+        self.assertIn("needs attention: 1 new file(s) are Wii U data that can't be converted and your game has none "
+                      "(1 Havok physics; Gone.hkcl): left out, so what uses them may fail", text)
 
     def test_wii_u_texture_names_follow_the_switch(self):
         b = type("B", (), {"wanted": set()})()

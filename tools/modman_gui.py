@@ -185,6 +185,7 @@ class Row:
     version: str | None = None
     about: str = ""            # one line about the mod (the launcher's list; Backend.describe)
     full: str = ""             # all of it
+    secret: bool = False       # [mod] secret (an easter egg, a hidden extra's part): never listed
 
     def cells(self) -> tuple[str, str, str, str, str]:
         return (str(self.number), "On" if self.on else "Off", self.name, kind_text(self.kinds), self.version or "-")
@@ -221,6 +222,7 @@ class Job:
     game_started: bool = False
     proc: object = None
     cancelled: bool = False
+    hide: tuple = ()           # words its output never shows (a secret mod's id, title, folder): see hide_words
 
     @property
     def slot(self) -> str:
@@ -232,6 +234,16 @@ class Job:
 
 def kind_text(kinds: list[str]) -> str:
     return ", ".join(KIND_LABELS.get(k, k) for k in kinds) or "-"
+
+
+SECRET_WORD = "(secret)"
+
+
+def hide_words(text: str, words) -> str:
+    """text with each of `words` (a secret mod's id, title, folder: any case) written as (secret)."""
+    for w in sorted({w for w in words if isinstance(w, str) and len(w) > 2}, key=len, reverse=True):
+        text = re.sub(re.escape(w), SECRET_WORD, text, flags=re.IGNORECASE)
+    return text
 
 
 def clip(s: str, n: int = 120) -> str:
@@ -467,6 +479,10 @@ class Backend:
         # (config.json: Turn on/off replaces it, and Windows refuses that while another thread has it open)
         self.files = threading.Lock()
         self.describe = None   # (library, entry) -> (about, full) for each row (the launcher sets it)
+        # The secret mods ([mod] secret: an easter egg, a hidden extra's parts) are left out of the list (More...,
+        # Mod Manager). The launcher keeps them (marked secret): its easter-egg switch needs their state, and Home
+        # leaves them out itself (LaunchController.shown_rows).
+        self.keep_secret = False
 
     def listing(self) -> Listing:
         try:
@@ -476,11 +492,13 @@ class Backend:
         if lib is None:
             return Listing(self.root, [], False)
         rows = [Row(k, m["id"], m.get("name") or m["id"], bool(m.get("enabled")), list(m.get("kinds") or []),
-                    m.get("version")) for k, m in enumerate(lib.mods, 1)]
+                    m.get("version"), secret=m.get("secret") is True) for k, m in enumerate(lib.mods, 1)]
         if self.describe is not None:
             for row, m in zip(rows, lib.mods):
                 with contextlib.suppress(Exception):   # (a mod.toml that can't be read: no text, never a crash)
                     row.about, row.full = self.describe(self.root, m)
+        if not self.keep_secret:   # (the numbers stay the library's: commands use them)
+            rows = [r for r in rows if not r.secret]
         return Listing(self.root, rows)
 
     def install_problem(self) -> str | None:
@@ -673,7 +691,7 @@ class Controller:
         job = self.details_job
         if job is None:
             return ["Nothing has run yet.", f"Library: {self.listing.root}"]
-        head = [f"modman {' '.join(job.args)}   (library: {self.listing.root})"]
+        head = [hide_words(f"modman {' '.join(job.args)}   (library: {self.listing.root})", job.hide)]
         if job.dropped:
             head.append(f"({job.dropped} earlier lines not kept)")
         tail = []
@@ -697,11 +715,13 @@ class Controller:
         row = self._ready("move", mod_id)
         if not row:
             return
-        pos = row.number + delta
-        if not 1 <= pos <= len(self.listing.rows):
+        # (to the next listed mod's place: the numbers are the library's, and a secret mod between them isn't listed)
+        nums = sorted(r.number for r in self.listing.rows)
+        k = nums.index(row.number) + delta if row.number in nums else -1
+        if not 0 <= k < len(nums):
             self.status = Status("info", [f"{row.name} is already {'first' if delta < 0 else 'last'}."])
             return
-        self._quick("move", [str(row.number), str(pos)], row)
+        self._quick("move", [str(row.number), str(nums[k])], row)
 
     def add(self, path: str) -> None:
         if not self.free("add"):
@@ -851,6 +871,8 @@ class Controller:
         self.backend.start(job, self.events)
 
     def _line(self, job: Job, text: str) -> None:
+        if job.hide:   # (a secret mod's output: its names never reach Details)
+            text = hide_words(text, job.hide)
         job.lines.append(text)
         if len(job.lines) > MAX_LINES:
             del job.lines[:DROP_LINES]
@@ -871,7 +893,8 @@ class Controller:
             if new:
                 name, select = new[-1].name, new[-1].id
         elif job.action == "remove" and code == 0 and self.listing.rows:
-            select = self.listing.rows[min(job.number, len(self.listing.rows)) - 1].id  # (the one now in its place)
+            # (the one now in its place: the next listed one, else the last)
+            select = next((r.id for r in self.listing.rows if r.number >= job.number), self.listing.rows[-1].id)
         if select:
             self._select = select
             self.list_version += 1
@@ -1583,6 +1606,19 @@ EGG_ASK = "Enable easter eggs?"
 EGG_LINE = "Secret extras. Some take longer the first time you press Play."
 EGG_DONE = {True: ["Easter eggs are on.", "Play uses the change. Some take longer the first time."],
             False: ["Easter eggs are off.", "Play uses the change."]}
+BONUS_SAY = "A part of a mod you turned on is built from your game files first (about 30 seconds)."
+
+
+def egg_words(mods: list[dict]) -> tuple:
+    """What Details never shows of these secret mods (launcher.read_bundled's): their ids (and the part after the
+    first dot), titles and folders."""
+    out = []
+    for m in mods:
+        mid = m.get("id") or ""
+        folder = m.get("folder") or ""
+        out += [mid, mid.split(".", 1)[-1], m.get("title") or "", folder, os.path.basename(folder.rstrip("/\\"))]
+        out += [m.get("after_on_makes") or ""]
+    return tuple(dict.fromkeys(w for w in out if w))
 HOME_ROWS = 3          # the mod list always has room for this many
 ABOUT_LINES = 2        # the selected mod's text under the list: this many lines (longer text is cut with "...")
 BREATH_LINES = 4       # "Add this mod?": the description in this many lines at most (the warning and buttons fit)
@@ -1688,6 +1724,7 @@ class LaunchBackend(Backend):
         self.menu = (load_modmenu() if menu is None else menu) or None
         self.popen = popen or subprocess.Popen
         self.describe = la.describe_mod
+        self.keep_secret = True   # (the easter-egg switch reads the eggs' state; Home lists none: shown_rows)
 
     def deploy_state(self) -> str:
         """One line under Play: is the deploy up to date (Play then starts at once)?"""
@@ -1744,6 +1781,23 @@ class LaunchBackend(Backend):
     def start_plain(self):
         return la.start_plain(self.install, tuple(getattr(self.mm, "MOD_ENV", ())), self.popen)
 
+    def bonus_needed(self, mods: list[dict]) -> list[str]:
+        """The ids of the bundled mods with after_on (launcher.read_bundled's) that are on, or that the game's Mods
+        page turned on (its pending changes), while the library has no after_on_makes yet: their bonus is built
+        before Play deploys."""
+        with self.files:
+            lib = self.mm.Library.load(self.root)
+        if lib is None:
+            return []
+        have = {m["id"] for m in lib.mods}
+        on = {m["id"] for m in lib.mods if m.get("enabled")}
+        menu = self.menu
+        if menu is not None:
+            with contextlib.suppress(Exception):   # (the Mods page's files: what the library says, then)
+                if menu.has_pending(lib):
+                    on = {r.id for r in menu.rows(lib) if r.wanted}
+        return [m["id"] for m in mods if m["id"] in on and m.get("after_on_makes") not in have]
+
     def enabled_ids(self) -> set[str]:
         """The ids of the mods that are ON in the library now."""
         with self.files:
@@ -1758,11 +1812,14 @@ class LaunchController(Controller):
     plain words. While the game is open, Play waits (watch() notices when it closes)."""
 
     def __init__(self, backend: LaunchBackend, clock=time.monotonic, port: int | None = None, dev: bool = False,
-                 dev_ids=(), egg_ids=()):
+                 dev_ids=(), egg_ids=(), after_on=()):
         self.port_arg = port                        # --port (tests, developers): always opens that control port
         self.dev = dev                              # Settings > Developer commands
         self.dev_ids = set(DEV_MODS) | set(dev_ids)  # mods whose commands need developer mode
         self.egg_ids = set(egg_ids)                 # the easter eggs: one Easter eggs row on Home for all of them
+        # the bundled mods with after_on (launcher.read_bundled): their bonus is built when they are first turned on
+        # (the picker's Save, else the next Play: Home or the game's Mods page turned them on)
+        self.after_on = [m for m in after_on if m.get("after_on") and m.get("after_on_makes")]
         self.install_done: list[str] | None = None  # what the status says when the picked mods are in
         self.install_mods: list[str] = []           # while the picked mods are added: their ids, in order
         self.install_failed: Job | None = None      # the first step that failed (Details shows it)
@@ -1800,9 +1857,10 @@ class LaunchController(Controller):
         return f"{text} {self.state_text}".strip()
 
     def shown_rows(self) -> list[Row]:
-        """Home's list: the mods but the easter eggs, then one Easter eggs row for all of them (ON while one of them is
-        on), whenever there are eggs (they needn't be in the library yet: the switch adds them)."""
-        rows = [r for r in self.listing.rows if r.id not in self.egg_ids]
+        """Home's list: the mods but the easter eggs and the secret ones ([mod] secret), then one Easter eggs row for
+        all the eggs (ON while one of them is on), whenever there are eggs (they needn't be in the library yet: the
+        switch adds them)."""
+        rows = [r for r in self.listing.rows if r.id not in self.egg_ids and not r.secret]
         if self.egg_ids and not self.listing.error:
             on = any(r.on for r in self.listing.rows if r.id in self.egg_ids)
             rows.append(Row(0, EGG_ROW, EGG_TITLE, on, [], about=EGG_LINE, full=EGG_LINE))
@@ -1827,9 +1885,11 @@ class LaunchController(Controller):
             if m["id"] in have:
                 c, out = self.backend.quick([action, m["id"]])
                 code, lines = code or c, lines + out
-        # (Details names the switch, not the mods: they are secret)
-        self.details_job = Job(action, [action, f"({EGG_TITLE.lower()})"], name=EGG_TITLE, lines=lines, code=code,
-                               started=started, ended=self.clock())
+        # (Details names the switch, not the mods: they are secret, so their ids and titles are left out too)
+        words = egg_words(mods)
+        self.details_job = Job(action, [action, f"({EGG_TITLE.lower()})"], name=EGG_TITLE,
+                               lines=[hide_words(x, words) for x in lines], code=code, started=started,
+                               ended=self.clock(), hide=words)
         self._reload(select=EGG_ROW)
         self.status = Status("ok", list(EGG_DONE[on])) if code == 0 else \
             launcher_words(failed("Not changed.", [x.rstrip() for x in lines if x.strip()]))
@@ -1885,9 +1945,14 @@ class LaunchController(Controller):
         self.jobs["main"] = job
         self.status = Status("busy", ["Getting ready..."])
 
+        bonus = list(self.after_on)
+
         def work():
             try:
                 facts = self.backend.play_facts()
+                if bonus and not facts.get("running") and not facts.get("error"):
+                    # (a mod turned on on Home or in the game's Mods page whose bonus isn't built yet: built first)
+                    facts["bonus"] = self.backend.bonus_needed(bonus)
             except Exception as e:  # (said in the window, never a crash)
                 facts = {"error": f"{type(e).__name__}: {e}"}
             self.events.put(("plan", job, facts))
@@ -1921,11 +1986,14 @@ class LaunchController(Controller):
             self.status = Status("error", ["Savage Wind is already open.", "Close it, then press Play."])
             return
         steps = []
+        for m in self.after_on:   # (before the deploy: what they add is used at once)
+            if m["id"] in (facts.get("bonus") or ()):
+                steps += self.bonus_steps(m, EGG_TITLE if m.get("egg") else m["title"])
         if facts.get("pending"):
             steps.append(Job("apply", ["apply"], script=MODMENU_PY))
         elif self.no_rebuild:
             steps.append(Job("deploy", ["deploy", "--no-rebuild"]))
-        elif facts.get("deploy"):
+        elif facts.get("deploy") or steps:
             steps.append(Job("deploy", ["deploy"]))
         steps.append(Job("play", list(self.run_args), in_process=True))
         self.first_time = facts.get("deploy") == "first"
@@ -1967,6 +2035,8 @@ class LaunchController(Controller):
             self.status = Status("busy", ["Getting your mods ready...",
                                           "The first time takes longer." if self.first_time
                                           else "Then the game starts."])
+        elif job.action == "tool":   # (a bonus built before the deploy: Play's after_on step)
+            self.status = Status("busy", ["Getting your mods ready...", BONUS_SAY])
         else:
             self.status = Status("busy", ["Starting the game..."])
 
@@ -2020,7 +2090,7 @@ class LaunchController(Controller):
                 self.game_open, self._gone = True, 0
                 self.status = Status("error", ["Savage Wind is already open.", "Close it, then press Play."])
             return
-        if code == 0:
+        if code == 0 or (job.action == "tool" and self.chain):   # (a bonus that can't be built: played without it)
             if self.chain:
                 self._next()
             return
@@ -2077,26 +2147,34 @@ class LaunchController(Controller):
         """Put the picked bundled mods (launcher.read_bundled) into the library, one step after the other in the
         background: each code mod not there yet is added (modman add, then its after_add commands), then turned on
         or off as picked; a recipe mod turned on and not there yet is built from the player's game files (its build
-        commands). A recipe that stays off is built only when it is picked later. An easter egg is called Easter
-        eggs while it goes in (its title is secret). done: what the status says when they are in."""
+        commands). A recipe that stays off is built only when it is picked later. A mod with after_on gets its bonus
+        built (those commands) when it goes in turned on and the library has no after_on_makes yet. An easter egg
+        left OFF stays out of the library (so nothing lists it; the switch puts it in), and is called Easter eggs
+        while it goes in, its id and title left out of Details (they are secret). done: what the status says when
+        they are in."""
         if not self.free("add"):
             return
         have = {r.id for r in self.listing.rows}
         steps: list[Job] = []
         for m in mods:
-            on, title = bool(picks.get(m["id"], m["on"])), EGG_TITLE if m.get("egg") else m["title"]
+            on, egg = bool(picks.get(m["id"], m["on"])), bool(m.get("egg"))
+            title, hide = (EGG_TITLE, egg_words([m])) if egg else (m["title"], ())
             new = m["id"] not in have
+            if egg and new and not on:
+                continue
             if m["kind"] == "code" and new:
-                steps.append(Job("add", ["add", m["folder"]], name=title, mod_id=m["id"]))
+                steps.append(Job("add", ["add", m["folder"]], name=title, mod_id=m["id"], hide=hide))
             elif m["kind"] == "recipe" and new and on:
-                steps += [Job("tool", cmd[1:], script=os.path.join(TOOLS, cmd[0]), name=title, mod_id=m["id"])
-                          for cmd in m["build"]]
+                steps += [Job("tool", cmd[1:], script=os.path.join(TOOLS, cmd[0]), name=title, mod_id=m["id"],
+                              hide=hide) for cmd in m["build"]]
             if new and (m["kind"] == "code" or on):
-                steps += [Job("tool", cmd[1:], script=os.path.join(TOOLS, cmd[0]), name=title, mod_id=m["id"])
-                          for cmd in m.get("after_add") or []]
+                steps += [Job("tool", cmd[1:], script=os.path.join(TOOLS, cmd[0]), name=title, mod_id=m["id"],
+                              hide=hide) for cmd in m.get("after_add") or []]
+            if on and m.get("after_on") and m.get("after_on_makes") not in have:
+                steps += self.bonus_steps(m, title)
             if m["kind"] == "code" or not new:
                 steps.append(Job("enable" if on else "disable", ["enable" if on else "disable", m["id"]],
-                                 name=title, mod_id=m["id"], in_process=True))
+                                 name=title, mod_id=m["id"], in_process=True, hide=hide))
         self.installing, self.install_total = [], len(steps)
         self.install_mods = list(dict.fromkeys(j.mod_id for j in steps))   # ("Adding mod 2 of 5": mods, not steps)
         self.install_failed = None
@@ -2106,6 +2184,13 @@ class LaunchController(Controller):
             self._next()
         else:
             self._installed()
+
+    def bonus_steps(self, m: dict, title: str) -> list[Job]:
+        """The after_on commands of a bundled mod (its bonus, built from the player's game files), as tool jobs. The
+        bonus is secret: its id never shows in Details."""
+        hide = egg_words([m]) if m.get("egg") else (m["after_on_makes"],)
+        return [Job("tool", cmd[1:], script=os.path.join(TOOLS, cmd[0]), name=title, mod_id=m["id"], hide=hide)
+                for cmd in m["after_on"]]
 
     def _installed(self) -> None:
         failed, self.installing = self.installing or [], None
@@ -2806,7 +2891,8 @@ class LauncherView(BigText):
             self.ctl.stop()
         self.ctl = LaunchController(backend, port=self.port or self.settings.port, dev=self.settings.dev,
                                     dev_ids={m["id"] for m in self.bundled if m.get("developer")},
-                                    egg_ids={m["id"] for m in self.eggs})
+                                    egg_ids={m["id"] for m in self.eggs},
+                                    after_on=[m for m in self.bundled if m.get("after_on")])
         warn = next((s for s in rep.screens if not s.blocks), None)
         if warn is not None:
             self.ctl.status = Status("warn", [warn.heading + ".", warn.line])

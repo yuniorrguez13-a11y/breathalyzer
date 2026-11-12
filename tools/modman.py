@@ -156,7 +156,7 @@ VERSION_RE = re.compile(r"^(\d{1,9}(?:\.\d{1,9}){0,3})(?:[-+][0-9A-Za-z.-]+)?$")
 GAME_VERSION_RE = re.compile(r"^\d{1,9}\.\d{1,9}\.\d{1,9}$")
 REQ_RE = re.compile(r"^(>=|==)\s*(\d{1,9}(?:\.\d{1,9}){0,3})$")
 MANIFEST_KEYS = {"mod": {"id", "name", "version", "authors", "description", "game_versions", "loader_api",
-                         "icon", "background", "title_picture", "url", "update_url", "part_of"},
+                         "icon", "background", "title_picture", "url", "update_url", "part_of", "secret"},
                  "code": {"windows", "linux", "hooks"}, "data": {"romfs", "dlc_romfs"}, "dependencies": None,
                  "font": {"file", "for", "languages", "license"},
                  "settings": None, "pages": None}   # ([[settings]] and [[pages]]: tools/mod_settings.py checks them)
@@ -711,6 +711,7 @@ class Manifest:
     dlc_romfs: str | None = None
     dependencies: dict[str, str] = field(default_factory=dict)
     part_of: str | None = None               # [mod] part_of: another mod's id; this one is used only while it is on
+    secret: bool = False                     # [mod] secret: never listed on Home, in More... or the game's Mods page
     notes: list[str] = field(default_factory=list)
     # Mods page v2 (docs/mod-format.md). Paths like dll: "/"-separated, relative to mod.toml's folder.
     icon: str | None = None                  # [mod] icon: the mod's picture
@@ -908,6 +909,11 @@ def parse_manifest(text: str, base_rel: str = "") -> tuple[Manifest | None, list
     elif part_of is not None and part_of == mod_id:
         errs.append(f'mod.toml: [mod] part_of names the mod itself ("{part_of}")')
         part_of = None
+    secret = mod.get("secret", False)
+    if not isinstance(secret, bool):
+        errs.append("mod.toml: [mod] secret must be true or false (true: Home, More... and the game's Mods page never "
+                    "list the mod)")
+        secret = False
 
     # Mods page v2: pictures, link, font, settings pages (docs/mod-format.md)
     pics: dict[str, str | None] = {}
@@ -980,7 +986,8 @@ def parse_manifest(text: str, base_rel: str = "") -> tuple[Manifest | None, list
                          "Manager can)")
     return Manifest(id=mod_id, name=name, version=version, base_rel=base_rel, authors=list(authors),
                     description=description, game_versions=games, loader_api=api, dll=dll, hooks=sorted(hooks),
-                    romfs=romfs, dlc_romfs=dlc_romfs, dependencies=dependencies, part_of=part_of, notes=notes,
+                    romfs=romfs, dlc_romfs=dlc_romfs, dependencies=dependencies, part_of=part_of, secret=secret,
+                    notes=notes,
                     icon=pics["icon"], background=pics["background"], title_picture=pics["title_picture"],
                     url=links["url"], update_url=links["update_url"], font=font, settings=lists["settings"],
                     pages=lists["pages"], raw=data), []
@@ -2003,6 +2010,8 @@ def add_mod(lib: Library, src: str, name: str | None = None, *, convert: bool = 
         entry["version"] = man.version
         if man.part_of:
             entry["part_of"] = man.part_of
+        if man.secret:
+            entry["secret"] = True
     elif pkg or upkg:
         entry["bnp" if pkg else "ukmm"] = {"options": [o.name for o in res.chosen]}
         if info.version:
@@ -2567,9 +2576,11 @@ def hooks_text(hooks: dict[int, list[str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False) -> dict:
+def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False, merge: bool = True) -> dict:
     """Build library\\deploy\\ from the enabled mods, in order (later mods win). Returns launch.json's contents
-    (with "dry_run": true and nothing written for a dry run)."""
+    (with "dry_run": true and nothing written for a dry run). merge: the packs and whole files two enabled mods
+    change, one a BCML package, are merged (bnp.deploy_hook(files=True)); a dry run merges them too (in memory), so
+    what it says is what the deploy does. merge=False (a dry run that only asks about the game code) skips that."""
     install = lib.require_install()
     if not dry_run and game_running():
         raise ModmanError("Savage Wind is running. Close it, then deploy again.")
@@ -2711,7 +2722,7 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False) -> 
         #             other mods' copies as BCML merges them, put in the overlay below (MERGED_OWNER))
         pairs = [(m["name"], root) for m, root, s in scans if s.romfs]
         try:
-            hook = bnp.deploy_hook(pairs, extracted, files=not dry_run)
+            hook = bnp.deploy_hook(pairs, extracted, files=merge)
         except Exception as e:  # noqa: BLE001 (a pack merge that fails never stops the deploy: each mod's own copy)
             hook = bnp.deploy_hook(pairs, extracted)
             hook.attention.append(f"The mods' packs can't be merged ({type(e).__name__}: {e}): the later mod's copy "
@@ -2722,7 +2733,15 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False) -> 
     if sources:
         try:  # (romfs_mods' plan against the game: what its real deploy would refuse, it refuses here)
             gindex = rm.GameIndex.scan(extracted)
-            pre = rm.deploy(sources, overlay, gindex, dry_run=True, rstb=rstb)
+            dry_plan = None
+            if dry_run and hook is not None and hook.files:   # (the merged files in the plan, as the deploy puts them)
+                dry_plan = rm.plan(sources, gindex, rstb)
+                try:
+                    rm.add_generated(dry_plan, [(path, data, None) for path, data in sorted(hook.files.items())],
+                                     MERGED_OWNER)
+                except ValueError as e:
+                    attention.append(f"The merged packs can't be deployed ({e}): the later mod's copy of each is used")
+            pre = rm.deploy(sources, overlay, gindex, dry_run=True, rstb=rstb, plan_=dry_plan)
         except (rm.DeployError, zipfile.BadZipFile) as e:
             raise ModmanError(f"RomFS overlay: {e}") from None
     makers = [m for m in GENERATED_OWNER if feature(m, "deploy_files")]  # (fonts, title picture, pictures)

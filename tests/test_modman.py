@@ -42,6 +42,14 @@ FAR_PATCH = f"@nsobid-{BID}\n@flag offset_shift 0x100\n// Far\n@enabled\n0010000
 GAP_PATCH = f"@nsobid-{BID}\n@flag offset_shift 0x100\n// Gap\n@enabled\n00001500 41424344\n"   # between segments
 
 
+def setUpModule():
+    """A drive with room to spare: extracting a .zip keeps 2 GB (or 1% of the drive) free, as for a .bnp, and the PC
+    running the tests may have less. The tests about free space give their own drive (shutil.disk_usage)."""
+    p = mock.patch("shutil.disk_usage", return_value=mock.Mock(total=1 << 40, used=0, free=1 << 40))
+    p.start()
+    unittest.addModuleCleanup(p.stop)
+
+
 def read_only(p) -> bool:
     return not os.stat(p).st_mode & stat.S_IWRITE
 

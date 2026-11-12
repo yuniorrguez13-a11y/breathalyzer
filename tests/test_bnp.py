@@ -242,11 +242,23 @@ def done(stdout: bytes = b"", code: int = 0):
     return mock.Mock(returncode=code, stdout=stdout, stderr=b"")
 
 
+ROOMY = type("Usage", (), {"total": 1 << 40, "used": 0, "free": 1 << 40})()
+
+
+def roomy(case: unittest.TestCase) -> None:
+    """A drive with room to spare for the test: the extract checks keep 2 GB (or 1% of the drive) free, and the PC
+    running the tests may have less (the tests about that rule give their own drive)."""
+    p = mock.patch("shutil.disk_usage", return_value=ROOMY)
+    p.start()
+    case.addCleanup(p.stop)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="bnp-test-"))
         self.addCleanup(lambda: mm.remove_tree(str(self.tmp)))
         self.game = write(self.tmp / "game", game_files())
+        roomy(self)
 
     def files_of(self, stage: Path) -> dict:
         return {p.relative_to(stage).as_posix(): p.read_bytes() for p in stage.rglob("*") if p.is_file()}
@@ -606,11 +618,114 @@ class Names(unittest.TestCase):
             bnp.list_archive("x.bnp")
         self.assertIn("install 7-Zip", str(cm.exception))
 
+    def test_tar_is_never_tried_after_7zip_or_for_a_rar(self):
+        """Windows' tar.exe (libarchive) only reads on a PC without 7-Zip: never after 7-Zip failed or refused an
+        archive (a password says so at once), never for a .rar, never for a packed download."""
+        both = [("7z", "7z.exe"), ("tar", "tar.exe")]
+        with tempfile.TemporaryDirectory() as d:
+            rar = os.path.join(d, "x.rar")
+            with open(rar, "wb") as f:
+                f.write(bnp.RAR_MAGIC + bytes(24))
+            for path, err in ((rar, bnp.BnpError("7-Zip can't read x.rar")), ("x.bnp", bnp.BnpError("7-Zip can't")),
+                              ("x.bnp", bnp.Refused("x.bnp is password-protected"))):
+                with self.subTest(path=os.path.basename(path), err=str(err)), \
+                        mock.patch.object(bnp, "archive_tools", return_value=both), \
+                        mock.patch.object(bnp, "_list_7z", side_effect=err), \
+                        mock.patch.object(bnp, "_list_tar", return_value=[("info.json", 2, "file", False)]) as tar, \
+                        self.assertRaises(bnp.BnpError) as cm:
+                    bnp.list_archive(path)
+                tar.assert_not_called()
+                self.assertEqual(str(cm.exception), str(err))
+            # (no 7-Zip: a .rar and a packed download are refused, a .bnp is read with tar.exe)
+            for path, seven_only in ((rar, False), ("x.7z", True)):
+                with self.subTest(path=path, seven_only=seven_only), \
+                        mock.patch.object(bnp, "archive_tools", return_value=[("tar", "tar.exe")]), \
+                        mock.patch.object(bnp, "_list_tar") as tar, self.assertRaises(bnp.BnpError) as cm:
+                    bnp.list_archive(path, seven_only)
+                tar.assert_not_called()
+                self.assertIn("7-Zip", str(cm.exception))
+            with mock.patch.object(bnp, "archive_tools", return_value=[("tar", "tar.exe")]), \
+                    mock.patch.object(bnp, "_list_tar", return_value=[("info.json", 2, "file", False)]):
+                self.assertEqual(bnp.list_archive("x.bnp")[1], "tar")
+
+    def test_a_password_from_7zip_is_refused_at_once(self):
+        out = slt({"Path": "info.json", "Size": "2", "Attributes": "A", "Encrypted": "+"})
+        with mock.patch.object(bnp, "_run", return_value=done(out)), self.assertRaises(bnp.Refused) as cm:
+            bnp._list_7z("7z.exe", "x.bnp")
+        self.assertIn("password-protected", str(cm.exception))
+
+    def test_a_file_listed_with_no_size_is_refused(self):
+        """A RAR5 entry marked "size unknown" (7-Zip prints a blank Size), or a tar.exe line that doesn't read: every
+        size check counts on the listing, so such a file is refused, not counted as 0 bytes."""
+        for size in ("", None, "?"):
+            block = {"Path": "big.bin", "Attributes": "A", "Encrypted": "-"}
+            if size is not None:
+                block["Size"] = size
+            with self.subTest(size=size), mock.patch.object(bnp, "archive_tools", return_value=[("7z", "7z.exe")]), \
+                    mock.patch.object(bnp, "_run", return_value=done(slt(block))), \
+                    self.assertRaises(bnp.BnpError) as cm:
+                bnp.list_archive("x.bnp")
+            self.assertIn("lists no size for big.bin", str(cm.exception))
+        dirs = slt({"Path": "sub", "Size": "", "Attributes": "D", "Encrypted": "-"},
+                   {"Path": "sub\\a.txt", "Size": "3", "Attributes": "A", "Encrypted": "-"})
+        with mock.patch.object(bnp, "archive_tools", return_value=[("7z", "7z.exe")]), \
+                mock.patch.object(bnp, "_run", return_value=done(dirs)):
+            self.assertEqual([m.size for m in bnp.list_archive("x.bnp")[0]], [0, 3])   # (a folder needs none)
+        names, long = b"./a.txt\r\n", b"-rw-r--r--  0 0 0 ?? Nov 07 12:00 ./a.txt\r\n"
+        with mock.patch.object(bnp, "archive_tools", return_value=[("tar", "tar.exe")]), \
+                mock.patch.object(bnp, "_run", side_effect=[done(names), done(long)]), \
+                self.assertRaises(bnp.BnpError) as cm:
+            bnp.list_archive("x.bnp")
+        self.assertIn("lists no size for a.txt", str(cm.exception))
+
+    def test_a_copy_link_is_a_link(self):
+        """RAR5 file copies: 7-Zip names them with a "Copy Link" property and fills them from another entry."""
+        out = slt({"Path": "info.json", "Size": "2", "Attributes": "A", "Encrypted": "-"},
+                  {"Path": "copy.txt", "Size": "2", "Attributes": "A", "Encrypted": "-", "Copy Link": "info.json"})
+        with mock.patch.object(bnp, "archive_tools", return_value=[("7z", "7z.exe")]), \
+                mock.patch.object(bnp, "_run", return_value=done(out)), self.assertRaises(bnp.BnpError) as cm:
+            bnp.list_archive("x.bnp")
+        self.assertIn("holds a link (copy.txt)", str(cm.exception))
+        plain = slt({"Path": "a.txt", "Size": "2", "Attributes": "A", "Encrypted": "-", "Copy Link": ""})
+        with mock.patch.object(bnp, "archive_tools", return_value=[("7z", "7z.exe")]), \
+                mock.patch.object(bnp, "_run", return_value=done(plain)):
+            self.assertEqual(len(bnp.list_archive("x.bnp")[0]), 1)   # (an empty property is no link)
+
+    def test_an_extractor_filling_the_drive_is_stopped(self):
+        """While extracting, the tool is stopped as soon as the drive has less free space than the room kept (an
+        archive writing more than it lists)."""
+        low = type("U", (), {"total": 1 << 40, "used": 0, "free": 1 << 20})()
+        start = time.monotonic()
+        with mock.patch.object(bnp.shutil, "disk_usage", return_value=low), self.assertRaises(bnp.BnpError) as cm:
+            bnp._run([sys.executable, "-c", "import time; time.sleep(30)"], watch=(tempfile.gettempdir(), 1 << 30))
+        self.assertIn("was stopped", str(cm.exception))
+        self.assertLess(time.monotonic() - start, 10)
+        roomy(self)
+        r = bnp._run([sys.executable, "-c", "print('ok')"], watch=(tempfile.gettempdir(), 1 << 20))
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, b"ok"))
+
+    def test_room_checks_before_extracting(self):
+        gb = 1 << 30
+        roomy(self)
+        with tempfile.TemporaryDirectory() as d:
+            for sizes, packed, why in (([25 * gb], None, "more than the whole game"), ([5 * gb], None, "a file of 5"),
+                                       ([2 * gb], 1 << 20, "made to fill the disk"), ([2 * gb], gb, None)):
+                with self.subTest(sizes=sizes, packed=packed):
+                    if why:
+                        with self.assertRaises(bnp.BnpError) as cm:
+                            bnp.check_room("x.zip", [("f", s) for s in sizes], packed, os.path.join(d, "out"))
+                        self.assertIn(why, str(cm.exception))
+                    else:
+                        folder, spare = bnp.check_room("x.zip", [("f", s) for s in sizes], packed,
+                                                       os.path.join(d, "out"))
+                        self.assertEqual((folder, spare), (d, (1 << 40) // 100))
+
     def test_extract_refuses_files_it_did_not_list(self):
+        roomy(self)
         with tempfile.TemporaryDirectory() as d:
             dest = os.path.join(d, "out")
 
-            def fake_run(argv, timeout=0):
+            def fake_run(argv, timeout=0, watch=None):
                 write(Path(dest), {"info.json": "{}", "surprise.txt": "x"})
                 return mock.Mock(returncode=0, stdout=b"", stderr=b"")
             with mock.patch.object(bnp, "archive_tools", return_value=[("7z", "7z.exe")]), \
@@ -1566,9 +1681,12 @@ class Modman(Base):
         marker = json.loads((overlay / rm.MARKER).read_text(encoding="utf-8"))
         self.assertEqual(marker["rstb"]["merged_from"], ["Made Up Mod", "Second Mod"])
         self.assertFalse(any(c["path"] == rm.RSTB for c in marker["conflicts"]))
-        # the second mod replaces packs of the first: said, not hidden
-        self.assertTrue(any("Second Mod replaces" in a and "Pack/Title.pack" in a for a in launch["attention"]),
-                        launch["attention"])
+        # the packs both change are merged (each mod's own files, then their logs), not replaced: said in the notes
+        self.assertFalse(any("Second Mod replaces" in a for a in launch["attention"]), launch["attention"])
+        self.assertTrue(any(n.startswith("Pack/Title.pack: merged from Made Up Mod, Second Mod") for n in launch["notes"]),
+                        launch["notes"])
+        self.assertEqual(marker["files"]["Pack/Title.pack"]["mod"], mm.MERGED_OWNER)
+        self.assertFalse(any("Pack/Title.pack (" in a for a in launch["attention"]), launch["attention"])   # (no clash)
 
     def test_a_package_whose_sizes_change_nothing_ships_no_table(self):
         self.add("small", {"info.json": json.dumps({"name": "Small", "version": "1"}), f"{R}/Model/Kept.txt": "x",
@@ -1756,13 +1874,56 @@ class Downloads(DownloadFiles, Base):
         dl = self.unpack(self.zipped("dl.zip", {"Mod.zip": zip_bytes({"romfs/Model/A.txt": "a"})}))
         found, _ = dl.pick()
         self.assertEqual((found.label, Path(found.path).name, dl.levels), ("Mod", "Mod.zip", 1))
+        self.assertEqual(dl.files, 2)   # (its files count in the download's budget: modman opens it next)
+
+    def test_packages_kept_as_they_are_get_every_check(self):
+        """A .bnp or a mod .zip in a download isn't opened here but by modman next: it is listed and checked all the
+        same (budget, disk filler, size of one file), and none is kept from the last level (it would be one more)."""
+        inner = zip_bytes({"romfs/Model/A.txt": "a", "romfs/Model/B.txt": "b"})
+        with mock.patch.object(bnp, "MAX_MEMBERS", 2), self.assertRaises(bnp.BnpError) as cm:
+            self.unpack(self.zipped("dl.zip", {"Mod.zip": inner}))
+        self.assertIn("files with the archives in it", str(cm.exception))
+        real = bnp.list_archive
+
+        def bomb(p, seven_only=False):
+            members, kind = real(p, seven_only)
+            if os.path.basename(p) == "Mod.zip":
+                members = [bnp.Member(m.name, 0 if m.is_dir else 3 << 30, m.is_dir, m.raw) for m in members]
+            return members, kind
+        with mock.patch.object(bnp, "list_archive", side_effect=bomb), self.assertRaises(bnp.BnpError) as cm:
+            self.unpack(self.zipped("dl2.zip", {"Mod.zip": inner}))
+        self.assertIn("made to fill the disk", str(cm.exception))
+        pkg = self.seven("pkg.bnp", package()).read_bytes()
+        deep = self.zipped("deep.zip", {"a.zip": zip_bytes({"b.zip": zip_bytes({"Pkg.bnp": pkg})})})
+        with self.assertRaises(bnp.BnpError) as cm:
+            self.unpack(deep)
+        self.assertIn("packed more than 3 deep", str(cm.exception))
+        dl = self.unpack(self.zipped("ok.zip", {"a.zip": zip_bytes({"Pkg.bnp": pkg})}))
+        self.assertEqual((dl.pick()[0].what, dl.levels), ("BCML package (.bnp)", 2))
+
+    def test_every_level_is_opened_with_7zip_only(self):
+        tools = bnp.archive_tools()
+        if not any(k == "7z" for k, _ in tools):
+            self.skipTest("needs 7-Zip")
+        seen = []
+        real = bnp._run
+
+        def spy(argv, *a, **kw):
+            seen.append(os.path.basename(argv[0]).lower())
+            return real(argv, *a, **kw)
+        path = self.zipped("dl.zip", {"a.zip": zip_bytes({"c.7z": self.seven("c.7z", {"romfs/Model/A.txt": "a"})
+                                                          .read_bytes()})})
+        with mock.patch.object(bnp, "_run", side_effect=spy):
+            self.unpack(path)
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {"7z.exe"})
 
     def test_every_file_must_have_its_listed_size(self):
         path = self.seven("m.7z", {"romfs/Model/A.txt": "abc"})
         real = bnp.list_archive
 
-        def lying(p):
-            members, kind = real(p)
+        def lying(p, seven_only=False):
+            members, kind = real(p, seven_only)
             return [bnp.Member(m.name, 0 if m.is_dir else m.size + 1, m.is_dir, m.raw) for m in members], kind
         with mock.patch.object(bnp, "list_archive", side_effect=lying), self.assertRaises(bnp.BnpError) as cm:
             self.unpack(path)
@@ -1905,8 +2066,10 @@ class DownloadsInModman(DownloadFiles, Base):
         self.assertEqual(stored["Other.txt"][0], b"game other")
         self.assertEqual((mod / "Pack" / "Title.pack").read_bytes(), before)   # (the player's own copy: untouched)
         text = "\n".join(notes)
-        self.assertIn("Pack/Title.pack looks like a whole copy from another game version: the 1 file(s) it lacks "
-                      "(Other.txt) come from your game. It changes 1 file(s) (Actor/Pack/Inner.sbactorpack)", text)
+        # (what it lacks inside the packs both hold counts too: the game's Inner.sbactorpack has two more files)
+        self.assertIn("Pack/Title.pack looks like a whole copy from another game version: the 3 file(s) it lacks "
+                      "(Actor/ASList/Player.baslist, B.txt, Other.txt) come from your game. It changes 1 file(s) "
+                      "(Actor/Pack/Inner.sbactorpack)", text)
 
     def test_map_files_and_the_mods_own_files_stay_out_of_a_filled_pack(self):
         # RotP's TitleBG.pack has no Map/ files (its maps are its DLC files): filling the game's in would hide them
@@ -1927,6 +2090,62 @@ class DownloadsInModman(DownloadFiles, Base):
         before = (only / "Pack" / "TitleBG.pack").read_bytes()
         self.assertEqual(bnp.fill_old_packs(str(only), str(game)), [])
         self.assertEqual((only / "Pack" / "TitleBG.pack").read_bytes(), before)
+
+    def test_a_text_pack_lacking_files_inside_its_inner_pack_is_filled(self):
+        """A Wii U Bootup_USen.pack from 1.5.0 (linkle-dialogue-fix): its top holds the same one file as the game's,
+        and the texts pack inside it lacks the Switch's newer texts (ZELDA NOTES...): they come from the game."""
+        game = write(self.tmp / "game-romfs", {"Pack/Bootup_USen.pack": sarc({
+            "Message/Msg_USen.product.ssarc": yaz0(sarc({"A.msbt": "game a", "New.msbt": "game new"}))})})
+        mod = write(self.tmp / "fix", {"Pack/Bootup_USen.pack": sarc({
+            "Message/Msg_USen.product.ssarc": yaz0(sarc({"A.msbt": "mod a"}))})})
+        notes = bnp.fill_old_packs(str(mod), str(game))
+        inner = bnp.Blob((mod / "Pack" / "Bootup_USen.pack").read_bytes()).child(
+            "Message/Msg_USen.product.ssarc").open()
+        self.assertEqual(sorted(inner), ["A.msbt", "New.msbt"])
+        self.assertEqual((inner["A.msbt"][0], inner["New.msbt"][0]), (b"mod a", b"game new"))
+        self.assertIn("the 1 file(s) it lacks (New.msbt) come from your game", notes[0])
+        # (the same bytes as the game's inner pack: nothing to fill, nothing said)
+        same = write(self.tmp / "same", {"Pack/Bootup_USen.pack": (game / "Pack" / "Bootup_USen.pack").read_bytes()})
+        self.assertEqual(bnp.fill_old_packs(str(same), str(game)), [])
+
+    def test_a_converted_wiiu_pack_is_filled_from_the_game(self):
+        mod = write(self.tmp / "downloads" / "Old Wii U", {"content/Pack/Title.pack": wc.sarc_build([
+            ("Actor/Pack/Inner.sbactorpack", wc.yaz0_compress(wc.sarc_build([("A.txt", b"mod a")], wc.BE)))], wc.BE)})
+        (entry, scan, notes), _ = quiet(mm.add_mod, self.lib, str(mod))
+        stored = bnp.Blob((self.libdir / "mods" / entry["id"] / "romfs" / "Pack" / "Title.pack").read_bytes())
+        self.assertIn("Other.txt", stored.open())
+        self.assertTrue(any("Pack/Title.pack looks like a whole copy from another game version" in n for n in notes),
+                        notes)
+
+    def test_a_zip_is_extracted_with_the_same_room_checks(self):
+        """modman's own .zip extraction (a plain mod, or one a download held): room kept free on the drive, and no
+        disk filler, as for a .bnp; nothing is written when refused."""
+        path = self.zipped("plain.zip", {"romfs/Model/A.txt": "a"})
+        dest = self.tmp / "out-zip"
+        tight = type("U", (), {"total": 237 << 30, "free": 2 << 30})()
+        with mock.patch("shutil.disk_usage", return_value=tight), self.assertRaises(mm.ModmanError) as cm:
+            mm.extract_zip(str(path), str(dest))
+        self.assertIn("kept free", str(cm.exception))
+        self.assertFalse(dest.exists())
+        with mock.patch.object(bnp, "BOMB_MIN", 0), mock.patch.object(bnp, "BOMB_RATIO", 0), \
+                self.assertRaises(mm.ModmanError) as cm:
+            mm.extract_zip(str(path), str(dest))
+        self.assertIn("made to fill the disk", str(cm.exception))
+        self.assertEqual(mm.extract_zip(str(path), str(dest))[0], 1)
+
+    def test_two_adds_at_once_never_share_a_work_folder(self):
+        """The launcher and the command line adding two downloads whose names start alike: each its own folder."""
+        works = []
+
+        def fake(src, work, say=print):
+            works.append(work)
+            raise bnp.BnpError("stop here")
+        with mock.patch.object(bnp, "unpack_download", side_effect=fake):
+            for name in ("the-legend-of-linkle-dialogue-mod-ver118.7z", "the-legend-of-linkle-dialogue-fix.7z"):
+                with self.assertRaises(mm.ModmanError):
+                    mm.add_download(self.lib, str(self.tmp / name))
+        self.assertEqual(len(set(works)), 2)
+        self.assertTrue(all(os.path.basename(w).startswith(mm.ADDING) and w.endswith(".unpack") for w in works))
 
     def test_bare_wiiu_folders_added_directly_are_refused(self):
         mod = write(self.tmp / "downloads" / "WiiU Bare", {"Pack/Title.pack": wc.sarc_build([("A.txt", b"a")], wc.BE)})

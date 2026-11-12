@@ -49,7 +49,12 @@ python tools/wiiu_convert.py convert "D:\mods\Armor Mod" --out "D:\mods\Armor Mo
 A mod is a folder or a `.zip` with `content/` (game files) and/or `aoc/0010/` (DLC files), also inside one wrapper
 folder or a Cemu graphic pack (`<pack>/rules.txt` + `<pack>/content/`). You can also pass the `content` folder
 itself. Files outside those folders (readme, `rules.txt`, preview pictures) are left out. A download with several
-options (two packs with their own `content/`) is refused: convert the one you want. Switch mods, UKMM packages,
+options (two packs with their own `content/`) is refused: convert the one you want. One mod for several regions of
+the game (the same folders under BotW title ids that differ only in region, `sdcafiine/00050000101C9400` and
+`sdcafiine/00050000101C9500`, as the Linkle dialogue fix ships) is one mod: the `101C9400` copy is converted (else
+`101C9500`, else `101C9300`), the others are left out and named, saying whether their files are the same as the kept
+copy's (if not, convert that folder on its own to use it instead). A `.zip` member bigger than 1 GB (bigger than any
+game file) isn't read. Switch mods, UKMM packages,
 packed BCML packages (`info.json` with `logs/`) and Cemu graphic packs made for another game (no BotW title id in
 `rules.txt`) are refused too by this command (Switch mods need no conversion). `modman add` installs Wii U BCML
 packages (`.bnp`, [bnp](bnp.md#wii-u-packages)) and Wii U UKMM packages ([ukmm](ukmm.md)) itself: it puts the
@@ -93,6 +98,13 @@ them: where the mod uses them it may crash or look wrong.
 
 A pack holding only files that can't be converted (a layout archive, say) is kept whole. A pack with some of each
 is converted, and the files inside that couldn't be are listed (`pack//file inside`).
+
+A whole `Pack/*.pack` a Wii U mod ships always comes from another game version (1.5.0). `modman add` fills it from
+your game after converting (`bnp.fill_old_packs`, as for a Switch pack copied from an older version): the files it
+lacks, also inside the packs it holds, come from your game, and the add says how many. The Linkle dialogue fix's
+`Bootup_USen.pack` lacks 5 of the Switch's texts inside its `Msg_USen.product.ssarc` (ZELDA NOTES, the Daily Bonus,
+the Switch 2 Edition screens): they come back. The 141 labels the Switch added inside texts it does have are still
+missing (that needs a text merge).
 
 ## Proof that nothing is lost
 

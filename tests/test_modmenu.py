@@ -123,6 +123,24 @@ class MenuFile(Base):
         self.assertEqual(w[4], "Baume Uberall ? from Wii...")
         self.assertLessEqual(len(w[4]), 28)
         self.assertEqual(w[6], "Wii U mod: may look wrong.")
+
+    def test_a_secret_mod_is_hidden(self):
+        """[mod] secret (an easter egg, a hidden extra's part): hidden like the Mod menu mod, by its library entry or
+        its mod.toml, so the game never lists it and can't turn it on or off."""
+        for m in self.lib.mods:
+            if m["id"] == "better-sprint":
+                m["secret"] = True
+        self.lib.save()
+        (self.root / "mods" / "map-base" / "mod.toml").write_text(
+            '[mod]\nid = "map-base"\nname = "Map Base"\nversion = "1.0"\nsecret = true\n', encoding="utf-8")
+        rows = {r.id: r for r in modmenu.describe_mods(self.lib)}
+        self.assertTrue(rows["better-sprint"].hidden and rows["map-base"].hidden)
+        self.assertIsNone(rows["better-sprint"].position)
+        modmenu.sync(self.lib)
+        mods = {ln[1]: ln for ln in self.menu_lines() if ln[0] == "mod"}
+        self.assertEqual((mods["better-sprint"][3], mods["map-base"][3]), ("hidden", "hidden"))
+        self.assertNotIn("better-sprint", [i for i, _ in modmenu.listed(self.lib)] if hasattr(modmenu, "listed")
+                         else [r.id for r in modmenu.describe_mods(self.lib) if not r.hidden])
         for ln in lines:
             self.assertTrue(all(32 <= ord(c) < 127 for c in "".join(ln)), ln)
 

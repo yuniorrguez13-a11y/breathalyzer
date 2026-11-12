@@ -19,6 +19,10 @@
 # kind "recipe": built on the player's PC from their own game files when it is first turned on: folder = the recipe
 #   (shipped in app\ anyway), build = the tool commands that build it (tools\<tool> <args>), in order.
 # after_add: tool commands to run once the mod is in the library.
+# after_on, after_on_makes: tool commands that build a bonus of the mod (the mod after_on_makes names) from the
+#   player's game files, run when the mod is turned on while the library has no after_on_makes yet: the picker's Save
+#   with it ON, else the next Play (after Home or the game's Mods page turned it on). Players who never turn the mod on
+#   never pay for the bonus. Its id never shows in Details.
 
 [[mod]]
 id = "botw-mod-loader.modmenu"
@@ -93,15 +97,17 @@ title = "Ghost multiplayer"
 description = "See a friend as a second Link in your world (on your home network)."
 default = "off"
 why = "It uses the network, and it isn't tested on two PCs yet."
-tags = ["Experimental", "Uses the network", "Comes with a surprise, built from your game files (about 30 seconds)"]
+tags = ["Experimental", "Uses the network", "Comes with a surprise, built when you first turn it on (30 seconds)"]
 ready = false
 kind = "code"
 manifest = "native/examples/ghost/mod.toml"
 dll = "build/native/ghost-mods/ghost.dll"
-# The AK-47 (docs/ak47.md) comes with it: built from the player's files once the multiplayer mod is in the library,
-# as its own mod giruka.ak47 with part_of = this mod (so it is only used while this one is on). --optional: a build
-# that can't be made never fails the multiplayer mod's install.
-after_add = [["ak47_build.py", "build", "--optional"]]
+# A secret extra comes with it (docs/easter-eggs.md, the AK-47): built from the player's files the first time the multiplayer
+# mod is turned on, as two secret mods: giruka.ak47 (the item's data: always on once built, so a save that holds the
+# item always loads) and giruka.ak47-spot (where it lies: part_of = this mod, so only while this one is on).
+# --optional: a build that can't be made never stops the multiplayer mod; --quiet: its output names nothing.
+after_on = [["ak47_build.py", "build", "--optional", "--quiet"]]
+after_on_makes = "giruka.ak47"
 
 [[mod]]
 id = "botw-mod-loader.zelda-view"

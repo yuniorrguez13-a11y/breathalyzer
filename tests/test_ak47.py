@@ -14,6 +14,7 @@ import tomllib
 import unittest
 import zlib
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
@@ -21,6 +22,7 @@ import aamp  # noqa: E402
 import ak47_build as ak  # noqa: E402
 import bcml_data as bd  # noqa: E402
 import bcml_maps as bm  # noqa: E402
+import bcml_texts as bt  # noqa: E402
 import bnp  # noqa: E402
 import menu_bg  # noqa: E402
 import modman  # noqa: E402
@@ -280,6 +282,7 @@ def make_recipe(root: str, **model) -> str:
     with open(os.path.join(folder, "rifle.glb"), "wb") as f:
         f.write(rifle())
     shutil.copy(REPO / "assets" / "ak47" / "mod.toml", os.path.join(folder, "mod.toml"))
+    shutil.copy(REPO / "assets" / "ak47" / ak.SPOT_TOML, os.path.join(folder, ak.SPOT_TOML))
     doc = {"format": 1, "actor": ACTOR, "donor": DONOR,
            "model": {"file": "rifle.glb", "forward": "-z", "up": "+y", "flip": False, "length": 1.0, **model},
            "drop_tags": ["AmiiboTreasure", "ZukanWeapon"],
@@ -292,6 +295,9 @@ def make_recipe(root: str, **model) -> str:
 
 # --------------------------------------------------------------------------------------------- tests
 
+REAL_LOAD = ak.load_recipe
+
+
 @contextlib.contextmanager
 def quiet():
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -301,27 +307,43 @@ def quiet():
 class RecipeTests(unittest.TestCase):
     def test_the_real_recipe(self):
         r = ak.load_recipe()
-        self.assertEqual(r.manifest["id"], "giruka.ak47")
-        self.assertEqual(r.manifest["part_of"], ak.MP_ID)
+        self.assertEqual((r.manifest["id"], r.spot_manifest["id"]), ("giruka.ak47", "giruka.ak47-spot"))
+        self.assertNotIn("part_of", r.manifest)                  # (the item stays on: saves that hold it load)
+        self.assertEqual(r.spot_manifest["part_of"], ak.MP_ID)   # (where it lies: only with multiplayer on)
         self.assertEqual(r.actor, "Weapon_Lsword_AK47")
         self.assertEqual(ak._unit_of(r.spot["x"], r.spot["z"]) + "_Dynamic", r.spot["unit"])
         ak.model_check(r)   # (the shipped .glb is the one the recipe names)
-        man, errs = modman.parse_manifest((REPO / "assets" / "ak47" / "mod.toml").read_text(encoding="utf-8"))
-        self.assertEqual(errs, [])
-        self.assertEqual(man.part_of, ak.MP_ID)
-        self.assertFalse(man.notes)
-        self.assertLessEqual(len(man.description), 80)
+        for name, part_of in (("mod.toml", None), (ak.SPOT_TOML, ak.MP_ID)):
+            man, errs = modman.parse_manifest((REPO / "assets" / "ak47" / name).read_text(encoding="utf-8"))
+            self.assertEqual(errs, [])
+            self.assertEqual((man.part_of, man.secret), (part_of, True))
+            self.assertFalse(man.notes)
+            self.assertLessEqual(len(man.description), 80)
+            # (neutral: what a library entry says never gives the extra away)
+            text = (man.name + " " + man.description).lower()
+            self.assertFalse([w for w in ("ak-47", "ak47", "rifle", "gun", "weapon") if w in text], text)
 
     def test_unit_of(self):
         self.assertEqual(ak._unit_of(-1364, 1755.5), "D-6")
         self.assertEqual(ak._unit_of(-5000, -4000), "A-1")
         self.assertEqual(ak._unit_of(4999, 3999), "J-8")
 
-    def test_bundled_entry_builds_it_after_the_multiplayer_mod(self):
+    def test_bundled_entry_builds_it_when_the_multiplayer_mod_is_turned_on(self):
         data = tomllib.loads((REPO / "tools" / "packaging" / "bundled-mods.toml").read_text(encoding="utf-8"))
         ghost = next(m for m in data["mod"] if m["id"] == ak.MP_ID)
-        self.assertIn(["ak47_build.py", "build", "--optional"], ghost["after_add"])
+        self.assertNotIn("after_add", ghost)   # (never built for a player who never turns multiplayer on)
+        self.assertEqual(ghost["after_on"], [["ak47_build.py", "build", "--optional", "--quiet"]])
+        self.assertEqual(ghost["after_on_makes"], ak.load_recipe().manifest["id"])
         self.assertTrue((REPO / "tools" / "ak47_build.py").is_file())
+
+    def test_the_shipped_model_has_our_own_wood(self):
+        glb = ak.Glb((REPO / "assets" / "ak47" / "AK-47.glb").read_bytes())
+        names = [im.get("name") for im in glb.doc["images"]]
+        self.assertEqual(names[0], "image (8)")                  # (the DoD photo: public domain)
+        self.assertTrue(names[1].startswith("wood (procedural"), names)
+        credits = (REPO / "assets" / "ak47" / "MODEL-CREDITS.txt").read_text(encoding="utf-8")
+        self.assertIn(ak.load_recipe().model["sha256"], credits)
+        self.assertIn("DM-ST-89-01131", credits)
 
     def test_library_after_the_command(self):
         # (the launcher puts --library last)
@@ -404,7 +426,9 @@ class BuildTests(unittest.TestCase):
         cls.game = ak.Game(cls.install, DONOR)
         cls.out = os.path.join(cls.tmp, "out")
         cls.built = ak.build_package(cls.game, cls.recipe, cls.out)
-        cls.rom = os.path.join(cls.out, ak.BASE_TID, "romfs")
+        cls.item = os.path.join(cls.out, cls.recipe.manifest["id"])
+        cls.spot = os.path.join(cls.out, cls.recipe.spot_manifest["id"])
+        cls.rom = os.path.join(cls.item, ak.BASE_TID, "romfs")
 
     @classmethod
     def tearDownClass(cls):
@@ -416,8 +440,22 @@ class BuildTests(unittest.TestCase):
         return wc.yaz0_decompress(data)[0] if data[:4] == b"Yaz0" else data
 
     def log(self, name: str) -> str:
-        with open(os.path.join(self.out, "logs", name), encoding="utf-8") as f:
+        """A log of the item mod; map.yml: the spot mod's (it has nothing else)."""
+        with open(os.path.join(self.spot if name == "map.yml" else self.item, "logs", name), encoding="utf-8") as f:
             return f.read()
+
+    def test_two_mods(self):
+        self.assertEqual((self.built.folder, self.built.spot_folder), (self.item, self.spot))
+        self.assertEqual(sorted(os.listdir(os.path.join(self.item, "logs"))),
+                         ["actorinfo.yml", "gamedata.yml", "rstb.json", "savedata.yml", "texts.json"])
+        self.assertEqual(sorted(os.listdir(self.spot)), [ak.OUT_FILE, "info.json", "logs", "mod.toml"])
+        self.assertEqual(os.listdir(os.path.join(self.spot, "logs")), ["map.yml"])
+        item, _ = modman.parse_manifest(Path(self.item, "mod.toml").read_text(encoding="utf-8"))
+        spot, _ = modman.parse_manifest(Path(self.spot, "mod.toml").read_text(encoding="utf-8"))
+        self.assertEqual((item.part_of, spot.part_of, item.secret, spot.secret), (None, ak.MP_ID, True, True))
+        # (where it lies: only in the spot mod's BUILT.md, never in the item's)
+        self.assertNotIn("1364", Path(self.item, ak.OUT_FILE).read_text(encoding="utf-8"))
+        self.assertIn("x=-1364.00", Path(self.spot, ak.OUT_FILE).read_text(encoding="utf-8"))
 
     def test_model(self):
         res = read_model(self.read(f"Model/{ACTOR}.sbfres"))
@@ -546,6 +584,25 @@ class BuildTests(unittest.TestCase):
         # (the made-up game has no English texts: that one is expected)
         self.assertEqual([p for p in problems if "English" not in p], [])
 
+    def test_check_looks_at_the_static_unit_too(self):
+        """A tree in D-6_Static (TitleBG.pack) 2 m from the spot, a rock 3.5 m away: the tree is named, with the
+        same radius as the docs (3 m)."""
+        with tempfile.TemporaryDirectory(prefix="ak47-static-") as d:
+            install = make_game(d)
+            tbg = os.path.join(install, "extracted", "romfs", "Pack", "TitleBG.pack")
+            objs = [{"HashId": bm.U32(5), "SRTHash": 0, "Translate": [SPOT["x"] + 2.0, PEAK, SPOT["z"]],
+                     "UnitConfigName": "TreeNear"},
+                    {"HashId": bm.U32(6), "SRTHash": 0, "Translate": [SPOT["x"], PEAK, SPOT["z"] + 3.5],
+                     "UnitConfigName": "RockFar"}]
+            with open(tbg, "wb") as f:
+                f.write(bnp.sarc_build([("Map/MainField/D-6/D-6_Static.smubin", wc.yaz0_compress(bm.byml_dump(
+                    {"Objs": objs, "Rails": []})), 4)]))
+            problems = ak.check(os.path.join(d, "nolib"), install=install, recipe_dir=self.recipe.folder)
+        near = [p for p in problems if "stands within" in p]
+        self.assertEqual(near, [f"TreeNear (D-6_Static) stands within {ak.NEAR_RADIUS:g} m of the spot"])
+        self.assertEqual(ak.NEAR_RADIUS, 3.0)
+        self.assertIn("within 3 m", (REPO / "docs" / "easter-eggs.md").read_text(encoding="utf-8"))
+
     def test_optional_build_never_fails(self):
         with tempfile.TemporaryDirectory() as d, quiet():
             code = ak.main(["build", "--optional", "--no-add", "--out", os.path.join(d, "o"), "--game", d])
@@ -553,6 +610,226 @@ class BuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, quiet():
             code = ak.main(["build", "--no-add", "--out", os.path.join(d, "o"), "--game", d])
         self.assertEqual(code, 2)
+
+    def test_optional_build_survives_a_damaged_donor_model(self):
+        """The claymore's model damaged (a Yaz0 header over garbage): not an AkError (the decompressor's or the model
+        reader's own error). --optional still ends with 0 and a short traceback; without it the error is raised."""
+        with tempfile.TemporaryDirectory(prefix="ak47-bad-") as d:
+            install = make_game(d)
+            model = os.path.join(install, "extracted", "romfs", "Model", f"{DONOR}.sbfres")
+            with open(model, "wb") as f:
+                f.write(b"Yaz0" + struct.pack(">I", 1 << 20) + bytes(8) + bytes([0xFF]) + bytes(40))
+            args = ["build", "--no-add", "--game", install, "--library", os.path.join(d, "nolib")]
+            with mock.patch.object(ak, "load_recipe", lambda folder=None: REAL_LOAD(self.recipe.folder)):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = ak.main([*args, "--optional", "--quiet", "--out", os.path.join(d, "o1")])
+                self.assertEqual(code, 0)
+                self.assertIn("Traceback", err.getvalue())
+                self.assertIn("The extra wasn't built (it is optional)", out.getvalue())
+                with quiet(), self.assertRaises(Exception) as cm:
+                    ak.main([*args, "--out", os.path.join(d, "o2")])
+                self.assertNotIsInstance(cm.exception, ak.AkError)
+
+    def test_quiet_and_verbose(self):
+        """--quiet names nothing and never says where it lies; only --verbose says where."""
+        for flag, where in (("--quiet", False), (None, False), ("--verbose", True)):
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory(prefix="ak47-say-") as d, \
+                    mock.patch.object(ak, "load_recipe", lambda folder=None: REAL_LOAD(self.recipe.folder)):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = ak.main(["build", "--no-add", "--out", os.path.join(d, "o"), "--game", self.install,
+                                    "--library", os.path.join(d, "nolib")] + ([flag] if flag else []))
+                text = out.getvalue() + err.getvalue()
+                self.assertEqual(code, 0, text)
+                self.assertEqual("x=-1364" in text, where, text)
+                if flag == "--quiet":
+                    self.assertTrue(text.startswith("Done: the extra is built"), text)
+                    self.assertNotIn(ACTOR.lower(), text.lower())
+                    self.assertNotIn("ak-47", text.lower())
+
+
+ROOMY = type("Usage", (), {"total": 1 << 40, "used": 0, "free": 1 << 40})()
+
+
+def english_texts() -> bytes:
+    """A made-up Pack/Bootup_USen.pack: the weapon texts and the NPC texts, one label each."""
+    def msbt(labels: dict) -> bytes:
+        return bt.msbt_build(bt.Msbt(len(labels), list(labels), 0, [],
+                                     [v.encode("utf-16-le") + b"\0\0" for v in labels.values()]))
+    msg = bnp.sarc_build([("ActorType/NPC.msbt", msbt({"Npc_A_Name": "A"}), 8),
+                          ("ActorType/WeaponLargeSword.msbt", msbt({f"{DONOR}_Name": "Claymore"}), 8)])
+    return bnp.sarc_build([("Message/Msg_USen.product.ssarc", wc.yaz0_compress(msg), 8)])
+
+
+class LibraryTests(unittest.TestCase):
+    """The AK-47 built into a scratch library (made-up game, made-up multiplayer and castle mods): its two secret
+    mods, the HashId kept clear of other mods' map changes, and deploy merging the files it shares with the castle."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ak47-lib-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.install = make_game(self.tmp)
+        for rel, data in (("savagewind.exe", b"MZ made-up exe"), ("extracted/swgame.dll", b"made-up game code"),
+                          ("extracted/swgame.dll.id", b"test-id\n"), ("extracted/romfs/System/Version.txt", b"x"),
+                          ("extracted/romfs/Pack/Bootup_USen.pack", english_texts())):
+            path = os.path.join(self.install, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(data)
+        self.recipe = ak.load_recipe(make_recipe(self.tmp))
+        self.libdir = os.path.join(self.tmp, "lib")
+        modman.Library(self.libdir, self.install).save()
+        for patch in (mock.patch.object(modman, "game_running", return_value=False),
+                      mock.patch.object(modman, "MODHOST_DIR", os.path.join(self.tmp, "no-modhost")),
+                      mock.patch("shutil.disk_usage", return_value=ROOMY)):   # (the test PC's drive may be full)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    @property
+    def lib(self):
+        return modman.Library.load(self.libdir)
+
+    def add(self, name: str, files: dict):
+        src = os.path.join(self.tmp, "src", name)
+        for rel, data in files.items():
+            path = os.path.join(src, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(data.encode() if isinstance(data, str) else data)
+        with quiet():
+            return modman.add_mod(self.lib, src)[0]
+
+    def add_ghost(self):
+        return self.add("ghost", {"mod.toml": f'[mod]\nid = "{ak.MP_ID}"\nname = "Ghost multiplayer"\n'
+                                              'version = "0.1.0"\n[data]\nromfs = "romfs"\n',
+                                  "romfs/System/GhostTest.txt": "made up"})
+
+    def add_castle(self):
+        """A made-up castle date: a BCML package that changes the actor info and the flags too (SwZelda)."""
+        entry = {"name": "SwZelda", "profile": "NPC", "bfres": "SwZelda", "mainModel": "SwZelda", "sortKey": 900}
+        flag_ = ak.flag_entry("SwCastle_Door", None)
+        return self.add("castle", {
+            "info.json": json.dumps({"name": "Castle date", "version": "0.1.0", "desc": "Made up.",
+                                     "platform": "switch", "options": {}}),
+            "mod.toml": '[mod]\nid = "giruka.castle-date"\nname = "Castle date"\nversion = "0.1.0"\n',
+            "logs/actorinfo.yml": bd.to_text({str(zlib.crc32(b"SwZelda")): entry}),
+            "logs/gamedata.yml": bd.to_text({"bool_data": {"add": {"SwCastle_Door": flag_}, "del": []}}),
+            "logs/savedata.yml": bd.to_text({"add": [{"DataName": "SwCastle_Door",
+                                                      "HashValue": flag_["HashValue"]}], "del": []}),
+            "logs/texts.json": json.dumps({"USen": {"ActorType/NPC.msyt": {
+                "SwZelda_Name": {"contents": [{"text": "Zelda"}]}}}})})
+
+    def build(self):
+        with quiet():
+            return ak.build(self.libdir, install=self.install, recipe_dir=self.recipe.folder)
+
+    def test_two_secret_mods_the_item_stays_on(self):
+        self.add_ghost()
+        r = self.build()
+        mods = {m["id"]: m for m in self.lib.mods}
+        item, spot = mods["giruka.ak47"], mods["giruka.ak47-spot"]
+        self.assertEqual((item.get("part_of"), spot.get("part_of")), (None, ak.MP_ID))
+        self.assertEqual((item.get("secret"), spot.get("secret")), (True, True))
+        self.assertEqual((r["entry"]["id"], r["spot_entry"]["id"]), ("giruka.ak47", "giruka.ak47-spot"))
+        lib = self.lib
+        for m in lib.mods:
+            if m["id"] == ak.MP_ID:
+                m["enabled"] = False
+        # multiplayer off: the item stays (a save that holds it loads), where it lies goes
+        self.assertEqual([m["id"] for m in lib.enabled()], ["giruka.ak47"])
+        for m in lib.mods:
+            m["enabled"] = True
+        self.assertEqual([m["id"] for m in lib.enabled()], [ak.MP_ID, "giruka.ak47", "giruka.ak47-spot"])
+        # built again: both replaced, their places and on/off kept
+        lib.mods[1]["enabled"] = False
+        lib.save()
+        self.build()
+        self.assertEqual([(m["id"], m["enabled"]) for m in self.lib.mods],
+                         [(ak.MP_ID, True), ("giruka.ak47", False), ("giruka.ak47-spot", True)])
+
+    def test_the_hash_id_keeps_clear_of_other_mods(self):
+        first = zlib.crc32(b"giruka.ak47/hilltop")   # (what a build picks when nothing else uses it)
+        obj = {"HashId": bm.U32(first), "SRTHash": 0, "Translate": [0.0, 0.0, 0.0], "UnitConfigName": "Rock"}
+        self.add("other", {"info.json": json.dumps({"name": "Other map mod", "version": "1", "platform": "switch"}),
+                           "logs/map.yml": bd.to_text({"D-6_Dynamic": {"Objs": {"add": [obj]}}})})
+        r = self.build()
+        self.assertNotEqual(r["built"].hash_id, first)
+        self.assertEqual([p for p in ak.check(self.libdir, install=self.install, recipe_dir=self.recipe.folder)
+                          if "HashId" in p], [])
+        # a mod added later that uses the AK-47's HashId: check names it
+        obj = dict(obj, HashId=bm.U32(r["built"].hash_id))
+        self.add("later", {"info.json": json.dumps({"name": "Later map mod", "version": "1", "platform": "switch"}),
+                           "logs/map.yml": bd.to_text({"D-6_Dynamic": {"Objs": {"add": [obj]}}})})
+        problems = ak.check(self.libdir, install=self.install, recipe_dir=self.recipe.folder)
+        self.assertIn(f"HashId {r['built'].hash_id} of the spot is added by Later map mod too: build it again",
+                      problems)
+
+    def labels(self, pack: bytes) -> set:
+        """The English text labels in a Bootup_USen.pack."""
+        msg = bnp.Blob(pack).child("Message/Msg_USen.product.ssarc")
+        return {lab for name in msg.open() for lab in bt.msbt_read(msg.child(name).raw).labels}
+
+    def merged(self, files: dict) -> tuple[set, set]:
+        """(actor names, bool flag names) in the merged ActorInfo and Bootup.pack."""
+        def unyaz(d):
+            return wc.yaz0_decompress(d)[0] if d[:4] == b"Yaz0" else d
+        ai = bd.byml_load(unyaz(files["Actor/ActorInfo.product.sbyml"]))
+        actors = {a["name"] for a in ai["Actors"]}
+        self.assertEqual(ai["Hashes"], sorted(ai["Hashes"]))
+        gd = bnp.Blob(files["Pack/Bootup.pack"]).child("GameData/gamedata.ssarc")
+        flags = set()
+        for name in gd.open():
+            root = bd.byml_load(gd.child(name).raw)
+            flags |= {r["DataName"] for rows in root.values() for r in rows if isinstance(r, dict)}
+        return actors, flags
+
+    def test_deploy_merges_the_files_it_shares_with_the_castle(self):
+        """The finding: the AK-47 and the castle date both change ActorInfo and Bootup.pack. Deploy (and its dry run)
+        merges them in either order: both actors and both mods' flags stay."""
+        for castle_first in (False, True):
+            with self.subTest(castle_first=castle_first):
+                shutil.rmtree(self.libdir)
+                modman.Library(self.libdir, self.install).save()
+                if castle_first:
+                    self.add_castle()
+                self.add_ghost()
+                self.build()
+                if not castle_first:
+                    self.add_castle()
+                want_actors = {DONOR, "Other", ACTOR, "SwZelda"}
+                want_flags = {f"IsGet_{ACTOR}", "SwCastle_Door", f"IsGet_{DONOR}"}
+                hooks = []
+                real = bnp.deploy_hook
+
+                def spy(*a, **kw):
+                    hooks.append(real(*a, **kw))
+                    return hooks[-1]
+                with mock.patch.object(bnp, "deploy_hook", spy), quiet():
+                    launch = modman.deploy(self.lib, dry_run=True)
+                self.assertTrue(launch["dry_run"])
+                self.assertFalse([a for a in launch["attention"] if "replaces" in a or "several mods" in a],
+                                 launch["attention"])
+                self.assertTrue(any(n.startswith("Actor/ActorInfo.product.sbyml: merged from") for n in
+                                    launch["notes"]), launch["notes"])
+                actors, flags = self.merged(hooks[-1].files)
+                self.assertLessEqual(want_actors, actors)
+                self.assertLessEqual(want_flags, flags)
+                self.assertLessEqual({f"{ACTOR}_Name", "SwZelda_Name", "Npc_A_Name"},
+                                     self.labels(hooks[-1].files["Pack/Bootup_USen.pack"]))
+                # the real deploy: the same in the overlay
+                with quiet():
+                    launch = modman.deploy(self.lib)
+                overlay = launch["parts"]["overlay"]["path"]
+                files = {}
+                for rel in ("Actor/ActorInfo.product.sbyml", "Pack/Bootup.pack", "Pack/Bootup_USen.pack"):
+                    with open(os.path.join(overlay, *rel.split("/")), "rb") as f:
+                        files[rel] = f.read()
+                actors, flags = self.merged(files)
+                self.assertLessEqual(want_actors, actors)
+                self.assertLessEqual(want_flags, flags)
+                self.assertLessEqual({f"{ACTOR}_Name", "SwZelda_Name"}, self.labels(files["Pack/Bootup_USen.pack"]))
+                self.assertTrue(os.path.isfile(os.path.join(overlay, "Map", "MainField", "D-6", "D-6_Dynamic.smubin")))
 
 
 class PartOfTests(unittest.TestCase):

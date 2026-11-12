@@ -182,7 +182,7 @@ OUR_IDS = ("botw-mod-loader.", "giruka.")     # bundled mods are ours: their ids
 MAX_TITLE, MAX_DESCRIPTION, MAX_TAG = 40, 80, 80  # (the game's Mods page cuts a description at 80 characters)
 FONT_MISSING = set("{}|`^~%#")               # characters the game's menu font lacks (tools/modmenu.py)
 BUNDLED_KEYS = {"id", "title", "description", "default", "why", "tags", "ready", "kind", "manifest", "dll", "folder",
-                "build", "after_add", "developer", "egg"}
+                "build", "after_add", "after_on", "after_on_makes", "developer", "egg"}
 
 
 class ReleaseError(RuntimeError):
@@ -1116,6 +1116,11 @@ def read_bundled(root: Path, tracked: set[str]) -> tuple[list[dict], list[tuple[
             why.append("kind must be \"code\" or \"recipe\"")
         if "after_add" in m:
             why += _commands_problems("after_add", m["after_add"], tracked)
+        if "after_on" in m or "after_on_makes" in m:
+            why += _commands_problems("after_on", m.get("after_on"), tracked)
+            makes = m.get("after_on_makes")
+            if not isinstance(makes, str) or not makes.startswith(OUR_IDS)                     or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", makes):
+                why.append("after_on_makes must be the id of the mod after_on adds (one of ours)")
         if not why and kind == "recipe":
             why += _manifest_id_problems(root / m["folder"] / "mod.toml", mid)
         bad += [(where, w) for w in why]
@@ -1180,7 +1185,9 @@ def _add_bundled(plan: Plan, root: Path, tracked: set[str], build_dir: Path, for
                  "why": m["why"], "tags": tags,
                  "experimental": not m["ready"], "kind": m["kind"]}
         if m["kind"] == "code":
-            folder = f"{BUNDLED_DIR}/{m['id'].split('.', 1)[1]}"
+            # (an easter egg's folder gets a plain name: the folder names are what players see in app\)
+            eggs_so_far = sum(1 for x in listed if x.get("egg"))
+            folder = f"{BUNDLED_DIR}/{f'egg-{eggs_so_far + 1}' if m.get('egg') else m['id'].split('.', 1)[1]}"
             dll = build_dir.joinpath(*m["dll"].split("/")[2:])
             dest_dll = f"{APP}/{folder}/{dll.name}"
             if not dll.is_file():
@@ -1221,6 +1228,8 @@ def _add_bundled(plan: Plan, root: Path, tracked: set[str], build_dir: Path, for
             entry["build"] = m["build"]
         if m.get("after_add"):
             entry["after_add"] = m["after_add"]
+        if m.get("after_on"):   # (the mod's bonus, built when the player turns the mod on: launcher.read_bundled)
+            entry["after_on"], entry["after_on_makes"] = m["after_on"], m["after_on_makes"]
         if m.get("developer"):
             entry["developer"] = True
         if m.get("egg"):   # (secret: the picker and Home show one easter-egg switch for all of them, OFF at first)

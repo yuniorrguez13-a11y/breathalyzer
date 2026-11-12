@@ -32,9 +32,11 @@ A Wii U package (files in content/ and aoc/0010/) is put together and converted 
 logs made the Switch's, and then installed the same way (install_wiiu).
 
 The library copy keeps .bnp/ next to the mod's files (info.json, the logs, bnp.json, rstb.json): `deploy` merges
-the size table changes of several enabled mods into one table (the larger size wins) instead of using the last one.
-Packs and the files the logs made are not merged between mods yet: the later mod's copy wins, and deploy names what
-an earlier package loses (deploy_hook).
+the size table changes of several enabled mods into one table (the larger size wins) instead of using the last one,
+and merges the packs and the whole files (ActorInfo...) that two enabled mods change, one a package, as BCML merges
+several mods: each mod's own files, then every package's logs again, in order (merge_packages; modman deploy and its
+dry run). What can't be merged (a pack the game lacks, a merge that fails) is the later mod's copy, and deploy names
+what an earlier package loses (deploy_hook).
 Nothing here runs anything from the package, and no name from it is read as an option (names starting with '-' are
 refused, the others come after "--"); the game's files are only read.
 """
@@ -72,6 +74,7 @@ MAX_MEMBERS = 200_000
 MAX_UNPACKED = 20 << 30               # a package listing more (BotW's whole RomFS is ~15 GB) is refused
 MAX_MEMBER = 4 << 30                  # and one listing a single file bigger than this
 SPARE_MIN = 2 << 30                   # free space kept on the drive when extracting: this, or 1% of it if more
+SPARE_SHARE = 100                     # (that 1%: the drive's size divided by this)
 BELOW_NORMAL = 0x00004000             # Windows process priority for the extractor: keeps the PC responsive
 NO_WINDOW = 0x08000000
 ADDING = ".adding-"                   # modman's stage folders (and this module's work folders next to them)
@@ -349,7 +352,7 @@ def check_room(name: str, sizes: list[tuple[str, int]], packed: int | None, dest
     while not os.path.isdir(parent) and os.path.dirname(parent) != parent:
         parent = os.path.dirname(parent)
     usage = shutil.disk_usage(parent)
-    spare = max(SPARE_MIN, usage.total // 100)   # (room kept for the game, Windows and the rebuilt files)
+    spare = max(SPARE_MIN, usage.total // SPARE_SHARE)   # (room kept for the game, Windows and the rebuilt files)
     if need + spare > usage.free:
         raise BnpError(f"Not enough free space to extract {name}: {need >> 20} MB needed and {spare >> 20} MB kept "
                        f"free, {usage.free >> 20} MB free.")

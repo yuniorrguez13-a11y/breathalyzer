@@ -406,6 +406,23 @@ class Deploy(unittest.TestCase):
         self.assertEqual(env, {rm.ENV_OVERLAY: str(self.out), rm.ENV_NO_HUD: "1"})
         self.assertTrue(any("RSTB comes from R only" in w for w in man["warnings"]))
 
+    def test_packages_whose_sizes_were_checked_are_never_named_as_needing_entries(self):
+        """A BCML or UKMM package tools/bnp.py or tools/ukmm.py installed had its sizes worked out at add (an empty
+        .bnp/rstb.json: none needed): not named as a mod whose files may need entries, merged table or not."""
+        a = self.mod("A", {"romfs/Pack/A.txt": "a"})
+        b = self.mod("B", {"romfs/Pack/B.txt": "b", ".bnp/rstb.json": "{}"})
+        u = self.mod("U", {"romfs/Pack/U.txt": "u", ".ukmm/ukmm.json": "{}"})
+        r = self.mod("R", {f"romfs/{RSTB}": "table"})
+        man = self.deploy([a, b, u, r])
+        w = next(w for w in man["warnings"] if "RSTB comes from R only" in w)
+        self.assertIn("files from A may need entries", w)
+        self.assertNotIn("B", w.split("files from", 1)[1])
+        self.assertNotIn("U", w.split("files from", 1)[1].split("may need")[0])
+        merged = rm.MergedRstb(b"merged", ["R"])
+        p = rm.plan([a, b, u, r], None, merged)
+        w = next(w for w in rm.manifest_for(p, str(self.out), complete=False)["warnings"] if "no size changes" in w)
+        self.assertIn("no size changes from A;", w)
+
     def test_dlc_marks_never_at_the_root(self):
         a = self.mod("A", {"romfs/System/AocVersion.txt": "x", "romfs/Pack/AocMainField.pack": "x",
                            "romfs/Pack/A.txt": "a", "01007EF00011F001/romfs/System/AocVersion.txt": "x"})

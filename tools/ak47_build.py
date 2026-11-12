@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""AK-47 (a Breathalyzer easter egg by giruka that comes with the multiplayer mod): builds the mod on your PC from
+"""AK-47 (a Breathalyzer secret extra by giruka that comes with the multiplayer mod): builds the mod on your PC from
 your own game files and a free 3D model, and adds it to your mod library with modman.
 
     python tools/ak47_build.py build [--library DIR] [--game DIR] [--model FILE] [--no-add --out DIR] [--optional]
+                                     [--quiet | --verbose]
     python tools/ak47_build.py check [--library DIR] [--game DIR]      offline checks on your files (reads only)
     python tools/ak47_build.py icon --out FILE.png [--game DIR]          draws the inventory icon to a PNG
     python tools/ak47_build.py where [--library DIR] [--game DIR]       the game files it reads
+    python tools/ak47_build.py rewood --model IN.glb --out OUT.glb       (developers) the model with our own wood
 
 A new two-handed weapon, Weapon_Lsword_AK47 ("AK-47"), that never fires: it is the Traveler's Claymore
 (Weapon_Lsword_001) with an AK-47 model, held in the claymore's two-handed grip. One lies on a hilltop of the Great
-Plateau (assets/ak47/ak47.json says where; docs/ak47.md has only a vague hint). Our own parts are in assets/ak47/:
-the recipe (ak47.json), the mod.toml and the model (AK-47.glb, "PSX style AK-47 Model" by Plewr, CC0). Nothing from
-the game is in this repo or in what we ship: every pack, model, icon, map change and size entry is made here from the
-player's `extracted\\romfs` (only read).
+Plateau (assets/ak47/ak47.json says where; docs/easter-eggs.md has only a vague hint). Our own parts are in
+assets/ak47/: the recipe (ak47.json), the two mod.toml files and the model (AK-47.glb, "PSX style AK-47 Model" by
+Plewr, CC0, with our own procedural wood texture: `rewood`). Nothing from the game is in this repo or in what we ship:
+every pack, model, icon, map change and size entry is made here from the player's `extracted\\romfs` (only read).
 
-What `build` makes (a BCML-style package folder that `modman add` installs, so the map, actor info, game data, save
-data and text changes are merged by tools/bcml_maps.py, bcml_data.py and bcml_texts.py the normal way):
+What `build` makes: two BCML-style package folders that `modman add` installs, so the map, actor info, game data, save
+data and text changes are merged by tools/bcml_maps.py, bcml_data.py and bcml_texts.py the normal way. Both are
+secret ([mod] secret: never listed on Home, in More... or on the game's Mods page). giruka.ak47, the item (always on
+once built, so a save that holds the AK-47 always loads):
 
   Actor/Pack/Weapon_Lsword_AK47.sbactorpack   the claymore's pack: its actor link and model list renamed and pointed
                                               at our model; the amiibo and Hyrule Compendium tags dropped
@@ -29,14 +33,19 @@ data and text changes are merged by tools/bcml_maps.py, bcml_data.py and bcml_te
   logs/texts.json                             "AK-47", its description (ActorType/WeaponLargeSword)
   logs/gamedata.yml, savedata.yml             IsGet_Weapon_Lsword_AK47 and the placed one's pick-up flag
                                               (MainField_Weapon_Lsword_AK47_<HashId>: back after a Blood Moon)
-  logs/map.yml                                one AK-47 lying on the hilltop (a loose _Dynamic map unit), its height
-                                              read from the player's terrain files
   logs/rstb.json                              size entries for the new files, from the game's entries for the files
                                               they come from
 
-The mod's mod.toml says part_of = "botw-mod-loader.ghost": modman uses it only while the multiplayer mod is on. The
-multiplayer mod's entry in tools/packaging/bundled-mods.toml runs `build --optional` after the multiplayer mod is
-added, so the AK-47 comes with it (a build that can't be made says why and leaves the multiplayer mod alone).
+and giruka.ak47-spot, where one lies (its spot.toml says part_of = "botw-mod-loader.ghost": modman uses it only
+while the multiplayer mod is on):
+
+  logs/map.yml                                one AK-47 lying on the hilltop (a loose _Dynamic map unit), its height
+                                              read from the player's terrain files; a HashId that neither the game's
+                                              map nor another library mod's map changes use
+
+The multiplayer mod's entry in tools/packaging/bundled-mods.toml runs `build --optional --quiet` the first time the
+multiplayer mod is turned on (after_on), so the AK-47 comes with it (a build that can't be made leaves the multiplayer
+mod alone; --quiet names nothing, for the launcher's Details; only --verbose prints where it lies).
 
 Pure Python (no third-party packages): the glTF reader, the geometry, the BC encoders (tools/menu_bg.py's), the Switch
 model and texture writers (tools/wiiu_model) and the icon's rasterizer are all here or in our own tools.
@@ -50,11 +59,13 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import struct
 import sys
 import tempfile
 import tomllib
+import traceback
 import zlib
 from dataclasses import dataclass, field
 
@@ -76,9 +87,11 @@ from wiiu_model.neutral import Mesh, Texture, TextureSet, VertexBuffer  # noqa: 
 REPO = os.path.dirname(TOOLS)
 RECIPE = os.path.join(REPO, "assets", "ak47")
 BASE_TID = "01007EF00011E000"
-MP_ID = "botw-mod-loader.ghost"           # the multiplayer mod the AK-47 comes with ([mod] part_of)
+MP_ID = "botw-mod-loader.ghost"           # the multiplayer mod the AK-47 comes with (spot.toml's [mod] part_of)
+SPOT_TOML = "spot.toml"                  # assets/ak47: the spot mod's mod.toml (mod.toml is the item's)
 GROUND_TOLERANCE = 2.0                   # m: the player's terrain may differ this much from the recipe's height
 MAX_SLOPE_SPREAD = 0.6                   # m: the most the ground may rise or fall within 1.2 m of the spot
+NEAR_RADIUS = 3.0                        # m: nothing the game places (static or dynamic) may stand this near the spot
 MAX_GLB = 64 << 20
 MAX_VERTICES = 60000                     # u16 indices, one shape
 MAX_IMAGE = 4096
@@ -116,6 +129,8 @@ class Recipe:
     texts: dict
     spot: dict
     folder: str
+    spot_manifest: dict = field(default_factory=dict)   # spot.toml's [mod]
+    spot_toml_text: str = ""
 
     @property
     def model_path(self) -> str:
@@ -133,11 +148,14 @@ def _num(v, what: str) -> float:
 
 
 def load_recipe(folder: str = RECIPE) -> Recipe:
-    """assets/ak47: mod.toml and ak47.json, checked."""
+    """assets/ak47: mod.toml (the item's), spot.toml (the spot's) and ak47.json, checked."""
     try:
         with open(os.path.join(folder, "mod.toml"), encoding="utf-8") as f:
             toml_text = f.read()
         manifest = tomllib.loads(toml_text)
+        with open(os.path.join(folder, SPOT_TOML), encoding="utf-8") as f:
+            spot_text = f.read()
+        spot_manifest = tomllib.loads(spot_text)
         with open(os.path.join(folder, "ak47.json"), encoding="utf-8") as f:
             r = json.load(f)
     except (OSError, ValueError) as e:
@@ -145,6 +163,13 @@ def load_recipe(folder: str = RECIPE) -> Recipe:
     mod = manifest.get("mod") or {}
     if not isinstance(mod.get("id"), str) or not isinstance(mod.get("version"), str):
         raise AkError("assets/ak47/mod.toml has no [mod] id and version")
+    if mod.get("part_of"):
+        raise AkError("assets/ak47/mod.toml (the item) has a part_of: the item stays on, so saves that hold it load")
+    smod = spot_manifest.get("mod") or {}
+    if not isinstance(smod.get("id"), str) or not isinstance(smod.get("version"), str) or smod["id"] == mod["id"]:
+        raise AkError(f"assets/ak47/{SPOT_TOML} has no [mod] id (not the item's) and version")
+    if not isinstance(smod.get("part_of"), str):
+        raise AkError(f"assets/ak47/{SPOT_TOML} has no [mod] part_of (the multiplayer mod)")
     if not isinstance(r, dict) or r.get("format") != 1:
         raise AkError("assets/ak47/ak47.json isn't format 1")
     actor, donor = r.get("actor"), r.get("donor")
@@ -178,7 +203,7 @@ def load_recipe(folder: str = RECIPE) -> Recipe:
     if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
         raise AkError("assets/ak47/ak47.json: drop_tags isn't a list of tag names")
     return Recipe(manifest=mod, toml_text=toml_text, actor=actor, donor=donor, model=model, drop_tags=tags,
-                  texts=texts, spot=spot, folder=folder)
+                  texts=texts, spot=spot, folder=folder, spot_manifest=smod, spot_toml_text=spot_text)
 
 
 def _unit_of(x: float, z: float) -> str:
@@ -1417,7 +1442,8 @@ def check_logs(logs: dict[str, str]) -> None:
 
 @dataclass
 class Built:
-    folder: str
+    folder: str                        # the item mod's folder (giruka.ak47)
+    spot_folder: str = ""              # the spot mod's folder (giruka.ak47-spot)
     spot: tuple = ()                   # (x, y, z) where it lies
     ground: float = 0.0
     vertices: int = 0
@@ -1467,9 +1493,23 @@ def make_weapon(game: Game, recipe: Recipe, model_path: str | None = None, log=N
     return m, donor_raw
 
 
-def build_package(game: Game, recipe: Recipe, out: str, *, model_path: str | None = None, log=None) -> Built:
-    """Write the AK-47 mod (a BCML-style package folder: info.json, mod.toml, logs/, the new files) into `out` (a new
-    or empty folder). Reads only the player's game files and the model."""
+def _package_files(folder: str, toml_text: str, manifest: dict, logs: dict[str, str], built: list[str]) -> None:
+    """A package folder's own files: logs/, mod.toml, info.json and BUILT.md (what was made, for developers)."""
+    for name, text in logs.items():
+        _write(os.path.join(folder, "logs", name), text)
+    _write(os.path.join(folder, "mod.toml"), toml_text)
+    _write(os.path.join(folder, "info.json"), json.dumps({
+        "name": manifest.get("name", manifest["id"]), "version": manifest["version"],
+        "desc": manifest.get("description", ""), "platform": "switch", "options": {}}, indent=1) + "\n")
+    _write(os.path.join(folder, OUT_FILE), "\n".join(built + [""]))
+
+
+def build_package(game: Game, recipe: Recipe, out: str, *, model_path: str | None = None, log=None,
+                  used: set[int] | None = None, verbose: bool = False) -> Built:
+    """Write the AK-47's two mods (BCML-style package folders: info.json, mod.toml, logs/, the new files) into `out`
+    (a new or empty folder): out/<item id> (the model, textures, icon, actor pack, actor info, flags, texts, sizes)
+    and out/<spot id> (map.yml: where one lies). used: more HashIds to keep clear of (other library mods' map
+    changes). verbose: the log names where it lies. Reads only the player's game files and the model."""
     if os.path.isdir(out) and os.listdir(out):
         raise AkError(f"{out} isn't empty")
     actor, donor = recipe.actor, recipe.donor
@@ -1478,8 +1518,10 @@ def build_package(game: Game, recipe: Recipe, out: str, *, model_path: str | Non
         raise AkError(f"Your game's actor info has no {donor}")
     if actor in ai:
         raise AkError(f"Your game already has an actor called {actor}")
-    romfs = os.path.join(out, BASE_TID, "romfs")
-    res = Built(out)
+    item_dir = os.path.join(out, recipe.manifest["id"])
+    spot_dir = os.path.join(out, recipe.spot_manifest["id"])
+    romfs = os.path.join(item_dir, BASE_TID, "romfs")
+    res = Built(item_dir, spot_dir)
     rstb = game.rstb()
     if rstb is None:
         res.notes.append("the game's size table isn't there: no size entries for the new files")
@@ -1535,9 +1577,10 @@ def build_package(game: Game, recipe: Recipe, out: str, *, model_path: str | Non
     entry = actorinfo_entry(ai[donor], actor, lo, hi, pk.tags, used_sort)
     logs = {"actorinfo.yml": bd.to_text({str(zlib.crc32(actor.encode())): entry})}
 
-    # where it lies
+    # where it lies (the spot mod)
     spot = recipe.spot
-    _log(log, f"Reading your terrain at the hilltop (x={spot['x']:.0f}, z={spot['z']:.0f})...")
+    _log(log, "Reading your terrain at its spot" + (f" (x={spot['x']:.0f}, z={spot['z']:.0f})" if verbose else "")
+         + "...")
     ground, area = game.terrain().height(spot["x"], spot["z"])
     if abs(ground - spot["ground"]) > GROUND_TOLERANCE:
         raise AkError(f"your terrain at the AK-47's spot is {ground:.1f} m high, not about {spot['ground']:.1f} m "
@@ -1548,38 +1591,64 @@ def build_package(game: Game, recipe: Recipe, out: str, *, model_path: str | Non
     unit = game.unit(spot["unit"])
     if not isinstance(unit, dict) or not isinstance(unit.get("Objs"), list):
         raise AkError(f"Your game's {spot['unit']} map unit can't be read")
-    used = game.hash_ids(log)
-    obj = placed_object(actor, spot, ground, used)
+    taken = set(game.hash_ids(log)) | set(used or ())
+    obj = placed_object(actor, spot, ground, taken)
     res.hash_id = int(obj["HashId"])
     res.ground = ground
     res.spot = tuple(float(v) for v in obj["Translate"])
-    logs["map.yml"] = bd.to_text({spot["unit"]: {"Objs": {"add": [obj]}}})
+    spot_logs = {"map.yml": bd.to_text({spot["unit"]: {"Objs": {"add": [obj]}}})}
 
-    # flags, texts, sizes
+    # flags (the placed one's too: the item's, so a save that picked it up keeps its flag), texts, sizes
     gd, sd = flags_logs(actor, donor, res.hash_id, game.flags())
     logs["gamedata.yml"] = bd.to_text(gd)
     logs["savedata.yml"] = bd.to_text(sd)
     logs["texts.json"] = json.dumps(texts_log(actor, recipe.texts), indent=1, ensure_ascii=False) + "\n"
     logs["rstb.json"] = json.dumps(dict(sorted(rstb_json.items())), indent=1) + "\n"
     check_logs(logs)
-    for name, text in logs.items():
-        _write(os.path.join(out, "logs", name), text)
-    _write(os.path.join(out, "mod.toml"), recipe.toml_text)
-    _write(os.path.join(out, "info.json"), json.dumps({
-        "name": recipe.manifest.get("name", "AK-47"), "version": recipe.manifest["version"],
-        "desc": recipe.manifest.get("description", ""), "platform": "switch", "options": {}}, indent=1) + "\n")
-    _write(os.path.join(out, OUT_FILE), "\n".join([
-        "# AK-47: built on this PC by tools/ak47_build.py from the player's own game files and assets/ak47's model.",
-        "", f"- actor: {actor} (from {donor})", f"- model: {res.vertices} vertices, {res.triangles} triangles",
-        f"- placed in {spot['unit']} at x={res.spot[0]:.2f} y={res.spot[1]:.2f} z={res.spot[2]:.2f} "
+    check_logs(spot_logs)
+    head = "# AK-47: built on this PC by tools/ak47_build.py from the player's own game files and assets/ak47's model."
+    _package_files(item_dir, recipe.toml_text, recipe.manifest, logs, [
+        head, "", f"- actor: {actor} (from {donor})", f"- model: {res.vertices} vertices, {res.triangles} triangles",
+        f"- where it lies: the mod {recipe.spot_manifest['id']}"])
+    _package_files(spot_dir, recipe.spot_toml_text, recipe.spot_manifest, spot_logs, [
+        head, "", f"- placed in {spot['unit']} at x={res.spot[0]:.2f} y={res.spot[1]:.2f} z={res.spot[2]:.2f} "
         f"(ground {ground:.2f} m, terrain area {area:.1f} m), HashId {res.hash_id}",
-        f"- part of: {recipe.manifest.get('part_of', MP_ID)}", ""]))
+        f"- part of: {recipe.spot_manifest['part_of']}"])
     return res
+
+
+def map_hash_ids(lib: mm.Library | None, mods: list[dict]) -> dict[int, str]:
+    """The HashIds these library mods' map changes add (a BCML package's .bnp/logs/map.yml and its options'):
+    HashId -> the mod's name. A log that can't be read adds none (deploy names it)."""
+    out: dict[int, str] = {}
+    for m in mods if lib is not None else []:
+        root = os.path.join(lib.mods_dir, m["id"])
+        info = bnp.stored(root)
+        if not info:
+            continue
+        try:
+            data = bnp.package_logs(root, info, {"map.yml": bm})[0]
+        except Exception:  # noqa: BLE001 (one mod's damaged logs: never a reason to stop)
+            continue
+        for diff in data.get("map.yml", []):
+            for unit in diff.values() if isinstance(diff, dict) else []:
+                for sec in unit.values() if isinstance(unit, dict) else []:
+                    for o in ((sec.get("add") or []) if isinstance(sec, dict) else []):
+                        h = o.get("HashId") if isinstance(o, dict) else None
+                        if isinstance(h, int):
+                            out.setdefault(int(h) & 0xFFFFFFFF, m.get("name") or m["id"])
+    return out
+
+
+def other_hash_ids(lib: mm.Library | None, recipe: Recipe) -> dict[int, str]:
+    """map_hash_ids of every library mod but the AK-47's own two (on or off: one turned on later counts too)."""
+    ours = {recipe.manifest["id"], recipe.spot_manifest["id"]}
+    return map_hash_ids(lib, [m for m in lib.mods if m["id"] not in ours]) if lib is not None else {}
 
 
 def add_to_library(lib: mm.Library, folder: str, mod_id: str, log=None) -> tuple[dict, list[str]]:
     """The built folder into the library through modman's normal add (the old copy removed first, its on/off and
-    place in the load order kept; a new one goes last)."""
+    place in the load order kept; a new one goes last, on)."""
     idx = next((i for i, m in enumerate(lib.mods) if m["id"] == mod_id), None)
     was_on = lib.mods[idx]["enabled"] if idx is not None else True
     if idx is not None:
@@ -1601,8 +1670,9 @@ def add_to_library(lib: mm.Library, folder: str, mod_id: str, log=None) -> tuple
 
 
 def build(library: str | None = None, *, install: str | None = None, out: str | None = None, add: bool = True,
-          model_path: str | None = None, recipe_dir: str = RECIPE, log=None) -> dict:
-    """Build the AK-47 mod and (add=True) put it in the library. Returns {"built": Built, "entry", "notes"}."""
+          model_path: str | None = None, recipe_dir: str = RECIPE, log=None, verbose: bool = False) -> dict:
+    """Build the AK-47's two mods and (add=True) put them in the library. Returns {"built": Built, "entry": the
+    item's library entry, "spot_entry", "notes"}."""
     recipe = load_recipe(recipe_dir)
     root = mm.resolve_library(library)
     lib = mm.Library.load(root)
@@ -1612,14 +1682,18 @@ def build(library: str | None = None, *, install: str | None = None, out: str | 
     tmp = None
     if out is None:
         tmp = tempfile.mkdtemp(prefix="ak47-build-")
-        out = os.path.join(tmp, recipe.manifest["id"])
+        out = os.path.join(tmp, "out")
     out = os.path.abspath(out)
     try:
-        built = build_package(game, recipe, out, model_path=model_path, log=log)
-        entry, notes = None, []
+        built = build_package(game, recipe, out, model_path=model_path, log=log,
+                              used=set(other_hash_ids(lib, recipe)), verbose=verbose)
+        entry = spot_entry = None
+        notes: list[str] = []
         if add:
-            entry, notes = add_to_library(lib, out, recipe.manifest["id"], log)
-        return {"built": built, "entry": entry, "notes": notes}
+            entry, n1 = add_to_library(lib, built.folder, recipe.manifest["id"], log)
+            spot_entry, n2 = add_to_library(lib, built.spot_folder, recipe.spot_manifest["id"], log)
+            notes = n1 + n2
+        return {"built": built, "entry": entry, "spot_entry": spot_entry, "notes": notes}
     finally:
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1631,8 +1705,9 @@ def check(library: str | None = None, *, install: str | None = None, recipe_dir:
           log=None) -> list[str]:
     """Offline checks on the player's files (reads only): the new names are free, the claymore's files are there and
     can be read, the model builds and passes the writers' self-checks, the hilltop is where the recipe says (the
-    terrain's height, a gentle top, nothing placed within 3 m), the map unit and HashId are fine. Returns the problems
-    (empty: all good)."""
+    terrain's height, a gentle top, nothing the game places, static or dynamic, within NEAR_RADIUS m), the spot's
+    HashId is used neither by the game's map nor by another library mod's map changes. Returns the problems (empty:
+    all good)."""
     recipe = load_recipe(recipe_dir)
     lib = mm.Library.load(mm.resolve_library(library))
     game = find_game(install, lib, recipe.donor)
@@ -1688,21 +1763,112 @@ def check(library: str | None = None, *, install: str | None = None, recipe_dir:
                 out.append(f"the spot isn't a hilltop: the ground {r:.0f} m away is {max(ring) - h:.1f} m higher")
     except AkError as e:
         out.append(str(e))
-    try:
-        unit = game.unit(spot["unit"])
-        for o in unit.get("Objs") or []:
-            tr = o.get("Translate") if isinstance(o, dict) else None
-            if isinstance(tr, list) and len(tr) == 3 and math.hypot(tr[0] - spot["x"], tr[2] - spot["z"]) < 3.0:
-                out.append(f"{o.get('UnitConfigName')} stands within 3 m of the spot")
-    except (AkError, OSError, bm.LogError, wc.FormatError) as e:
-        out.append(f"the map unit {spot['unit']} can't be read ({e})")
+    # nothing placed near it: the loose dynamic unit and the static one (trees, rocks: in TitleBG.pack)
+    for unit_name in (spot["unit"], spot["unit"].rsplit("_", 1)[0] + "_Static"):
+        try:
+            unit = game.unit(unit_name)
+            for o in (unit.get("Objs") or []) if isinstance(unit, dict) else []:
+                tr = o.get("Translate") if isinstance(o, dict) else None
+                if isinstance(tr, list) and len(tr) == 3 and \
+                        math.hypot(tr[0] - spot["x"], tr[2] - spot["z"]) < NEAR_RADIUS:
+                    out.append(f"{o.get('UnitConfigName')} ({unit_name}) stands within {NEAR_RADIUS:g} m of the spot")
+        except (AkError, OSError, bm.LogError, wc.FormatError, struct.error, IndexError) as e:
+            out.append(f"the map unit {unit_name} can't be read ({e})")
+    # the spot's HashId: the built spot mod's (else the one a build would pick) against the game's map and the
+    # other library mods' map changes
     used = game.hash_ids(log)
-    obj = placed_object(actor, spot, spot["ground"], used)
-    if int(obj["HashId"]) in used:
-        out.append(f"HashId {int(obj['HashId'])} is in use")
-    if f"MainField_{actor}_{int(obj['HashId'])}" in flags:
-        out.append("the placed AK-47's flag is already in your game data")
+    others = other_hash_ids(lib, recipe)
+    spot_mod = [m for m in (lib.mods if lib is not None else []) if m["id"] == recipe.spot_manifest["id"]]
+    mine = set(map_hash_ids(lib, spot_mod)) if spot_mod else \
+        {int(placed_object(actor, spot, spot["ground"], set(used) | set(others))["HashId"])}
+    for h in sorted(mine):
+        if h in used:
+            out.append(f"HashId {h} of the spot is in your game's map too: build it again")
+        if h in others:
+            out.append(f"HashId {h} of the spot is added by {others[h]} too: build it again")
+        if f"MainField_{actor}_{h}" in flags:
+            out.append("the placed AK-47's flag is already in your game data")
     return out
+
+
+# ---------------------------------------------------------------------------------------------------- our own wood
+
+# The downloaded model's stock had a wood photo of unknown source; ours is drawn here (rewood put it in
+# assets/ak47/AK-47.glb). Horizontal grain like the photo's: growth rings bent by low noise, long streaks, PSX-style
+# speckle. Pure Python and the same picture every time (integer hashing, no random module).
+WOOD_LIGHT = (198, 116, 52)
+WOOD_DARK = (128, 64, 24)
+
+
+def _hash01(ix: int, iy: int, seed: int) -> float:
+    h = (ix * 374761393 + iy * 668265263 + seed * 2246822519) & 0xFFFFFFFF
+    h = ((h ^ (h >> 13)) * 1274126177) & 0xFFFFFFFF
+    return ((h ^ (h >> 16)) & 0xFFFF) / 65535.0
+
+
+def _noise(x: float, y: float, seed: int) -> float:
+    """Value noise in 0..1 (smooth between the lattice points)."""
+    x0, y0 = math.floor(x), math.floor(y)
+    fx, fy = x - x0, y - y0
+    sx, sy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
+    a, b = _hash01(x0, y0, seed), _hash01(x0 + 1, y0, seed)
+    c, d = _hash01(x0, y0 + 1, seed), _hash01(x0 + 1, y0 + 1, seed)
+    return (a + (b - a) * sx) + ((c + (d - c) * sx) - (a + (b - a) * sx)) * sy
+
+
+def wood_picture(w: int, h: int, seed: int = 47) -> menu_bg.Picture:
+    """A w x h wood texture (RGBA, opaque), the grain running left to right."""
+    px = bytearray(w * h * 4)
+    for y in range(h):
+        v = y / h
+        for x in range(w):
+            u = x / w
+            warp = _noise(u * 2.0, v * 1.5, seed) * 0.7 + _noise(u * 6.0, v * 4.0, seed + 1) * 0.3
+            rings = v * 8.0 + warp * 1.1 + 0.12 * math.sin(u * 3.3 + v * 1.7)
+            r = rings - math.floor(rings)
+            line = math.exp(-((r - 0.5) / 0.05) ** 2)                      # a thin dark ring line
+            streak = 0.6 * _noise(u * 2.5, v * 90.0, seed + 2) + 0.4 * _noise(u * 7.0, v * 170.0, seed + 5)
+            t = min(1.0, 0.42 * line + 0.5 * streak ** 1.5 + 0.18 * _noise(u * 1.2, v * 1.5, seed + 3))
+            speck = (_hash01(x, y, seed + 4) - 0.5) * 22.0                 # PSX-style speckle, like the photo's
+            k = (y * w + x) * 4
+            for c in range(3):
+                px[k + c] = max(0, min(255, round(WOOD_LIGHT[c] + (WOOD_DARK[c] - WOOD_LIGHT[c]) * t + speck)))
+            px[k + 3] = 255
+    return menu_bg.Picture(w, h, px)
+
+
+def replace_image(data: bytes, which, png: bytes, name: str | None = None) -> bytes:
+    """The .glb `data` with image `which` (its name, or its number) holding `png` instead; every buffer view laid out
+    again (4-byte aligned, in their order), so nothing of the old picture is left in the file. Records what was
+    changed in the file's asset copyright line."""
+    g = Glb(data)
+    doc = copy.deepcopy(g.doc)
+    imgs, views = doc.get("images") or [], doc.get("bufferViews") or []
+    k = which if isinstance(which, int) else next((i for i, im in enumerate(imgs) if im.get("name") == which), None)
+    if k is None or not 0 <= k < len(imgs) or not isinstance(imgs[k].get("bufferView"), int):
+        raise AkError(f"the model has no image {which!r} kept in the file")
+    target = imgs[k]["bufferView"]
+    if any(a.get("bufferView") == target for a in doc.get("accessors") or []) or \
+            sum(im.get("bufferView") == target for im in imgs) > 1:
+        raise AkError("the image's data is shared with something else in the model: can't replace it")
+    if len(doc.get("buffers") or []) != 1:
+        raise AkError("the model has more than one buffer")
+    out = bytearray()
+    for i, v in enumerate(views):
+        part = png if i == target else g.view(i)[0]
+        out += bytes(-len(out) % 4)
+        v["byteOffset"] = len(out)
+        v["byteLength"] = len(part)
+        out += part
+    out += bytes(-len(out) % 4)
+    doc["buffers"][0]["byteLength"] = len(out)
+    imgs[k]["mimeType"] = "image/png"
+    if name:
+        imgs[k]["name"] = name
+    js = json.dumps(doc, separators=(",", ":")).encode("utf-8")
+    js += b" " * (-len(js) % 4)
+    body = struct.pack("<II", len(js), 0x4E4F534A) + js + struct.pack("<II", len(out), 0x004E4942) + bytes(out)
+    return b"glTF" + struct.pack("<II", 2, 12 + len(body)) + body
 
 
 # ---------------------------------------------------------------------------------------------------- command line
@@ -1717,6 +1883,14 @@ def _low_priority() -> None:
             pass
 
 
+def secret_text(text: str, recipe: Recipe | None = None) -> str:
+    """text with the weapon's names written as "extra" (build --quiet: the launcher's Details never names it)."""
+    words = ["Weapon_Lsword_AK47", "AK-47", "AK47"] + ([recipe.actor] if recipe else [])
+    for w in sorted(set(words), key=len, reverse=True):
+        text = re.sub(re.escape(w), "extra", text, flags=re.IGNORECASE)
+    return text
+
+
 def main(argv: list[str] | None = None) -> int:
     with contextlib.suppress(AttributeError, ValueError, OSError):
         sys.stdout.reconfigure(errors="replace")
@@ -1729,19 +1903,31 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--library", help=lib_help)
     ap.add_argument("--game", help=game_help)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    b = sub.add_parser("build", parents=[common], help="build the AK-47 mod and add it to the library")
+    b = sub.add_parser("build", parents=[common], help="build the AK-47's two mods and add them to the library")
     b.add_argument("--model", help="another .glb model to use (default: assets/ak47's)")
-    b.add_argument("--no-add", action="store_true", help="only write the mod folder (--out)")
-    b.add_argument("--out", help="where to write the mod folder (needed with --no-add; a new or empty folder)")
+    b.add_argument("--no-add", action="store_true", help="only write the mod folders (into --out)")
+    b.add_argument("--out", help="where to write the mod folders (needed with --no-add; a new or empty folder)")
     b.add_argument("--optional", action="store_true",
-                   help="a build that can't be made says why and ends with exit code 0 (after the multiplayer mod is "
-                        "added: the AK-47 is a bonus)")
+                   help="a build that can't be made, for any reason, says why and ends with exit code 0 (the AK-47 is "
+                        "a bonus of the multiplayer mod)")
+    say = b.add_mutually_exclusive_group()
+    say.add_argument("--quiet", action="store_true",
+                     help="say only whether it worked, naming nothing (the launcher's Details: it is a secret)")
+    say.add_argument("--verbose", action="store_true", help="also say where it lies (a spoiler)")
     sub.add_parser("check", parents=[common], help="offline checks on your files (reads only)")
     i = sub.add_parser("icon", parents=[common], help="draw the inventory icon to a PNG (changes nothing)")
     i.add_argument("--out", required=True, help="the PNG to write")
     sub.add_parser("where", parents=[common], help="the game files the AK-47 is built from")
+    w = sub.add_parser("rewood", help="(developers) write the model with our own procedural wood texture in place of "
+                                      "its wood picture")
+    w.add_argument("--model", required=True, help="the .glb to read")
+    w.add_argument("--out", required=True, help="the .glb to write (a new file)")
+    w.add_argument("--image", default="wood", help="the image to replace: its name in the .glb, or its number")
+    w.add_argument("--size", default="600x400", help="the wood picture's size (default 600x400)")
     args = ap.parse_args(argv)
     _low_priority()
+    quiet = getattr(args, "quiet", False)
+    optional = args.cmd == "build" and getattr(args, "optional", False)
     try:
         if args.cmd == "where":
             recipe = load_recipe()
@@ -1768,28 +1954,60 @@ def main(argv: list[str] | None = None) -> int:
             menu_bg.write_png(args.out, pic)
             print(f"Icon written: {args.out}")
             return 0
+        if args.cmd == "rewood":
+            ww, _, hh = args.size.lower().partition("x")
+            if not (ww.isdigit() and hh.isdigit() and 8 <= int(ww) <= MAX_IMAGE and 8 <= int(hh) <= MAX_IMAGE):
+                raise AkError(f"--size {args.size}: write it like 600x400 (8 to {MAX_IMAGE})")
+            if os.path.exists(args.out):
+                raise AkError(f"{args.out} is there already: pick a new file")
+            with open(args.model, "rb") as f:
+                data = f.read()
+            pic = wood_picture(int(ww), int(hh))
+            new = replace_image(data, int(args.image) if args.image.isdigit() else args.image,
+                                menu_bg.png_bytes(pic), "wood (procedural: tools/ak47_build.py wood_picture)")
+            _write(args.out, new)
+            print(f"Written: {args.out} ({len(new)} bytes, SHA-256 {hashlib.sha256(new).hexdigest()})")
+            return 0
         if args.no_add and not args.out:
             raise AkError("--no-add needs --out <folder>")
         r = build(args.library, install=args.game, out=args.out, add=not args.no_add, model_path=args.model,
-                  log=print)
+                  log=None if quiet else print, verbose=args.verbose)
         made = r["built"]
-        where = f"in your library as {r['entry']['name']}" if r["entry"] else made.folder
-        print(f"AK-47 built ({made.vertices} vertices, on the hill at x={made.spot[0]:.1f} z={made.spot[2]:.1f}): "
-              f"{where}.")
+        if quiet:
+            print("Done: the extra is built" + (" and in your library." if r["entry"] else ".")
+                  + (f" ({len(made.notes) + len(r['notes'])} note(s): python tools/ak47_build.py build shows them)"
+                     if made.notes or r["notes"] else ""))
+            return 0
+        where = f"in your library as {r['entry']['name']} and {r['spot_entry']['name']}" if r["entry"] else \
+            f"{made.folder} and {made.spot_folder}"
+        spot = f", on the hill at x={made.spot[0]:.1f} z={made.spot[2]:.1f}" if args.verbose else ""
+        print(f"AK-47 built ({made.vertices} vertices{spot}): {where}.")
         for n in made.notes:
             print(f"  note: {n}")
         for n in r["notes"]:
             print(f"  {n}")
         if r["entry"]:
-            print("It is used while the multiplayer mod is on. Next: python tools/modman.py deploy")
+            print("The item is always on (saves that hold it keep loading); where it lies only while the multiplayer "
+                  "mod is on. Next: python tools/modman.py deploy")
         return 0
     except (AkError, mm.ModmanError) as e:
-        print(f"error: {e}", file=sys.stderr)
-        if args.cmd == "build" and getattr(args, "optional", False):
-            print("The AK-47 (a bonus of the multiplayer mod) wasn't built; the multiplayer mod is fine. Build it "
-                  "later with: python tools/ak47_build.py build")
-            return 0
-        return 2
+        if not optional:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        print(f"error: {secret_text(str(e)) if quiet else e}", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001 (--optional: anything else that goes wrong never stops the mod either)
+        if not optional:
+            raise
+        tb = traceback.format_exception(type(e), e, e.__traceback__, limit=-3)
+        text = "".join(tb).rstrip()
+        msg = f"error: {type(e).__name__}: {e}\n{text}"
+        print(secret_text(msg) if quiet else msg, file=sys.stderr)
+    if quiet:
+        print("The extra wasn't built (it is optional): the mod it comes with is fine.")
+    else:
+        print("The AK-47 (a bonus of the multiplayer mod) wasn't built; the multiplayer mod is fine. Build it "
+              "later with: python tools/ak47_build.py build")
+    return 0
 
 
 if __name__ == "__main__":

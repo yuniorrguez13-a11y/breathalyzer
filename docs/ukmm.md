@@ -41,7 +41,9 @@ kinds (BYML, texts, game data, actor info, maps) aren't merged here yet.
   the Switch's formats first, in memory, by `tools/wiiu_convert.py` with your game files (`X.Tex1` + `X.Tex2` become
   `X.Tex`, renamed in the manifests and pack lists too). A file that stays Wii U data (Havok, sounds, effects) gives
   way to your game's copy of the same path (the pack's twin, else the game's actor packs: Havok cloth in a new armor
-  pack is a copy of a vanilla one), else it is left out and named. Parsed resources and pack lists are the same on
+  pack is a copy of a vanilla one), else it is left out. Both are under *Needs attention*, by kind: where your
+  game's copy is used that part of the mod is lost; where there is none it is missing, so what uses it may fail
+  (`ukmm.wiiu_lines`). Parsed resources and pack lists are the same on
   both consoles. Models the converter can't read yet (see [wiiu-models](wiiu-models.md)) are left out and named.
   UKMM stores these in its own data model; reading each kind back is its own piece of work. The merges themselves
   exist now for BCML packages (game data, save data, actor info, events, area data, status effects, residents,

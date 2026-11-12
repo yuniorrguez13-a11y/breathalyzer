@@ -33,6 +33,6 @@ Breathalyzer, by giruka.
   the GX2 sampler bit layout come from BfresLibrary (MIT licensed: Copyright (c) 2017-2018 Syroot) and wut (zlib
   licensed); the GX2 register bit positions in `tools/wiiu_model/materials.py` follow Mesa's `r600d.h` (MIT
   licensed). No code was copied from them.
-- The AK-47 model (`assets/ak47/AK-47.glb`, used by `tools/ak47_build.py`, docs/ak47.md) is "PSX style AK-47 Model"
-  by Plewr (https://plewr.itch.io/psx-style-ak-47-model), released under CC0. It is shipped unchanged; the weapon
-  built from it on your PC also holds data from your own game files and stays on your PC.
+- A CC0 model by Plewr (itch.io), with our own wood texture, is used by a secret extra (see docs/easter-eggs.md); its
+  full credits are in the MODEL-CREDITS.txt next to it in `assets/`. What is built from it on your PC also holds data
+  from your own game files and stays on your PC.

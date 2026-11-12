@@ -575,6 +575,54 @@ class Layout(unittest.TestCase):
                 wc.plan_layout(list(paths))
             self.assertIn(words, str(cm.exception), paths)
 
+    def test_one_mod_for_several_regions_keeps_one_copy(self):
+        """linkle-dialogue-fix: sdcafiine/00050000101C9400 and .../101C9500, the same files for two regions of the
+        game: one copy is converted (101C9400 first), the other left out and named. Other folders stay refused."""
+        us, eu = "sdcafiine/00050000101C9400/Content", "sdcafiine/00050000101C9500/Content"
+        lay = wc.plan_layout([f"{eu}/Pack/Bootup_USen.pack", f"{us}/Pack/Bootup_USen.pack", "readme.txt"])
+        self.assertEqual(lay.root, "sdcafiine/00050000101C9400")
+        self.assertEqual(lay.files, [(f"{us}/Pack/Bootup_USen.pack", "romfs/Pack/Bootup_USen.pack")])
+        self.assertEqual((lay.copies, lay.copy_roots), ({f"{eu}/Pack/Bootup_USen.pack": f"{us}/Pack/Bootup_USen.pack"},
+                                                        ["sdcafiine/00050000101C9500"]))
+        self.assertEqual(wc.plan_layout(["x/00050000101c9300/content/a.txt", "x/00050000101c9500/content/a.txt"]).root,
+                         "x/00050000101c9500")
+        for paths in (["a/00050000101C9400/content/x.txt", "b/00050000101C9500/content/x.txt"],     # (two parents)
+                      ["00050000101C9400/content/x.txt", "0005000E101C9500/content/x.txt"],     # (base and update)
+                      ["00050000101C9400/content/x.txt", "00050000101C9400x/content/x.txt"]):
+            with self.subTest(paths=paths), self.assertRaises(wc.ConvertError) as cm:
+                wc.plan_layout(paths)
+            self.assertIn("several mods or options", str(cm.exception))
+
+    def test_region_copies_are_compared_and_named(self):
+        us, eu = "sdcafiine/00050000101C9400/Content", "sdcafiine/00050000101C9500/Content"
+        doc = byml(DOC, BE)
+        with tempfile.TemporaryDirectory() as d:
+            for eu_doc, words in ((doc, "the same mod for another region of the game"), (byml({"x": 1}, BE),
+                                                                                          "differs from it")):
+                root = Path(d) / f"mod-{len(words)}"
+                make(root, {f"{us}/Map/MainField/A-1/A-1_Dynamic.smubin": wc.yaz0_compress(doc),
+                            f"{eu}/Map/MainField/A-1/A-1_Dynamic.smubin": wc.yaz0_compress(eu_doc)})
+                rep = wc.convert_mod(str(root), str(Path(d) / f"out-{len(words)}"))
+                with self.subTest(words=words):
+                    self.assertEqual(len(rep.files), 1)
+                    self.assertIn(words, rep.regions[0])
+                    self.assertIn("sdcafiine/00050000101C9500", rep.text())
+                    self.assertEqual(rep.verdict(), "everything converted")
+
+    def test_a_zip_member_bigger_than_any_game_file_is_not_read(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "mod.zip"
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+                z.writestr("content/Pack/Big.pack", b"\0" * 5000)
+            src = wc.ModSource(str(path))
+            try:
+                self.assertEqual(src.read("content/Pack/Big.pack", 4), b"\0" * 4)
+                with mock.patch.object(wc, "MAX_ZIP_READ", 4096), self.assertRaises(wc.ConvertError) as cm:
+                    src.read("content/Pack/Big.pack")
+                self.assertIn("bigger than any game file", str(cm.exception))
+            finally:
+                src.zip.close()
+
     def test_unsafe_names_are_never_mapped(self):
         bad = ["content/C:../C:../ESCAPED.txt", "content/D:/x.txt", "content/Actor\\..\\..\\x.txt",
                "content/Pack/a:b.txt", "content/Pack/con.txt", "content/Pack/Aux.pack", "content/Model/Bad./x",

@@ -4,7 +4,7 @@
  "donor": "Weapon_Lsword_001",
  "model": {
   "file": "AK-47.glb",
-  "sha256": "05d275574ec0e8d719ddb8e27c6d0b280d0acecbb429b6bfa6a519c4682cd51c",
+  "sha256": "88b73d00b97cd9e28c596ed1ff66ca1456086d51685cc8b3cc9e50aa840206dd",
   "forward": "-z",
   "up": "+y",
   "flip": false,

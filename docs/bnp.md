@@ -23,19 +23,24 @@ on its own is missing most of its files: the game would crash on it.
 
 ## What `add` does
 
-1. **Extracts** it with 7-Zip (`7z.exe` in Program Files or on PATH), else with Windows' own `tar.exe`, which reads
-   7-Zip archives. It lists the archive first and refuses it, writing nothing, if a name would land outside the
-   folder (`..`, an absolute path, a drive letter), is a name Windows treats specially (`CON`, `NUL`, a `:` stream, a
-   trailing dot), starts with `-`, is a link (a junction too), is there twice, or is password-protected. With
-   `tar.exe`, a name beyond plain ASCII is refused too (it lists names in the ANSI code page and can't read them back
-   reliably): install 7-Zip for such a package. It extracts into a new work folder next to the library copy, checks
+1. **Extracts** it with 7-Zip (`7z.exe` in Program Files or on PATH). Only on a PC without 7-Zip is Windows' own
+   `tar.exe` used, which reads 7-Zip archives: never after 7-Zip failed on or refused an archive, never for a `.rar`
+   and never for a packed download (below). It lists the archive first and refuses it, writing nothing, if a name
+   would land outside the folder (`..`, an absolute path, a drive letter), is a name Windows treats specially (`CON`,
+   `NUL`, a `:` stream, a trailing dot), starts with `-`, is a link (a junction, a RAR "copy link" too), is there
+   twice, is listed with no size (a RAR entry marked "size unknown": every size check counts on the listing), or is
+   password-protected (7-Zip's word on that is final: no other tool is tried). With `tar.exe`, a name beyond plain
+   ASCII is refused too (it lists names in the ANSI code page and can't read them back reliably), as is a line it
+   lists that can't be read: install 7-Zip for such a package. It extracts into a new work folder next to the library copy, checks
    that only the listed files came out, clears the read-only setting 7-Zip brings back, and deletes the work folder
    afterwards (`add` says so when it can't). A work folder or library copy left by an add that was cut short
    (`.adding-*`, untouched for an hour) is deleted by the next `add`. The extractor runs at a lower priority. Nothing
    in the package is run: the tool that listed the archive is the only one that reads it, a file is read by the name
    the archive spells it, after `--`, so no name is ever taken for an option. A package that lists more than 20 GB
-   (more than the whole game) or one file over 4 GB is refused, and extracting needs its size plus 2 GB (or 1% of
-   the drive, if more) free, so the drive never fills up.
+   (more than the whole game), one file over 4 GB, or over 1000 times its own size (above 1 GB) is refused, and
+   extracting needs its size plus 2 GB (or 1% of the drive, if more) free, so the drive never fills up; while the
+   extractor runs, it is stopped as soon as the drive has less than half that room left (an archive writing more
+   than it lists). A plain mod `.zip` gets the same checks (`modman.extract_zip`, through `bnp.check_room`).
 2. **Options:** the ones the package turns on by default. `--bnp-option NAME` (its name or folder, any case; repeat
    it) adds one; for a choose-one group it replaces the group's default. `--bnp-no-options` leaves the defaults out,
    so `--bnp-no-options --bnp-option X` installs only X. A required group with nothing chosen gets its first option,
@@ -115,12 +120,17 @@ merged). A damaged `bnp.json` is named under *Needs attention* (add the mod agai
   name for the few the table lists by name), so a file one mod names and another's table holds is one file, and the
   result doesn't depend on the mods' order. A package whose sizes change nothing is left out. `deploy` says which mods
   it merged; when the game's own table is missing it says the tables can't be merged, and still checks every mod.
-- **Packs are not merged between mods yet.** When a later mod ships a pack (or a file a data log made, such as
-  `ActorInfo`) that a BCML package also has, the later one wins as for any file, and *Needs attention* says that
-  package's changes in it are lost, naming the data logs merged into it (`its merged gamedata.yml too`). Nearly
-  every package with game data, texts or map logs ships `Bootup.pack`, `Bootup_XXxx.pack` or `TitleBG.pack`, so two
-  such packages clash there. Merge such mods in UKMM (Switch mode) and add its output instead, for now.
-- **The merge itself is built, `deploy` doesn't use it yet.** `bnp.deploy_hook(..., files=True)` gives those files
+- **Packs are merged between mods** (since 2026-11-12). When two enabled mods ship a pack (or a file a data log
+  made, such as `ActorInfo`) and one of them is a BCML package, `deploy` merges them (`bnp.deploy_hook(...,
+  files=True)`) and puts the merged file in the overlay over every mod's copy (`romfs_mods.add_generated`, owner
+  `generated:merged`; its size entry is in the merged table). *Notes* say `<pack>: merged from <mods>`; the clash
+  is not listed under *Needs attention* any more. Nearly every package with game data, texts or map logs ships
+  `Bootup.pack`, `Bootup_XXxx.pack` or `TitleBG.pack`, which is where they met before: Linkle's body (11 files in
+  `TitleBG.pack`) now stays next to linkle-dialogue's, in either order. A merge that fails (an error the merge
+  doesn't expect) leaves each mod's own copy, the later one winning, with one line under *Needs attention*. A dry
+  run merges too (in memory), so it says what the deploy does (`deploy(..., merge=False)` skips it). When no BCML
+  package is involved, the later mod's copy wins as for any file.
+- **How the merge works:** `bnp.deploy_hook(..., files=True)` gives those files
   merged as BCML merges mods: the game's copy, then each mod's own files over it in order (only the ones that differ
   from the game's, packs inside packs the same way), leaving out a package's files that its logs made (and the files
   BCML ships changed and logs too, such as event info and quests, when the log can be read); then every package's
@@ -131,26 +141,31 @@ merged). A damaged `bnp.json` is named under *Needs attention* (add the mod agai
   package comes later in the order and changes a file a package's logs change, the package's logs still come last,
   so for an entry both change (the same text, flag, actor...) the package's wins, where BCML (which logs every mod)
   would keep the later mod's: *Needs attention* names each such file. A whole file such as `ActorInfo` starts from
-  the last mod's copy that no package's logs made, else the game's. The merged files get size table entries, and a size table is made for them even when no mod
-  ships one. For `deploy` to use it, `tools/modman.py` has to call it with `files=True` and put `hook.files` into the
-  overlay over every mod's copy (`romfs_mods.add_generated`, which today leaves out a file that needs a size entry:
-  the merged table from the hook already holds them).
+  the last mod's copy that no package's logs made, else the game's. The merged files get size table entries, and a
+  size table is made for them even when no mod ships one.
+- **Sizes worked out at add:** a BCML or UKMM package this loader installed (its library copy has `.bnp\rstb.json`,
+  even an empty one, or `.ukmm\ukmm.json`) is never named as a mod whose files "may need entries" in the size
+  table: its entries were worked out when it was added (`romfs_mods.sizes_checked`).
 
 ## Packed downloads (.7z, .rar, archives inside)
 
 `tools/modman.py add` also takes a download it can't use as it is: a `.rar`, a `.7z` without a BCML `info.json`
 (so not a `.bnp`), or a `.zip` that holds archives (and isn't a BCML or UKMM package itself)
-(`bnp.packed_download`). `bnp.unpack_download` unpacks it into `modloader\mods\.adding-<name>.unpack\`, which is
-removed when the add ends (or by the next add, if one was cut short):
+(`bnp.packed_download`). `bnp.unpack_download` unpacks it into `modloader\mods\.adding-<name>-<process>-<random>
+.unpack\` (a name of its own, so two adds at once, the launcher and the command line, never share one), which is
+removed when the add ends (or by a later add after an hour, if one was cut short):
 
-- **Safety, at every level:** the same tools and checks as a `.bnp` (`extract()`: names, links, `-` names, free
-  space), plus: each file must come out the size the archive lists; the archives together may list at most
-  `MAX_MEMBERS` files and `MAX_UNPACKED` bytes; an archive listing over 1000 times its own size, above 1 GB, is
-  refused before anything is written; at most 3 archives one inside the other (a 4th is refused). A `.rar` needs
-  7-Zip (Windows' `tar.exe` isn't tried for it). Nothing from the download is run.
+- **Safety, at every level:** opened with 7-Zip only (Windows' `tar.exe` is never used for a download: a PC
+  without 7-Zip is told to install it, or to extract the download itself), with the same checks as a `.bnp`
+  (`extract()`: names, links, `-` names, sizes listed, free space), plus: each file must come out the size the
+  archive lists; the archives together may list at most `MAX_MEMBERS` files and `MAX_UNPACKED` bytes; an archive
+  listing over 1000 times its own size, above 1 GB, or one file over 4 GB, is refused before anything is written; at
+  most 3 archives one inside the other (a 4th is refused). Nothing from the download is run.
 - **What is a mod in it:** the folder's own files when `mod_inspect` finds a mod in them (archives in it are moved
   out first), and each archive in it: a `.bnp`, a UKMM package or a mod `.zip` as it is (added the usual way), any
-  other one opened in turn. Wrapper folders are looked through.
+  other one opened in turn. Wrapper folders are looked through. A package kept as it is gets the same checks (listed
+  by 7-Zip, counted in the budget, the disk-filler and big-file checks), and none is kept from the 3rd level: modman
+  opening it would be a 4th.
 - **Game version folders:** of two or more folders side by side named for game versions (`1.6.0/`, `1.9.0/`, `For
   Switch v1.6.0`), or whose patches name a known build, only the 1.9.0 one is kept (else the newest, said); the
   others are named as left out. A mod's own version in a folder name (`Armor v1.2.0`) doesn't count.
@@ -197,12 +212,18 @@ goes the same way.
 5. **Size table:** worked out again from the Switch files, never from the Wii U package's: a file the game has grows
    its entry as a rebuilt one does; a new file (and each new file inside a new pack) gets UKMM's estimate (the game's
    files of the same kind nearest in size, see [ukmm](ukmm.md); event flows from a few of the game's event packs);
-   models and textures get the model converter's sizes.
+   models and textures get the model converter's sizes. A file the table lists but the game keeps somewhere else (a
+   shared file such as `Actor/AIProgram/X.baiprog` changed in a new actor pack, an actor pack shipped loose that the
+   game keeps only in `TitleBG.pack`) grows from the game's copy found there (`bnp.game_copy`); with no copy at all,
+   to the estimate for its kind, never below its own bytes plus the game's entry.
 6. Then it **installs** like a Switch package (packs filled, logs merged, size table). The library copy keeps the
    converter's report in `.bnp\wiiu-convert-report.txt`, and `bnp.json` says `"converted_from": "wiiu"`.
 
 `add` lists what the conversion did, and under *Needs attention* each option whose models couldn't be converted
-(your game's model is used, so that part of the mod is lost or only half there).
+(your game's model is used, so that part of the mod is lost or only half there), the loose files left out as Wii U
+data (`bnp.dropped_notes`: those that change a game file, whose part of the mod is lost, apart from new ones the game
+has none of, which are missing), and the files in packs swapped for the game's (Havok, sound). For linkle-dialogue
+that is 138 of its 162 files, all its voice lines.
 
 ## Limits
 

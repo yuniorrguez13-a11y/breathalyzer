@@ -11,10 +11,11 @@
 
 [mod]
 id = "botw-mod-loader.zelda-view"
-name = "Link from Zelda's view (easter egg)"
+name = "Secret word (easter egg)"
 version = "1.0.0"
 authors = ["giruka"]
-description = "A hidden easter egg for the in-game console. The word is in docs/easter-eggs.md. Not tested in game yet."
+description = "A hidden easter egg for the game's console (docs/easter-eggs.md). Not tested in game yet."
+secret = true               # never listed on Home, in More... or on the game's Mods page: the easter-egg switch
 game_versions = ["1.9.0"]   # it calls and hooks game functions by their 1.9.0 addresses
 loader_api = 3              # hooks (API 2) and live settings (API 3)
 
