@@ -39,6 +39,10 @@ Also optional, same protocol version, sent only with client.py --ghost-sync (or 
                       within 1.01, the place within 2 m), sent only while it is on his back. The receiver's ghost puts
                       its item exactly there (his armor moves the bow, so the item's own offsets are not enough).
 A bad one is dropped on its own, never the state. Older relays drop them all; older clients ignore them.
+
+Who am I (docs/charsel.md; feature "look", session.py): a hello may say "features":["look"] and
+"look":{"id":"zelda","v":1,"name":"Zelda"}; such clients get the others' looks in welcome and join, and
+{"type":"look",...} lines (at most one change every 2 s per player). Only an id travels, never game data.
 """
 from __future__ import annotations
 

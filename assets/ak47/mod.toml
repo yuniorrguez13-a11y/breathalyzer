@@ -1,0 +1,15 @@
+# AK-47: a hidden easter egg that comes with the multiplayer mod (Ghost multiplayer), by giruka (docs/ak47.md).
+# This folder is a recipe, not a mod you add as it is: it holds no game files. tools/ak47_build.py builds the mod on
+# your PC from your own game files (the Traveler's Claymore's actor, model and icon as the base, the map, the size
+# table) and the model in this folder, then adds it to your mod library with this mod.toml:
+#   python tools/ak47_build.py build
+# part_of: the mod is only used while the multiplayer mod is on (docs/mod-format.md).
+
+[mod]
+id = "giruka.ak47"
+name = "AK-47 (comes with Ghost multiplayer)"
+version = "0.1.0"
+authors = ["giruka"]
+description = "A hidden AK-47 that hits like a claymore. Only on with Ghost multiplayer."
+game_versions = ["1.9.0"]
+part_of = "botw-mod-loader.ghost"

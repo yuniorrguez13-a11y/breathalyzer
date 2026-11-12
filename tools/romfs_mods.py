@@ -738,6 +738,18 @@ def _some(items: list[str], n: int = 5) -> str:
     return ", ".join(items[:n]) + (f" and {len(items) - n} more" if len(items) > n else "")
 
 
+# A mod folder holding one of these is a BCML or UKMM package tools/bnp.py or tools/ukmm.py installed: the size-table
+# entries its files need were worked out when it was added (.bnp/rstb.json, even an empty one; the UKMM install's own),
+# so the deploy never says it may need entries
+SIZES_CHECKED = (".bnp/rstb.json", ".ukmm/ukmm.json")
+
+
+def sizes_checked(path: str) -> bool:
+    if not path or not os.path.isdir(path):
+        return False
+    return any(os.path.isfile(os.path.join(path, *rel.split("/"))) for rel in SIZES_CHECKED)
+
+
 def manifest_for(p: Plan, out: str, *, complete: bool, dry_run: bool = False) -> dict:
     """The report, also written as the overlay's marker file. No times: the same input gives the same file."""
     files: dict[str, dict] = {}
@@ -776,7 +788,8 @@ def manifest_for(p: Plan, out: str, *, complete: bool, dry_run: bool = False) ->
         warnings.append(f"The RSTB is merged from the size tables of {', '.join(p.rstb_merged)}, so start Savage Wind "
                         f"with {ENV_NO_HUD}=1 (modman run does): 0.4.1-alpha.4 stops its own RSTB fixes when the "
                         "overlay has one (issue #505). Keep the voice language the same as the text language.")
-        others = [m.name for i, m in enumerate(p.mods) if won[i] and m.name not in p.rstb_merged and not m.owner]
+        others = [m.name for i, m in enumerate(p.mods) if won[i] and m.name not in p.rstb_merged and not m.owner
+                  and not sizes_checked(m.path)]
         if others:
             warnings.append(f"The merged RSTB has no size changes from {', '.join(others)}; their files may need "
                             "entries in it. Merge the mods with UKMM (Switch mode) first.")
@@ -784,7 +797,8 @@ def manifest_for(p: Plan, out: str, *, complete: bool, dry_run: bool = False) ->
         warnings.append(f"{rstb_from} ships an RSTB, so start Savage Wind with {ENV_NO_HUD}=1 (the env command "
                         "adds it): 0.4.1-alpha.4 stops its own RSTB fixes when the overlay has one (issue #505). "
                         "Keep the voice language the same as the text language.")
-        others = [m.name for i, m in enumerate(p.mods) if won[i] and m.name != rstb_from and not m.owner]
+        others = [m.name for i, m in enumerate(p.mods) if won[i] and m.name != rstb_from and not m.owner
+                  and not sizes_checked(m.path)]
         if others:
             warnings.append(f"The RSTB comes from {rstb_from} only; files from {', '.join(others)} may need entries "
                             "in it. Merge the mods with UKMM (Switch mode) first.")

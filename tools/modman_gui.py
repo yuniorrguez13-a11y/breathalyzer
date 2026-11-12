@@ -1575,6 +1575,14 @@ REBUILD_SAY = "Building the game code for your code mods: about 10-20 minutes, o
 LAUNCH_WORDS = ((PRESS_DEPLOY, "Play uses the change."), ("Press Deploy to use it.", "Play uses it."),
                 ("Press Deploy to take it out of the game.", "Play leaves it out."),
                 ("Press Play to start the game.", "Press Play to start the game."))
+# Easter eggs (bundled-mods.toml egg = true) are secret: the picker and Home never list them one by one, only one
+# switch that turns every one of them on or off together (OFF at first).
+EGG_ROW = "breathalyzer:easter-eggs"   # (Home's list: the switch's row; never a mod id)
+EGG_TITLE = "Easter eggs"
+EGG_ASK = "Enable easter eggs?"
+EGG_LINE = "Secret extras. Some take longer the first time you press Play."
+EGG_DONE = {True: ["Easter eggs are on.", "Play uses the change. Some take longer the first time."],
+            False: ["Easter eggs are off.", "Play uses the change."]}
 HOME_ROWS = 3          # the mod list always has room for this many
 ABOUT_LINES = 2        # the selected mod's text under the list: this many lines (longer text is cut with "...")
 BREATH_LINES = 4       # "Add this mod?": the description in this many lines at most (the warning and buttons fit)
@@ -1750,10 +1758,12 @@ class LaunchController(Controller):
     plain words. While the game is open, Play waits (watch() notices when it closes)."""
 
     def __init__(self, backend: LaunchBackend, clock=time.monotonic, port: int | None = None, dev: bool = False,
-                 dev_ids=()):
+                 dev_ids=(), egg_ids=()):
         self.port_arg = port                        # --port (tests, developers): always opens that control port
         self.dev = dev                              # Settings > Developer commands
         self.dev_ids = set(DEV_MODS) | set(dev_ids)  # mods whose commands need developer mode
+        self.egg_ids = set(egg_ids)                 # the easter eggs: one Easter eggs row on Home for all of them
+        self.install_done: list[str] | None = None  # what the status says when the picked mods are in
         self.install_mods: list[str] = []           # while the picked mods are added: their ids, in order
         self.install_failed: Job | None = None      # the first step that failed (Details shows it)
         self.chain: list[Job] = []
@@ -1785,9 +1795,45 @@ class LaunchController(Controller):
     def summary_line(self) -> str:
         if self.listing.error:
             return ""
-        rows = self.listing.rows
+        rows = self.shown_rows()
         text = f"{sum(r.on for r in rows)} of {n_of(len(rows), 'mod')} on." if rows else "No mods yet."
         return f"{text} {self.state_text}".strip()
+
+    def shown_rows(self) -> list[Row]:
+        """Home's list: the mods but the easter eggs, then one Easter eggs row for all of them (ON while one of them is
+        on), whenever there are eggs (they needn't be in the library yet: the switch adds them)."""
+        rows = [r for r in self.listing.rows if r.id not in self.egg_ids]
+        if self.egg_ids and not self.listing.error:
+            on = any(r.on for r in self.listing.rows if r.id in self.egg_ids)
+            rows.append(Row(0, EGG_ROW, EGG_TITLE, on, [], about=EGG_LINE, full=EGG_LINE))
+        return rows
+
+    def shown_row(self, row_id: str | None) -> Row | None:
+        return next((r for r in self.shown_rows() if r.id == row_id), None)
+
+    def set_eggs(self, mods: list[dict], on: bool) -> None:
+        """The Easter eggs switch: every egg (launcher.read_bundled's mods with egg) on or off together. The ones in
+        the library are turned on or off at once, as Turn on/off does; turned on while one isn't there yet, they are
+        put in as the picker's Save does (a code mod added, a recipe built from the player's game files)."""
+        if not mods or not self.free("toggle"):
+            return
+        self._reload()
+        have = {r.id for r in self.listing.rows}
+        if on and any(m["id"] not in have for m in mods):
+            self.install_picked(mods, {m["id"]: True for m in mods}, done=EGG_DONE[True])
+            return
+        action, started, code, lines = "enable" if on else "disable", self.clock(), 0, []
+        for m in mods:
+            if m["id"] in have:
+                c, out = self.backend.quick([action, m["id"]])
+                code, lines = code or c, lines + out
+        # (Details names the switch, not the mods: they are secret)
+        self.details_job = Job(action, [action, f"({EGG_TITLE.lower()})"], name=EGG_TITLE, lines=lines, code=code,
+                               started=started, ended=self.clock())
+        self._reload(select=EGG_ROW)
+        self.status = Status("ok", list(EGG_DONE[on])) if code == 0 else \
+            launcher_words(failed("Not changed.", [x.rstrip() for x in lines if x.strip()]))
+        self.refresh_state()
 
     def can(self, action: str) -> bool:
         if action in ("details", "refresh", "settings"):
@@ -1893,8 +1939,8 @@ class LaunchController(Controller):
             on = self.backend.enabled_ids()
         except Exception:  # (then the list as the window last read it)
             on = {r.id for r in self.listing.rows if r.on}
-        names = {r.id: r.name for r in self.listing.rows}
-        return [names.get(i, i) for i in sorted(set(on) & self.dev_ids)]
+        names = {r.id: EGG_TITLE if r.id in self.egg_ids else r.name for r in self.listing.rows}   # (eggs: secret)
+        return list(dict.fromkeys(names.get(i, i) for i in sorted(set(on) & self.dev_ids)))
 
     def play_args(self) -> list[str]:
         """modman run's arguments. Developer mode (the game's control port: SAVAGEWIND_CONTROL) is on when Settings
@@ -2027,17 +2073,18 @@ class LaunchController(Controller):
 
     # --- Breathalyzer Plus: the mods picked in the mod picker
 
-    def install_picked(self, mods: list[dict], picks: dict[str, bool]) -> None:
+    def install_picked(self, mods: list[dict], picks: dict[str, bool], done: list[str] | None = None) -> None:
         """Put the picked bundled mods (launcher.read_bundled) into the library, one step after the other in the
         background: each code mod not there yet is added (modman add, then its after_add commands), then turned on
         or off as picked; a recipe mod turned on and not there yet is built from the player's game files (its build
-        commands). A recipe that stays off is built only when it is picked later."""
+        commands). A recipe that stays off is built only when it is picked later. An easter egg is called Easter
+        eggs while it goes in (its title is secret). done: what the status says when they are in."""
         if not self.free("add"):
             return
         have = {r.id for r in self.listing.rows}
         steps: list[Job] = []
         for m in mods:
-            on, title = bool(picks.get(m["id"], m["on"])), m["title"]
+            on, title = bool(picks.get(m["id"], m["on"])), EGG_TITLE if m.get("egg") else m["title"]
             new = m["id"] not in have
             if m["kind"] == "code" and new:
                 steps.append(Job("add", ["add", m["folder"]], name=title, mod_id=m["id"]))
@@ -2053,6 +2100,7 @@ class LaunchController(Controller):
         self.installing, self.install_total = [], len(steps)
         self.install_mods = list(dict.fromkeys(j.mod_id for j in steps))   # ("Adding mod 2 of 5": mods, not steps)
         self.install_failed = None
+        self.install_done = done
         self.chain = steps
         if steps:
             self._next()
@@ -2061,7 +2109,7 @@ class LaunchController(Controller):
 
     def _installed(self) -> None:
         failed, self.installing = self.installing or [], None
-        self._reload()
+        self._reload(select=EGG_ROW if self.install_done is EGG_DONE[True] else None)   # (the switch stays picked)
         self.refresh_state()
         if failed:
             names = list(dict.fromkeys(failed))
@@ -2075,7 +2123,8 @@ class LaunchController(Controller):
             self.status = Status("error", [f"{n_of(len(names), 'mod')} couldn't be added: {', '.join(names)}.",
                                            "The others are ready. Press Details to see why."])
         else:
-            self.status = Status("ok", ["Your mods are ready.", "Press Play. You can turn them on or off below."])
+            self.status = Status("ok", list(self.install_done or ["Your mods are ready.",
+                                                                  "Press Play. You can turn them on or off below."]))
 
     # --- .breath files (tools/breath.py): add one, make one
 
@@ -2296,6 +2345,7 @@ class LauncherView(BigText):
         self.breath_buttons: list = []
         self.fps_note = ""                                    # Settings' frame rate line after a change
         self.bundled_key, self.bundled = la.read_bundled(app_dir)   # (Breathalyzer Plus: our mods for the picker)
+        self.eggs = [m for m in self.bundled if m.get("egg")]      # (secret: one switch for all, never listed)
         self.picks: dict[str, bool] = {}
         self.pick_buttons: dict[str, object] = {}
         self.picker_buttons: list = []
@@ -2536,7 +2586,7 @@ class LauncherView(BigText):
     def size_columns(self) -> None:
         """The Mod column as wide as the longest name, up to 45% of the list (What it does gets the rest)."""
         zero = self.font.measure("0")
-        rows = self.ctl.listing.rows if self.ctl is not None else []
+        rows = self.ctl.shown_rows() if self.ctl is not None else []
         longest = max([self.font.measure(r.name) for r in rows] + [self.bold.measure("Mod"), zero * 8])
         have = self.tree.winfo_width()
         cap = int((have if have > 1 else self.text_width()) * 0.45)
@@ -2549,7 +2599,7 @@ class LauncherView(BigText):
             return
         pad = self.font.measure("0") * 2
         widths = {c: int(self.tree.column(c, "width")) - pad for c in ("name", "about")}
-        for row in self.ctl.listing.rows:
+        for row in self.ctl.shown_rows():
             if not self.tree.exists(row.id):
                 continue
             for col, text in (("name", row.name), ("about", row.about)):
@@ -2755,7 +2805,8 @@ class LauncherView(BigText):
         if self.ctl is not None:
             self.ctl.stop()
         self.ctl = LaunchController(backend, port=self.port or self.settings.port, dev=self.settings.dev,
-                                    dev_ids={m["id"] for m in self.bundled if m.get("developer")})
+                                    dev_ids={m["id"] for m in self.bundled if m.get("developer")},
+                                    egg_ids={m["id"] for m in self.eggs})
         warn = next((s for s in rep.screens if not s.blocks), None)
         if warn is not None:
             self.ctl.status = Status("warn", [warn.heading + ".", warn.line])
@@ -2812,7 +2863,7 @@ class LauncherView(BigText):
         self.play.configure(state="normal" if ctl.can("play") else "disabled",
                             bg=t["play"] if ctl.can("play") else t["button"])
         self.plain_button.configure(state="normal" if ctl.can("play_plain") else "disabled")
-        empty = not ctl.listing.rows and not ctl.listing.error   # (no mods: one Play, no Play without mods, no Turn off)
+        empty = not ctl.shown_rows() and not ctl.listing.error   # (no mods: one Play, no Play without mods or Turn off)
         per_mod = {self.by_action["toggle"].ring, self.by_action["export"].ring}
         self.show_flow([r for r in self.flow_all if not (empty and r in per_mod)])
         if ctl.can("cancel"):
@@ -2844,7 +2895,7 @@ class LauncherView(BigText):
     def render_list(self) -> None:
         keep = self.ctl.take_select() or self.selected_id()
         self.tree.delete(*self.tree.get_children())
-        rows = self.ctl.listing.rows
+        rows = self.ctl.shown_rows()   # (the easter eggs: one Easter eggs row, never one by one)
         for row in rows:
             self.tree.insert("", "end", iid=row.id, values=("ON" if row.on else "OFF", row.name, row.about))
         ids = [r.id for r in rows]
@@ -2859,9 +2910,9 @@ class LauncherView(BigText):
     def render_about(self) -> None:
         if self.ctl is None:
             return
-        row = self.ctl.row(self.selected_id())
+        row = self.ctl.shown_row(self.selected_id())
         if row is None:
-            text = "Add a mod with Add mod." if not self.ctl.listing.rows else "Pick a mod to read what it does."
+            text = "Add a mod with Add mod." if not self.ctl.shown_rows() else "Pick a mod to read what it does."
         else:
             text = f"{row.name}: {row.full or row.about or kind_text(row.kinds)}"
         width = int(self.about.cget("wraplength") or 0) or self.text_width()
@@ -2964,7 +3015,12 @@ class LauncherView(BigText):
         self.render()
 
     def on_toggle(self) -> None:
-        self.after_action(lambda: self.ctl.toggle(self.selected_id()))
+        sel = self.selected_id()
+        if sel == EGG_ROW:   # (the Easter eggs switch: every egg on or off together)
+            row = self.ctl.shown_row(EGG_ROW)
+            on = not (row is not None and row.on)
+            return self.after_action(lambda: self.ctl.set_eggs(self.eggs, on))
+        return self.after_action(lambda: self.ctl.toggle(sel))
 
     def on_offer(self) -> None:
         if self.ctl.offer and self.ctl.offer[1] == "no_rebuild":
@@ -3066,6 +3122,9 @@ class LauncherView(BigText):
         """Export as .breath: the selected mod in one file to share (a mod built from your game files can't be)."""
         if not self.ctl.can("add"):
             return self.after_action(lambda: self.ctl.free("add"))
+        if self.selected_id() == EGG_ROW:
+            self.ctl.status = Status("info", ["Easter eggs can't be exported.", "Pick another mod in the list."])
+            return self.render()
         row = self.ctl.row(self.selected_id())
         if row is None:
             self.ctl.status = Status("info", ["Pick a mod in the list first.", "Then press Export as .breath."])
@@ -3312,9 +3371,13 @@ class LauncherView(BigText):
 
     def show_picker(self, from_settings: bool = False) -> None:
         """Our mods, each with ON/OFF, its title, what it does and its notes. A mod already in the library shows
-        how it is now; the others their default."""
+        how it is now; the others their default. The easter eggs are never listed: one "Enable easter eggs?" switch
+        for all of them (picks[EGG_ROW]), OFF unless one of them is on now."""
         rows = {r.id: r for r in self.ctl.listing.rows} if self.ctl is not None else {}
-        self.picks = {m["id"]: rows[m["id"]].on if m["id"] in rows else m["on"] for m in self.bundled}
+        self.picks = {m["id"]: rows[m["id"]].on if m["id"] in rows else m["on"] for m in self.bundled
+                      if not m.get("egg")}
+        if self.eggs:
+            self.picks[EGG_ROW] = any(rows[m["id"]].on for m in self.eggs if m["id"] in rows)
         self.picker_from_settings = from_settings
         self.fill_picker()
         self.show("picker")
@@ -3329,20 +3392,23 @@ class LauncherView(BigText):
             w.destroy()
         self.wraps = [(w, s) for w, s in self.wraps if w.winfo_exists()]
         self.picker_buttons, self.pick_buttons, self.picker_flow.items = [], {}, []
-        for k, m in enumerate(self.bundled):
-            b = self.make_button(body, "", lambda i=m["id"]: self.flip_pick(i), self.picker_buttons, bold=True,
-                                 width=4)
+        cards = [(m["id"], m["title"], m["description"],
+                  [*m["tags"], *([f"Starts {'ON' if m['on'] else 'OFF'}: {m['why'].rstrip('.')}"]
+                                 if m.get("why") else [])])   # (the tags, and why it starts on or off)
+                 for m in self.bundled if not m.get("egg")]
+        if self.eggs:   # (secret: one switch for every egg, never their titles)
+            cards.append((EGG_ROW, EGG_ASK, EGG_LINE, []))
+        for k, (key, title, text, notes) in enumerate(cards):
+            b = self.make_button(body, "", lambda i=key: self.flip_pick(i), self.picker_buttons, bold=True, width=4)
             b.ring.grid(row=k, column=0, sticky="nw", pady=(0, 8))
             b.bind("<FocusIn>", lambda e, ring=b.ring: self.picker_see(ring), add="+")
-            self.pick_buttons[m["id"]] = b
-            self.paint_pick(m["id"])
+            self.pick_buttons[key] = b
+            self.paint_pick(key)
             card = tk.Frame(body, bg=t["bg"])
             card.grid(row=k, column=1, sticky="ew", padx=(12, 0), pady=(0, 8))
-            self.label(card, self.bold, text=m["title"]).pack(anchor="w")
-            self.wrap_label(card, text=m["description"], share=0.85).pack(anchor="w")
-            notes = [*m["tags"], *([f"Starts {'ON' if m['on'] else 'OFF'}: {m['why'].rstrip('.')}"]
-                                   if m.get("why") else [])]
-            if notes:   # (the tags, and why it starts on or off)
+            self.label(card, self.bold, text=title).pack(anchor="w")
+            self.wrap_label(card, text=text, share=0.85).pack(anchor="w")
+            if notes:
                 self.wrap_label(card, text=". ".join(notes) + ".", share=0.85, fg=t["disabled"]).pack(anchor="w")
         buttons = [("Save", self.on_pick_save)] + ([("Back", self.back)] if self.picker_from_settings else [])
         for k, (text, command) in enumerate(buttons):
@@ -3399,7 +3465,9 @@ class LauncherView(BigText):
         self.save_settings()
         self.show("home")
         self.play.focus_set()
-        self.after_action(lambda: self.ctl.install_picked(self.bundled, dict(self.picks)))
+        picks = {k: v for k, v in self.picks.items() if k != EGG_ROW}
+        picks.update({m["id"]: bool(self.picks.get(EGG_ROW)) for m in self.eggs})   # (every egg as the one switch)
+        self.after_action(lambda: self.ctl.install_picked(self.bundled, picks))
 
     # --- Settings
 
@@ -3466,7 +3534,7 @@ class LauncherView(BigText):
             (".breath files", [("text", breath[0])], breath[1]),
         ]
         if self.bundled:
-            rows.append(("Our mods", [("text", f"{len(self.bundled)} come with Breathalyzer")],
+            rows.append(("Our mods", [("text", f"{len(self.bundled) - len(self.eggs)} come with Breathalyzer")],
                          [("Pick again", lambda: self.show_picker(from_settings=True))]))
         for w in self.settings_top.winfo_children():
             w.destroy()

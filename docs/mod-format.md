@@ -58,6 +58,7 @@ dlc_romfs = "01007EF00011F001/romfs"
 | `[mod] title_picture` | no | The title-screen picture. The same rules as `icon`. The last mod that is on and has one wins, unless the player picked one in Mod Manager. |
 | `[mod] url` | no | The mod's web page: starts with `https://`, at most 300 characters, no spaces. Mod Manager shows it; the game only says the link is in Mod Manager (its font can't show web addresses). |
 | `[mod] update_url` | no | Kept for the update check that comes later. The same rules as `url`. |
+| `[mod] part_of` | no | The id of another mod this one is part of (the same rules as `[mod] id`, not the mod itself), like the AK-47 ([ak47](ak47.md)) that comes with the multiplayer mod. The mod is used only while that mod is in the library and on: turned off, or missing, it turns this one off too (it can still be turned off on its own). `add` keeps it in the mod's library entry; `list` says when a mod that is on waits for it. |
 | `[font] file` | yes, in `[font]` | Makes the mod a font mod: a `.ttf` font (TrueType outlines) in the mod. It is built into the game's fonts at deploy, on your PC, and never shared ([fonts](fonts.md)). The player picks which font is used. |
 | `[font] for` | no (`"menu"`) | Which of the game's fonts it replaces: `"menu"`, the menus and the game's texts. `"all"` comes later: `add` says so and uses `"menu"` for now. |
 | `[font] languages` | no (all) | Some of `"US"`, `"EU"` and `"JP"`, like `["US", "EU"]`. `"KR"`, `"CN"`, `"TW"` and `"TH"` come later: `add` says so and leaves them out. |
@@ -165,6 +166,9 @@ for a `mod.toml` put into a library folder by hand), and a mod without a `mod.to
 Versions compare by their numbers (`1.0` is `1.0.0`; a suffix is ignored). A mod without a `mod.toml` has
 no version, so it only meets `"*"`. `add` says when a dependency isn't met yet. Dependencies don't change the load
 order: modhost loads the DLLs in file name order.
+
+A mod with `[mod] part_of` isn't a dependency: it never stops a deploy. While the mod it is part of is off
+or missing, deploy leaves it out, as if it were off.
 
 ## What add and deploy check
 

@@ -54,6 +54,7 @@ GIVE_UP = ("wrong room code", "needs a room code", "too many wrong room codes", 
            "doesn't know the room code")
 
 DEFAULT_HZ = 20.0
+MAX_HZ = 24.0                # under the relay's 25 states a second (security.KIND_RATES), with room for jitter
 DEFAULT_DELAY = 0.1       # how far behind real time other players are drawn (s)
 STALE_AFTER = 3.0         # no news for this long: drawn grey
 GOTO_LIFT = 0.5           # teleport this far above the other player's feet (a target below ground makes Link fall)
@@ -698,6 +699,7 @@ class RelayLink:
         self.host, self.port, self.name, self.room, self.bot = host, port, name, room, bot
         self.look = look   # Who am I: said in every hello (features ["look"]); None: a plain visitor, as before
         self.speaks_look = False   # the relay's welcome said "look": `look` changes can go to it
+        self.look_refused = False  # the relay said "look changes too often": the Runner sends the look again
         self.code = code   # a co-op host's room code (docs/coop.md): proved in the hello, never sent as text
         self.gave_up: str | None = None   # the relay refused us for good (GIVE_UP): no more retries
         self.on_message = on_message
@@ -853,6 +855,8 @@ class RelayLink:
                     self.peer_count = max(0, self.peer_count - 1)
                 elif kind == "error":
                     text, at = str(msg.get("error"))[:200], self.clock()
+                    if text.startswith("look changes too often"):
+                        self.look_refused = True   # (not lost: the Runner sends the newest look again)
                     if text != self._last_error[0] or at - self._last_error[1] > 10.0:
                         self.log(f"Relay: {text}")
                         self._last_error = (text, at)
@@ -891,6 +895,9 @@ GHOST_ASK_AGAIN_MAX = 60.0   # ... twice as long each time, up to this, until a 
 GHOST_STABLE = 10.0
 GHOST_TURN_SPEED = 0.5       # m/s: a player moving slower than this keeps the ghost's last facing
 GHOST_ITEMS_EVERY = 2.0      # --ghost-items: `ghost items` goes again this often even with no change (s)
+GHOST_SWITCH_M = 2.0         # another player takes the ghost only when this much nearer than the one shown (m) ...
+GHOST_SWITCH_S = 1.0         # ... for this long (s): two friends at about the same distance never swap it back and
+#                              forth (with --ghost-looks each swap is a new body)
 # --ghost-link: the Link body. tools/mp/ghost_link_pack.py builds a pack under this name (the default stand-in's) from
 # your own game files; deployed, the ghost looks like Link, else it is the Sheikah man. Asked for by name, so the mod
 # never swaps in its crate. (Also ghost.c's LINK_ACTOR.)
@@ -1032,8 +1039,12 @@ class Ghost:
     through this PC's own catalog (charsel.Looks: what it built, on which free name), never to `ghost spawn` raw; a
     pick this PC lacks is the Link body, and the log says why. A new pick spawns the new body (the mod replaces the
     old one). A body the mod gives up on is the Link body for the rest of the session. With a mod that has `iam`
-    (0.8.0, its `ghost` reply says has_iam) the client gives it the list of characters and your own pick
-    (`ghost looks`), and takes what you type there (`iam zelda`: take_iam).
+    (0.8.0, its `ghost` reply says has_iam) the client gives it the list of characters, your own pick and the last
+    iam_seq it read (`ghost looks <list> <pick> <seen>`), and takes what you type there (`iam zelda`: take_iam): a word
+    typed while this client runs, or (take_old_iam: no --look given) one typed before it that no client has taken
+    yet. A word an earlier client already took never comes back (the mod clears it once the client saw it).
+
+    The peer shown changes only when another is GHOST_SWITCH_M nearer for GHOST_SWITCH_S (or the shown one is gone).
     """
 
     def __init__(self, peer: str | None = None, actor: str | None = None, log=print, clock=time.monotonic,
@@ -1044,9 +1055,13 @@ class Ghost:
         self.look_note = ""          # why the shown player is the Link body and not their pick ("": it is their pick)
         self._look_said: tuple | None = None
         self.has_iam = False         # the mod has `iam` (0.8.0): it gets the list of characters (`ghost looks`)
-        self.my_look = "link"        # your own pick, for `ghost looks` (the Runner sets it)
+        self.my_look: str | None = "link"   # your own pick, for `ghost looks` (the Runner sets it; None: --no-look,
+        #                                     so no list: `iam` then says the client isn't sending)
+        self.take_old_iam = True     # a word typed before this client (no client took it yet) is your pick; False with
+        #                              --look (the command line wins over an old `iam`)
         self._looks_sent: list[str] | None = None
-        self._iam_seen: int | None = None
+        self._iam_seen: int | None = None   # the last iam_seq read on this connection (None: none yet)
+        self._nearer: tuple | None = None   # (peer id, since): another player nearer than the one shown
         self.iam_wanted: str | None = None   # what you typed with `iam`, not yet taken (take_iam)
         self.items = items           # --ghost-items: the ghost holds what the shown player holds (ghost mod 0.6.0)
         self.has_items = False       # ... the mod takes `ghost items` (its `ghost` reply said has_items)
@@ -1079,14 +1094,28 @@ class Ghost:
         self.heading = Heading()              # the shown player's facing: their direction of travel
 
     def pick(self, session: Session, now: float) -> dict | None:
-        """The peer to show: nearest first (Session.views), or the --ghost-peer one. None: nobody with a position."""
-        for v in session.views(now):
-            if "x" not in v:
-                continue
-            if self.peer is not None and v["name"].casefold() != self.peer.casefold():
-                continue
-            return v
-        return None
+        """The peer to show: the nearest (Session.views), or the --ghost-peer one. The one shown stays until another
+        is GHOST_SWITCH_M nearer for GHOST_SWITCH_S. None: nobody with a position."""
+        cands = [v for v in session.views(now)
+                 if "x" in v and (self.peer is None or v["name"].casefold() == self.peer.casefold())]
+        if not cands:
+            self._nearer = None
+            return None
+        best = cands[0]
+        cur = next((v for v in cands if v["id"] == self.shown), None)
+        if cur is None or cur is best:
+            self._nearer = None
+            return best
+        if best["dist"] is None or cur["dist"] is None or cur["dist"] - best["dist"] < GHOST_SWITCH_M:
+            self._nearer = None
+            return cur
+        if self._nearer is None or self._nearer[0] != best["id"]:
+            self._nearer = (best["id"], now)
+            return cur
+        if now - self._nearer[1] >= GHOST_SWITCH_S:
+            self._nearer = None
+            return best
+        return cur
 
     def requests(self, session: Session, now: float, connection: int) -> list[list[str]]:
         if connection != self._conn:          # a new game connection (maybe a new game): start over
@@ -1105,8 +1134,8 @@ class Ghost:
         out: list[list[str]] = []
         if self.sync and self.has_self:
             out.append(["ghost", "self"])     # (your own Link, for the state you send: own_state)
-        if self.has_iam:                      # (0.8.0: the characters `iam` takes, and your pick)
-            cmd = ["ghost", "looks", iam_list(), self.my_look]
+        if self.has_iam and self.my_look:     # (0.8.0: the characters `iam` takes, your pick, the last iam_seq read)
+            cmd = ["ghost", "looks", iam_list(), self.my_look, str(self._iam_seen or 0)]
             if cmd != self._looks_sent:
                 out.append(cmd)
                 self._looks_sent = cmd
@@ -1299,17 +1328,21 @@ class Ghost:
                 self._check_mod(r, state)
 
     def _take_iam(self, r: dict) -> None:
-        """A `ghost` reply (0.8.0): has_iam, and a new `iam` you typed (iam_seq went up): kept for take_iam()."""
+        """A `ghost` reply (0.8.0): has_iam, and a new `iam` you typed (iam_seq went up): kept for take_iam(). The
+        first iam_seq on a connection is where this client starts: its word is taken only with take_old_iam, and only
+        if no client took it already (the mod clears a word once `ghost looks` says it was seen)."""
         was, self.has_iam = self.has_iam, r.get("has_iam") is True
         if self.has_iam and not was:
             self._looks_sent = None           # (send it the list at once)
         seq, typed = r.get("iam_seq"), r.get("iam")
-        if not self.has_iam or not isinstance(seq, int) or isinstance(seq, bool):
+        if not self.has_iam or not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
             return
         if seq != self._iam_seen:
-            if seq > 0 and isinstance(typed, str) and charsel.find_id(typed):
-                self.iam_wanted = charsel.find_id(typed)
+            first = self._iam_seen is None
             self._iam_seen = seq
+            cid = charsel.find_id(typed) if isinstance(typed, str) and typed else None
+            if seq > 0 and cid and (self.take_old_iam or not first):
+                self.iam_wanted = cid
 
     def _check_mod(self, r: dict, state: str) -> None:
         """A `ghost` reply: a ghost that stayed resets the back-off; a mod that stopped trying gets asked again (a
@@ -1370,8 +1403,8 @@ class Runner:
         self.on_look = on_look       # Who am I: called with a new pick typed in the game (`iam`): keeps it
         self._look_msg: dict | None = None   # a `look` change to send (one per session.LOOK_EVERY s)
         self._look_at = -1e9
-        if ghost is not None and look is not None:
-            ghost.my_look = look["id"]
+        if ghost is not None:
+            ghost.my_look = look["id"] if look is not None else None   # (--no-look: no list for `iam`, nothing sent)
         self.period = 1.0 / hz
         self.record = record
         self.print_every = print_every
@@ -1408,6 +1441,10 @@ class Runner:
         return True
 
     def _send_look(self) -> None:
+        if self.relay.look_refused:          # (the relay found it too soon: the newest look goes again, in time)
+            self.relay.look_refused = False
+            if self._look_msg is None:
+                self._look_msg = self.relay.look
         msg = self._look_msg
         if msg is None or not self.relay.connected or not self.relay.speaks_look:
             return
@@ -1701,7 +1738,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--room", default=DEFAULT_ROOM, help="room to join (default: default)")
     ap.add_argument("--code", help="the host's room code, 3 words (a co-op host's relay; docs/coop.md)")
     ap.add_argument("--game-port", type=int, default=GAME_PORT, help=f"the game's control port (default {GAME_PORT})")
-    ap.add_argument("--hz", type=float, default=DEFAULT_HZ, help="updates per second (default 20, max 25)")
+    ap.add_argument("--hz", type=float, default=DEFAULT_HZ,
+                    help="updates per second (default 20, max 24: the relay takes 25 states a second)")
     ap.add_argument("--delay", type=float, default=DEFAULT_DELAY, help="draw others this many seconds late (default 0.1)")
     ap.add_argument("--no-ui", action="store_true", help="no window: print distances once a second")
     ap.add_argument("--record", metavar="FILE", help="also save your path to this JSONL file, replacing it (for bot.py --replay)")
@@ -1734,8 +1772,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("bad --name (1-20 letters, digits, space, _ . ' -)")
     if valid_room(args.room) is None:
         ap.error("bad --room (1-32 of A-Z a-z 0-9 _ -)")
-    if not 0 < args.hz <= 25:
-        ap.error("--hz must be above 0 and at most 25 (the relay allows 30 messages a second)")
+    if not 0 < args.hz <= MAX_HZ:
+        ap.error(f"--hz must be above 0 and at most {MAX_HZ:g} (the relay takes 25 states a second)")
     if not 0 <= args.delay <= 2:
         ap.error("--delay must be from 0 to 2 seconds")
     try:
@@ -1756,15 +1794,17 @@ def main(argv: list[str] | None = None) -> int:
     looks = None
     if args.ghost_looks is not None:
         args.ghost_link = True
-        folder = args.ghost_looks or choice["packs"] or str(charsel.DEFAULT_OUT)
-        looks = charsel.Looks(charsel.load_catalog(folder), GHOST_LINK_ACTOR)
-        print(f"--ghost-looks: {len(looks.slots)} characters built here ({folder}); a pick this PC lacks shows as "
-              "the Link body.")
+        cat, where = charsel.here_catalog(args.ghost_looks or choice["packs"])
+        looks = charsel.Looks(cat, GHOST_LINK_ACTOR)
+        gone = cat.get("not_deployed") or []
+        print(f"--ghost-looks: {len(looks.slots)} characters in your game ({where}); a pick this PC lacks shows as "
+              "the Link body." + (f" Built but not deployed: {', '.join(gone)} (Play or deploy)." if gone else ""))
     ghost = None
     sync = args.ghost_sync or args.ghost_link or args.ghost_items
     if args.ghost or args.ghost_peer is not None or args.ghost_actor is not None or sync:
         ghost = Ghost(args.ghost_peer, GHOST_LINK_ACTOR if args.ghost_link else args.ghost_actor, sync=sync,
                       items=args.ghost_items, looks=looks)
+        ghost.take_old_iam = args.look is None   # (--look wins over a word typed with `iam` before this client)
     if args.ghost_items and not args.ghost_link:
         print("--ghost-items: the Link body and the people's bodies have the hand bones the items go on; without "
               "--ghost-link (or --ghost-looks) the stand-in holds nothing.")

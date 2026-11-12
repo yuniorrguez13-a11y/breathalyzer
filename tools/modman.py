@@ -128,6 +128,7 @@ MENU_SYMBOLS = set("{}#$%@^`|~")      # the game's menu font has none of these (
 # doesn't load, turns its part off. Called in this order: docs/mod-format.md, "What deploy does with them".
 FEATURES = ("mod_settings", "font", "menu_bg", "mod_pictures")
 GENERATED_OWNER = {"font": "generated:fonts", "menu_bg": "generated:title", "mod_pictures": "generated:pictures"}
+MERGED_OWNER = "generated:merged"   # packs two enabled mods change, one a BCML package: merged (bnp.deploy_hook)
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 RESERVED_RE = re.compile(r"^(con|prn|aux|nul|com[0-9]|lpt[0-9])$")
 CHEAT_RE = re.compile(r"(^|/)cheats/([0-9a-f]{16})\.txt$", re.I)  # (any case: Windows and the SD card ignore it)
@@ -155,7 +156,7 @@ VERSION_RE = re.compile(r"^(\d{1,9}(?:\.\d{1,9}){0,3})(?:[-+][0-9A-Za-z.-]+)?$")
 GAME_VERSION_RE = re.compile(r"^\d{1,9}\.\d{1,9}\.\d{1,9}$")
 REQ_RE = re.compile(r"^(>=|==)\s*(\d{1,9}(?:\.\d{1,9}){0,3})$")
 MANIFEST_KEYS = {"mod": {"id", "name", "version", "authors", "description", "game_versions", "loader_api",
-                         "icon", "background", "title_picture", "url", "update_url"},
+                         "icon", "background", "title_picture", "url", "update_url", "part_of"},
                  "code": {"windows", "linux", "hooks"}, "data": {"romfs", "dlc_romfs"}, "dependencies": None,
                  "font": {"file", "for", "languages", "license"},
                  "settings": None, "pages": None}   # ([[settings]] and [[pages]]: tools/mod_settings.py checks them)
@@ -466,7 +467,11 @@ class Library:
         return os.path.join(self.mods_dir, mod_id)
 
     def enabled(self) -> list[dict]:
-        return [m for m in self.mods if m.get("enabled")]
+        """The mods that are on. A mod that is part of another one (its mod.toml's [mod] part_of, kept as
+        "part_of" in its entry) counts as on only while that mod is in the library and on too."""
+        on = {m["id"] for m in self.mods if m.get("enabled")}
+        return [m for m in self.mods if m.get("enabled")
+                and (not isinstance(m.get("part_of"), str) or m["part_of"] in on)]
 
     @classmethod
     def load(cls, root: str) -> Library | None:
@@ -705,6 +710,7 @@ class Manifest:
     romfs: str | None = None                 # [data] folders, like dll ("." is mod.toml's folder itself)
     dlc_romfs: str | None = None
     dependencies: dict[str, str] = field(default_factory=dict)
+    part_of: str | None = None               # [mod] part_of: another mod's id; this one is used only while it is on
     notes: list[str] = field(default_factory=list)
     # Mods page v2 (docs/mod-format.md). Paths like dll: "/"-separated, relative to mod.toml's folder.
     icon: str | None = None                  # [mod] icon: the mod's picture
@@ -894,6 +900,14 @@ def parse_manifest(text: str, base_rel: str = "") -> tuple[Manifest | None, list
                         '(any version)')
         else:
             dependencies[dep] = req.strip() or "*"
+    part_of = text_of(mod, "mod", "part_of", example="yourname.other-mod")
+    if part_of is not None and not manifest_id_ok(part_of):
+        errs.append(f'mod.toml: [mod] part_of = "{clip(part_of)}" isn\'t a mod id (ids look like '
+                    '"yourname.other-mod")')
+        part_of = None
+    elif part_of is not None and part_of == mod_id:
+        errs.append(f'mod.toml: [mod] part_of names the mod itself ("{part_of}")')
+        part_of = None
 
     # Mods page v2: pictures, link, font, settings pages (docs/mod-format.md)
     pics: dict[str, str | None] = {}
@@ -966,7 +980,7 @@ def parse_manifest(text: str, base_rel: str = "") -> tuple[Manifest | None, list
                          "Manager can)")
     return Manifest(id=mod_id, name=name, version=version, base_rel=base_rel, authors=list(authors),
                     description=description, game_versions=games, loader_api=api, dll=dll, hooks=sorted(hooks),
-                    romfs=romfs, dlc_romfs=dlc_romfs, dependencies=dependencies, notes=notes,
+                    romfs=romfs, dlc_romfs=dlc_romfs, dependencies=dependencies, part_of=part_of, notes=notes,
                     icon=pics["icon"], background=pics["background"], title_picture=pics["title_picture"],
                     url=links["url"], update_url=links["update_url"], font=font, settings=lists["settings"],
                     pages=lists["pages"], raw=data), []
@@ -1490,9 +1504,10 @@ def extract_zip(src: str, dest: str) -> tuple[int, list[str]]:
                 raise ModmanError(f"Not added: {name} has two different files named {'/'.join(parts)}.")
             seen[key] = info
             plan.append((info, parts))
-        need, free = sum(i.file_size for i, _ in plan), shutil.disk_usage(_existing(dest)).free
-        if need > free:
-            raise ModmanError(f"Not enough free space to extract {name}: {_size(need)} needed, {_size(free)} free.")
+        try:  # (the .bnp checks: no more than a mod could hold, not a disk filler, room kept free on the drive)
+            bnp.check_room(name, [(i.filename, i.file_size) for i, _ in plan], os.path.getsize(src), dest)
+        except (bnp.BnpError, OSError) as e:
+            raise ModmanError(str(e)) from None
         os.makedirs(dest, exist_ok=True)
         for info, parts in plan:
             dst = os.path.join(dest, *parts)
@@ -1742,6 +1757,7 @@ def wiiu_summary(rep, report: str | None = None) -> list[str]:
     gone += [p.rsplit("/", 1)[-1] for p in rep.unsafe + rep.other]
     if gone:
         out.append(f"Left out: {len(gone)} ({_some(gone, 3)}).")
+    out += [f"{x}." for x in getattr(rep, "regions", [])]   # (one mod for several regions of the game: one kept)
     if c.get("attention"):
         out.append(f"Models and textures converted with warnings: {c['attention']} (under \"Needs attention\" in the "
                    "report; not proven on real Wii U files yet: check them in game).")
@@ -1818,7 +1834,10 @@ def add_download(lib: Library, src: str, name: str | None = None, *, convert: bo
     size checked, at most 3 archives deep, nothing run), the mod in it added, the work folder removed. Several mods
     in it: --option names the one to add."""
     os.makedirs(lib.mods_dir, exist_ok=True)
-    work = os.path.join(lib.mods_dir, ADDING + slug(default_name(src))[:24] + ".unpack")
+    # (a name of its own: two adds at once (the launcher and the command line) never share one; a cut-short add's is
+    # removed by bnp.sweep_stale after an hour)
+    work = os.path.join(lib.mods_dir, f"{ADDING}{slug(default_name(src))[:24]}-{os.getpid()}-{os.urandom(3).hex()}"
+                        ".unpack")
     if os.path.lexists(work):
         remove_tree(work)  # (left by an add that was cut short; the name is modman's own)
     try:
@@ -1927,8 +1946,8 @@ def add_mod(lib: Library, src: str, name: str | None = None, *, convert: bool = 
         else:
             os.makedirs(stage, exist_ok=True)
             store_file(src, stage)
-        if not (pkg or upkg or wiiu):  # (a Pack/*.pack copied whole from another game version: filled from yours)
-            notes += bnp.fill_old_packs(stage, game_romfs(lib))
+        if not (pkg or upkg):  # (a Pack/*.pack copied whole from another game version, a converted Wii U one too:
+            notes += bnp.fill_old_packs(stage, game_romfs(lib))   # filled from yours)
         note = example_dll(src, stage)
         if note:
             notes.append(note)
@@ -1982,6 +2001,8 @@ def add_mod(lib: Library, src: str, name: str | None = None, *, convert: bool = 
              "added": _now()}
     if man:
         entry["version"] = man.version
+        if man.part_of:
+            entry["part_of"] = man.part_of
     elif pkg or upkg:
         entry["bnp" if pkg else "ukmm"] = {"options": [o.name for o in res.chosen]}
         if info.version:
@@ -2685,8 +2706,16 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False) -> 
     gindex = None
     pre = None
     rstb = None
-    if romfs_paths:  # (BCML packages: one size table for every mod that changes it; packs a later mod replaces)
-        hook = bnp.deploy_hook([(m["name"], root) for m, root, s in scans if s.romfs], extracted)
+    hook = None
+    if romfs_paths:  # (BCML packages: one size table for every mod that changes it; their packs merged with the
+        #             other mods' copies as BCML merges them, put in the overlay below (MERGED_OWNER))
+        pairs = [(m["name"], root) for m, root, s in scans if s.romfs]
+        try:
+            hook = bnp.deploy_hook(pairs, extracted, files=not dry_run)
+        except Exception as e:  # noqa: BLE001 (a pack merge that fails never stops the deploy: each mod's own copy)
+            hook = bnp.deploy_hook(pairs, extracted)
+            hook.attention.append(f"The mods' packs can't be merged ({type(e).__name__}: {e}): the later mod's copy "
+                                  "of each is used")
         attention += hook.attention
         notes += hook.notes
         rstb = hook.rstb
@@ -2747,6 +2776,12 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False) -> 
             if gindex is None and os.path.isdir(os.path.join(extracted, "romfs")):
                 gindex = rm.GameIndex.scan(extracted)
             p = rm.plan(sources, gindex, rstb)
+            if hook is not None and hook.files:   # (sized in hook.rstb already: no entry to add here)
+                try:
+                    rm.add_generated(p, [(path, data, None) for path, data in sorted(hook.files.items())],
+                                     MERGED_OWNER)
+                except ValueError as e:
+                    attention.append(f"The merged packs can't be deployed ({e}): the later mod's copy of each is used")
             for rel, data in run_makers(lib, p, scans, makers, attention, notes, made):
                 with open(d.add_file(rel), "wb") as f:
                     f.write(data)
@@ -3007,7 +3042,8 @@ def _launch(lib, h, exe, man, rep, root_dir, game_lib, rebuild, native, d, merge
         if made:  # (files made at deploy: fonts, the title picture, pictures)
             parts["overlay"]["generated"] = {k: len(v) for k, v in made.items()}
         attention += man["warnings"]
-        conflicts = man["conflicts"]
+        conflicts = [c for c in man["conflicts"]   # (not the packs merged from the mods: bnp.deploy_hook names them)
+                     if (man["files"].get(c["path"]) or {}).get("mod") != MERGED_OWNER]
         if conflicts:
             attention.append(f"{len(conflicts)} RomFS file(s) are in several mods; the later mod wins: "
                              + _some([f"{c['path']} ({' -> '.join(c['mods'])})" for c in conflicts], 3))
@@ -3500,10 +3536,13 @@ def cmd_list(args) -> int:
     w = max(len(m["id"]) for m in lib.mods)
     kw = max(len(", ".join(m["kinds"]) or "-") for m in lib.mods)
     vw = max(len(str(m.get("version") or "-")) for m in lib.mods)
+    used = {m["id"] for m in lib.enabled()}
     for k, m in enumerate(lib.mods, 1):
         wiiu = wiiu_short(m)
+        waits = m["enabled"] and m["id"] not in used   # ([mod] part_of: on, but its main mod is off)
         say(f"  {k:>2}  {'on ' if m['enabled'] else 'off'}  {m['id']:<{w}}  {str(m.get('version') or '-'):<{vw}}  "
-            f"{', '.join(m['kinds']) or '-':<{kw}}  {m['name']}" + (f"  ({wiiu})" if wiiu else ""))
+            f"{', '.join(m['kinds']) or '-':<{kw}}  {m['name']}" + (f"  ({wiiu})" if wiiu else "")
+            + (f"  (used only while {m['part_of']} is on)" if waits else ""))
     return 0
 
 

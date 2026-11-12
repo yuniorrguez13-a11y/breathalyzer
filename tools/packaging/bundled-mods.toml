@@ -11,6 +11,8 @@
 # why: why that default (shown under Details).
 # tags: short notes the picker shows on the mod's card (plain words: "You type a command for it", not "console").
 # developer: true when the mod's commands need developer mode: Play turns developer commands on while it is ON.
+# egg: true for an easter egg. Secret: the picker and Home never list it one by one; one switch "Enable easter
+#   eggs?" (OFF at first) turns every egg = true mod on or off together. An egg always starts OFF (keep default "off").
 # ready: true = in the Plus zip. false = not tested enough yet: left out (make_release --with-experimental adds the
 #   built ones, marked Experimental and off).
 # kind "code": a DLL. manifest = its mod.toml, dll = the built DLL (a path under build/native).
@@ -91,19 +93,24 @@ title = "Ghost multiplayer"
 description = "See a friend as a second Link in your world (on your home network)."
 default = "off"
 why = "It uses the network, and it isn't tested on two PCs yet."
-tags = ["Experimental", "Uses the network"]
+tags = ["Experimental", "Uses the network", "Comes with a surprise, built from your game files (about 30 seconds)"]
 ready = false
 kind = "code"
 manifest = "native/examples/ghost/mod.toml"
 dll = "build/native/ghost-mods/ghost.dll"
+# The AK-47 (docs/ak47.md) comes with it: built from the player's files once the multiplayer mod is in the library,
+# as its own mod giruka.ak47 with part_of = this mod (so it is only used while this one is on). --optional: a build
+# that can't be made never fails the multiplayer mod's install.
+after_add = [["ak47_build.py", "build", "--optional"]]
 
 [[mod]]
 id = "botw-mod-loader.zelda-view"
 title = "Secret word"
 description = "A hidden easter egg for the game's console."
-default = "on"
-why = "It does nothing until you type its word. Its hooks make the first start 10-20 minutes longer."
+default = "off"
+why = "An easter egg: the one easter-egg switch turns it on. Its hooks make the first start 10-20 minutes longer."
 tags = ["Experimental", "First start takes 10-20 minutes longer"]
+egg = true
 ready = false
 kind = "code"
 manifest = "native/examples/zelda_view/mod.toml"

@@ -75,6 +75,8 @@
 //   ghost items <w|-> <s|-> <b|-> [mask]  what the ghost holds (mask 0-7: bit 0 weapon, 1 shield, 2 bow on the back;
 //                                        default 4); ghost items off; ghost items back on|off
 //   ghost give <actor> [dx dy dz]        spawn an actor near Link for him to take (tests; never the ghost's items)
+//   ghost looks <list> [current]         (0.8.0) the characters `iam` takes, from tools/mp/client.py (iam.c)
+//   iam [name | next | back]             (0.8.0, player safe) Who am I: who your friends see you as (iam.c)
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,7 +84,7 @@
 #include "swmod.h"
 #include "botw.h"  // (only BOTW_ADDR_MAIN and BOTW_ADDR_GUEST_END: the guest window for `ghost self`'s pointer check)
 
-#define GHOST_VERSION "0.7.1"  // (the same as mod.toml)
+#define GHOST_VERSION "0.8.0"  // (the same as mod.toml)
 
 // ---- Win32 / C runtime (declared here: the zig that ships with Savage Wind has no windows.h or stdio.h)
 __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
@@ -3021,6 +3023,9 @@ static void rel_text(int has, const float m[12], char *out, size_t cap) {
     }
 }
 
+// 0.8.0: Who am I (`iam`, `ghost looks`; docs/charsel.md). Only a word under the lock: no game code, no game memory.
+#include "iam.c"
+
 static void report(SwModReply *r) {
     Status s;
     lock();
@@ -3067,6 +3072,7 @@ static void report(SwModReply *r) {
     api->reply_bool(r, "has_self", true);     // (0.5.0: `ghost self`)
     api->reply_bool(r, "has_items", true);    // (0.6.0: `ghost items`; the client looks for it)
     api->reply_bool(r, "has_items_rel", true);  // (0.6.2: `ghost items rel`; the client looks for it)
+    iam_report(r);                              // (0.8.0: has_iam, iam_seq, iam: what `iam` picked)
     api->reply_str(r, "version", GHOST_VERSION);
     const ItemsStatus *it = &s.items;
     api->reply_bool(r, "items.on", it->on != 0);
@@ -3256,7 +3262,7 @@ static void report_self(SwModReply *r) {
 #define USAGE                                                                                                     \
     "usage: ghost [spawn [name|link] [dx dy dz] | pos x y z [yaw [speed [anim]]] | follow dx dy dz | stop"           \
     " | despawn | anim auto|off|name | far far_m [near_m] | self | items weapon|- shield|- bow|- [mask]"             \
-    " | items off | items back on|off | give name [dx dy dz]]"
+    " | items off | items back on|off | give name [dx dy dz] | looks list [current]]"
 
 // `ghost items ...` (0.6.0): what the ghost holds.
 static void cmd_items(int argc, char **argv, SwModReply *r) {
@@ -3492,6 +3498,10 @@ static void cmd_ghost(int argc, char **argv, SwModReply *r) {
         cmd_give(argc, argv, r);
         return;
     }
+    if (!strcmp(sub, "looks")) {
+        cmd_looks(argc, argv, r);
+        return;
+    }
     api->reply_fail(r, USAGE);
 }
 
@@ -3504,10 +3514,12 @@ static const SwModCommand commands[] = {
     {"ghost",
      "[spawn [name|link] [dx dy dz] | pos x y z [yaw [speed [anim]]] | follow dx dy dz | stop | despawn"
      " | anim auto|off|name | far m [m] | self | items w|- s|- b|- [mask] | items off | items back on|off"
-     " | give name [dx dy dz]]",
+     " | give name [dx dy dz] | looks list [current]]",
      "Ghost actor (example mod): state, or spawn / move / animate / remove it; self: your own Link's state; items: "
      "what it holds",
      cmd_ghost, 0},
+    {"iam", IAM_USAGE, "Who am I: pick who your friends see you as in multiplayer (iam zelda; iam alone lists them)",
+     cmd_iam, SWMOD_CMD_PLAYER},
 };
 
 SWMOD_EXPORT int swmod_init(const SwModApi *a) {

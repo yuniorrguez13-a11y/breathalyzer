@@ -880,7 +880,8 @@ def read_bundled(app_dir: str = REPO) -> tuple[str, list[dict]]:
     """(a key for this list, our mods) from app\\bundled-mods.json: ("", []) without one (Breathalyzer without Plus)
     or when it can't be used. A mod that names a folder outside app\\ or a command that isn't one of our tools is
     left out. Each mod: id, title, description, on (its default), why, tags, kind ("code": folder; "recipe": build,
-    the commands that build it from the player's game files), after_add."""
+    the commands that build it from the player's game files), after_add, egg (an easter egg: secret, so the picker and
+    Home never list it, only one switch for all of them; it always starts OFF)."""
     try:
         with open(os.path.join(app_dir, BUNDLED_JSON), encoding="utf-8") as f:
             data = json.load(f)
@@ -901,10 +902,12 @@ def read_bundled(app_dir: str = REPO) -> tuple[str, list[dict]]:
         if not isinstance(after, list) or not isinstance(build, list) \
                 or not all(tool_command(c, tools) for c in [*after, *build]):
             continue
-        mod = {"id": m["id"], "title": m["title"], "description": m["description"], "on": m["default"] == "on",
+        egg = m.get("egg") is True
+        mod = {"id": m["id"], "title": m["title"], "description": m["description"],
+               "on": m["default"] == "on" and not egg,
                "why": m.get("why") if isinstance(m.get("why"), str) else "", "kind": m["kind"],
                "tags": [t for t in m.get("tags") or [] if isinstance(t, str)], "after_add": after,
-               "experimental": m.get("experimental") is True, "developer": m.get("developer") is True}
+               "experimental": m.get("experimental") is True, "developer": m.get("developer") is True, "egg": egg}
         if m["kind"] == "code":
             mod["folder"] = app_folder(m.get("folder"), app_dir)
             if mod["folder"] is None:

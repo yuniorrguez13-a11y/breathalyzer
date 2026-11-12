@@ -63,7 +63,9 @@ Then it uses your mod list next to Savage Wind (`modloader`), or makes one. Brea
 picker: each of our mods with **ON** or **OFF**, its title, what it does, notes like "Changes how the game plays"
 and why it starts on or off; **Save**
 adds them to your list (a mod built from your game files is built when you turn it on). Settings > Our mods >
-**Pick again** shows it again.
+**Pick again** shows it again. Easter eggs are secret: never listed one by one, only one switch, **Enable easter
+eggs?** ("Secret extras. Some take longer the first time you press Play."), OFF at first. On Home they are one
+**Easter eggs** row that turns all of them on or off.
 
 ### Home
 

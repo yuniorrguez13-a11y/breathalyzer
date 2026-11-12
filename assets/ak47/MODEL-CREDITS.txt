@@ -1,0 +1,6 @@
+AK-47.glb in this folder:
+
+  "PSX style AK-47 Model" by Plewr - https://plewr.itch.io/psx-style-ak-47-model
+  Licence: CC0 (public domain dedication; no credit required, credited anyway with thanks).
+  Downloaded 2026-11-12 (free, no login). SHA-256 05d275574ec0e8d719ddb8e27c6d0b280d0acecbb429b6bfa6a519c4682cd51c
+  The file is unchanged. tools/ak47_build.py turns it into a Switch weapon model on the player's PC.

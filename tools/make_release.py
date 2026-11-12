@@ -182,7 +182,7 @@ OUR_IDS = ("botw-mod-loader.", "giruka.")     # bundled mods are ours: their ids
 MAX_TITLE, MAX_DESCRIPTION, MAX_TAG = 40, 80, 80  # (the game's Mods page cuts a description at 80 characters)
 FONT_MISSING = set("{}|`^~%#")               # characters the game's menu font lacks (tools/modmenu.py)
 BUNDLED_KEYS = {"id", "title", "description", "default", "why", "tags", "ready", "kind", "manifest", "dll", "folder",
-                "build", "after_add", "developer"}
+                "build", "after_add", "developer", "egg"}
 
 
 class ReleaseError(RuntimeError):
@@ -1090,6 +1090,8 @@ def read_bundled(root: Path, tracked: set[str]) -> tuple[list[dict], list[tuple[
             why.append("ready must be true or false")
         if "developer" in m and not isinstance(m["developer"], bool):
             why.append("developer must be true or false (true: Play turns on developer commands while it is on)")
+        if "egg" in m and not isinstance(m["egg"], bool):
+            why.append("egg must be true or false (true: an easter egg, behind the picker's one easter-egg switch)")
         kind = m.get("kind")
         if kind == "code":
             why += _bundled_path_problems("manifest", m.get("manifest"), tracked, True)
@@ -1174,7 +1176,8 @@ def _add_bundled(plan: Plan, root: Path, tracked: set[str], build_dir: Path, for
         if not m["ready"] and "Experimental" not in tags:
             tags.insert(0, "Experimental")
         entry = {"id": m["id"], "title": m["title"], "description": m["description"],
-                 "default": "on" if m["ready"] and m["default"] == "on" else "off", "why": m["why"], "tags": tags,
+                 "default": "on" if m["ready"] and m["default"] == "on" and not m.get("egg") else "off",
+                 "why": m["why"], "tags": tags,
                  "experimental": not m["ready"], "kind": m["kind"]}
         if m["kind"] == "code":
             folder = f"{BUNDLED_DIR}/{m['id'].split('.', 1)[1]}"
@@ -1220,6 +1223,8 @@ def _add_bundled(plan: Plan, root: Path, tracked: set[str], build_dir: Path, for
             entry["after_add"] = m["after_add"]
         if m.get("developer"):
             entry["developer"] = True
+        if m.get("egg"):   # (secret: the picker and Home show one easter-egg switch for all of them, OFF at first)
+            entry["egg"] = True
         listed.append(entry)
     plan.bundled = listed
     doc = {"format": 1, "edition": "plus", "version": plan.version, "from": BUNDLED_TOML,

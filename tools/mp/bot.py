@@ -446,7 +446,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--speed", type=float, default=3.0, help="walking speed in m/s (default 3)")
     ap.add_argument("--replay", metavar="FILE", help="walk a path saved with client.py --record")
     ap.add_argument("--absolute", action="store_true", help="with --replay: walk the path where it was recorded")
-    ap.add_argument("--hz", type=float, default=DEFAULT_HZ, help="states per second (default 20, max 25)")
+    ap.add_argument("--hz", type=float, default=DEFAULT_HZ,
+                    help="states per second (default 20, max 24: the relay takes 25 a second)")
     ap.add_argument("--anim", metavar="SCRIPT",
                     help='also send these animation names in a loop, as --ghost-sync does: "Wait:2,Move@6:3,CutS1:0.7" '
                          "(NAME[@m/s][:seconds]; @ sets the circle's speed)")
@@ -469,8 +470,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("bad --name (1-20 letters, digits, space, _ . ' -)")
     if valid_room(args.room) is None:
         ap.error("bad --room (1-32 of A-Z a-z 0-9 _ -)")
-    if not 0 < args.hz <= 25:
-        ap.error("--hz must be above 0 and at most 25")
+    if not 0 < args.hz <= 24:
+        ap.error("--hz must be above 0 and at most 24 (the relay takes 25 states a second)")
     if args.absolute and not args.replay:
         ap.error("--absolute only works with --replay")
     for flag in ("weapon", "shield", "bow"):

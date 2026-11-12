@@ -203,6 +203,29 @@ terminal; a room code proved without sending it; limits per message kind). Story
 not live. Ghost clients join a world with a room code only with `--code`; a wrong or missing code stops them instead
 of retrying. Checked in the game on one PC with the bot as host; the two-PC test steps are in coop.md.
 
+## Who am I: pick who your friends see you as (not yet run in the game)
+
+[charsel](charsel.md): pick a character on a wheel (the Multiplayer menu's **4  Who am I**, `python tools\charsel.py
+wheel`, or `iam zelda` in the game's console), and with `--ghost-looks` your friends see you as Zelda, Daruk, a
+Bokoblin... Each PC builds the bodies from its own game files (`python tools\charsel.py build`); a friend who lacks
+one sees you as the Link body. Client options: `--look NAME` (who you are; default your pick, else Link),
+`--no-look`, `--ghost-looks [DIR]` (implies `--ghost-link`). The bot takes `--look "zelda:5,goron:5"` (a loop).
+
+On the wire (feature `look`, protocol version 1, `tools/mp/session.py`):
+- the hello carries `"features":["look"]` and `"look":{"id":"zelda","v":1,"name":"Zelda"}` (an id: lower-case
+  letters, digits and `-`, up to 24; a name for people, up to 28 ASCII characters; anything else is dropped);
+- the welcome's peers and each join carry the others' looks, to clients that said `look`;
+- `{"type":"look","look":{...}}` changes it: a client sends at most one every 2 s; the relay takes one 1.5 s after
+  the last (network jitter) and answers earlier ones with "look changes too often", after which the client sends its
+  newest pick again; the relay keeps the latest for late joiners and passes it on as
+  `{"type":"look","id","name","look"}`;
+- an older client (no features) sees none of it and can't send it; an older relay (no `look` in its welcome) gets
+  only the hello, so the client sends no `look` lines to it. Only the id travels, never game data.
+- the co-op agents (host and friend) leave `look` out of their hello: they never send one and get none. A client that
+  says `look` is no visitor, so the relay holds its states to 25 a second: `--hz` is at most 24 (client and bot).
+- with `--ghost-looks`, each friend is shown only as a character that is in your game (built, added to your mods and
+  deployed), else as the Link body.
+
 ## Limits
 
 - Radar only, unless you use the ghost mod (above): a copy of a Sheikah man stands in for the other player.

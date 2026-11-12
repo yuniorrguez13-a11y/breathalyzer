@@ -1829,6 +1829,8 @@ class Builder:
         self.used_dict = False
         self._dict_looked = False
         self.wiiu: WiiuBinaries | None = None   # a Wii U package's binary resources, converted (prepare_wiiu)
+        self.wiiu_lost: dict[str, str] = {}     # where -> kind: Wii U data that can't be converted, the game's copy used
+        self.wiiu_gone: dict[str, str] = {}     # where -> kind: the same with no game copy: left out
         self.wanted: set[str] = set()       # canonical paths of the resources the chosen layers hold
         self.resources = 0                  # and how many resources that is
         for name in pkg.files:
@@ -1957,8 +1959,13 @@ class Builder:
                 vanilla = self.elsewhere(canon)
                 if vanilla is not None:
                     self.res.from_game += 1
-            if vanilla is None and self.wiiu is not None and canon in self.wiiu.failed:
-                self.left_out.add(where)    # (Wii U data that can't be converted, and the game has no copy: named)
+            if self.wiiu is not None and canon in self.wiiu.failed:
+                kind = self.wiiu.failed[canon].split(":", 1)[0] or "file"
+                if vanilla is None:
+                    self.left_out.add(where)    # (Wii U data that can't be converted, and the game has no copy: named)
+                    self.wiiu_gone[where] = kind
+                else:
+                    self.wiiu_lost[where] = kind
             if vanilla is None or not bnp.is_packish(name) or not self.touches(vanilla, aoc):
                 return vanilla
             # (the game's pack, with files inside it the package changes: UKMM rebuilds it from its own list)
@@ -2080,6 +2087,28 @@ class Builder:
             return None                     # (the merge changed nothing: the game's copy is used)
         self.res.merged += 1
         return out
+
+
+def wiiu_lines(lost: dict[str, str], gone: dict[str, str]) -> list[str]:
+    """Needs attention lines for a Wii U package's files that stay Wii U data (where -> kind): those whose game copy
+    is used (that part of the mod is lost), and those the game has none of (left out: what uses them may fail)."""
+    def count(by: dict[str, str]) -> str:
+        c: dict[str, int] = {}
+        for k in by.values():
+            c[k] = c.get(k, 0) + 1
+        return ", ".join(f"{v} {k}" for k, v in sorted(c.items(), key=lambda kv: (-kv[1], kv[0])))
+
+    def names(by: dict[str, str]) -> str:
+        return _some([w.split("//")[-1].rsplit("/", 1)[-1] for w in sorted(by)], 2)
+
+    out = []
+    if lost:
+        out.append(f"{len(lost)} file(s) are Wii U data that can't be converted ({count(lost)}): your game's are used "
+                   f"({names(lost)}), so that part of the mod is lost")
+    if gone:
+        out.append(f"{len(gone)} new file(s) are Wii U data that can't be converted and your game has none "
+                   f"({count(gone)}; {names(gone)}): left out, so what uses them may fail")
+    return out
 
 
 TEX1_RE = re.compile(r"\.Tex1(\.s?bfres)$", re.I)
@@ -2324,6 +2353,7 @@ def install(src: str, stage: str, game: str, *, meta: Meta, picks: list[str] = (
         if b.wiiu is not None:
             for k, v in b.wiiu.sizes.items():   # (the model converter's sizes for converted models and textures)
                 b.entries[k] = max(v, b.entries.get(k, 0))
+        res.not_merged += wiiu_lines(b.wiiu_lost, b.wiiu_gone)
         if b.missing:
             res.not_merged.append(f"{len(b.missing)} file(s) neither the package nor your game has "
                                   f"({_some(b.missing, 2)}): left out, so the parts of the mod that use them may not "

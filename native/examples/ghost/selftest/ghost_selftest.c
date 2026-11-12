@@ -1154,6 +1154,148 @@ static void check_coop(void) {
     coop_ticks(1);
 }
 
+// ------------------------------------------------------------------ 0.8.0 Who am I (iam.c): `iam` and `ghost looks`
+// Fake replies: the fields the commands give, their console line and their failure.
+static char g_rep_fail[512], g_rep_text[512], g_rep_iam[64];
+static int64_t g_rep_seq, g_rep_looks;
+static int g_rep_has_iam;
+static void rep_str(SwModReply *r, const char *k, const char *v) {
+    (void)r;
+    if (!strcmp(k, "iam")) snprintf(g_rep_iam, sizeof g_rep_iam, "%s", v);
+}
+static void rep_int(SwModReply *r, const char *k, int64_t v) {
+    (void)r;
+    if (!strcmp(k, "iam_seq")) g_rep_seq = v;
+    if (!strcmp(k, "looks")) g_rep_looks = v;
+}
+static void rep_num(SwModReply *r, const char *k, double v) { (void)r, (void)k, (void)v; }
+static void rep_bool(SwModReply *r, const char *k, bool v) {
+    (void)r;
+    if (!strcmp(k, "has_iam")) g_rep_has_iam = v;
+}
+static void rep_text(SwModReply *r, const char *fmt, ...) {
+    (void)r;
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    vsnprintf(g_rep_text, sizeof g_rep_text, fmt, ap);
+    __builtin_va_end(ap);
+}
+static void rep_fail(SwModReply *r, const char *fmt, ...) {
+    (void)r;
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    vsnprintf(g_rep_fail, sizeof g_rep_fail, fmt, ap);
+    __builtin_va_end(ap);
+}
+// Run one command line through a command function, as the console splits it (spaces).
+static void run_line(void (*fn)(int, char **, SwModReply *), const char *line) {
+    static char buf[1024];
+    char *argv[16];
+    int argc = 0;
+    snprintf(buf, sizeof buf, "%s", line);
+    for (char *t = strtok(buf, " "); t && argc < 16; t = strtok(0, " ")) argv[argc++] = t;
+    g_rep_fail[0] = g_rep_text[0] = g_rep_iam[0] = 0;
+    g_rep_seq = g_rep_looks = -1;
+    g_rep_has_iam = 0;
+    fn(argc, argv, (SwModReply *)(void *)g_rep_text);
+}
+
+static void check_iam(void) {
+    g_fake_api.reply_str = rep_str, g_fake_api.reply_int = rep_int, g_fake_api.reply_num = rep_num;
+    g_fake_api.reply_bool = rep_bool, g_fake_api.reply_text = rep_text, g_fake_api.reply_fail = rep_fail;
+    lock();
+    memset(&g_iam, 0, sizeof g_iam);
+    unlock();
+    // before any client: `iam` says to start it; a word is kept as typed (the client checks it when it starts)
+    run_line(cmd_iam, "iam");
+    check("iam", "no_list_says_start", strstr(g_rep_text, "Start the multiplayer client") != 0 && !*g_rep_fail,
+          "text %s fail %s", g_rep_text, g_rep_fail);
+    run_line(cmd_iam, "iam Zelda");
+    check("iam", "no_list_kept", !strcmp(g_rep_iam, "zelda") && g_rep_seq == 1 && !*g_rep_fail, "iam %s seq %lld",
+          g_rep_iam, (long long)g_rep_seq);
+    check("iam", "no_list_says_kept", strstr(g_rep_text, "Kept: zelda") && !strstr(g_rep_text, "a few seconds"),
+          "text %s", g_rep_text);  // (no client yet: never "your friends see it")
+    // the client's list, and your current pick (no `seen`: the typed word is cleared)
+    run_line(cmd_looks, "ghost looks link/hero,linkle,zelda/princess,goron/daruk,bokoblin/boko zelda");
+    check("iam", "list_taken", g_rep_looks == 5 && g_iam.n == 5 && !strcmp(g_iam.current, "zelda") && !*g_rep_fail
+          && !*g_iam.want, "looks %lld n %d current %s want %s fail %s", (long long)g_rep_looks, g_iam.n,
+          g_iam.current, g_iam.want, g_rep_fail);
+    run_line(cmd_iam, "iam DARUK");
+    check("iam", "alias_any_case", !strcmp(g_rep_iam, "goron") && g_rep_seq == 2, "iam %s seq %lld", g_rep_iam,
+          (long long)g_rep_seq);
+    check("iam", "no_client_running_says_so", strstr(g_rep_text, "when it runs") && !strstr(g_rep_text, "a few seconds"),
+          "text %s", g_rep_text);  // (a list, but no `ghost` ask lately: no promise)
+    run_line(cmd_iam, "iam ganon");
+    check("iam", "unknown_refused", strstr(g_rep_fail, "no ganon") && strstr(g_rep_fail, "link, linkle, zelda, goron, "
+          "bokoblin") && g_iam.seq == 2 && !strcmp(g_iam.want, "goron"), "fail %s seq %d want %s", g_rep_fail,
+          g_iam.seq, g_iam.want);
+    run_line(cmd_iam, "iam next");
+    int next1 = !strcmp(g_rep_iam, "bokoblin");
+    run_line(cmd_iam, "iam next");
+    int wrap = !strcmp(g_rep_iam, "link");
+    run_line(cmd_iam, "iam back");
+    check("iam", "next_back_wrap", next1 && wrap && !strcmp(g_rep_iam, "bokoblin") && g_iam.seq == 5,
+          "next %d wrap %d back %s seq %d", next1, wrap, g_rep_iam, g_iam.seq);
+    run_line(cmd_iam, "iam");
+    check("iam", "lists_names", strstr(g_rep_text, "You are bokoblin") && strstr(g_rep_text, "link, linkle, zelda"),
+          "text %s", g_rep_text);
+    // bad lists are refused whole; the old list stays
+    const char *bad[] = {"ghost looks link,,zelda", "ghost looks LINK", "ghost looks a/b/", "ghost looks a,",
+                         "ghost looks -a", "ghost looks zelda/aaaaaaaaaaaaaaaaaaaaaaaaa", "ghost looks a b/c"};
+    int refused = 0;
+    for (int i = 0; i < (int)(sizeof bad / sizeof *bad); i++) {
+        run_line(cmd_looks, bad[i]);
+        refused += *g_rep_fail != 0;
+    }
+    check("iam", "bad_lists_refused", refused == (int)(sizeof bad / sizeof *bad) && g_iam.n == 5, "refused %d of %d, n %d",
+          refused, (int)(sizeof bad / sizeof *bad), g_iam.n);
+    // words that can't be ids
+    run_line(cmd_iam, "iam zel%da");
+    int bad1 = *g_rep_fail != 0;
+    run_line(cmd_iam, "iam aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    int bad2 = *g_rep_fail != 0;
+    run_line(cmd_iam, "iam two words");
+    check("iam", "bad_words_refused", bad1 && bad2 && *g_rep_fail && g_iam.seq == 5, "%d %d seq %d", bad1, bad2,
+          g_iam.seq);
+    // the `ghost` reply's part: the client takes iam_seq and iam from it
+    g_rep_has_iam = 0, g_rep_seq = -1, g_rep_iam[0] = 0;
+    iam_report((SwModReply *)(void *)g_rep_text);
+    check("iam", "report", g_rep_has_iam && g_rep_seq == 5 && !strcmp(g_rep_iam, "bokoblin") && g_rep_looks == 5,
+          "has %d seq %lld iam %s looks %lld", g_rep_has_iam, (long long)g_rep_seq, g_rep_iam, (long long)g_rep_looks);
+    // the client just asked (`ghost`): now a pick says the friends see it soon
+    run_line(cmd_iam, "iam zelda");
+    check("iam", "client_running_says_soon", strstr(g_rep_text, "a few seconds") && g_iam.seq == 6, "text %s seq %d",
+          g_rep_text, g_iam.seq);
+    // `ghost looks <list> current seen`: the typed word is cleared only when the client saw the newest one, so an
+    // old `iam` never wins over a newer pick, and a word typed since is kept for the client
+    const char *five = "ghost looks link/hero,linkle,zelda/princess,goron/daruk,bokoblin/boko";
+    char line[256];
+    snprintf(line, sizeof line, "%s goron 5", five);
+    run_line(cmd_looks, line);
+    int kept_newer = !strcmp(g_iam.want, "zelda") && !strcmp(g_iam.current, "goron") && !*g_rep_fail;
+    snprintf(line, sizeof line, "%s goron 6", five);
+    run_line(cmd_looks, line);
+    int cleared = !*g_iam.want && !strcmp(g_iam.current, "goron") && !*g_rep_fail;
+    run_line(cmd_iam, "iam");
+    check("iam", "looks_seen_clears_old_word", kept_newer && cleared && strstr(g_rep_text, "You are goron"),
+          "kept %d cleared %d text %s", kept_newer, cleared, g_rep_text);
+    snprintf(line, sizeof line, "%s goron 6x", five);
+    run_line(cmd_looks, line);
+    int bad_seen = *g_rep_fail != 0;
+    snprintf(line, sizeof line, "%s goron 6 7", five);
+    run_line(cmd_looks, line);
+    check("iam", "looks_bad_seen_refused", bad_seen && *g_rep_fail, "%d fail %s", bad_seen, g_rep_fail);
+    // the full list the client sends (tools/mp/client.py iam_list: 11 characters with their aliases) fits
+    run_line(cmd_looks, "ghost looks link/hero,linkle/linkel,zelda/princess,hylian/hateno/villager,sheikah/paya,"
+             "gerudo/urbosa,goron/daruk,rito/revali,zora/mipha,bokoblin/boko,moblin/moriblin link");
+    check("iam", "client_list_fits", g_rep_looks == 11 && !*g_rep_fail, "looks %lld fail %s", (long long)g_rep_looks,
+          g_rep_fail);
+    lock();
+    memset(&g_iam, 0, sizeof g_iam);
+    unlock();
+    setup();  // (the plain fakes again)
+}
+
 SWMOD_EXPORT int ghost_selftest(char *out, int cap) {
     g_out = out, g_cap = cap, g_len = 0, g_fails = 0;
     if (out && cap > 0) out[0] = 0;
@@ -1164,5 +1306,6 @@ SWMOD_EXPORT int ghost_selftest(char *out, int cap) {
     items_setup();
     check_items();
     check_coop();
+    check_iam();
     return g_fails;
 }

@@ -431,8 +431,8 @@ async def host_session(library: Path, name: str, game, story_list: story.StoryLi
             disc_thread.start()
         except OSError as e:
             log(f"Join lists can't find this host ({e}); friends can still type your address.")
-    hello = session.hello(name, ROOM, story={"v": 1, "base": list_hash, "dlc": None}, key=fp,
-                          host_proof=security.host_proof(secret, ROOM))
+    hello = session.hello(name, ROOM, features=session.COOP_FEATURES, story={"v": 1, "base": list_hash, "dlc": None},
+                          key=fp, host_proof=security.host_proof(secret, ROOM))
 
     async def connect() -> Line:
         ln = await Line.open("127.0.0.1", port)
@@ -575,7 +575,8 @@ async def join_session(library: Path, name: str, address: str, save_dir: Path, s
     names = story_list.names(dlc)
     list_hash = story_list.list_hash(dlc)
     key = security.fingerprint(security.player_key(library))
-    hello = session.hello(name, ROOM, story={"v": 1, "base": list_hash, "dlc": None}, key=key)
+    hello = session.hello(name, ROOM, features=session.COOP_FEATURES, story={"v": 1, "base": list_hash, "dlc": None},
+                          key=key)
     backups = Path(library) / "mp" / "backups" / Path(save_dir).name
     out = {"merged": None, "backup": None, "times": 0, "adds": 0, "ended": None, "error": None, "joins": 0,
            "story": None}

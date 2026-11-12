@@ -50,6 +50,7 @@ SIZE_LIMIT = 348_448   # bytes: the game's size table entry for this pack (the r
 DEFAULT_ROMFS = Path.home() / "Documents" / "SavageWind" / "Savage Wind" / "extracted" / "romfs"
 DEFAULT_OUT = REPO / "out" / "ghost-link-mod"
 VERSION = "0.1.0"
+BUILT_MARK = "built.txt"   # next to mod.toml: made from the game's files (tools/breath.py BUILT_MARKS: never exported)
 
 # (our name, Link's clip in Player_Animation, blend frames into it). Most of our names are the player's own animation
 # names (what `ghost self` reads on the other PC), so the ghost replays them as they are. Not the player's (checked
@@ -318,7 +319,11 @@ def build(romfs: Path, out: Path, slots: str = "sheikah", say=print) -> dict:
         raise PackError(f"the pack is {unpacked} bytes unpacked; the game allows {SIZE_LIMIT} for this name")
     target = out / "romfs" / "Actor" / "Pack" / f"{LINK_ACTOR}.sbactorpack"
     target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        target.unlink()   # (a new file, never written through a hard link the library may share)
     target.write_bytes(data)
+    (out / BUILT_MARK).write_text("Built on this PC from its own game files (tools/mp/ghost_link_pack.py). Never "
+                                  "share it: each player builds their own.\n", encoding="utf-8")
     (out / "mod.toml").write_text(MOD_TOML, encoding="utf-8")
     say(f"Built {target} ({len(files)} files, {unpacked:,} bytes unpacked, the game allows {SIZE_LIMIT:,}).")
     return {"pack": str(target), "files": len(files), "unpacked": unpacked, "packed": len(data)}

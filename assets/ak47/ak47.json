@@ -1,0 +1,27 @@
+{
+ "format": 1,
+ "actor": "Weapon_Lsword_AK47",
+ "donor": "Weapon_Lsword_001",
+ "model": {
+  "file": "AK-47.glb",
+  "sha256": "05d275574ec0e8d719ddb8e27c6d0b280d0acecbb429b6bfa6a519c4682cd51c",
+  "forward": "-z",
+  "up": "+y",
+  "flip": false,
+  "length": 1.0
+ },
+ "drop_tags": ["AmiiboOnlyDropBeginning", "AmiiboTreasure", "ZukanWeapon"],
+ "texts": {
+  "name": "AK-47",
+  "desc": "Nobody in Hyrule knows how to fire it,\nso you swing it like a claymore. It's\nheavy, it's loud-looking, and it's\nsurprisingly good at bonking Bokoblins."
+ },
+ "spot": {
+  "unit": "D-6_Dynamic",
+  "x": -1364.0,
+  "z": 1755.5,
+  "ground": 295.72,
+  "lift": 0.25,
+  "yaw": 35.0,
+  "about": "the top of the hill on the Great Plateau's west rim, between the Shrine of Resurrection and the River of the Dead"
+ }
+}

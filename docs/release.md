@@ -164,6 +164,7 @@ files written, no C runtime: it uses only kernel32 and user32. Run from inside t
 | `kind = "code"` | a DLL: `manifest` (its mod.toml) and `dll` (under `build/native`) |
 | `kind = "recipe"` | built on the player's PC from their own game files when first turned on: `folder` (the recipe, shipped in `app\` anyway) and `build` (our tool commands, in order) |
 | `after_add` | our tool commands to run once the mod is in the library |
+| `egg` | `true`: an easter egg. Secret: the picker and Home never list it; one switch "Enable easter eggs?" (OFF at first) turns every `egg = true` mod on or off together. An egg always starts OFF |
 
 Rules make_release checks: every path is a file git tracks or a DLL in `build\native`; never anything from `out\`
 (stress-lib, showcase-lib), never another folder; the mod.toml's id matches; the DLL is ours (64-bit, exports

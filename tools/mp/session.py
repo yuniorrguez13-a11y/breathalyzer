@@ -37,12 +37,14 @@ import re
 from . import encode, finite
 
 FEATURES = ("coop1", "story1", "look")          # what this Breathalyzer speaks
+COOP_FEATURES = ("coop1", "story1")             # the co-op agents' hello: they never send a look (and want none)
 KNOWN_FEATURES = frozenset({"coop1", "story1", "look", "mods1"})
 FEATURE_OF = {"time": "coop1", "weather": "coop1", "story": "story1", "story_offer": "story1", "rules": "coop1"}
 MAX_HELLO = 1024
 MAX_STORY_HEX = 512        # 1,075 flags today = 270 characters
 MAX_WEATHER_HEX = 512
-LOOK_EVERY = 2.0           # s: the relay takes one look change per player this often
+LOOK_EVERY = 2.0           # s: a client sends one look change per player this often (by its own clock) ...
+LOOK_SLACK = 0.75          # ... and the relay takes one after LOOK_EVERY * LOOK_SLACK (network jitter)
 MAX_LOOK_NAME = 28
 
 _FEATURE_RE = re.compile(r"[a-z0-9]{1,16}")

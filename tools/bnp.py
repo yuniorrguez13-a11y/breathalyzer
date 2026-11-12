@@ -97,6 +97,11 @@ class BnpError(Exception):
     """A package that can't be installed, or no tool to read it. The message is for the player."""
 
 
+class Refused(BnpError):
+    """A refusal no other archive tool may overrule (a password, a file listed with no size): list_archive never
+    tries the next tool after one."""
+
+
 # ---------------------------------------------------------------------------------------------------- extracting
 
 @dataclass
@@ -107,13 +112,44 @@ class Member:
     raw: str = ""    # the name as the archive spells it (".\info.json", say): what the tool that listed it is given
 
 
-def _run(argv: list[str], timeout: int = 1800) -> subprocess.CompletedProcess:
+WATCH_EVERY = 0.25            # seconds between two looks at the drive while an archive is extracted
+
+
+def _run(argv: list[str], timeout: int = 1800, watch: tuple[str, int] | None = None) -> subprocess.CompletedProcess:
+    """Run an archive tool (below normal priority, no window) and wait for it. watch: (a folder, bytes): the tool is
+    stopped as soon as that folder's drive has less free space than this (an archive writing more than it lists)."""
     flags = (BELOW_NORMAL | NO_WINDOW) if os.name == "nt" else 0
+    if watch is None:
+        try:
+            return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout,
+                                  creationflags=flags)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise BnpError(f"{os.path.basename(argv[0])} didn't run: {e}") from None
+    folder, floor = watch
     try:
-        return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout,
-                              creationflags=flags)
-    except (OSError, subprocess.TimeoutExpired) as e:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                creationflags=flags)
+    except OSError as e:
         raise BnpError(f"{os.path.basename(argv[0])} didn't run: {e}") from None
+    end = time.monotonic() + timeout
+    while True:
+        try:
+            out, err = proc.communicate(timeout=WATCH_EVERY)
+            return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            low = shutil.disk_usage(folder).free < floor
+        except OSError:
+            low = False
+        if low or time.monotonic() > end:
+            proc.kill()
+            proc.communicate()
+            if low:
+                raise BnpError(f"{os.path.basename(argv[0])} was stopped: the drive was filling up past the room kept "
+                               "free, so the archive unpacks to more than it lists (damaged, or made to fill the "
+                               "disk). Not added.")
+            raise BnpError(f"{os.path.basename(argv[0])} didn't run: it took over {timeout} seconds")
 
 
 def archive_tools() -> list[tuple[str, str]]:
@@ -146,7 +182,14 @@ def _no_tool() -> BnpError:
 UNIX_MODE = re.compile(r"[-?a-z][-rwxsStT]{9}")
 
 
-def _list_7z(exe: str, path: str) -> list[tuple[str, int, str, bool]]:
+def _size(value: str | None) -> int | None:
+    """A listed size, or None when the tool printed none (a RAR entry marked "size unknown", a line it couldn't
+    read): list_archive refuses such a file, as every size check counts on the listing."""
+    value = (value or "").strip()
+    return int(value) if value.isdigit() else None
+
+
+def _list_7z(exe: str, path: str) -> list[tuple[str, int | None, str, bool]]:
     r = _run([exe, "l", "-slt", "-sccUTF-8", "--", os.path.abspath(path)], timeout=300)
     if r.returncode != 0:
         msg = (r.stderr or r.stdout).decode("utf-8", "replace").strip().splitlines()
@@ -165,19 +208,16 @@ def _list_7z(exe: str, path: str) -> list[tuple[str, int, str, bool]]:
         if "Path" not in kv:
             continue
         if kv.get("Encrypted") == "+":
-            raise BnpError(f"{os.path.basename(path)} is password-protected: extract it yourself, then add the "
-                           "folder.")
+            raise Refused(f"{os.path.basename(path)} is password-protected: extract it yourself, then add the "
+                          "folder.")
         attr = kv.get("Attributes", "").split()   # Windows' letters ("DL": a junction), a Unix mode: either may lack
         unix = next((a for a in attr if UNIX_MODE.fullmatch(a)), "")
         win = next((a for a in attr if not UNIX_MODE.fullmatch(a)), "")
         is_dir = "D" in win or unix.startswith("d") or kv.get("Folder") == "+"
-        link = ("L" in win or unix.startswith("l") or bool(kv.get("Symbolic Link")) or bool(kv.get("Hard Link"))
-                or bool(kv.get("Link")))
-        try:
-            size = int(kv.get("Size") or 0)
-        except ValueError:
-            size = 0
-        out.append((kv["Path"], size, "link" if link else "dir" if is_dir else "file", link))
+        # ("Copy Link": a RAR5 entry filled from another entry when extracted; refused like the other links)
+        link = "L" in win or unix.startswith("l") or any(
+            (kv.get(k) or "").strip() for k in ("Symbolic Link", "Hard Link", "Link", "Copy Link"))
+        out.append((kv["Path"], _size(kv.get("Size")), "link" if link else "dir" if is_dir else "file", link))
     return out
 
 
@@ -189,7 +229,7 @@ def _tar_text(data: bytes) -> str:
     return data.decode("mbcs" if os.name == "nt" else "utf-8", "replace").replace("\r\n", "\n")
 
 
-def _list_tar(exe: str, path: str) -> list[tuple[str, int, str, bool]]:
+def _list_tar(exe: str, path: str) -> list[tuple[str, int | None, str, bool]]:
     path = os.path.abspath(path)
     names = _run([exe, "-tf", path], timeout=300)
     long = _run([exe, "-tvf", path], timeout=300)
@@ -211,7 +251,7 @@ def _list_tar(exe: str, path: str) -> list[tuple[str, int, str, bool]]:
     for name, line in zip(nlines, llines):
         m = TAR_LINE.match(line)
         kind = m.group(1) if m else "?"
-        size = int(m.group(2)) if m else 0
+        size = int(m.group(2)) if m else None   # (a line it can't read: no size, refused for a file)
         link = kind in ("l", "h")
         out.append((name, size, "link" if link else "dir" if kind == "d" or name.endswith("/") else "file", link))
     return out
@@ -231,18 +271,29 @@ def check_name(raw: str, archive: str = "the package") -> list[str]:
     return parts
 
 
-def list_archive(path: str) -> tuple[list[Member], str]:
+def list_archive(path: str, seven_only: bool = False) -> tuple[list[Member], str]:
     """The checked members of a .bnp (or any archive 7-Zip or tar.exe reads) and the tool that read it ("7z" or
     "tar": extract() and read_member() use only that one). Refuses unsafe names, names starting with '-', links,
-    password protection, and two files with the same name (in any case)."""
+    password protection, a file listed with no size, and two files with the same name (in any case).
+    Windows' tar.exe is only tried on a PC without 7-Zip, never for a .rar, never with seven_only (a packed download,
+    at every level), and never after 7-Zip refused the archive."""
     tools = archive_tools()
     if not tools:
         raise _no_tool()
     name = os.path.basename(path)
+    sevens = [t for t in tools if t[0] == "7z"]
+    rar = archive_magic(path) == "rar"
+    if (seven_only or rar) and not sevens:
+        what = "a .rar needs 7-Zip on this PC" if rar else "a download packed in archives is opened with 7-Zip only"
+        raise BnpError(f"Can't open {name}: {what} (7-zip.org). Or extract it with any archive tool and add the "
+                       "folder.")
+    tools = sevens or tools
     errors = []
     for kind, exe in tools:
         try:
             raw = _list_7z(exe, path) if kind == "7z" else _list_tar(exe, path)
+        except Refused:
+            raise
         except BnpError as e:
             errors.append(str(e))
             continue
@@ -267,6 +318,9 @@ def list_archive(path: str) -> tuple[list[Member], str]:
         if what == "dir":
             members.append(Member(rel, 0, True, n))
             continue
+        if size is None:
+            raise Refused(f"Not added: {name} lists no size for {rel}, so it can't be checked before it is "
+                          "extracted: damaged, or made to fool archive tools.")
         key = rel.lower()
         if key in seen:
             raise BnpError(f"Not added: {name} has two files named {rel}.")
@@ -275,36 +329,56 @@ def list_archive(path: str) -> tuple[list[Member], str]:
     return members, kind
 
 
-def extract(path: str, dest: str) -> list[Member]:
-    """Extract a .bnp into dest, a new folder (it must not exist yet). Lists and checks every name first, then checks
-    that only the listed files came out and that none is a link. On any refusal dest is removed again."""
-    if os.path.lexists(dest):
-        raise BnpError(f"{dest} already exists: extracting needs a new folder.")
-    members, kind = list_archive(path)
-    files = [m for m in members if not m.is_dir]
-    need = sum(m.size for m in files)
-    big = max(files, key=lambda m: m.size, default=None)
+def check_room(name: str, sizes: list[tuple[str, int]], packed: int | None, dest: str) -> tuple[str, int]:
+    """The checks before an archive (named `name`, `packed` bytes or None; sizes: (file, size listed) of its files) is
+    extracted into dest: not over MAX_UNPACKED in all nor MAX_MEMBER for one file, not over BOMB_RATIO times its own
+    size (above BOMB_MIN), and room left on the drive (SPARE_MIN, or 1% of the drive if more). Returns (an existing
+    folder on dest's drive, the free space to keep there while extracting). modman's .zip extraction uses it too."""
+    need = sum(s for _, s in sizes)
+    big = max(sizes, key=lambda t: t[1], default=None)
     if need > MAX_UNPACKED:
-        raise BnpError(f"Not added: {os.path.basename(path)} unpacks to {need >> 30} GB, more than the whole game: "
+        raise BnpError(f"Not added: {name} unpacks to {need >> 30} GB, more than the whole game: damaged, or not a "
+                       "mod.")
+    if big is not None and big[1] > MAX_MEMBER:
+        raise BnpError(f"Not added: {name} holds a file of {big[1] >> 30} GB ({big[0]}), bigger than any game file: "
                        "damaged, or not a mod.")
-    if big is not None and big.size > MAX_MEMBER:
-        raise BnpError(f"Not added: {os.path.basename(path)} holds a file of {big.size >> 30} GB ({big.name}), "
-                       "bigger than any game file: damaged, or not a mod.")
+    if packed and need > BOMB_MIN and need > packed * BOMB_RATIO:
+        raise BnpError(f"Not added: {name} would unpack to {need >> 30} GB from {max(packed >> 20, 1)} MB: that "
+                       "isn't a mod (an archive made to fill the disk).")
     parent = os.path.dirname(os.path.abspath(dest))
     while not os.path.isdir(parent) and os.path.dirname(parent) != parent:
         parent = os.path.dirname(parent)
     usage = shutil.disk_usage(parent)
     spare = max(SPARE_MIN, usage.total // 100)   # (room kept for the game, Windows and the rebuilt files)
     if need + spare > usage.free:
-        raise BnpError(f"Not enough free space to extract {os.path.basename(path)}: {need >> 20} MB needed and "
-                       f"{spare >> 20} MB kept free, {usage.free >> 20} MB free.")
+        raise BnpError(f"Not enough free space to extract {name}: {need >> 20} MB needed and {spare >> 20} MB kept "
+                       f"free, {usage.free >> 20} MB free.")
+    return parent, spare
+
+
+def extract(path: str, dest: str, seven_only: bool = False) -> list[Member]:
+    """Extract a .bnp into dest, a new folder (it must not exist yet). Lists and checks every name and size first
+    (check_room), stops the tool if the drive fills up past the room kept free while it runs, then checks that only
+    the listed files came out and that none is a link. On any refusal dest is removed again. seven_only: with 7-Zip
+    only (see list_archive)."""
+    if os.path.lexists(dest):
+        raise BnpError(f"{dest} already exists: extracting needs a new folder.")
+    members, kind = list_archive(path, seven_only)
+    files = [m for m in members if not m.is_dir]
+    try:
+        packed = os.path.getsize(path)
+    except OSError:
+        packed = None
+    parent, spare = check_room(os.path.basename(path), [(m.name, m.size) for m in files], packed, dest)
     exe = next(e for k, e in archive_tools() if k == kind)
     os.makedirs(dest)
     try:
+        watch = (parent, spare // 2)
         if kind == "7z":
-            r = _run([exe, "x", "-y", "-sccUTF-8", "-snl-", f"-o{os.path.abspath(dest)}", "--", os.path.abspath(path)])
+            r = _run([exe, "x", "-y", "-sccUTF-8", "-snl-", f"-o{os.path.abspath(dest)}", "--", os.path.abspath(path)],
+                     watch=watch)
         else:
-            r = _run([exe, "-xf", os.path.abspath(path), "-C", os.path.abspath(dest)])
+            r = _run([exe, "-xf", os.path.abspath(path), "-C", os.path.abspath(dest)], watch=watch)
         if r.returncode != 0:
             msg = (r.stderr or r.stdout).decode("utf-8", "replace").strip().splitlines()
             raise BnpError(f"Couldn't extract {os.path.basename(path)}" + (f": {msg[-1]}" if msg else "") + ".")
@@ -571,18 +645,23 @@ def unpack_download(src: str, work: str, say=print) -> Download:
     return dl
 
 
-def _unpack_one(path: str, dest: str, level: int, dl: Download, say) -> None:
+def _vet(path: str, dl: Download) -> list[Member]:
+    """An archive of a download, before it is opened or kept as a mod package: listed by 7-Zip (names, links,
+    sizes), refused when it would unpack to over BOMB_RATIO times its size (above BOMB_MIN) or holds a file over
+    MAX_MEMBER, and counted in the download's budget for all levels together (MAX_MEMBERS, MAX_UNPACKED). Returns
+    its files."""
     name = os.path.basename(path)
-    if archive_magic(path) == "rar" and not any(k == "7z" for k, _ in archive_tools()):
-        raise BnpError(f"Can't open {name}: a .rar needs 7-Zip on this PC (7-zip.org). Or extract it with any "
-                       "archive tool and add the folder.")
-    members, _ = list_archive(path)
+    members, _ = list_archive(path, seven_only=True)
     files = [m for m in members if not m.is_dir]
     listed = sum(m.size for m in files)
     packed = max(os.path.getsize(path), 1)
     if listed > BOMB_MIN and listed > packed * BOMB_RATIO:
         raise BnpError(f"Not added: {name} would unpack to {listed >> 30} GB from {max(packed >> 20, 1)} MB: that "
                        "isn't a mod (an archive made to fill the disk).")
+    big = max(files, key=lambda m: m.size, default=None)
+    if big is not None and big.size > MAX_MEMBER:
+        raise BnpError(f"Not added: {name} holds a file of {big.size >> 30} GB ({big.name}), bigger than any game "
+                       "file: damaged, or not a mod.")
     dl.files += len(files)
     dl.size += listed
     if dl.files > MAX_MEMBERS:
@@ -591,8 +670,14 @@ def _unpack_one(path: str, dest: str, level: int, dl: Download, say) -> None:
     if dl.size > MAX_UNPACKED:
         raise BnpError(f"Not added: {dl.name} unpacks to over {MAX_UNPACKED >> 30} GB with the archives in it: "
                        "damaged, or not a mod.")
+    return files
+
+
+def _unpack_one(path: str, dest: str, level: int, dl: Download, say) -> None:
+    name = os.path.basename(path)
+    files = _vet(path, dl)
     say(f"Unpacking {name}...")
-    extract(path, dest)
+    extract(path, dest, seven_only=True)
     got = {k.lower(): v for k, v in _walk(dest).items()}
     for m in files:
         p = got.get(m.name.lower())
@@ -694,10 +779,15 @@ def _find_mods(folder: str, label: str, level: int, work: str, dl: Download, say
             os.replace(os.path.join(base, *top.split("/")) if top else base, path)
         dl.found.append(Found(label, path, _what(findings) or "DLLs"))
     for rel, path, stem in nested:
+        # (a package kept as it is is opened by modman next: one more level, so none is kept past the last one)
+        if level >= UNPACK_LEVELS:
+            raise BnpError(f"Not added: {dl.name} holds archives packed more than {UNPACK_LEVELS} deep ({rel} is "
+                           "one more): not opened.")
         kind = archive_magic(path)
         if kind == "7z":
-            members, _ = list_archive(path)
+            members, _ = list_archive(path, seven_only=True)
             if find_info([m.name for m in members if not m.is_dir]) is not None:
+                _vet(path, dl)
                 dl.found.append(Found(stem, path, "BCML package (.bnp)"))
                 continue
         elif kind == "zip":
@@ -712,14 +802,27 @@ def _find_mods(folder: str, label: str, level: int, work: str, dl: Download, say
             except (OSError, ValueError, RuntimeError, EOFError, NotImplementedError, zipfile.BadZipFile, zlib.error):
                 found = []   # (a .zip Python can't read, as one packed with Deflate64: 7-Zip opens it below)
             if found and not inner:
+                _vet(path, dl)
                 dl.found.append(Found(stem, path, _what(found)))
                 continue
-        if level >= UNPACK_LEVELS:
-            raise BnpError(f"Not added: {dl.name} holds archives packed more than {UNPACK_LEVELS} deep ({rel} is "
-                           "one more): not opened.")
         dest = dl.box(work, stem)
         _unpack_one(path, dest, level + 1, dl, say)
         _find_mods(dest, os.path.basename(dest), level + 1, work, dl, say)
+
+
+def lacks(upper: Blob, lower: Blob, path: str = "", depth: int = 0) -> list[str]:
+    """The files of the pack `lower` that `upper` lacks, also inside the packs both hold ("a//b"): what fill() would
+    add. Reads only."""
+    ufiles, out = upper.open(), []
+    for name in lower.open():
+        sub = f"{path}//{name}" if path else name
+        if name not in ufiles:
+            out.append(sub)
+        elif depth < 4 and is_packish(name):
+            ub, lb = upper.child(name), lower.child(name)
+            if ub.orig != lb.orig and ub.is_sarc() and lb.is_sarc():   # (the same bytes lack nothing)
+                out += lacks(ub, lb, sub, depth + 1)
+    return out
 
 
 def fill_old_packs(root: str, romfs: str | None) -> list[str]:
@@ -751,7 +854,7 @@ def fill_old_packs(root: str, romfs: str | None) -> list[str]:
             kept = [n for n in want if n not in have and (n.lower().startswith("map/") or n.lower() in own)]
             for n in kept:
                 del want[n]   # (lower is only read here: these stay out of the mod's pack)
-            missing = [n for n in want if n not in have]
+            missing = lacks(upper, lower)   # (inside its packs too: Bootup_USen.pack's texts pack, say)
             if not missing:
                 continue
             changed = sorted(n for n, (c, _) in have.items() if n in want and c != want[n][0])
@@ -761,7 +864,8 @@ def fill_old_packs(root: str, romfs: str | None) -> list[str]:
             notes.append(f"{e.rel}: couldn't be compared with your game's ({ex}): used as it is")
             continue
         notes.append(f"{e.rel} looks like a whole copy from another game version: the {len(missing)} file(s) it lacks "
-                     f"({_some(missing)}) come from your game. It changes {len(changed)} file(s)"
+                     f"({_some([m.split('//')[-1] for m in missing])}) come from your game. It changes "
+                     f"{len(changed)} file(s)"
                      + (f" ({_some(changed)}): some may be that version's, not the mod's" if changed else "")
                      + (f". The {len(kept)} map or loose file(s) it leaves out stay out, so the game reads those "
                         "outside the pack" if kept else ""))
@@ -2531,12 +2635,89 @@ def settle_wiiu_leftovers(nx: str, rep, game: str, sizer, notes: list[str], bad:
             bad.append(f"{_target(rel)}: its Wii U files can't be swapped for your game's ({e}); the pack is used as "
                        "converted, so the game may crash where it loads them")
     if replaced:
-        notes.append(f"{len(replaced)} file(s) in packs that are Wii U data (Havok, sound...) replaced by your game's "
-                     f"file of the same path ({_some([r.split('//')[-1] for r in replaced], 3)})")
+        bad.append(f"{len(replaced)} file(s) in packs are Wii U data (Havok, sound...) that can't be converted: your "
+                   f"game's file of the same path is used ({_some([r.split('//')[-1] for r in replaced], 3)}), so "
+                   "that part of the mod is lost")
     if removed:
         bad.append(f"{len(removed)} file(s) in packs are Wii U data that can't be converted and your game has no "
                    f"file of their path ({_some([r.split('//')[-1] for r in removed], 3)}): left out of their "
                    "packs, so the parts of the mod that use them may not work")
+
+
+_TOP_PACKS: dict[str, dict[str, tuple[str, int, int]]] = {}
+
+
+def top_pack_files(romfs: str) -> dict[str, tuple[str, int, int]]:
+    """The files in the game's top packs (Pack/TitleBG.pack, Pack/Bootup.pack...): name (lowercase) -> (the pack,
+    offset, size), read from their headers only, once per game folder."""
+    if romfs in _TOP_PACKS:
+        return _TOP_PACKS[romfs]
+    out: dict[str, tuple[str, int, int]] = {}
+    folder = os.path.join(romfs, "Pack")
+    try:
+        names = sorted(n for n in os.listdir(folder) if n.lower().endswith(".pack"))
+    except OSError:
+        names = []
+    for n in names:
+        p = os.path.join(folder, n)
+        try:
+            with open(p, "rb") as f:
+                head = f.read(0x14)
+                if len(head) < 0x14 or head[:4] != b"SARC" or head[6:8] != b"\xff\xfe":
+                    continue
+                doff = struct.unpack_from("<I", head, 0x0C)[0]
+                if doff > 1 << 24:
+                    continue
+                raw = head + f.read(doff - 0x14)
+            if raw[0x14:0x18] != b"SFAT":
+                continue
+            count = struct.unpack_from("<H", raw, 0x1A)[0]
+            sfnt = 0x20 + 16 * count
+            if raw[sfnt:sfnt + 4] != b"SFNT":
+                continue
+            for k in range(count):
+                _, attr, start, end = struct.unpack_from("<IIII", raw, 0x20 + 16 * k)
+                if not attr >> 24 or end < start:
+                    continue
+                at = sfnt + 8 + (attr & 0xFFFFFF) * 4
+                stop = raw.find(b"\0", at, doff)
+                if stop < 0:
+                    break
+                name = raw[at:stop].decode("utf-8", "replace")
+                out.setdefault(name.lower(), (p, doff + start, end - start))
+        except (OSError, struct.error):
+            continue
+    _TOP_PACKS[romfs] = out
+    return out
+
+
+def game_copy(game: str, name: str, dlc: bool, sizer) -> bytes | None:
+    """The game's copy (as stored) of a file it keeps somewhere else than the mod puts it: in an actor pack
+    (sizer.look(), the canonical name), else in a top pack (Pack/TitleBG.pack...). None when it has none."""
+    import ukmm  # (it imports this module)
+    hit = sizer.look().get(ukmm.canonical((ukmm.AOC if dlc else "") + name))
+    if hit is not None:
+        try:
+            b = Blob(_read(hit[0]))
+            for inner in hit[1][:-1]:
+                b = b.child(inner)
+            e = b.open().get(hit[1][-1]) if b is not None else None
+            if e:
+                return e[0].data() if isinstance(e[0], Blob) else e[0]
+        except (OSError, wc.FormatError, struct.error, IndexError, AttributeError):
+            pass
+    if dlc:
+        return None
+    where = top_pack_files(os.path.join(game, "romfs")).get(name.lower())
+    if where is None:
+        return None
+    try:
+        with open(where[0], "rb") as f:
+            f.seek(where[1])
+            data = f.read(where[2])
+        return data if len(data) == where[2] else None
+    except OSError:
+        return None
 
 
 def converted_sizes(nx: str, game: str, rstb: Rstb | None, sizer) -> tuple[dict[str, int], list[str]]:
@@ -2589,6 +2770,22 @@ def converted_sizes(nx: str, game: str, rstb: Rstb | None, sizer) -> tuple[dict[
                 sizer.siblings.pop()
         return need
 
+    def grow(names: list[str], g: int, old: bytes | None, new_len: int, pack: bool, dlc: bool, depth: int,
+             top: str, name: str) -> None:
+        """An entry the game's table has for a file whose same-path copy isn't there to compare with (old: the
+        game's copy found elsewhere, or None): grown as for a rebuilt file; with no copy at all, to the estimate
+        for its kind, and never below the file's own bytes plus the game's entry."""
+        if old is not None:
+            old_len = ukmm.unpacked_size(old)
+            if new_len > old_len:
+                put(names, needed_size(g, old_len, new_len, pack))
+            return
+        need = max(guess(name, new_len, pack, dlc, depth, top) or 0, g)
+        if round32(new_len) >= need:
+            need = round32(new_len) + g   # (nothing to go by: room for the bytes and the old entry's overhead)
+        if need > g:
+            put(names, need)
+
     def inside(blob: Blob, gblob: Blob | None, dlc: bool, depth: int, where: str) -> None:
         try:
             files = blob.open()
@@ -2610,10 +2807,13 @@ def converted_sizes(nx: str, game: str, rstb: Rstb | None, sizer) -> tuple[dict[
                 gchild = gblob.child(n) if gfiles and n in gfiles else None
                 if gchild is not None and child.orig == gchild.orig:
                     continue                   # (the game's own file: its entry stands)
-                if g is not None:
-                    old_len = ukmm.unpacked_size(gchild.orig) if gchild is not None else None
-                    if old_len is not None and new_len > old_len:
+                if g is not None and gchild is not None:
+                    old_len = ukmm.unpacked_size(gchild.orig)
+                    if new_len > old_len:
                         put(names, needed_size(g, old_len, new_len, child.is_sarc()))
+                elif g is not None:             # (the game keeps it in another pack: a shared file, say)
+                    grow(names, g, game_copy(game, n, dlc, sizer), new_len, child.is_sarc(), dlc, depth,
+                         where.split("//", 1)[0], n)
                 elif gchild is None:            # (a file the game has without an entry keeps having none)
                     need = guess(n, new_len, child.is_sarc(), dlc, depth, where.split("//", 1)[0])
                     if need is None:
@@ -2644,10 +2844,14 @@ def converted_sizes(nx: str, game: str, rstb: Rstb | None, sizer) -> tuple[dict[
             pack = blob.is_sarc()
         except (wc.FormatError, struct.error, IndexError):
             pack = False
+        if gdata is None:   # (a file the game keeps only inside a pack: an actor pack in TitleBG.pack, say)
+            gdata = game_copy(game, inner, dlc, sizer)
         if g is not None and gdata is not None:
             old_len = ukmm.unpacked_size(gdata)
             if new_len > old_len:
                 put([name], needed_size(g, old_len, new_len, pack))
+        elif g is not None:
+            grow([name], g, None, new_len, pack, dlc, 0, inner, inner)
         elif g is None and gdata is None:
             need = guess(inner, new_len, pack, dlc, 0, inner)
             if need is None:
@@ -2711,6 +2915,7 @@ def install_wiiu(src_root: str, stage: str, game: str, *, info: Info, picks: lis
             notes.append(wiiu_summary(rep))
             settle_wiiu_leftovers(nx, rep, game, sizer, notes, bad)
             bad += option_model_notes(rep, origin, chosen, game)
+            bad += dropped_notes(rep, game)
         # 3. the logs made the Switch's; files they rebuild taken out; size entries for the Switch files
         names = translate_wiiu_logs(layers, nx, game, notes, bad)
         drop_logged(nx, names, notes)
@@ -2756,6 +2961,36 @@ def wiiu_summary(rep) -> str:
         line += (f"; {len(rep.dropped)} that stay Wii U data left out, your game's used where it has them "
                  f"({_some([d.rsplit('/', 1)[-1] for d in rep.dropped], 3)})")
     return line
+
+
+def dropped_notes(rep, game: str) -> list[str]:
+    """The loose files the converter left out because they stay Wii U data (sound, voice, Havok...; models and
+    textures are option_model_notes'): those that change a game file (the game's is used: that part of the mod is
+    lost), and new ones the game has no copy of (missing: what uses them may fail)."""
+    files = {f["path"]: f for f in rep.files}
+    lost: dict[str, list[str]] = {}
+    gone: dict[str, list[str]] = {}
+    for d in rep.dropped:
+        f = files.get(d)
+        if f is None or f["kind"] in (*wc.MODEL_KINDS, "model/texture"):
+            continue
+        t = f["target"]
+        rel = f"{BASE_TID}/{t}" if t.startswith(wc.BASE_OUT + "/") else t
+        (lost if _game_file(game, rel) else gone).setdefault(f["kind"] or "file", []).append(d.rsplit("/", 1)[-1])
+
+    def count(by: dict[str, list[str]]) -> str:
+        return ", ".join(f"{len(v)} {k}" for k, v in sorted(by.items(), key=lambda kv: -len(kv[1])))
+
+    out = []
+    if lost:
+        names = [n for v in lost.values() for n in v]
+        out.append(f"{len(names)} file(s) stay Wii U data and are left out ({count(lost)}): your game's are used "
+                   f"({_some(names, 2)}), so that part of the mod is lost")
+    if gone:
+        names = [n for v in gone.values() for n in v]
+        out.append(f"{len(names)} new file(s) stay Wii U data and your game has none ({count(gone)}; "
+                   f"{_some(names, 2)}): missing, so what uses them may fail")
+    return out
 
 
 def option_model_notes(rep, origin: dict[str, str], chosen: list[Option], game: str) -> list[str]:
@@ -3287,9 +3522,9 @@ def deploy_hook(mods: list[tuple[str, str]], extracted: str, files: bool = False
     table merging every mod's size changes when two or more change it (a BCML package's from its rstb.json, another
     mod's by comparing the table it ships with the game's), and a line for each BCML package whose packs a later mod
     replaces. files: also merge those packs (merge_packages) into hook.files (overlay path -> bytes, to deploy in
-    place of every mod's copy), their sizes in the table (made even when only they need it); modman doesn't put them
-    in the overlay yet (romfs_mods.add_generated could, with no size entry: hook.rstb holds them), so it calls this
-    without. Reads only."""
+    place of every mod's copy), their sizes in the table (made even when only they need it); modman deploy puts them
+    in the overlay with romfs_mods.add_generated (owner "generated:merged", no size entry of their own: hook.rstb
+    holds them). Reads only."""
     hook = DeployHook()
     # (name, a BCML package's entries or None, the size table a mod that isn't one ships or None, whether it ships one)
     pending: list[tuple[str, dict | None, str | None, bool]] = []

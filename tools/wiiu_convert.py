@@ -1984,6 +1984,30 @@ class Layout:
     other: list[str]                           # files outside content/ and aoc/0010/
     root: str                                  # the folder holding content/ (or "")
     unsafe: list[str] = field(default_factory=list)  # game files with a name that can't be written safely
+    copies: dict[str, str] = field(default_factory=dict)  # a file of another region's copy -> the kept copy's file
+    copy_roots: list[str] = field(default_factory=list)   # those copies' folders
+
+
+# BotW's Wii U title ids (base 0, update e, DLC c; region 3, 4 or 5): one mod for several regions is the same folders
+# under ids that differ only in that digit (sdcafiine/00050000101C9400 and sdcafiine/00050000101C9500)
+TITLE_RE = re.compile(r"0005000([0ec])101c9([345])00")
+REGION_ORDER = "453"   # the copy kept: 101C9400 (USA), else 101C9500 (Europe), else 101C9300 (Japan)
+
+
+def region_copies(roots: list[tuple[str, ...]]) -> tuple[str, ...] | None:
+    """When the folders holding content/ are one mod for several regions of the game (the same folders under BotW
+    title ids that differ only in region), the one to keep; else None."""
+    shapes, picks = set(), []
+    for k in roots:
+        hits = [i for i, p in enumerate(k) if TITLE_RE.fullmatch(p)]
+        if len(hits) != 1:
+            return None
+        m = TITLE_RE.fullmatch(k[hits[0]])
+        shapes.add(k[:hits[0]] + (m.group(1),) + k[hits[0] + 1:])
+        picks.append((REGION_ORDER.index(m.group(2)), k))
+    if len(shapes) != 1 or len({r for r, _ in picks}) != len(picks):
+        return None
+    return min(picks)[1]
 
 
 def plan_layout(paths: list[str], top_name: str = "") -> Layout:
@@ -1993,6 +2017,7 @@ def plan_layout(paths: list[str], top_name: str = "") -> Layout:
     a trailing dot or space, a reserved name like "con") goes in `unsafe` and is never written."""
     low = [p.lower() for p in paths]
     roots: dict[tuple[str, ...], str] = {}
+    root_of: dict[str, tuple[str, ...]] = {}
     files, other, unsafe = [], [], []
     whole = None
     if top_name.lower() == "content":
@@ -2024,13 +2049,27 @@ def plan_layout(paths: list[str], top_name: str = "") -> Layout:
             continue
         j, k, out = hit
         roots.setdefault(tuple(lparts[:j]), "/".join(parts[:j]))
+        root_of[path] = tuple(lparts[:j])
         if any(_bad_name(x) for x in parts[k:]):
             unsafe.append(path)
             continue
         files.append((path, f"{out}/{'/'.join(parts[k:])}"))
+    copies: dict[str, str] = {}
+    copy_roots: list[str] = []
     if len(roots) > 1:
-        shown = ", ".join(sorted((v or "(top)") for v in roots.values())[:4])
-        raise ConvertError(f"holds several mods or options ({shown}): convert each folder on its own")
+        keep = region_copies(list(roots))
+        if keep is None:
+            shown = ", ".join(sorted((v or "(top)") for v in roots.values())[:4])
+            raise ConvertError(f"holds several mods or options ({shown}): convert each folder on its own")
+        # (one mod for several regions: the kept copy is converted, the others are compared with it in _run)
+        kept_target = {t.lower(): p for p, t in files if root_of[p] == keep}
+        for p, t in files:
+            if root_of[p] != keep:
+                copies[p] = kept_target.get(t.lower(), "")
+        copy_roots = sorted(v for key, v in roots.items() if key != keep)
+        files = [(p, t) for p, t in files if root_of[p] == keep]
+        unsafe = [p for p in unsafe if root_of.get(p) == keep]
+        roots = {keep: roots[keep]}
     if not files and not unsafe:
         if any("romfs" in lp.split("/")[:-1] for lp in low):
             raise ConvertError("is a Switch mod (it has a romfs folder): it needs no conversion")
@@ -2048,7 +2087,10 @@ def plan_layout(paths: list[str], top_name: str = "") -> Layout:
         if target.lower() in seen:
             raise ConvertError(f"has {seen[target.lower()]} and {member}, which become the same file")
         seen[target.lower()] = member
-    return Layout(files, other, root, unsafe)
+    return Layout(files, other, root, unsafe, copies, copy_roots)
+
+
+MAX_ZIP_READ = 1 << 30   # a .zip member bigger than this isn't read (the game's biggest file is ~150 MB)
 
 
 class ModSource:
@@ -2078,8 +2120,16 @@ class ModSource:
     def read(self, rel: str, limit: int | None = None) -> bytes:
         try:
             if self.zip:
-                data = self.zip.read(rel)
-                return data if limit is None else data[:limit]
+                info = self.zip.getinfo(rel)
+                if info.file_size > MAX_ZIP_READ:
+                    # (read whole into memory: a file bigger than any game file is a damaged .zip, or one made to
+                    # fill the memory; a .zip member never gives more than the size it lists)
+                    raise ConvertError(f"{rel} is {info.file_size >> 20} MB, bigger than any game file: the .zip is "
+                                       "damaged, or not a mod")
+                if limit is not None:
+                    with self.zip.open(info) as f:
+                        return f.read(limit)
+                return self.zip.read(info)
             with open(_long(str(self.root / rel)), "rb") as f:
                 return f.read(-1 if limit is None else limit)
         except NotImplementedError:
@@ -2107,6 +2157,7 @@ class ModReport:
     dropped: list[str] = field(default_factory=list)
     unsafe: list[str] = field(default_factory=list)     # game files left out for their name (see plan_layout)
     models: dict = field(default_factory=dict)          # ModelJob.summary() + "rstb" (Wii U models and textures)
+    regions: list[str] = field(default_factory=list)    # the copies for other regions of the game, left out (a line)
 
     def by_status(self) -> Counter:
         return Counter(f["status"] for f in self.files)
@@ -2232,9 +2283,10 @@ class ModReport:
                 lines.append(f"  ... and {len(self.unsafe) - 50} more")
         notes = [f for f in self.files if f["status"] == LEFT_OUT] + [n.__dict__ for n in self.guesses()]
         mlines = self.model_lines()
-        if notes or self.dropped or self.other or mlines:
+        if notes or self.dropped or self.other or mlines or self.regions:
             lines.append("")
             lines.append("Notes:")
+            lines += [f"  {x}" for x in self.regions]
             lines += [f"  {x}" for x in mlines]
             for f in notes:
                 lines.append(f"  {f['path']}: {f['detail']}")
@@ -2331,6 +2383,18 @@ def _write_new(write_to: str, target: str, data: bytes, what: str) -> None:
         raise ConvertError(f"would write {what} over a file already written") from None
 
 
+def region_note(src, layout: Layout) -> str:
+    """One line on the copies of the mod for other regions of the game that plan_layout left out: the same files as
+    the kept copy's, or not (then which to convert on its own)."""
+    same = len(layout.copies) == len(layout.files) * len(layout.copy_roots) and all(
+        kept and src.read(kept) == src.read(other) for other, kept in layout.copies.items())
+    if same:
+        return (f"{_short(layout.copy_roots)}: the same mod for another region of the game (the same files as "
+                f"{layout.root}'s): left out, {layout.root} is converted")
+    return (f"{layout.root} is converted; {_short(layout.copy_roots)}, the copy for another region of the game, "
+            "differs from it and is left out: to use that one instead, convert its folder on its own")
+
+
 def _run(path: str, conv: Converter, write_to: str | None = None, drop: bool = False,
          opened: tuple | None = None, collect: dict | None = None) -> ModReport:
     """Convert every game file of the mod (and write it under write_to). `opened`: (source, layout) when the mod is
@@ -2338,6 +2402,8 @@ def _run(path: str, conv: Converter, write_to: str | None = None, drop: bool = F
     src, layout = opened or _open(path)
     p = Path(path)
     rep = ModReport(mod=str(p), out=write_to or "", other=layout.other, unsafe=layout.unsafe)
+    if layout.copies:
+        rep.regions.append(region_note(src, layout))
     job = conv.models
     if job is not None:
         job.prepare(src, layout)

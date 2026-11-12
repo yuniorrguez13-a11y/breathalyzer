@@ -90,6 +90,18 @@ class GhostNative(unittest.TestCase):
                             "settles_first", "after_settle", "set_again", "gen_refused", "probe_read",
                             "no_getter_no_call", "no_getter_not_ready"])
 
+    def test_who_am_i(self):
+        """0.8.0 (iam.c): `iam` before any client says to start it and keeps a word as typed; the client's list
+        (`ghost looks`) is taken whole or refused whole; an alias in any case picks its id; a name not on the list is
+        refused with the names; next/back go round the list; the `ghost` reply carries has_iam, iam_seq and iam; the
+        client's own list (11 characters with aliases) fits. A pick says "a few seconds" only while a client asks
+        (`ghost` in the last 6 s), else "Kept" (no list) or that the client tells them when it runs; `ghost looks
+        <list> <pick> <seen>` clears the typed word only when nothing newer was typed; a bad `seen` is refused."""
+        self.group("iam", ["no_list_says_start", "no_list_kept", "no_list_says_kept", "list_taken", "alias_any_case",
+                           "no_client_running_says_so", "unknown_refused", "next_back_wrap", "lists_names",
+                           "bad_lists_refused", "bad_words_refused", "report", "client_running_says_soon",
+                           "looks_seen_clears_old_word", "looks_bad_seen_refused", "client_list_fits"])
+
     def test_nothing_else_failed(self):
         self.assertEqual(self.fails, 0, self.report)
 

@@ -31,6 +31,9 @@ tried between two PCs, and attacks with a real weapon are not checked (the test 
   See [Held items](#held-items-060-opt-in).
 - The check, with one game and the bot: `python tools\mp\ghost_ingame_check.py --link --spot -1033.6 252.3 1809.3 132`
   (see [In-game check](#in-game-check)).
+- **Who am I** (0.8.0, not yet run in the game): `iam zelda` in the console picks who your friends see you as, and
+  `client.py --ghost-looks` shows each player as the one they picked (Zelda, a Goron, a Bokoblin...). See
+  [Who am I](#who-am-i-080) and [charsel](charsel.md).
 
 ## Run it
 
@@ -81,6 +84,8 @@ Alone, to try it: `python tools\mp\relay.py`, then the client with `--ghost`, th
 | `ghost items back on\|off` | (0.6.0) Back placement on (default) or off: off, everything is in the hands |
 | `ghost items rel <slot> <12 numbers>\|-` | (0.6.2) Where slot 0-2's item sits on the back: a 3x4 matrix, row by row, in the frame of the ghost's `Pod_A` (as `ghost self` gives Link's own, `<item>_rel`); `-`: the item's own offsets again. The client sends the other player's |
 | `ghost give <actor> [dx dy dz]` | (0.6.0, for tests) Spawn an actor near Link (default 1.5 m in front of him, 0.8 m up) for him to take. It never touches the ghost or its items |
+| `ghost looks <list> [current [seen]]` | (0.8.0) The characters `iam` takes, from the client: `id/alias/alias,...` (lower-case letters, digits and `-`), your current pick, and the last `iam_seq` the client read (the typed word is cleared when it matches; without `seen`, always). See [Who am I](#who-am-i-080) |
+| `iam [name \| next \| back]` | (0.8.0, player safe: the command works without developer mode; the client that sends your pick uses the control port, which turns it on) Who am I: `iam` lists the names, `iam zelda` (or an alias: `iam daruk`) picks one, `next`/`back` go round the list. See [Who am I](#who-am-i-080) |
 
 The commands only leave a request; the mod acts on it in the next frame. A `ghost spawn` sent in the same batch as a
 `ghost pos` spawns the actor right at that position. Of a `spawn` and a `despawn` sent before that frame, the later
@@ -95,7 +100,9 @@ one wins.
 | `--ghost-actor ACTOR` | Another actor name (implies `--ghost`), e.g. `Dm_Npc_Zelda_Sibyl` |
 | `--ghost-sync` | (0.5.0, checked in game on one PC) Also share animations and say what the other player holds. Use it on both PCs, each with ghost mod 0.5.0 (implies `--ghost`) |
 | `--ghost-link` | (0.5.0, checked in game on one PC) Show the other player with the [Link body](#link-body-050-opt-in) (implies `--ghost-sync`; not together with `--ghost-actor`) |
-| `--ghost-items` | (0.6.0, checked in game on one PC) The ghost also holds what the other player holds. Needs `--ghost-link` (only the Link body has the hand bones) and ghost mod 0.6.0 on your PC (implies `--ghost-sync`) |
+| `--ghost-items` | (0.6.0, checked in game on one PC) The ghost also holds what the other player holds. Needs `--ghost-link` (or `--ghost-looks`) and ghost mod 0.6.0 on your PC (implies `--ghost-sync`). Holding is checked on the Link body only |
+| `--ghost-looks [DIR]` | (0.8.0, not yet run in the game) Show each player as the one they picked on the Who am I wheel, from the characters this PC built (`tools\charsel.py build`); a pick this PC lacks is the Link body (implies `--ghost-link`). See [Who am I](#who-am-i-080) |
+| `--look NAME` / `--no-look` | Who you are for the others (default: your pick on the wheel, else Link) / say nothing (join as a visitor, as before) |
 
 The `ghost` reply of 0.5.0 also has `version`, `takes_anim` and `has_self` (the client looks for these), `remote`
 (the other player's animation name now), `remote_calls`, `remote_misses` and `remote_missing` (the names the actor
@@ -403,6 +410,39 @@ for a `modload`ed copy). **Armor is not built:** it would work the same way (an 
 its pose by bone name), but almost every head piece and most upper pieces have cloth physics, estimated at 1-4 frames
 a second, and some of the game's code paths would meet a missing pointer that is not checked yet
 (out/research/ghost-items-plan.md, "Armor").
+
+## Who am I (0.8.0)
+
+Not yet run in the game. Pick who your friends see you as ([charsel](charsel.md)): on the wheel, with
+`python tools\charsel.py pick zelda`, or in the game's console (F12) with **`iam zelda`**. (`look` is taken: the game
+uses it for the camera.) `iam` only keeps the word you typed, under the lock: no game call, no game memory, so it is
+player safe and the command works without developer mode. The list and your pick travel through the client's control
+port, though, which turns developer mode on.
+
+- `iam`: who you are now and the names you can type (`names` in the reply). Before a client has given the list it
+  says to start the multiplayer client, and a word is kept as typed ("Kept: zelda. The multiplayer client checks it
+  and tells your friends once it runs with --ghost-looks"). After `iam <name>` it says "Your friends see it in a few
+  seconds" only while a client asked for `ghost` in the last 6 s; otherwise that the client tells them when it runs.
+- `iam <name>`: an id or an alias from the list, any case (`iam Daruk` picks `goron`); a name not on the list is
+  refused with the names. `iam next` / `iam back` go round the list in the wheel's order.
+- The client gives the list on each game connection and each change (`ghost looks <list> <pick> <seen>`,
+  `client.iam_list()`: 11 characters with their aliases; up to 48 entries; `seen` is the last `iam_seq` it read) and
+  reads the `ghost` reply every 2 s: `has_iam`, `iam_seq` (one more for each `iam <name>`) and `iam` (the id typed
+  last, "" once a client saw it), plus `iam_current` and `looks`. A new `iam_seq` becomes your pick: the client sends
+  it to the relay (a `look` message) and keeps it in your wheel choice (not with `--look`). The first `iam_seq` on a
+  connection is only where the client starts: its word counts only if no client took it yet and no `--look` was
+  given, so an old `iam` never wins over a newer pick. `--no-look`: no list.
+- With `--ghost-looks` the client spawns each player's pick by the actor name this PC built it on, and only when
+  that pack is in your game (the library copy of the characters, turned on, with the pack in the deployed overlay:
+  `charsel.here_catalog`), never a name from the network. With three or more players the ghost changes to another
+  player only when that one is 2 m nearer for 1 s (each change of body is a new spawn). A new pick is a new `ghost spawn` (the mod
+  replaces the ghost). A body the mod gives up on (`wanted` false) is the Link body for the rest of the session, and
+  the log says so. Held items go to the new body again after a change.
+
+Self-test (`tests\test_ghost_native.py`, group `iam`): no list ("Kept"), the list taken or refused whole, aliases in
+any case, an unknown name refused with the list, next/back round the list, the reply's fields, "a few seconds" only
+while a client asks, `seen` clearing the old word only when nothing newer was typed, a bad `seen` refused, the client's
+own list fits.
 
 ## How it works
 

@@ -1083,6 +1083,18 @@ class PlayerZips(PlayerBase):
                                                                       1))
         self.assertIn("developer must be", " ".join(w for _, w in self.plan(edition="plus").refused))
 
+    def test_egg_flag_reaches_the_picker_list_and_starts_off(self):
+        # (an easter egg: the picker shows one switch for all of them, OFF at first, so the list says off even when
+        # bundled-mods.toml says on)
+        self.put("tools/packaging/bundled-mods.toml", BUNDLED.replace('kind = "code"', 'kind = "code"\negg = true', 1))
+        plan = self.plan(edition="plus")
+        self.assertEqual(plan.refused, [])
+        doc = json.loads(next(i.data for i in plan.items if i.rel == "app/bundled-mods.json"))
+        self.assertEqual((doc["mods"][0]["egg"], doc["mods"][0]["default"]), (True, "off"))
+        self.assertNotIn("egg", doc["mods"][1])
+        self.put("tools/packaging/bundled-mods.toml", BUNDLED.replace('kind = "code"', 'kind = "code"\negg = "yes"', 1))
+        self.assertIn("egg must be", " ".join(w for _, w in self.plan(edition="plus").refused))
+
 
 class PlayerSnapshot(PlayerBase):
     """The player zips come from a commit (git archive), never from the working tree."""

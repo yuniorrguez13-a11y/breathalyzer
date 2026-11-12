@@ -28,7 +28,8 @@ Co-op and base security (docs/coop.md; tools/mp/session.py, security.py), used w
   reaches the host only if the host's rules allow it (off by default). Cut off for flooding = kicked too.
 - A client without "features" in its hello is a visitor: states, join and leave only, never time or story.
 - Who am I (feature "look", docs/charsel.md): a hello's "look" (session.clean_look) is kept and shown to the others
-  that speak "look" (welcome peers, join); a `look` message changes it, at most one every session.LOOK_EVERY s, and
+  that speak "look" (welcome peers, join); a `look` message changes it, at most one every session.LOOK_EVERY s (3/4
+  of it is enough here: jitter), and
   goes to those others as {"type":"look","id","name","look"}. Only an id, a version and a name: never game data.
 Without host_secret and room_code it works as before: anyone who can reach the port can join.
 """
@@ -454,10 +455,10 @@ class Relay:
     # -- Who am I (docs/charsel.md) --
 
     def _look(self, conn: _Conn, msg: dict) -> None:
-        """A new look: checked, at most one every LOOK_EVERY s, kept for late joiners, passed to the others that
-        speak "look"."""
+        """A new look: checked, at most one every LOOK_EVERY s (with LOOK_SLACK for the network's jitter: a client
+        waits the whole LOOK_EVERY by its own clock), kept for late joiners, passed to the others that speak "look"."""
         now = self.clock()
-        if now - conn.look_at < session.LOOK_EVERY:
+        if now - conn.look_at < session.LOOK_EVERY * session.LOOK_SLACK:
             self._send(conn, {"type": "error", "error": f"look changes too often (one per {session.LOOK_EVERY:g} s)"})
             return
         look = session.clean_look(msg.get("look"))

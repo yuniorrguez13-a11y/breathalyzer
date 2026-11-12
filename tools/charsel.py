@@ -17,13 +17,19 @@ its own game files; only the character's id goes over the network.
     python tools/charsel.py pick ID                   the same choice without a window
     python tools/charsel.py where                     your choice and where it is kept
 
-A character pack is a tiny actor pack (5-13 KB) that names the game's own model and animation files: the donor's
-model list, an animation list with one small animation set per ghost name (the 33 names of the Link body,
-tools/mp/ghost_link_pack.py), no AI (the cutscene dummy's), no physics. People's models use Link's bone names, so
+A character pack is a tiny actor pack (14-19 KB unpacked, 6-8 KB packed) that names the game's own model and
+animation files: the donor's
+model list, an animation list with one small animation set per ghost name (the 33 names of the Link
+body, tools/mp/ghost_link_pack.py), no AI (the cutscene dummy's), no physics. People's models use Link's bone names, so
 Link's clips fill every move they don't have (through the game's own retarget); monsters use their own clips.
 Each pack goes on a free actor name the game knows but never uses (a cutscene name with no pack), so the ghost mod
 spawns it with `ghost spawn <name>`. Nothing from the game is in this repo: recipes are names only. Keep the output
-in out\\ (never committed) or your own mod library, and never share it: your friend builds their own.
+in out\\ (never committed) or your own mod library, and never share it: your friend builds their own. The build
+leaves built.txt next to mod.toml, so Export as .breath (tools/breath.py) refuses to share it.
+
+What this PC shows for a friend's pick comes only from the characters its game really gets: the library copy of
+this mod (modman add out\\charsel-packs), enabled, with its pack in the deployed overlay (here_catalog). Anything
+else is the Link body.
 """
 from __future__ import annotations
 
@@ -53,7 +59,11 @@ ENV_HOME = "BREATHALYZER_HOME"    # (the launcher's: tests point it elsewhere)
 LINK_ACTOR = "Dm_Npc_Sheiker_Searcher_M_001"   # the Link body (ghost_link_pack.LINK_ACTOR): charsel never writes it
 TEMPLATE = LINK_ACTOR             # its actor link and cutscene-dummy AI program come from the game's own pack
 PLAYER_ANIM = "Player_Animation"  # Link's animation file (always loaded, in TitleBG)
-PACK_LIMIT = 64 * 1024            # bytes unpacked: ours are 5-13 KB (the Link body's size-table entry is 348,448)
+PACK_LIMIT = 64 * 1024            # bytes unpacked: ours are 14-19 KB (the Link body's size-table entry is 348,448)
+BUILT_MARK = "built.txt"          # next to mod.toml: made from the game's files (tools/breath.py BUILT_MARKS: never
+#                                   exported as a .breath)
+BUILT_TEXT = ("Built on this PC from its own game files (tools/charsel.py). Never share it: each player builds their "
+              "own.\n")
 MAX_ID = 24
 _ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,23}")
 
@@ -102,7 +112,8 @@ class Recipe:
     load_mb: float = 0.0      # models, textures and animation files the game loads to show it (study 1, [V])
     aliases: tuple = ()       # other words for `iam` and `charsel pick`
     looks: str = ""           # one honest line: what looks right and what doesn't
-    v: int = 1                # bump when the recipe changes (receivers rebuild)
+    v: int = 1                # bump when the recipe changes: a build keeps an older pack only while its v matches
+    #                           (it also travels in the look message, for the log; receivers don't compare it)
 
 
 RECIPES: dict[str, Recipe] = {r.id: r for r in (
@@ -269,6 +280,45 @@ def load_catalog(folder) -> dict:
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) and isinstance(data.get("built"), dict) else {}
+
+
+def overlay_dir(library=None) -> Path:
+    """Where modman deploy (and Play) puts the RomFS files the game reads (library\\deploy\\overlay)."""
+    return Path(library or DEFAULT_LIBRARY) / "deploy" / "overlay"
+
+
+def deployed_catalog(library=None, overlay=None) -> dict:
+    """The characters this PC's game really gets: the catalog of this mod's library copy while it is enabled (modman
+    add out\\charsel-packs), keeping only the characters whose pack is in the deployed overlay
+    (Actor\\Pack\\<free name>.sbactorpack). {} when there is none: every look is then the Link body. The catalog
+    says where it came from ("where") and what it left out ("not_deployed")."""
+    lib = Path(library or DEFAULT_LIBRARY)
+    ov = Path(overlay) if overlay else overlay_dir(lib)
+    for m in reversed(library_mods(lib)):            # (the last enabled copy wins, as in the deploy)
+        cat = load_catalog(m["folder"])
+        if cat.get("mod") != MOD_ID:
+            continue
+        built, gone = {}, []
+        for cid, info in cat["built"].items():
+            slot = info.get("slot") if isinstance(info, dict) else None
+            pack = ov / "Actor" / "Pack" / f"{slot}.sbactorpack" if isinstance(slot, str) else None
+            if slot in FREE_SLOTS and pack is not None and pack.is_file():
+                built[cid] = info
+            else:
+                gone.append(cid)
+        return dict(cat, built=built, not_deployed=gone, where=str(m["folder"]))
+    return {}
+
+
+def here_catalog(folder=None, library=None) -> tuple[dict, str]:
+    """(the catalog to show looks with, where it is from). A folder you name (--ghost-looks DIR, --out) is taken as
+    it is; otherwise only what this PC's game really gets (deployed_catalog)."""
+    if folder:
+        return load_catalog(folder), str(folder)
+    cat = deployed_catalog(library)
+    if not cat:
+        return {}, "none in your game (build, add to your mods, then Play or deploy)"
+    return cat, cat["where"]
 
 
 class Looks:
@@ -452,19 +502,41 @@ class Pad:
 
 TK_KEYS = {"Left": "left", "Right": "right", "Up": "up", "Down": "down", "Return": "enter", "KP_Enter": "enter",
            "Escape": "esc", "BackSpace": "esc", "space": "enter"}
-CAT_COLORS = {"Hylians": "#2f9e44", "Races": "#1971c2", "Monsters": "#c92a2a"}
+CAT_COLORS = {"Hylians": "#237032", "Races": "#1971c2", "Monsters": "#c92a2a"}   # (white text: 5:1 or more)
+MIN_PT = 18                       # the smallest text on the wheel (points)
+
+
+def screen_scale(root) -> float:
+    """How much bigger than 96 dpi this screen draws (1.0-3.0): the canvas is in pixels, fonts are in points, so a
+    window made DPI aware (modman_gui.dpi_aware) scales the canvas by this to keep the labels inside their slices."""
+    try:
+        return max(1.0, min(3.0, float(root.winfo_fpixels("1i")) / 96.0))
+    except Exception:   # (no display)
+        return 1.0
 
 
 class WheelWindow:
     """The wheel drawn on a Tk canvas: one slice per character around a ring (its group's colour, the chosen one
-    lit), the chosen name big in the middle, and the hints. Big text by default (the player's eyes come first)."""
+    lit), the chosen name big in the middle ("Daruk (Goron)"), its group and status, and under the wheel who others
+    see, the honest looks line and the hints. Big text (at least MIN_PT points; the player's eyes come first). scale:
+    screen_scale(root) when the window is DPI aware; the wheel never grows taller than the screen."""
 
-    def __init__(self, root, wheel: Wheel, size: int = 560, font: int = 26, on_done=None, pad: Pad | None = None):
+    def __init__(self, root, wheel: Wheel, size: int = 640, font: int = 26, on_done=None, pad: Pad | None = None,
+                 scale: float = 1.0):
         import tkinter as tk
-        self.root, self.wheel, self.size, self.font, self.on_done = root, wheel, size, font, on_done
+        self.root, self.wheel, self.font, self.on_done = root, wheel, font, on_done
         self.pad = pad
+        self.px = scale * 96 / 72                    # pixels per point
+        self.small = max(MIN_PT, font * 2 // 3)
+        self.text_h = int(self.small * self.px * 8.5)   # who + looks (up to 3 lines) + hints, with gaps
+        try:
+            room = int(root.winfo_screenheight()) - self.text_h - 120
+        except Exception:   # (no display)
+            room = 10_000
+        self.size = max(360, min(int(size * scale), room))
         root.configure(bg="#101418")
-        self.canvas = tk.Canvas(root, width=size, height=size + 3 * font, bg="#101418", highlightthickness=0)
+        self.canvas = tk.Canvas(root, width=self.size, height=self.size + self.text_h, bg="#101418",
+                                highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
         root.bind("<Key>", self._on_key)
         self.draw()
@@ -487,32 +559,53 @@ class WheelWindow:
             if self.wheel.done is None:
                 self.root.after(50, self.poll_pad)
 
+    def _fit(self, text: str, pt: int, width: float, bold: bool = True) -> tuple:
+        """The biggest font from pt down to MIN_PT that fits text in width pixels."""
+        try:
+            import tkinter.font as tkfont
+            while pt > MIN_PT and tkfont.Font(root=self.root, family="Segoe UI", size=pt,
+                                              weight="bold" if bold else "normal").measure(text) > width:
+                pt -= 1
+        except Exception:   # (no display: the asked size)
+            pass
+        return ("Segoe UI", pt, "bold") if bold else ("Segoe UI", pt)
+
     def draw(self) -> None:
-        c, s, f = self.canvas, self.size, self.font
+        import math
+        c, s, f, sm, px = self.canvas, self.size, self.font, self.small, self.px
         c.delete("all")
         mid, r_out, r_in = s / 2, s / 2 - 10, s / 4
-        for sl in self.wheel.slices():
+        rr = (r_out + r_in) / 2
+        slices = self.wheel.slices()
+        chord = 2 * rr * math.sin(math.radians(slices[0]["extent"] / 2)) - 8 if slices else s
+        for sl in slices:
             color = CAT_COLORS.get(sl["cat"], "#495057")
             # (Tk arcs: 0 degrees is 3 o'clock, counter-clockwise; ours: 0 is 12 o'clock, clockwise)
             start = 90 - sl["start"] - sl["extent"]
             c.create_arc(mid - r_out, mid - r_out, mid + r_out, mid + r_out, start=start, extent=sl["extent"],
                          fill="#ffd43b" if sl["on"] else color, outline="#101418", width=3, tags=("slice", sl["id"]))
-            import math
             a = math.radians(sl["start"] + sl["extent"] / 2)
-            rr = (r_out + r_in) / 2
             c.create_text(mid + rr * math.sin(a), mid - rr * math.cos(a), text=sl["name"],
-                          fill="#000000" if sl["on"] else "#ffffff", font=("Segoe UI", max(9, f // 2), "bold"),
+                          fill="#000000" if sl["on"] else "#ffffff", font=self._fit(sl["name"], sm, chord),
                           tags=("label", sl["id"]))
         c.create_oval(mid - r_in, mid - r_in, mid + r_in, mid + r_in, fill="#101418", outline="#101418")
         r = RECIPES[self.wheel.cid]
-        c.create_text(mid, mid - f * 0.6, text=r.name.split(" (")[0], fill="#ffffff", font=("Segoe UI", f, "bold"),
+        st = self.wheel.status()
+        c.create_text(mid, mid - f * px * 0.55, text=r.name, fill="#ffffff", font=self._fit(r.name, f, 2 * r_in - 16),
                       tags=("name",))
-        c.create_text(mid, mid + f * 0.6, text=r.cat + (f"  -  {self.wheel.status()}" if self.wheel.status() else ""),
-                      fill="#ced4da", font=("Segoe UI", max(10, f // 2)), tags=("cat",))
-        c.create_text(mid, s + f * 0.5, text=f"Others see you as: {r.name.split(' (')[0]}", fill="#ffffff",
-                      font=("Segoe UI", max(12, int(f * 0.7)), "bold"), tags=("who",))
-        c.create_text(mid, s + f * 1.6, text="Left/Right: character   Up/Down: group   Enter: OK   Esc: back",
-                      fill="#adb5bd", font=("Segoe UI", max(10, f // 2)), tags=("hint",))
+        c.create_text(mid, mid + sm * px * 0.9, text=r.cat + (f"  -  {st}" if st else ""), fill="#ffffff",
+                      font=self._fit(r.cat + (f"  -  {st}" if st else ""), sm, 2 * r_in - 24, bold=False),
+                      tags=("cat",))
+        y = s + sm * px * 0.3
+        c.create_text(mid, y, text=f"Others see you as: {r.name}", fill="#ffffff", anchor="n",
+                      font=("Segoe UI", sm, "bold"), width=s - 16, tags=("who",))
+        y += sm * px * 1.6
+        if r.looks:
+            c.create_text(mid, y, text=r.looks, fill="#f1f3f5", anchor="n", font=("Segoe UI", sm), width=s - 16,
+                          justify="center", tags=("looks",))
+        c.create_text(mid, s + self.text_h - sm * px * 0.3, text="Left/Right: character   Up/Down: group   "
+                      "Enter: OK   Esc: back", fill="#dee2e6", anchor="s", font=("Segoe UI", sm), width=s - 16,
+                      justify="center", tags=("hint",))
 
 
 def choose_window(current: str = "link", built: dict | None = None, linkle: bool | None = None,
@@ -529,7 +622,7 @@ def choose_window(current: str = "link", built: dict | None = None, linkle: bool
         picked[0] = cid or None
         root.quit()
 
-    win = WheelWindow(root, wheel, on_done=done, pad=Pad())
+    win = WheelWindow(root, wheel, on_done=done, pad=Pad(), scale=screen_scale(root))
     win.poll_pad()
     if timeout_s:
         root.after(int(timeout_s * 1000), root.quit)
@@ -728,7 +821,9 @@ def anim_files(r: Recipe, rest: str | None = None) -> list[tuple[str, bool]]:
 
 def resolve(r: Recipe, clips_of, rest: str | None = None) -> dict:
     """Where each clip comes from: {"own", "link", "missing", "clash"}. clips_of(file) gives a file's clip names, or
-    None to trust it (Link's file: its 33 clips play on the Link body in the game [V])."""
+    None to trust it (Link's file: its 33 clips play on the Link body in the game [V]; trusted for those only)."""
+    from mp import ghost_link_pack as glp
+    link_clips = {c for _n, c, _f in glp.ANIMS}
     m = clip_map(r, rest)
     files = anim_files(r, rest)
     own = dict(r.own)
@@ -738,7 +833,7 @@ def resolve(r: Recipe, clips_of, rest: str | None = None) -> dict:
         hit = None
         for f, _ in files:
             s = sets[f]
-            if s is None or clip in s:
+            if (s is None and name not in own and clip in link_clips) or (s is not None and clip in s):
                 hit = f
                 break
         if hit is None:
@@ -995,16 +1090,35 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
         raise CharselError("--out must be a folder of your own, not inside the game's files")
     if not (romfs / "Actor" / "Pack").is_dir():
         raise CharselError(f"{romfs} isn't the game's extracted romfs (no Actor\\Pack)")
-    ids = [find_id(i) or i for i in (ids or order())]
+    all_ids = not ids
+    ids = list(dict.fromkeys(find_id(i) or i for i in (ids or order())))
     bad = [i for i in ids if i not in RECIPES]
     if bad:
         raise CharselError(f"no character {', '.join(bad)} (charsel list)")
+    # a build of some characters keeps the others from the last build (same recipe version, pack still there)
+    old = load_catalog(out)
+    keep: dict[str, dict] = {}
+    for cid, info in ((old.get("built") or {}).items() if old.get("mod") == MOD_ID and not all_ids else ()):
+        r = RECIPES.get(cid)
+        slot = info.get("slot") if isinstance(info, dict) else None
+        if (r is not None and cid not in ids and slot in FREE_SLOTS and info.get("v") == r.v
+                and (out / "romfs" / "Actor" / "Pack" / f"{slot}.sbactorpack").is_file()):
+            keep[cid] = info
     table = dict(SLOTS)
     table.update(slots or {})
-    used = [table[i] for i in ids if i in table]
-    if len(used) != len(set(used)):
-        raise CharselError("two characters on the same actor name")
+    on: dict[str, list[str]] = {}
+    for cid in ids:   # (Link and Linkle get a name of their own only with --model-copies)
+        if cid in table and (RECIPES[cid].kind == "pack" or model_copies):
+            on.setdefault(table[cid], []).append(cid)
+    for cid, info in keep.items():
+        on.setdefault(info["slot"], []).append(cid)
+    clash = {s: c for s, c in on.items() if len(c) > 1}
+    if clash:
+        raise CharselError("two characters on the same actor name: " + "; ".join(
+            f"{' and '.join(c)} on {s}" for s, c in clash.items()) + " (move one with --slot, or build both)")
     notes: list[str] = []
+    if keep:
+        notes.append(f"Kept from the last build: {', '.join(keep)} (charsel build with no names rebuilds all).")
     try:
         ainfo = read_actorinfo(romfs)
     except Exception as e:   # (bcml_data is another job's; without it the free names aren't checked again)
@@ -1017,8 +1131,11 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
         raise CharselError(f"a game file didn't read as expected: {e}") from None
     clips = ClipCache(romfs, cache)
     pm = player_model_mod(library) if library else None
-    catalog = {"format": 1, "builder": VERSION, "mod": MOD_ID, "built": {}, "skipped": {}, "notes": notes,
-               "linkle": {"how": "missing"}, "link_modded": bool(pm), "model_copies": bool(model_copies),
+    catalog = {"format": 1, "builder": VERSION, "mod": MOD_ID, "built": dict(keep), "kept": sorted(keep),
+               "skipped": {k: v for k, v in (old.get("skipped") or {}).items()
+                           if not all_ids and k in RECIPES and k not in ids and k not in keep and isinstance(v, str)},
+               "notes": notes, "linkle": {"how": "missing"}, "link_modded": bool(pm),
+               "model_copies": bool(model_copies) or any(RECIPES[k].kind != "pack" for k in keep),
                "monster_link_clips": bool(monster_link)}
     if pm:
         catalog["player_model"] = {k: pm[k] for k in ("id", "name", "version", "fp", "linkle")}
@@ -1079,22 +1196,24 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
                                  "rest": (rest or r.rest) if r.kind == "pack" else "link", "load_mb": r.load_mb}
         say(f"  {r.name:16} on {slot:31} {len(files):3} files, {unpacked:6,} B unpacked, own clips "
             f"{len(res['own']):2}, Link's {len(res['link']):2}")
-    # write: a fresh romfs folder (only our files), then the catalog
+    # write: our files in the romfs folder (the kept characters' stay; every other pack or model of ours goes), the
+    # catalog, and built.txt (made from the game's files: never exported as a .breath)
     top = out / "romfs"
+    keep_slots = {info["slot"] for info in keep.values()}
+    keep_models = {ours(cid) for cid in keep}
     if top.is_dir():
         for p in sorted(top.rglob("*"), reverse=True):
-            if p.is_file() and (p.name.endswith(".sbactorpack") and p.stem in FREE_SLOTS
-                                or p.name.startswith("SwChar_")):
+            if p.is_file() and (p.name.endswith(".sbactorpack") and p.stem in FREE_SLOTS and p.stem not in keep_slots
+                                or p.name.startswith("SwChar_") and p.name.split(".")[0] not in keep_models):
                 p.unlink()
-    for slot, data in packs.items():
-        t = top / "Actor" / "Pack" / f"{slot}.sbactorpack"
-        t.parent.mkdir(parents=True, exist_ok=True)
-        t.write_bytes(data)
-    for rel, data in models.items():
+    for rel, data in [(f"Actor/Pack/{slot}.sbactorpack", d) for slot, d in packs.items()] + list(models.items()):
         t = top / rel
         t.parent.mkdir(parents=True, exist_ok=True)
+        if t.exists():
+            t.unlink()       # (a new file, never written through a hard link the library may share)
         t.write_bytes(data)
     out.mkdir(parents=True, exist_ok=True)
+    (out / BUILT_MARK).write_text(BUILT_TEXT, encoding="utf-8")
     (out / "mod.toml").write_text(MOD_TOML, encoding="utf-8")
     (out / CATALOG).write_text(json.dumps(catalog, indent=1) + "\n", encoding="utf-8")
     return catalog
@@ -1152,7 +1271,7 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--out", type=Path, default=DEFAULT_OUT)
     w = sub.add_parser("wheel", help="pick who you are on the wheel (a window)")
     w.add_argument("--state", type=Path)
-    w.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    w.add_argument("--out", type=Path, help="the built characters' folder (default: found)")
     p = sub.add_parser("pick", help="pick who you are without a window")
     p.add_argument("id")
     p.add_argument("--state", type=Path)
@@ -1166,7 +1285,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Building from {args.romfs} into {args.out}:")
             cat = build(args.romfs, args.out, args.ids, library=args.library, slots=parse_slots(args.slot),
                         model_copies=args.model_copies, monster_link=args.monster_link_clips, cache=args.cache)
-            print(f"Built {len(cat['built'])}, skipped {len(cat['skipped'])}. Linkle: {cat['linkle']['how']}.")
+            print(f"Built {len(cat['built']) - len(cat['kept'])}, kept {len(cat['kept'])}, skipped "
+                  f"{len(cat['skipped'])}. Linkle: {cat['linkle']['how']}.")
+            print(f"Next: python tools\\modman.py add {args.out} (once), then Play or deploy: only deployed "
+                  "characters are shown.")
             for cid, why in cat["skipped"].items():
                 print(f"  skipped {cid}: {why}")
             for n in cat["notes"]:
@@ -1191,7 +1313,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"You: {RECIPES[ch['look']].name} ({path})")
             return 0
         ch = load_choice(args.state)
-        cat = load_catalog(ch["packs"] or args.out)
+        cat, _where = here_catalog(args.out or ch["packs"])
         got = choose_window(ch["look"], cat.get("built") if cat else None,
                             (cat.get("linkle") or {}).get("how") == "link-body" if cat else None)
         if got:
