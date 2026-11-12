@@ -76,7 +76,11 @@
 //                                        default 4); ghost items off; ghost items back on|off
 //   ghost give <actor> [dx dy dz]        spawn an actor near Link for him to take (tests; never the ghost's items)
 //   ghost looks <list> [current]         (0.8.0) the characters `iam` takes, from tools/mp/client.py (iam.c)
-//   iam [name | next | back]             (0.8.0, player safe) Who am I: who your friends see you as (iam.c)
+//   ghost puppet [off|on|retry|lift m|map id=Actor,...]  (0.9.0) the self puppet (puppet.c): its state, or a change
+//   iam [name | next | back | self on|off]  (0.8.0, player safe) Who am I: who your friends see you as (iam.c);
+//                                        0.9.0: and who you see yourself as, live (puppet.c)
+// 0.9.0 (puppet.c): your own pick on your own screen, live: Link hidden with the game's own model show/hide, a
+//   "self puppet" of the character (its pack) kept at Link every frame, playing the character's clip for what he does.
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,7 +88,7 @@
 #include "swmod.h"
 #include "botw.h"  // (only BOTW_ADDR_MAIN and BOTW_ADDR_GUEST_END: the guest window for `ghost self`'s pointer check)
 
-#define GHOST_VERSION "0.8.0"  // (the same as mod.toml)
+#define GHOST_VERSION "0.9.0"  // (the same as mod.toml)
 
 // ---- Win32 / C runtime (declared here: the zig that ships with Savage Wind has no windows.h or stdio.h)
 __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
@@ -1557,6 +1561,7 @@ static double t_slow_note_t;              // ... and when (at most one note a se
 static int t_give_seq, t_give_state;
 static double t_give_since;
 static double t_now;                      // this tick's time (for remove_ghost)
+static uint64_t t_pup_proc;               // 0.9.0: the live self puppet (puppet.c; leftovers_tick never removes it)
 
 // ---- the ghost's bones (plain reads, every pointer checked: out/research/ghost-items-manual-bone.md)
 
@@ -2462,14 +2467,15 @@ static void give_tick(struct Cpu *c, const Requests *rq, uint64_t pi, uint64_t p
 // next to the new ghost. So what a stage change drops is watched (plain reads), and once Link is back on the current
 // stage for LEFTOVER_WAIT_S, whatever of it the game kept is removed the normal way: the game's own link check first,
 // an item gets its own bone follow back first, never Link's. Nothing is touched while there is no player (a load).
-static void old_ghost_add(double t) {
+static void old_link_add(const Link *l, double t) {  // (0.9.0: the self puppet's too)
     for (int k = 0; k < OLD_MAX; k++)
         if (!t_old_ghost_t[k]) {
-            g_old_ghost[k] = g_link;
+            g_old_ghost[k] = *l;
             t_old_ghost_t[k] = t;
             return;
         }
 }
+static void old_ghost_add(double t) { old_link_add(&g_link, t); }
 
 static void leftovers_tick(struct Cpu *c, uint64_t player, double t) {
     int ghosts = 0, items = 0;
@@ -2492,7 +2498,7 @@ static void leftovers_tick(struct Cpu *c, uint64_t player, double t) {
         if (t - t_old_ghost_t[k] <= LEFTOVER_WATCH_S && link_ok(&g_old_ghost[k], t) &&
             (GCALL1(c, LINK_VALID, &g_old_ghost[k]) & 1)) {
             uint64_t proc = rd64(g_old_ghost[k].data + LINKDATA_PROC);
-            if (proc && proc != t_status.actor && proc != player) {
+            if (proc && proc != t_status.actor && proc != t_pup_proc && proc != player) {
                 gcall(c, DELETE_LATER, proc, 0, 0, 0, 0, 0, 0);
                 t_status.items.leftovers++;
                 note("a ghost the stage change left behind was removed (%.0f s after the change)", t - t_old_ghost_t[k]);
@@ -2788,6 +2794,10 @@ static void far_check(struct Cpu *c, uint64_t pi, uint64_t player, float far_m, 
 }
 
 static void ghost_tick_body(struct Cpu *c, double t);
+// 0.9.0 the self puppet (puppet.c, included after iam.c)
+static void pup_tick(struct Cpu *c, uint64_t pi, uint64_t player, double t);
+static uint64_t pup_items_holder(const Requests *rq, Requests *out);
+static int pup_wants_self(void);
 
 // The name of a game call the mod makes (for the slow-call note).
 static const char *call_name(uint64_t fn) {
@@ -2799,7 +2809,8 @@ static const char *call_name(uint64_t fn) {
              {WEAPON_GRAB, "WEAPON_GRAB"}, {SET_MTX, "SET_MTX"}, {SET_TRANSFORM, "SET_TRANSFORM"},
              {PHYS_SET_MTX, "PHYS_SET_MTX"}, {FOLLOW_SET, "FOLLOW_SET"}, {FOLLOW_CTOR, "FOLLOW_CTOR"},
              {LINK_VALID, "LINK_VALID"}, {LINK_SET, "LINK_SET"}, {LINK_RESET, "LINK_RESET"}, {AS_PLAY, "AS_PLAY"},
-             {AS_CURRENT, "AS_CURRENT"}, {PLAYER_INFO_GET, "PLAYER_INFO_GET"}, {MTX_FROM_EULER, "MTX_FROM_EULER"}};
+             {AS_CURRENT, "AS_CURRENT"}, {PLAYER_INFO_GET, "PLAYER_INFO_GET"}, {MTX_FROM_EULER, "MTX_FROM_EULER"},
+             {0x7000f7739cull, "MODEL_SHOW"}};
     for (size_t k = 0; k < sizeof N / sizeof *N; k++)
         if (N[k].fn == fn) return N[k].name;
     return "another call";
@@ -2902,7 +2913,7 @@ static void ghost_tick_body(struct Cpu *c, double t) {
         if (rq.anim == ANIM_NAME && !t_anim_forced) note("too many different animation names used; restart the game");
         t_anim_asked = NULL;
     }
-    if (t < rq.self_until) {  // `ghost self` (only while a client asks)
+    if (t < rq.self_until || pup_wants_self()) {  // `ghost self` (only while a client asks, or a puppet mirrors Link)
         self_read(&t_status.self, pi, t);
         self_rel(&t_status.self, pi, t);  // (0.6.1: where his items are on him, after each equipment read)
     }
@@ -2943,7 +2954,10 @@ static void ghost_tick_body(struct Cpu *c, double t) {
         break;
     }
     if (t_status.state != ST_LIVE && t_anim_actor) anim_forget();  // (never touch an old actor's animations)
-    if (!no_player) items_tick(c, t_status.state == ST_LIVE ? t_status.actor : 0, &rq, t);  // 0.6.0: held items
+    pup_tick(c, pi, player, t);  // 0.9.0: the self puppet (puppet.c)
+    Requests irq;                // 0.6.0: held items (0.9.0: the ghost's, else the puppet's: Link's own items)
+    uint64_t holder = pup_items_holder(&rq, &irq);
+    if (!no_player && !(holder && holder == t_pup_proc && !player)) items_tick(c, holder, &irq, t);
     if (rq.give_seq != t_give_seq || t_give_state == GV_PENDING) give_tick(c, &rq, pi, player, t);
     t_status.targets = t_smooth.targets, t_status.snaps = t_smooth.snaps;
     t_status.interval = t_smooth.interval;
@@ -3025,6 +3039,8 @@ static void rel_text(int has, const float m[12], char *out, size_t cap) {
 
 // 0.8.0: Who am I (`iam`, `ghost looks`; docs/charsel.md). Only a word under the lock: no game code, no game memory.
 #include "iam.c"
+// 0.9.0: see yourself as your pick, live (the self puppet; docs/charsel.md). Its game part runs in the tick.
+#include "puppet.c"
 
 static void report(SwModReply *r) {
     Status s;
@@ -3073,6 +3089,22 @@ static void report(SwModReply *r) {
     api->reply_bool(r, "has_items", true);    // (0.6.0: `ghost items`; the client looks for it)
     api->reply_bool(r, "has_items_rel", true);  // (0.6.2: `ghost items rel`; the client looks for it)
     iam_report(r);                              // (0.8.0: has_iam, iam_seq, iam: what `iam` picked)
+    {                                           // (0.9.0: the self puppet; all of it: `ghost puppet`)
+        PupStatus *pp = calloc(1, sizeof *pp);
+        if (pp) {
+            lock();
+            *pp = g_pup;
+            unlock();
+            api->reply_bool(r, "has_puppet", true);
+            api->reply_str(r, "puppet.state", PS_NAMES[pp->state >= 0 && pp->state <= PS_FAILED ? pp->state : 0]);
+            api->reply_str(r, "puppet.id", pp->id);
+            api->reply_bool(r, "puppet.shown", pp->shown != 0);
+            api->reply_bool(r, "puppet.link_hidden", pp->link_hidden != 0);
+            api->reply_str(r, "puppet.as", pp->as);
+            api->reply_str(r, "puppet.why", pp->why);
+            free(pp);
+        }
+    }
     api->reply_str(r, "version", GHOST_VERSION);
     const ItemsStatus *it = &s.items;
     api->reply_bool(r, "items.on", it->on != 0);
@@ -3262,7 +3294,8 @@ static void report_self(SwModReply *r) {
 #define USAGE                                                                                                     \
     "usage: ghost [spawn [name|link] [dx dy dz] | pos x y z [yaw [speed [anim]]] | follow dx dy dz | stop"           \
     " | despawn | anim auto|off|name | far far_m [near_m] | self | items weapon|- shield|- bow|- [mask]"             \
-    " | items off | items back on|off | give name [dx dy dz] | looks list [current]]"
+    " | items off | items back on|off | give name [dx dy dz] | looks list [current]"                                \
+    " | puppet [off|on|retry|lift m|map id=Actor,...]]"
 
 // `ghost items ...` (0.6.0): what the ghost holds.
 static void cmd_items(int argc, char **argv, SwModReply *r) {
@@ -3502,6 +3535,10 @@ static void cmd_ghost(int argc, char **argv, SwModReply *r) {
         cmd_looks(argc, argv, r);
         return;
     }
+    if (!strcmp(sub, "puppet")) {  // 0.9.0
+        cmd_puppet(argc, argv, r);
+        return;
+    }
     api->reply_fail(r, USAGE);
 }
 
@@ -3514,11 +3551,12 @@ static const SwModCommand commands[] = {
     {"ghost",
      "[spawn [name|link] [dx dy dz] | pos x y z [yaw [speed [anim]]] | follow dx dy dz | stop | despawn"
      " | anim auto|off|name | far m [m] | self | items w|- s|- b|- [mask] | items off | items back on|off"
-     " | give name [dx dy dz] | looks list [current]]",
+     " | give name [dx dy dz] | looks list [current] | puppet [off|on|retry|lift m|map id=Actor,...]]",
      "Ghost actor (example mod): state, or spawn / move / animate / remove it; self: your own Link's state; items: "
      "what it holds",
      cmd_ghost, 0},
-    {"iam", IAM_USAGE, "Who am I: pick who your friends see you as in multiplayer (iam zelda; iam alone lists them)",
+    {"iam", IAM_USAGE, "Who am I: pick who you are (iam daruk): you see yourself as it at once, and your friends "
+     "see it in multiplayer; iam link: back to Link; iam alone lists them",
      cmd_iam, SWMOD_CMD_PLAYER},
 };
 

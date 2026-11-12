@@ -2694,20 +2694,32 @@ def base_changed(lib: modman.Library, info: dict) -> str | None:
     return None
 
 
+def modman_cmd(lib: modman.Library, verb: str) -> str:
+    """The modman command to type for this library: with --library only when it isn't the default one."""
+    cmd = f"python tools/modman.py {verb}"
+    try:
+        default = modman.resolve_library(None, lib.install)
+    except Exception:  # (no default to compare with: name the library)
+        default = None
+    if default and os.path.normcase(os.path.abspath(default)) == os.path.normcase(os.path.abspath(lib.root)):
+        return cmd
+    return f'{cmd} --library "{lib.root}"'
+
+
 def deploy_now(lib: modman.Library, no_deploy: bool) -> tuple[bool, list[str]]:
     """Deploy when the game is closed and no game code rebuild is needed. (deployed, lines to print: only the deploy
     notes about the menu picture; the others are modman's, and `modman deploy` shows them)."""
     if no_deploy:
-        return False, ["Not deployed (--no-deploy). To use it: python tools/modman.py deploy"]
+        return False, [f"Not deployed (--no-deploy). To use it: {modman_cmd(lib, 'deploy')}"]
     if modman.game_running():
-        return False, ["Close the game, then deploy: python tools/modman.py deploy"]
+        return False, [f"Close the game, then deploy: {modman_cmd(lib, 'deploy')}"]
     try:
         dry = modman.deploy(lib, dry_run=True, merge=False)   # (only the game code is asked about: no pack merge)
         parts = dry.get("parts") or {}
         if (parts.get("exefs") or {}).get("rebuild") == "build" or \
                 (parts.get("hooks") or {}).get("rebuild") == "build":
             return False, [f"Not deployed: your other mods need the game code rebuilt first ({modman.REBUILD_TIME}). "
-                           "To do it: python tools/modman.py deploy"]
+                           f"To do it: {modman_cmd(lib, 'deploy')}"]
         say("Deploying...")
         launch = modman.deploy(lib)
     except (modman.ModmanError, rm.DeployError) as e:
@@ -3226,7 +3238,7 @@ def cmd_set(args) -> int:
     instead = title_note(title_choice(lib))
     if deployed and not instead:
         say(f"Done: your picture is on the main menu ({what}).")
-        say("Deployed. Start the game to see it: python tools/modman.py run")
+        say(f"Deployed. Start the game to see it: {modman_cmd(lib, 'run')}")
     else:
         say(f"Done: the menu picture is in your library ({what}).")
         if instead:
@@ -3300,7 +3312,7 @@ def cmd_status(args) -> int:
     if any(m.get("id") == MOD_ID for m in launch.get("mods", [])):
         say("Deployed.")
     else:
-        say("Not deployed yet: python tools/modman.py deploy")
+        say(f"Not deployed yet: {modman_cmd(lib, 'deploy')}")
     return 0
 
 

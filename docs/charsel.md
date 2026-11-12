@@ -1,7 +1,8 @@
 # Who am I: pick who your friends see you as
 
 Like a ped selector: you pick a character on a wheel, and your friend sees you as that character in their game.
-You still play as Link (or Linkle). Tier 1, 2026-11-12.
+Tier 1, 2026-11-12. Tier 2 (2026-11-12): [you see yourself as your pick too](#see-yourself-as-your-pick), live in the
+game with no restart, or [at the next start](#play-as-at-the-next-start-the-restart-way) as a fallback.
 
 **Status: built and checked without the game. Nothing here has run in the game yet.** The bodies, the wheel and the
 network part are done and tested with made-up data. The [in-game check](#in-game-check) decides what really works.
@@ -136,6 +137,81 @@ the keys. All text is 18 pt or larger, white on dark green, blue and red (contra
   comes back after a newer pick (a client started later with `--look`, or the wheel). `iam` says "Your friends see it
   in a few seconds" only while a client has asked the mod within 6 s; otherwise it says the client sends it when it
   runs. With `--no-look` the client gives no list.
+
+## See yourself as your pick
+
+**Live, no restart (ghost mod 0.9.0, `native/examples/ghost/puppet.c`). Built and tested without the game; not yet
+run in the game.** Type `iam daruk` in the game's console (F12): you see yourself as Daruk within a second, and your
+friends do too. `iam link` brings Link back. `iam self off` keeps your friends' view but shows you Link (`iam self on`
+again). `iam` alone says what you see.
+
+How it works:
+
+- Link is hidden with the game's own model show/hide (bit 0 of each model unit's flags: the game's own "show actor"
+  sets it, its hide actions clear it). His armor and held items copy his model's draw flags every frame, so they go
+  with him [V code, G in the game]. If the game shows him again by itself, he is hidden again the next frame
+  (`rehides` in `ghost puppet`).
+- A "self puppet" is spawned: the same character pack your friends see you as (`charsel build`, added and deployed).
+  Every frame it is put exactly where Link is (place and turn) and plays the character's clip for what Link does:
+  its own clips first (Daruk sprints as his rolling ball: Link's `Move` from 6.9 m/s is `RunGear2`; Revali glides
+  with Rito wings; Mipha swims with Zora clips), Link's clips where it has none, and a near name for the rest of a
+  family (a climb jump plays `ClimbMove`). It is shown only once it plays a clip (never a T-pose).
+- The camera stays on Link (nothing moves him). Your weapon, shield and bow are copied into the puppet's hands (the
+  ghost's held items) while no friend's ghost is up; with a friend's ghost up, the puppet's hands are empty.
+- **Link shows instead** while he can't be mirrored: loading, cutscenes, riding a horse, a shield surf, and a state the
+  character has no clip for (a climb or swim with no climb or swim clip). The pause menu keeps what was shown. After a
+  load or a death the puppet is spawned again on the new stage.
+- A pack that never loads (not built, not deployed, or the game refuses it) is tried 5 times; then you stay Link and
+  `iam` says: "Daruk did not load (...): you stay Link. Restart the game to play as Daruk: python tools\charsel.py
+  playas daruk".
+- Developer mode: `ghost puppet` (its state: `shown`, `link_hidden`, `as_want`, `as`, `why`, `rehides`...),
+  `ghost puppet lift <m>` (raise or lower it, for a hip that floats or sinks), `ghost puppet retry`, `ghost puppet
+  off|on`, `ghost puppet map id=Actor,...` (another actor name per character).
+
+Not known until the game run [G]: whether the game shows Link again every frame by itself (he would flicker), whether
+his shadow goes with him, one frame of lag behind Link, the puppet's hip height. The Daruk pack did not spawn in the
+first character check (`charsel-ingame-results.txt` in the research notes, goron FAIL), so Daruk may need the restart
+way until that is fixed.
+
+## Play as, at the next start (the restart way)
+
+The fallback when the live way can't show a character: the character's body becomes **your own Link's** model, the
+way The Linkle Mod does it. Built on your PC from your own files; it needs a restart.
+
+```
+python tools\charsel.py playas daruk     build it, check it, add it to your mods (last, on)
+python tools\charsel.py playas           what you play as now
+python tools\charsel.py playas off       back to Link from the next start (and Linkle back on)
+python tools\charsel.py playas check     read the built mod back (no game)
+```
+
+Or on the Who am I wheel (the lobby's 4, or `charsel wheel`): **P** (a controller's **Y**) on a person builds it in
+the background and says "Done. Restart the game to play as Daruk."
+
+- People only: Zelda, Hylian, Paya, Urbosa, Daruk, Revali, Mipha. Their 21 main bones have Link's names, parents and
+  rest turns, so Link's 1,167 clips drive them. Monsters are not offered (their spine, neck and toes start 20-60
+  degrees off Link's).
+- What it builds (`out\charsel-playas`, a BCML-style package: only the changed files of `TitleBG.pack`; modman fills
+  the rest from your game):
+  - `Model/Link.sbfres`: Link's 121 bones first, in his order, with his parents; the body's own bones after them
+    (Daruk: 171 bones), each keeping its rest pose in model space; Link's 11 shapes shrunk to one point (his
+    materials and hide groups stay, so armor and face code still find them); the body's shapes on top.
+  - `Model/Link.Tex.sbfres`: Link's textures plus the body's.
+  - `Model/Armor_Default.sbfres`: the default hair, belt and trousers shrunk to a point, so nothing pokes through.
+  - The player's own animation list and sets: the character's own sprint, glide or swim (Daruk: `Nml_Move_Dash`
+    -> `Common_Move_Ball`, his rolling ball). `--no-own-moves`: Link's moves only.
+  - Size-table entries for every grown file (`logs/rstb.json`).
+- **The Linkle Mod** also replaces Link's model: while a play-as mod is on, it is turned off (said plainly), and
+  `playas off` turns it back on.
+- **Armor you wear shows on top**: every armor but the default is cut for Link's body, so it floats or clips on
+  another body. Take it off for the best look. The body also shows in the pause menu and in cutscenes.
+- Also [G] until the game run: feet slide a little (stride is Link's), the face doesn't move, tall bodies keep Link's
+  hitbox (Daruk's head goes through low ceilings), and hips may float or sink on Link's clips.
+- Checked without the game (Daruk, 2026-11-12): the model reads back and passes the model self-check, Link's 121
+  bones come first with his parents, every body bone keeps its rest pose, every skin matrix keeps its bone, the
+  textures are all there, the size entries cover every file. Tests with made-up data:
+  `tests/test_charsel_playas.py`; the live puppet: `tests/test_charsel_puppet.py` (and the ghost selftest).
+- Never share the built folder: it is made from your game's files (`built.txt` marks it; Export as .breath refuses it).
 
 ## Never shipped or sent
 

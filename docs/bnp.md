@@ -120,16 +120,32 @@ merged). A damaged `bnp.json` is named under *Needs attention* (add the mod agai
   name for the few the table lists by name), so a file one mod names and another's table holds is one file, and the
   result doesn't depend on the mods' order. A package whose sizes change nothing is left out. `deploy` says which mods
   it merged; when the game's own table is missing it says the tables can't be merged, and still checks every mod.
-- **Packs are merged between mods** (since 2026-11-12). When two enabled mods ship a pack (or a file a data log
-  made, such as `ActorInfo`) and one of them is a BCML package, `deploy` merges them (`bnp.deploy_hook(...,
-  files=True)`) and puts the merged file in the overlay over every mod's copy (`romfs_mods.add_generated`, owner
-  `generated:merged`; its size entry is in the merged table). *Notes* say `<pack>: merged from <mods>`; the clash
+- **Packs are merged between mods, file by file** (since 2026-11-12). When two enabled mods ship the same pack
+  (any mods: BCML packages, converted Wii U mods, plain Switch mods), or a whole file a package's data logs made
+  (such as `ActorInfo`), `deploy` merges them (`bnp.deploy_hook(..., files=True)`, `merge_packages`) and puts the
+  merged file in the overlay over every mod's copy (`romfs_mods.add_generated`, owner `generated:merged`; its size
+  entry is in the merged table). In load order, the later mod wins a file, never a whole pack. *Notes* say `<pack>: merged from <mods>`; the clash
   is not listed under *Needs attention* any more. Nearly every package with game data, texts or map logs ships
   `Bootup.pack`, `Bootup_XXxx.pack` or `TitleBG.pack`, which is where they met before: Linkle's body (11 files in
   `TitleBG.pack`) now stays next to linkle-dialogue's, in either order. A merge that fails (an error the merge
   doesn't expect) leaves each mod's own copy, the later one winning, with one line under *Needs attention*. A dry
-  run merges too (in memory), so it says what the deploy does (`deploy(..., merge=False)` skips it). When no BCML
-  package is involved, the later mod's copy wins as for any file.
+  run merges too (in memory), so it says what the deploy does (`deploy(..., merge=False)` skips it). A pack the game
+  lacks (a new actor pack two mods both add) isn't merged: the later mod's copy wins, as for any other file.
+- **Merge cache:** the merged files are kept in `modloader\cache\merged-packs\` (`index.json` and one
+  `<sha256>.bin` per file, shared between results). A deploy whose merge inputs are the same (each merged file's game
+  copy and every mod's copy of it: path, size, time; every package's `.bnp\` folder; the game's size table,
+  language packs and `ActorInfo`; these tools' own files) reads the result back, each file checked against its
+  hash, instead of merging again (the Linkle set: 20-38 s merged, about 4 s read back); *Notes* say so. The 2 newest
+  results are kept, files no kept result names are deleted. A dry run reads the cache but never writes it; a cache
+  that can't be written is skipped.
+- **A Wii U mod's whole text packs** (`Pack/Bootup_XXxx.pack`, as linkle-dialogue-fix ships them) are made a texts
+  log at `add` (`text_packs_to_package`): each language's pack is compared with your game's own, label by label; the
+  labels it changes or adds go into `.bnp\logs\texts.json` (system texts, `StaticMsg/ErrorMessage`,
+  `StaticMsg/StaffRoll*` and `LayoutMsg/SystemWindow_00`, are left out), and the mod is installed as a BCML package
+  from it. The Switch's own message files and labels the Wii U pack lacks stay, and `deploy` merges its texts with
+  every other mod's in load order (the later mod wins a label). The linkle-dialogue-fix: 1551 labels in 486 message
+  files for each of `USen` and `EUen`, 4 system files left out; its two byte-identical region folders are converted
+  once (`wiiu_convert.region_copies`).
 - **How the merge works:** `bnp.deploy_hook(..., files=True)` gives those files
   merged as BCML merges mods: the game's copy, then each mod's own files over it in order (only the ones that differ
   from the game's, packs inside packs the same way), leaving out a package's files that its logs made (and the files

@@ -14,13 +14,14 @@
 //   iam                 who you are now, and the names you can type
 //   iam <name>          pick one (an id or an alias from the list: `iam zelda`, `iam daruk`)
 //   iam next | back     the next or the previous one on the list (the wheel's order)
+//   iam self off | on   0.9.0: see yourself as Link, or (the default) as your pick, live (puppet.c)
 //   ghost looks <list> [current [seen]]   (the client) the list: comma-separated entries, each id/alias/alias
 //                                  (lower-case letters, digits and -, 1-24 each), at most IAM_MAX entries
 
 #define IAM_MAX 48
 #define IAM_WORD 24
 #define IAM_ENTRY 96
-#define IAM_USAGE "[name | next | back]"
+#define IAM_USAGE "[name | next | back | self on|off]"
 #define IAM_HEARD_S 6.0  // a client that asked for `ghost` this recently is running (it asks every 2 s)
 
 typedef struct {
@@ -33,6 +34,10 @@ typedef struct {
 } IamState;
 
 static IamState g_iam;  // (under lock(): commands run on the frame thread, the client asks from the socket)
+
+// 0.9.0: you see yourself as your pick, live (puppet.c, included after this file): its sentence, and `iam self`.
+static void pup_iam_text(const char *picked, char *out, size_t cap);
+static void pup_set_self(int on);
 
 // A word as `iam` takes it: lower-case letters, digits and -, 1-IAM_WORD, not starting with -.
 static int iam_word_ok(const char *s, size_t n) {
@@ -198,15 +203,26 @@ static void cmd_iam(int argc, char **argv, SwModReply *r) {
     char names[IAM_MAX * (IAM_WORD + 2) + 8];
     iam_names(st, names, sizeof names);
     const char *now = *st->want ? st->want : *st->current ? st->current : "link";
+    char see[300];
     if (argc == 1) {
         api->reply_str(r, "iam", now);
         api->reply_int(r, "iam_seq", st->seq);
         api->reply_str(r, "names", names);
+        pup_iam_text(NULL, see, sizeof see);
         if (st->n)
-            api->reply_text(r, "You are %s. Type iam and a name: %s", now, names);
+            api->reply_text(r, "You are %s. %s%sType iam and a name: %s", now, see, *see ? " " : "", names);
         else
-            api->reply_text(r, "You are %s. Start the multiplayer client to see the names you can pick.", now);
+            api->reply_text(r, "You are %s. %s%sStart the multiplayer client to see the names you can pick.", now, see,
+                            *see ? " " : "");
         free(st);
+        return;
+    }
+    if (argc == 3 && !strcmp(argv[1], "self") && (!strcmp(argv[2], "on") || !strcmp(argv[2], "off"))) {
+        free(st);
+        pup_set_self(argv[2][1] == 'n');
+        api->reply_bool(r, "self", argv[2][1] == 'n');
+        api->reply_text(r, argv[2][1] == 'n' ? "You see yourself as your pick again (live)."
+                                             : "You see yourself as Link. Your friends still see your pick.");
         return;
     }
     char word[IAM_WORD + 1], id[IAM_WORD + 1];
@@ -246,11 +262,13 @@ static void cmd_iam(int argc, char **argv, SwModReply *r) {
     free(st);
     api->reply_str(r, "iam", id);
     api->reply_int(r, "iam_seq", seq);
+    pup_iam_text(id, see, sizeof see);  // (0.9.0: you see yourself as it too, live)
     if (!listed)  // (no client gave the list yet: the word is kept as typed; the client checks it when it starts)
-        api->reply_text(r, "Kept: %s. The multiplayer client checks it and tells your friends once it runs with "
-                        "--ghost-looks.", id);
+        api->reply_text(r, "Kept: %s. %s%sThe multiplayer client checks it and tells your friends once it runs with "
+                        "--ghost-looks.", id, see, *see ? " " : "");
     else if (listening)
-        api->reply_text(r, "You are %s now. Your friends see it in a few seconds.", id);
+        api->reply_text(r, "You are %s now. %s%sYour friends see it in a few seconds.", id, see, *see ? " " : "");
     else
-        api->reply_text(r, "You are %s now. The multiplayer client (--ghost-looks) tells your friends when it runs.", id);
+        api->reply_text(r, "You are %s now. %s%sThe multiplayer client (--ghost-looks) tells your friends when it runs.",
+                        id, see, *see ? " " : "");
 }

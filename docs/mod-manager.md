@@ -130,7 +130,13 @@ files, or its `content` folder on its own. The library keeps only the Switch cop
   the folder.
 - A big mod takes a while: packed files are compressed again (about 1.5 seconds per MB on a test PC).
 - `python tools/modman.py add "<mod folder or .zip>" --no-convert` refuses a Wii U mod instead, as before.
-- Several Wii U mods that change the same file aren't merged: the later one wins, as for Switch mods.
+- Several mods that ship the same pack are merged file by file at `deploy` (the later mod wins a file, not the whole
+  pack; see [bnp](bnp.md#size-table-and-packs)); other files: the later one wins, as for Switch mods.
+- A Wii U text mod's whole text packs (`Pack/Bootup_XXxx.pack`, as linkle-dialogue-fix ships) are never used whole:
+  `add` makes the labels they change or add a texts log (`bnp.text_packs_to_package`; system texts such as error
+  messages and the staff roll stay your game's, and so do the Switch's own message files and labels), and the mod a
+  BCML package installed from it, so its texts merge label by label with your game's and with other mods' texts in
+  load order. A mod for several regions with byte-identical region folders is converted once.
 - Tested in game with a Wii U text mod made for the test (see [wiiu-mods](wiiu-mods.md)); no real Wii U mod tried yet.
 
 ## BCML packages (.bnp)
@@ -148,9 +154,9 @@ files, or its `content` folder on its own. The library keeps only the Switch cop
   maps, quests...) into the game's files and makes a size table (RSTB) for the mod when its sizes change the game's.
   It prints a `logs merged:` line.
 - What it can't merge (BCML 2 logs, damaged logs, parts of a log the game has no place for) is printed as
-  `needs attention:` and repeated by `deploy`: the game's own data is used for those parts. Two packages that ship
-  the same pack (`Bootup.pack`, `TitleBG.pack`...) aren't merged with each other yet: the later one's wins, and
-  `deploy` says what the earlier one loses.
+  `needs attention:` and repeated by `deploy`: the game's own data is used for those parts. Two mods that ship the
+  same pack (`Bootup.pack`, `TitleBG.pack`...) are merged file by file at `deploy`, and the packages' logs applied
+  again in order (see [bnp](bnp.md)); a merge nothing changed for is read back from `modloader\cache\merged-packs\`.
 - `list` shows the package's version. To change the options, `remove` it and add it again.
 
 ## UKMM packages
@@ -168,8 +174,10 @@ your game's files. The details are in [ukmm](ukmm.md).
 
 ## Good to know
 
-- **No merging,** except the size table. When two mods ship the same file (often `Pack/Bootup.pack`), only the
-  later one's is used, and `deploy` lists the clash. Mods that add files or make them bigger may need a matching RSTB
+- **Packs are merged, other files aren't.** When two mods ship the same pack (often `Pack/Bootup.pack` or
+  `TitleBG.pack`), `deploy` merges it file by file over your game's copy, in load order (the later mod wins a file),
+  packs inside packs too, with the BCML packages' logs applied again. When two mods ship the same other file, only
+  the later one's is used, and `deploy` lists the clash. Mods that add files or make them bigger may need a matching RSTB
   (the game's file-size table). When two or more mods change the RSTB (BCML packages, or mods that ship one),
   `deploy` merges their changes into one table (the larger size wins). Other files aren't merged: merge such mods
   with UKMM (Switch mode) first and add UKMM's output folder as one mod.

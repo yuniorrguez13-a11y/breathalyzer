@@ -32,3 +32,8 @@ never `modunload` or `modreload` it while it holds items (their bone follows and
 
 The addresses come from read-only research on the user's own 1.9.0 `main` (out\research, never committed) and from
 tests in the game. No game code is copied here.
+0.9.0 (`puppet.c`, not yet run in the game): `iam daruk` also shows you as Daruk on your own screen, live: Link is
+hidden with the game's own model show/hide (his armor and held items copy his model's flags), and a "self puppet"
+(the character's pack, the same one your friends see) is kept at Link every frame, playing the character's clip for
+what he does (Daruk's sprint is his rolling ball). Link shows instead during loads, cutscenes, riding, and states
+the character has no clip for. `iam link` brings Link back. `ghost puppet` shows its state (developer mode).

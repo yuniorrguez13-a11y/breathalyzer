@@ -64,9 +64,11 @@ static int fa_has(const FakeActor *fa, const char *name) {
 
 static int items_call(struct Cpu *c, uint64_t fn);  // (the held items' fake game calls, below)
 static int coop_call(struct Cpu *c, uint64_t fn);   // (the fake flag manager, below)
+static int pup_call(struct Cpu *c, uint64_t fn);    // (0.9.0: the self puppet's fake calls, below)
 
 static void fake_guest_call(struct Cpu *c, uint64_t fn) {
     SwModRegs *r = SWMOD_REGS(c);
+    if (pup_call(c, fn)) return;
     if (coop_call(c, fn)) return;
     if (items_call(c, fn)) return;
     if (fn == AS_PLAY) {
@@ -1296,6 +1298,305 @@ static void check_iam(void) {
     setup();  // (the plain fakes again)
 }
 
+// ------------------------------------------------------------------ 0.9.0 the self puppet (puppet.c)
+//
+// A made-up Link (his matrix, a model with one unit whose flags' bit 0 is "drawn") in the items' made-up world: the
+// puppet's request makes a fake actor with an animation holder (the pack's 33 names) and a model of its own. The fake
+// MODEL_SHOW sets or clears the bit in the model's units; SET_TRANSFORM puts the actor where it is asked.
+
+typedef struct {
+    _Alignas(16) uint8_t model[0x100], unit[0x40];
+    uint64_t units[1], slot0[1];
+} FakeModel;
+static void fake_model(uint8_t *actor, FakeModel *fm, int drawn) {
+    memset(fm, 0, sizeof *fm);
+    W64(actor, ACTOR_MODEL, fm->model);
+    W64(fm->model, 0, MODEL_VPTR);
+    W32(fm->model, MODEL_NUNITS, 1);
+    W64(fm->model, MODEL_UNITS, fm->units);
+    fm->units[0] = P(fm->slot0), fm->slot0[0] = P(fm->unit);
+    *(uint16_t *)(void *)(fm->unit + UNIT_FLAGS) = (uint16_t)(drawn ? 0x11 : 0x10);
+}
+static int fm_drawn(const FakeModel *fm) { return *(const uint16_t *)(const void *)(fm->unit + UNIT_FLAGS) & 1; }
+
+static struct {
+    _Alignas(16) uint8_t mem[0x600];
+    FakeModel fm;
+    _Alignas(16) uint8_t pi[0x100];
+} g_pl;                                    // Link (the player) and the player info block
+static FakeModel g_pp_fm;                  // the puppet's model
+static _Alignas(16) uint8_t g_pp_holder[0x100];
+static uint64_t g_pp_proc;                 // the puppet (the fake actor its request made)
+static char g_pp_current[32];              // what it plays
+static int g_pp_free = 1, g_pp_paused, g_pp_shows, g_pp_plays, g_pp_plays_missing;
+static int pp_free(void) { return g_pp_free; }
+static int pp_paused(void) { return g_pp_paused; }
+static const char *const PACK33[] = {"Wait", "Walk", "Run", "RunGear2", "CutS1", "CutS2", "CutS3", "CutSF", "CutDash",
+                                     "CutJumpSt", "CutCharge", "CutS1_Lsword", "CutSF_Lsword", "CutS1_Spear",
+                                     "CutS2_Spear", "CutSF_Spear", "BowCharge", "BowShoot", "GuardJust", "Jump", "Fall",
+                                     "Land", "ParashawlGlide", "ClimbWait", "ClimbMove", "SwimWait", "SwimMove",
+                                     "SwimDash", "SquatWait", "SquatMove", "DamageS", "Dead", "WeaponEquipOn"};
+static int pp_has(const char *name) {
+    for (int i = 0; i < N_OF(PACK33); i++)
+        if (!strcmp(PACK33[i], name)) return 1;
+    return 0;
+}
+
+static int pup_call(struct Cpu *c, uint64_t fn) {
+    SwModRegs *r = SWMOD_REGS(c);
+    if (fn == MODEL_SHOW) {
+        g_pp_shows++;
+        uint8_t *m = (uint8_t *)(uintptr_t)r->x[0];
+        int n = *(int32_t *)(void *)(m + MODEL_NUNITS);
+        uint64_t *arr = (uint64_t *)(uintptr_t)R64(m, MODEL_UNITS);
+        for (int i = 0; i < n; i++) {
+            uint16_t *f = (uint16_t *)(uintptr_t)(*(uint64_t *)(uintptr_t)arr[i] + UNIT_FLAGS);
+            *f = (uint16_t)(r->x[1] & 1 ? *f | 1u << r->x[2] : *f & ~(1u << r->x[2]));
+        }
+        return 1;
+    }
+    if (fn == REQUEST_CREATE && !strcmp((const char *)(uintptr_t)r->x[1], "Dm663_Npc_Assasin_A")) {
+        g_requests++;
+        if (!strcmp(g_refuse_name, "Dm663_Npc_Assasin_A")) {
+            r->x[0] = 0;
+            return 1;
+        }
+        g_not_weapon = 1;  // (an actor of another class: its isA answers through the fake vtable)
+        FakeItem *f = fake_item_new("Dm663_Npc_Assasin_A", r->x[3]);
+        if (!f) {
+            r->x[0] = 0;
+            return 1;
+        }
+        ((Handle *)(uintptr_t)r->x[3])->unit = P(&f->unit);
+        g_pp_proc = P(f->mem);
+        W64(f->mem, ACTOR_AS, g_pp_holder);
+        W64(g_pp_holder, AS_OWNER, f->mem);
+        W32(g_pp_holder, AS_SLOTS, 3);
+        fake_model(f->mem, &g_pp_fm, 1);
+        g_pp_current[0] = 0;
+        r->x[0] = 1;
+        return 1;
+    }
+    if (fn == SET_TRANSFORM && r->x[0] == g_pp_proc && g_pp_proc) {
+        const float *pos = (const float *)(uintptr_t)r->x[1];
+        float *mtx = (float *)(uintptr_t)(g_pp_proc + ACTOR_MTX);
+        mtx[3] = pos[0], mtx[7] = pos[1], mtx[11] = pos[2];
+        return 1;
+    }
+    if (fn == AS_PLAY && g_pp_proc && rd64(r->x[0] + 8) == g_pp_proc) {
+        const char *name = (const char *)(uintptr_t)r->x[1];
+        g_pp_plays++;
+        if (pp_has(name)) copy_name(g_pp_current, name);
+        else g_pp_plays_missing++;
+        return 1;
+    }
+    if (fn == AS_CURRENT && r->x[0] == P(g_pp_holder)) {
+        copy_name(g_cur_text, g_pp_current);
+        g_cur.vptr = 0, g_cur.str = P(g_cur_text);
+        r->x[0] = P(&g_cur);
+        return 1;
+    }
+    return 0;
+}
+
+static double g_pt = 9000.0;
+static float g_px = 100.0f;
+// secs of frames (30 a second): Link plays `anim` and moves along x at v m/s; the tick's puppet part and items, then
+// the game's frame.
+static void pup_run(const char *anim, float v, double secs) {
+    struct Cpu *c = (struct Cpu *)(void *)g_cpu;
+    copy_name(t_status.self.anim, anim);
+    t_status.self.found = 1;
+    for (double end = g_pt + secs; g_pt < end; g_pt += 1.0 / 30.0) {
+        g_px += v / 30.0f;
+        ((float *)(void *)(g_pl.mem + ACTOR_MTX))[3] = g_px;
+        ((float *)(void *)(g_pl.pi + PI_POS))[0] = g_px;
+        pup_tick(c, P(g_pl.pi), P(g_pl.mem), g_pt);
+        Requests irq;
+        uint64_t holder = pup_items_holder(&g_irq, &irq);
+        items_tick(c, holder, &irq, g_pt);
+        world_step();
+    }
+}
+static void pup_want(const char *word) {
+    lock();
+    memset(g_iam.want, 0, sizeof g_iam.want);
+    memcpy(g_iam.want, word, strlen(word));
+    unlock();
+}
+static float pp_x(void) { return ((const float *)(uintptr_t)(g_pp_proc + ACTOR_MTX))[3]; }
+
+static void check_puppet(void) {
+    // the pure parts: picks, ids, sentences
+    Missing *m = calloc(1, sizeof *m);
+    if (!m) return;
+    int sp = 0;
+    const char *walk = pup_pick("Move", 1.6f, AN_WALK, &sp, m), *run = pup_pick("Move", 5.4f, AN_RUN, &sp, m);
+    const char *dash = pup_pick("Move", 8.0f, AN_RUN, &sp, m), *still = pup_pick("Move", 6.5f, AN_RUN, &sp, m);
+    const char *slow = pup_pick("Move", 6.0f, AN_RUN, &sp, m);
+    check("puppet", "move_by_speed", !strcmp(walk, "Walk") && !strcmp(run, "Run") && !strcmp(dash, "RunGear2") &&
+          !strcmp(still, "RunGear2") && !strcmp(slow, "Run"), "%s %s %s %s %s", walk, run, dash, still, slow);
+    for (int k = 0; k < PUP_STRIKES; k++) missing_strike(m, "ClimbJump"), missing_strike(m, "CutS9");
+    for (int k = 0; k < PUP_STRIKES; k++) missing_strike(m, "SwimJump"), missing_strike(m, "HoldWait");
+    const char *cj = pup_pick("ClimbJump", 1.0f, AN_WAIT, &sp, m), *cut = pup_pick("CutS9", 0, AN_WAIT, &sp, m);
+    const char *sw = pup_pick("SwimJump", 3.0f, AN_WAIT, &sp, m), *hold = pup_pick("HoldWait", 0, AN_WAIT, &sp, m);
+    const char *horse = pup_pick("HorseRide", 5.0f, AN_RUN, &sp, m), *own = pup_pick("ParashawlGlide", 9, AN_RUN, &sp, m);
+    check("puppet", "near_names", !strcmp(cj, "ClimbMove") && !strcmp(cut, "CutS1") && !strcmp(sw, "SwimDash") &&
+          !strcmp(hold, "Wait") && !horse && !strcmp(own, "ParashawlGlide"), "%s %s %s %s %s %s", cj, cut, sw, hold,
+          horse ? horse : "(Link)", own);
+    for (int k = 0; k < PUP_STRIKES; k++) missing_strike(m, "ClimbMove"), missing_strike(m, "ClimbWait");
+    const char *noclimb = pup_pick("ClimbJump", 1.0f, AN_WAIT, &sp, m);
+    for (int k = 0; k < PUP_STRIKES; k++) missing_strike(m, "RunGear2");
+    sp = 0;
+    const char *nodash = pup_pick("Move", 8.0f, AN_RUN, &sp, m);
+    check("puppet", "unmirrored_shows_link", !noclimb && !strcmp(nodash, "Run"), "%s %s", noclimb ? noclimb : "(Link)",
+          nodash);
+    free(m);
+    check("puppet", "ids", !strcmp(pup_id("daruk"), "goron") && !strcmp(pup_id("goron"), "goron") &&
+          !*pup_id("link") && !*pup_id("linkle") && !*pup_id("ganon") && pup_slot("zora") &&
+          !strcmp(pup_slot("goron")->actor, "Dm663_Npc_Assasin_A"), "daruk %s", pup_id("daruk"));
+    PupStatus ps;
+    memset(&ps, 0, sizeof ps);
+    char line[300];
+    pup_sentence(&ps, "daruk", line, sizeof line);
+    int picked = strstr(line, "Daruk in a moment") != 0;
+    ps.state = PS_FAILED;
+    snprintf(ps.name, sizeof ps.name, "Daruk"), snprintf(ps.playas, sizeof ps.playas, "daruk");
+    snprintf(ps.why, sizeof ps.why, "Daruk did not load (x): you stay Link");
+    pup_sentence(&ps, NULL, line, sizeof line);
+    check("puppet", "sentences", picked && strstr(line, "Restart the game to play as Daruk") &&
+          strstr(line, "charsel.py playas daruk"), "%s", line);
+
+    if (!g_items_world_ok) {
+        check("puppet", "world", 1, "SKIP: the made-up globals' page is taken in this process");
+        return;
+    }
+    // a made-up Link at 100 5 200, drawn
+    items_fresh(1);
+    memset(&g_pl, 0, sizeof g_pl);
+    float lm[12] = {1, 0, 0, 100, 0, 1, 0, 5, 0, 0, 1, 200};
+    memcpy(g_pl.mem + ACTOR_MTX, lm, sizeof lm);
+    fake_model(g_pl.mem, &g_pl.fm, 1);
+    W64(g_pl.pi, PI_PLAYER, g_pl.mem);
+    float pp[3] = {100, 5, 200};
+    memcpy(g_pl.pi + PI_POS, pp, sizeof pp);
+    g_fake_vtable[2] = FAKE_ISA;
+    g_pup_free = pp_free, g_pup_paused = pp_paused, g_pup_check_files = 0;
+    g_pp_free = 1, g_pp_paused = 0, g_px = 100.0f;
+    memset(&t_status.self, 0, sizeof t_status.self);
+    t_status.wanted = 0, t_status.state = ST_IDLE;
+    g_nanim_names = 0;
+
+    // `iam daruk` (no client list: the word as typed): it spawns, Link hides once the puppet plays, the puppet shows
+    pup_want("daruk");
+    pup_run("Wait", 0, 1.0);
+    check("puppet", "spawns_and_swaps", t_pup.state == PS_LIVE && g_requests == 1 && !fm_drawn(&g_pl.fm) &&
+          fm_drawn(&g_pp_fm) && t_pup.shown && !strcmp(g_pp_current, "Wait") && t_pup.hides == 1,
+          "state %s requests %d link drawn %d puppet drawn %d shown %d plays %s hides %lld why %s",
+          PS_NAMES[t_pup.state], g_requests, fm_drawn(&g_pl.fm), fm_drawn(&g_pp_fm), t_pup.shown, g_pp_current,
+          (long long)t_pup.hides, t_pup.why);
+    check("puppet", "at_link", g_pp_proc && pp_x() == g_px, "puppet x %.2f, Link %.2f", g_pp_proc ? pp_x() : -1, g_px);
+    // Daruk's sprint: Link's Move at 8 m/s is RunGear2 (his rolling ball); walking is Walk
+    pup_run("Move", 8.0f, 1.5);
+    int sprint_ok = !strcmp(g_pp_current, "RunGear2");
+    char sprint[32];
+    copy_name(sprint, g_pp_current);
+    pup_run("Move", 1.6f, 1.5);
+    check("puppet", "sprint_and_walk", sprint_ok && !strcmp(g_pp_current, "Walk") && t_pup.shown, "sprint %s, then %s",
+          sprint, g_pp_current);
+    // the game shows Link again by itself: hidden again, counted
+    *(uint16_t *)(void *)(g_pl.fm.unit + UNIT_FLAGS) |= 1;
+    pup_run("Move", 1.6f, 0.2);
+    check("puppet", "rehide", !fm_drawn(&g_pl.fm) && t_pup.rehides == 1, "drawn %d rehides %lld", fm_drawn(&g_pl.fm),
+          (long long)t_pup.rehides);
+    // a climb jump the pack lacks: ClimbMove after the misses, the puppet stays shown
+    pup_run("ClimbJump", 1.0f, 1.0);
+    check("puppet", "climb_near_name", !strcmp(g_pp_current, "ClimbMove") && t_pup.shown && !fm_drawn(&g_pl.fm),
+          "plays %s shown %d", g_pp_current, t_pup.shown);
+    // a horse: Link shows, the puppet hides; back on foot: the puppet again
+    pup_run("HorseRide", 5.0f, 0.5);
+    int horse_link = fm_drawn(&g_pl.fm) && !fm_drawn(&g_pp_fm) && !t_pup.shown;
+    pup_run("Wait", 0, 0.5);
+    check("puppet", "horse_shows_link", horse_link && t_pup.shown && !fm_drawn(&g_pl.fm), "horse %d then shown %d",
+          horse_link, t_pup.shown);
+    // a cutscene (no real position): Link; free again: the puppet after the settle time
+    g_pp_free = 0;
+    pup_run("Wait", 0, 0.5);
+    int cut_link = fm_drawn(&g_pl.fm) && !fm_drawn(&g_pp_fm);
+    g_pp_free = 1;
+    pup_run("Wait", 0, 0.1);
+    int settling = fm_drawn(&g_pl.fm);
+    pup_run("Wait", 0, 0.5);
+    check("puppet", "cutscene_shows_link", cut_link && settling && !fm_drawn(&g_pl.fm) && fm_drawn(&g_pp_fm),
+          "cutscene %d settling %d now link %d puppet %d", cut_link, settling, fm_drawn(&g_pl.fm), fm_drawn(&g_pp_fm));
+    // the pause menu keeps what was shown
+    g_pp_paused = 1, g_pp_free = 0;
+    pup_run("Wait", 0, 0.3);
+    int kept = !fm_drawn(&g_pl.fm) && t_pup.shown;
+    g_pp_paused = 0, g_pp_free = 1;
+    pup_run("Wait", 0, 0.5);
+    check("puppet", "pause_keeps", kept, "link drawn %d shown %d", fm_drawn(&g_pl.fm), t_pup.shown);
+    // Link's sword and shield: copies in the puppet's hands (no friend's ghost); with a friend's ghost wanted: not
+    t_status.self.equip_ok = 1;
+    snprintf(t_status.self.weapon, 64, "Weapon_Sword_001"), snprintf(t_status.self.shield, 64, "Weapon_Shield_001");
+    Requests irq;
+    uint64_t holder = pup_items_holder(&g_irq, &irq);
+    int to_puppet = holder == g_pp_proc && !strcmp(irq.item_names[0], "Weapon_Sword_001") && irq.items_on;
+    t_status.wanted = 1;
+    uint64_t holder2 = pup_items_holder(&g_irq, &irq);
+    t_status.wanted = 0;
+    t_status.self.equip_ok = 0, t_status.self.weapon[0] = t_status.self.shield[0] = 0;
+    check("puppet", "items_to_puppet", to_puppet && holder2 != g_pp_proc, "holder %d, with a friend's ghost %d",
+          holder == g_pp_proc, holder2 == g_pp_proc);
+    // a stage change (a new spawn heap): forgotten without a call, spawned again
+    static _Alignas(16) uint8_t heap2[0x40];
+    uint64_t holder_obj = rd64(HEAP_HOLDER_PTR), heap1 = rd64(holder_obj + HEAP_OFF);
+    int dels = g_deletes, reqs = g_requests;
+    W64((void *)(uintptr_t)holder_obj, HEAP_OFF, heap2);
+    pup_run("Wait", 0, 0.05);
+    int forgot = t_pup.state == PS_WAIT && g_deletes == dels && t_pup.drops == 1;
+    pup_run("Wait", 0, PUP_RETRY_S + 1.0);
+    check("puppet", "stage_change", forgot && t_pup.state == PS_LIVE && g_requests == reqs + 1 && t_pup.shown,
+          "forgot %d state %s requests +%d", forgot, PS_NAMES[t_pup.state], g_requests - reqs);
+    W64((void *)(uintptr_t)holder_obj, HEAP_OFF, heap1);
+    pup_run("Wait", 0, PUP_RETRY_S + 1.0);
+    // `iam link`: the puppet goes (deleted), Link shows
+    dels = g_deletes;
+    pup_want("link");
+    pup_run("Wait", 0, 0.2);
+    check("puppet", "iam_link_back", t_pup.state == PS_OFF && fm_drawn(&g_pl.fm) && g_deletes > dels && !t_pup_proc,
+          "state %s link drawn %d deletes +%d", PS_NAMES[t_pup.state], fm_drawn(&g_pl.fm), g_deletes - dels);
+    // `iam self off` with a pick: no puppet
+    pup_set_self(0);
+    pup_want("daruk");
+    pup_run("Wait", 0, 0.5);
+    int off_ok = t_pup.state == PS_OFF && fm_drawn(&g_pl.fm);
+    pup_set_self(1);
+    pup_want("link");
+    pup_run("Wait", 0, 0.1);
+    check("puppet", "self_off", off_ok, "state %s", PS_NAMES[t_pup.state]);
+    // a pack the game refuses: given up after PUP_TRIES, Link stays, `iam` says to restart as Daruk
+    const char *was = g_refuse_name;
+    g_refuse_name = "Dm663_Npc_Assasin_A";
+    int req = g_requests;
+    pup_want("daruk");
+    pup_run("Wait", 0, PUP_TRIES * PUP_RETRY_S + 1.0);
+    lock();
+    PupStatus fin = g_pup;
+    unlock();
+    pup_sentence(&fin, NULL, line, sizeof line);
+    check("puppet", "refused_gives_up", fin.state == PS_FAILED && g_requests - req == PUP_TRIES && fm_drawn(&g_pl.fm) &&
+          strstr(line, "Restart the game to play as Daruk"), "state %s requests %d line %s", PS_NAMES[fin.state],
+          g_requests - req, line);
+    g_refuse_name = was;
+    pup_want("link");
+    pup_run("Wait", 0, 0.1);
+    g_pup_free = pup_free_real, g_pup_paused = pup_paused_real, g_pup_check_files = 1;
+    lock();
+    memset(&g_iam, 0, sizeof g_iam);
+    unlock();
+}
+
 SWMOD_EXPORT int ghost_selftest(char *out, int cap) {
     g_out = out, g_cap = cap, g_len = 0, g_fails = 0;
     if (out && cap > 0) out[0] = 0;
@@ -1307,5 +1608,6 @@ SWMOD_EXPORT int ghost_selftest(char *out, int cap) {
     check_items();
     check_coop();
     check_iam();
+    check_puppet();
     return g_fails;
 }

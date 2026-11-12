@@ -620,7 +620,10 @@ class Report:
         if self.mods is not None:
             out.append((True, f"Found your mod list: {self.mods} mod{'s' if self.mods != 1 else ''}"))
         elif self.library and "list_damaged" not in keys:
-            out.append((True, "A new mod list will be made next to Savage Wind"))
+            beside = os.path.normcase(os.path.dirname(os.path.abspath(self.library))) == os.path.normcase(
+                os.path.dirname(os.path.abspath(self.folder)))
+            out.append((True, "A new mod list will be made next to Savage Wind" if beside
+                        else f"A new mod list will be made in {self.library}"))
         return out
 
 

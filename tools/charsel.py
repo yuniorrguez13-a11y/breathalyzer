@@ -389,6 +389,9 @@ class Wheel:
         self.pos = self.ids.index(current) if current in self.ids else 0
         self.start = self.ids[self.pos]
         self.done: str | None = None
+        self.playas_note = ""       # P (the restart fallback): what the background build says now
+        self.playas_busy = False
+        self.playas_run = None      # (tests: a stand-in for playas_on)
 
     @property
     def cid(self) -> str:
@@ -414,7 +417,43 @@ class Wheel:
         elif k == "esc":
             self.done = ""
             return ""
+        elif k == "playas":
+            self.start_playas(self.cid)
         return None
+
+    def start_playas(self, cid: str, wait: bool = False) -> None:
+        """P on the wheel: build the play-as mod for cid in the background (playas_on: about a minute) and say how
+        it went in playas_note. The live view (`iam` in the game) needs no restart; this is the restart way."""
+        r = RECIPES[cid]
+        short = r.name.split(" (")[0]
+        if self.playas_busy:
+            return
+        if cid not in PLAYAS_PEOPLE:
+            self.playas_note = ("You are Link already." if r.kind != "pack"
+                                else f"{short} can't be played as at a restart yet (live only).")
+            return
+        self.playas_busy = True
+        self.playas_note = f"Building Play as {short} (about a minute)..."
+        run = self.playas_run or playas_on
+
+        def work() -> None:
+            try:
+                info = run(cid, say=lambda _s: None)
+                off = info.get("turned_off") or []
+                self.playas_note = (f"Done. Restart the game to play as {short}." +
+                                    (f" {', '.join(off)} is off meanwhile." if off else ""))
+            except CharselError as e:
+                self.playas_note = f"Play as {short}: {e}"
+            except Exception as e:   # (anything else: said, never a crash of the menu)
+                self.playas_note = f"Play as {short} failed: {e}"
+            finally:
+                self.playas_busy = False
+
+        if wait:
+            work()
+            return
+        import threading
+        threading.Thread(target=work, name="charsel-playas", daemon=True).start()
 
     def status(self, cid: str | None = None) -> str:
         """Ready / Build first / Needs a mod (the plan's three words), for this PC."""
@@ -431,11 +470,16 @@ class Wheel:
         r = RECIPES[self.cid]
         groups = "   ".join(f"[{c.upper()}]" if c == r.cat else c for c, _ in CATEGORIES)
         st = self.status()
+        short = r.name.split(" (")[0]
         out = ["Who am I?", f"  {groups}", f"  <  {r.name}  >" + (f"   {st}" if st else ""),
-               f"  Others see you as: {r.name.split(' (')[0]}. You play as: Link."]
+               f"  Others see you as: {short}." + (f" You see yourself as {short} too, live in the game."
+                                                    if r.kind == "pack" else " You play as: Link.")]
         if r.looks:
             out.append(f"  {r.looks}")
-        out.append("  Left/Right: character   Up/Down: group   Enter: OK   Esc: back")
+        if self.playas_note:
+            out.append(f"  {self.playas_note}")
+        out.append("  Left/Right: character   Up/Down: group   Enter: OK   Esc: back" +
+                   (f"   P: restart as {short}" if r.id in PLAYAS_PEOPLE else ""))
         return out
 
     def slices(self) -> list[dict]:
@@ -448,9 +492,10 @@ class Wheel:
 
 
 # XInput (a controller): the d-pad or the left stick move, A picks, B goes back. Pure mapping here; the window polls.
-XI_UP, XI_DOWN, XI_LEFT, XI_RIGHT, XI_A, XI_B = 0x0001, 0x0002, 0x0004, 0x0008, 0x1000, 0x2000
+XI_UP, XI_DOWN, XI_LEFT, XI_RIGHT, XI_A, XI_B, XI_Y = 0x0001, 0x0002, 0x0004, 0x0008, 0x1000, 0x2000, 0x8000
 STICK_DEAD = 16000
-PAD_KEYS = ((XI_UP, "up"), (XI_DOWN, "down"), (XI_LEFT, "left"), (XI_RIGHT, "right"), (XI_A, "enter"), (XI_B, "esc"))
+PAD_KEYS = ((XI_UP, "up"), (XI_DOWN, "down"), (XI_LEFT, "left"), (XI_RIGHT, "right"), (XI_A, "enter"), (XI_B, "esc"),
+            (XI_Y, "playas"))     # (Y: restart as the character, the play-as mod)
 
 
 def pad_buttons(buttons: int, lx: int = 0, ly: int = 0) -> int:
@@ -508,7 +553,7 @@ class Pad:
 
 
 TK_KEYS = {"Left": "left", "Right": "right", "Up": "up", "Down": "down", "Return": "enter", "KP_Enter": "enter",
-           "Escape": "esc", "BackSpace": "esc", "space": "enter"}
+           "Escape": "esc", "BackSpace": "esc", "space": "enter", "p": "playas", "P": "playas"}
 CAT_COLORS = {"Hylians": "#237032", "Races": "#1971c2", "Monsters": "#c92a2a"}   # (white text: 5:1 or more)
 MIN_PT = 18                       # the smallest text on the wheel (points)
 
@@ -556,8 +601,19 @@ class WheelWindow:
     def press(self, k: str) -> None:
         got = self.wheel.key(k)
         self.draw()
+        if self.wheel.playas_busy:
+            self.root.after(500, self._poll_playas)
         if got is not None and self.on_done is not None:
             self.on_done(got)
+
+    def _poll_playas(self) -> None:
+        """Redraw while P's build runs (its words change when it is done)."""
+        try:
+            self.draw()
+            if self.wheel.playas_busy:
+                self.root.after(500, self._poll_playas)
+        except Exception:   # (the window is gone)
+            pass
 
     def poll_pad(self) -> None:
         if self.pad is not None:
@@ -604,15 +660,19 @@ class WheelWindow:
                       font=self._fit(r.cat + (f"  -  {st}" if st else ""), sm, 2 * r_in - 24, bold=False),
                       tags=("cat",))
         y = s + sm * px * 0.3
-        c.create_text(mid, y, text=f"Others see you as: {r.name}", fill="#ffffff", anchor="n",
-                      font=("Segoe UI", sm, "bold"), width=s - 16, tags=("who",))
+        short = r.name.split(" (")[0]
+        who = f"Others see you as: {r.name}" + ("  -  you too, live" if r.kind == "pack" else "")
+        c.create_text(mid, y, text=who, fill="#ffffff", anchor="n", font=("Segoe UI", sm, "bold"), width=s - 16,
+                      tags=("who",))
         y += sm * px * 1.6
-        if r.looks:
-            c.create_text(mid, y, text=r.looks, fill="#f1f3f5", anchor="n", font=("Segoe UI", sm), width=s - 16,
-                          justify="center", tags=("looks",))
+        note = self.wheel.playas_note or r.looks
+        if note:
+            c.create_text(mid, y, text=note, fill="#ffd43b" if self.wheel.playas_note else "#f1f3f5", anchor="n",
+                          font=("Segoe UI", sm), width=s - 16, justify="center", tags=("looks",))
         c.create_text(mid, s + self.text_h - sm * px * 0.3, text="Left/Right: character   Up/Down: group   "
-                      "Enter: OK   Esc: back", fill="#dee2e6", anchor="s", font=("Segoe UI", sm), width=s - 16,
-                      justify="center", tags=("hint",))
+                      "Enter: OK   Esc: back" + (f"   P: restart as {short}" if r.id in PLAYAS_PEOPLE else ""),
+                      fill="#dee2e6", anchor="s", font=("Segoe UI", sm), width=s - 16, justify="center",
+                      tags=("hint",))
 
 
 def choose_window(current: str = "link", built: dict | None = None, linkle: bool | None = None,
@@ -2028,14 +2088,24 @@ def playas_off(*, library=None, state: Path | None = None) -> dict:
 
 
 def playas_hint(cid: str) -> str:
-    """What `iam` and the wheel say about seeing yourself as a character ("" for Link and Linkle)."""
+    """What the launcher and the lobby say about seeing yourself as a character ("" for Link and Linkle): live in the
+    game at once (`iam`, the ghost mod's self puppet), or at a restart (charsel playas, the body in your own files)."""
     r = RECIPES.get(cid)
     if r is None or r.kind != "pack":
         return ""
+    short = r.name.split(" (")[0]
     if cid not in PLAYAS_PEOPLE:
-        return f"You still play as Link ({r.name} can't be played as yet)."
-    word = (r.aliases or (cid,))[0]
-    return f"Restart the game to play as {r.name.split(' (')[0]} (charsel playas {word} first)."
+        return f"You see yourself as {short} live in the game (iam {cid}); no restart way for monsters yet."
+    word = playas_word(cid)
+    return (f"You see yourself as {short} live in the game (iam {word}). Restart the game to play as {short} "
+            f"instead: python tools\\charsel.py playas {word}")
+
+
+def playas_word(cid: str) -> str:
+    """The word to type for a character: its short name when that is one of its aliases (daruk), else its id."""
+    r = RECIPES[cid]
+    short = r.name.split(" (")[0].lower()
+    return short if short in r.aliases else cid
 
 
 # ------------------------------------------------------------------------------------------------ command line

@@ -1617,6 +1617,170 @@ class DataLogs(Base):
                     self.assertIn(f"bnp.json is damaged ({key})", problems[-1])
 
 
+def title_mod(other: str | None = None, inner: dict | None = None, top: dict | None = None) -> dict:
+    """A plain mod's whole Pack/Title.pack: the made-up game's (game_files), with these files changed or added."""
+    files = {"A.txt": "game a", "B.txt": "game b", "Actor/ASList/Player.baslist": game_aslist(), **(inner or {})}
+    return {f"{R}/Pack/Title.pack": sarc({"Actor/Pack/Inner.sbactorpack": yaz0(sarc(files)),
+                                          "Other.txt": other or "game other", **(top or {})})}
+
+
+def pack_tree(data: bytes) -> dict:
+    """A pack's files, packs inside it opened too ("a//b"), as text where it reads as text."""
+    out = {}
+    for name, d in wc.sarc_files(wc.yaz0_decompress(data)[0] if data[:4] == b"Yaz0" else data):
+        if bnp.is_packish(name):
+            out.update({f"{name}//{k}": v for k, v in pack_tree(d).items()})
+        else:
+            out[name] = d.decode() if d.isascii() else d
+    return out
+
+
+class MergeBetweenMods(Base):
+    """deploy_hook(files=True) for any two mods shipping the same pack (BCML packages or not): merged file by file in
+    load order, nested packs too, with sizes; the merge cache; Wii U whole text packs made a texts log."""
+
+    def test_two_plain_mods_sharing_a_pack_merge_file_by_file(self):
+        a = write(self.tmp / "a", title_mod("a other", {"A.txt": "a's own a", "OnlyA.txt": "a" * 300}))
+        b = write(self.tmp / "b", title_mod("b other", {"B.txt": "b's own b"}, {"OnlyB.txt": "only b"}))
+        for order, other in (((("A", a), ("B", b)), "b other"), ((("B", b), ("A", a)), "a other")):
+            with self.subTest(order=[n for n, _ in order]):
+                hook = bnp.deploy_hook([(n, str(p)) for n, p in order], str(self.game), files=True)
+                self.assertEqual(sorted(hook.files), ["Pack/Title.pack"])
+                self.assertEqual(hook.attention, [])
+                self.assertIn("Pack/Title.pack: merged from " + ", ".join(n for n, _ in order), " | ".join(hook.notes))
+                tree = pack_tree(hook.files["Pack/Title.pack"])
+                inner = "Actor/Pack/Inner.sbactorpack//"
+                # (each mod's own files kept; the file both change: the later mod's; nothing else lost)
+                self.assertEqual({k: tree[k] for k in ("Other.txt", "OnlyB.txt", inner + "A.txt", inner + "B.txt",
+                                                       inner + "OnlyA.txt")},
+                                 {"Other.txt": other, "OnlyB.txt": "only b", inner + "A.txt": "a's own a",
+                                  inner + "B.txt": "b's own b", inner + "OnlyA.txt": "a" * 300})
+                self.assertEqual(tree[inner + "Actor/ASList/Player.baslist"], game_aslist())
+                # the nested pack grew: its size entry with it (neither mod ships a table)
+                table = bnp.Rstb(hook.rstb.data)
+                game = bnp.Rstb(wc.yaz0_decompress((self.game / "romfs" / rm.RSTB).read_bytes())[0])
+                self.assertGreater(table.get("Actor/Pack/Inner.bactorpack"), game.get("Actor/Pack/Inner.bactorpack"))
+        # a pack only one mod ships, or one the game lacks, isn't merged (that mod's, or the later mod's, is used)
+        write(self.tmp / "c", {f"{R}/Pack/New.pack": sarc({"X.txt": "c"})})
+        write(self.tmp / "d", {f"{R}/Pack/New.pack": sarc({"Y.txt": "d"})})
+        hook = bnp.deploy_hook([("C", str(self.tmp / "c")), ("D", str(self.tmp / "d")), ("A", str(a))],
+                               str(self.game), files=True)
+        self.assertEqual(hook.files, {})
+
+    def test_merge_cache_reuses_an_unchanged_merge_and_redoes_a_changed_one(self):
+        a = write(self.tmp / "a", title_mod("a other"))
+        b = write(self.tmp / "b", title_mod(None, {"B.txt": "b's own b"}))
+        cache = self.tmp / "cache"
+        mods = [("A", str(a)), ("B", str(b))]
+        first = bnp.deploy_hook(mods, str(self.game), files=True, cache=str(cache))
+        self.assertFalse(any("last deploy's" in n for n in first.notes))
+        again = bnp.deploy_hook(mods, str(self.game), files=True, cache=str(cache))
+        self.assertTrue(any("last deploy's" in n for n in again.notes), again.notes)
+        self.assertEqual((again.files, again.rstb.data), (first.files, first.rstb.data))
+        # a damaged cached file is never used: merged again
+        for p in cache.glob("*.bin"):
+            p.write_bytes(b"damaged")
+        fixed = bnp.deploy_hook(mods, str(self.game), files=True, cache=str(cache))
+        self.assertFalse(any("last deploy's" in n for n in fixed.notes))
+        self.assertEqual(fixed.files, first.files)
+        # a mod's file changed: merged again, with the change; a dry run (store=False) reads but never writes
+        for n, text in enumerate(("b two", "b three", "b four")):
+            write(b, title_mod(None, {"B.txt": text}))
+            os.utime(b / R / "Pack" / "Title.pack", ns=(n + 1, (n + 1) * 10**9))
+            hook = bnp.deploy_hook(mods, str(self.game), files=True, cache=str(cache), store=n != 2)
+            self.assertFalse(any("last deploy's" in x for x in hook.notes))
+            self.assertEqual(pack_tree(hook.files["Pack/Title.pack"])["Actor/Pack/Inner.sbactorpack//B.txt"], text)
+        index = json.loads((cache / bnp.CACHE_INDEX).read_text(encoding="utf-8"))
+        self.assertEqual(len(index["results"]), bnp.CACHE_KEEP)
+        named = {d for r in index["results"].values() for d in r["files"].values()}
+        self.assertEqual({p.name.split(".")[0] for p in cache.glob("*.bin")}, named)   # (the rest deleted)
+        # the cache can't be written (a file in its place): the merge still works
+        bad = self.tmp / "not-a-folder"
+        bad.write_bytes(b"x")
+        self.assertEqual(bnp.deploy_hook(mods, str(self.game), files=True, cache=str(bad)).files.keys(),
+                         first.files.keys())
+
+
+def arc_texts(pack: bytes, lang: str) -> dict:
+    """{message file: {label: text}} of a Bootup_<lang>.pack."""
+    arc = dict(wc.sarc_files(pack))[f"Message/Msg_{lang}.product.ssarc"]
+    out = {}
+    for name, d in wc.sarc_files(wc.yaz0_decompress(arc)[0] if arc[:4] == b"Yaz0" else arc):
+        m = bt.msbt_read(d)
+        out[name] = {lb: t[:-2].decode("utf-16-le") for lb, t in zip(m.labels, m.texts)}
+    return out
+
+
+class TextPacks(Base):
+    """bnp.text_packs_to_package: a converted Wii U mod's whole text pack made a texts log (its changed and new
+    labels; system texts and the Switch's own files and labels the game's), installed as a package; deploy then
+    merges its texts with another package's label by label, the later mod winning."""
+    install = DataLogs.install
+
+    def setUp(self):
+        super().setUp()
+        files, sizes = data_game()
+        files["Pack/Bootup_USen.pack"] = sarc({"Message/Msg_USen.product.ssarc": yaz0(sarc({
+            ARMOR: msbt({"A_Name": "Tunic", "S_Name": "Switch only"}),
+            "LayoutMsg/AppLoadingMessage_00.msbt": msbt({"L": "Loading"}),
+            "StaticMsg/ErrorMessage.msbt": msbt({"E": "Switch error"})}))})
+        write(self.game / "romfs", files)
+        table = bnp.Rstb((self.game / "romfs" / rm.RSTB).read_bytes())
+        table.crc.update({crc(k): v for k, v in sizes.items()})
+        (self.game / "romfs" / rm.RSTB).write_bytes(table.to_bytes())
+
+    def wiiu_fix(self) -> Path:
+        """What wiiu_convert leaves for a Wii U text fix: whole text packs (the same texts for USen and EUde), its
+        message archive lacking a Switch-only file and label, a changed system text; and one other file."""
+        arc = sarc({ARMOR: msbt({"A_Name": "Fix Tunic", "C_Name": "New cape"}),
+                    "StaticMsg/ErrorMessage.msbt": msbt({"E": "Wii U error"})})
+        return write(self.tmp / ".adding-fix", {
+            "romfs/Pack/Bootup_USen.pack": sarc({"Message/Msg_USen.product.ssarc": arc}),
+            "romfs/Pack/Bootup_EUde.pack": sarc({"Message/Msg_EUde.product.ssarc": arc}),
+            "romfs/Model/Fix.txt": "fix model", "wiiu-convert-report.txt": "report"})
+
+    def test_whole_text_pack_becomes_a_texts_log_package(self):
+        stage = self.wiiu_fix()
+        said = []
+        notes = bnp.text_packs_to_package(str(stage), str(self.game), "Fix", say=said.append)
+        log = json.loads((stage / ".bnp" / "logs" / "texts.json").read_text(encoding="utf-8"))
+        # (only what it changes or adds, per language against the game's own: German "Rock" -> "Fix Tunic" too)
+        self.assertEqual({lang: {f: sorted(v) for f, v in files.items()} for lang, files in log.items()},
+                         {"USen": {ARMOR: ["A_Name", "C_Name"]}, "EUde": {ARMOR: ["A_Name", "C_Name"]}})
+        self.assertIn("made a texts log of the 4 label(s)", notes[0])
+        self.assertTrue(any("1 system message file(s) left out" in n for n in notes), notes)
+        files = self.files_of(stage)
+        self.assertNotIn("romfs/Model/Fix.txt", files)
+        self.assertEqual(files[f"{R}/Model/Fix.txt"], b"fix model")
+        self.assertEqual(files["wiiu-convert-report.txt"], b"report")
+        usen = arc_texts(files[f"{R}/Pack/Bootup_USen.pack"], "USen")
+        # (the Switch's own file and label kept, the system text the game's, the mod's change and new label in)
+        self.assertEqual(usen, {ARMOR: {"A_Name": "Fix Tunic", "S_Name": "Switch only", "C_Name": "New cape"},
+                                "LayoutMsg/AppLoadingMessage_00.msbt": {"L": "Loading"},
+                                "StaticMsg/ErrorMessage.msbt": {"E": "Switch error"}})
+        self.assertIsNotNone(bnp.stored(str(stage)))
+        self.assertFalse((self.tmp / ".adding-fix.texts").exists() or (self.tmp / ".adding-fix.pkg").exists())
+        # nothing to do: no text pack
+        plain = write(self.tmp / "plain", {"romfs/Model/X.txt": "x"})
+        self.assertEqual(bnp.text_packs_to_package(str(plain), str(self.game), "Plain"), [])
+        self.assertEqual(self.files_of(plain), {"romfs/Model/X.txt": b"x"})
+
+    def test_deploy_merges_its_texts_with_another_package_label_by_label(self):
+        stage = self.wiiu_fix()
+        bnp.text_packs_to_package(str(stage), str(self.game), "Fix", say=lambda *_: None)
+        texts = {"USen": {"ActorType/ArmorUpper.msyt": {"A_Name": {"contents": [{"text": "Pkg Tunic"}]},
+                                                         "S_Name": {"contents": [{"text": "Pkg hood"}]}}}}
+        _, pkg, _ = self.install({"info.json": json.dumps({"name": "Pkg", "version": "1", "platform": "switch"}),
+                                  "logs/texts.json": json.dumps(texts)}, "pkg")
+        for order, a_name in (((("Pkg", pkg), ("Fix", stage)), "Fix Tunic"), ((("Fix", stage), ("Pkg", pkg)), "Pkg Tunic")):
+            with self.subTest(order=[n for n, _ in order]):
+                hook = bnp.deploy_hook([(n, str(p)) for n, p in order], str(self.game), files=True)
+                self.assertEqual(hook.attention, [])
+                usen = arc_texts(hook.files["Pack/Bootup_USen.pack"], "USen")
+                self.assertEqual(usen[ARMOR], {"A_Name": a_name, "S_Name": "Pkg hood", "C_Name": "New cape"})
+                self.assertIn("LayoutMsg/AppLoadingMessage_00.msbt", usen)
+
+
 # ---------------------------------------------------------------- modman
 
 def fake_install(inst: Path) -> Path:

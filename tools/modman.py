@@ -1922,6 +1922,7 @@ def add_mod(lib: Library, src: str, name: str | None = None, *, convert: bool = 
     notes: list[str] = [f"{p} (left by an add that was cut short) couldn't be removed: delete it yourself"
                         for p in stuck]
     rep = None
+    text_pkg = False     # (a converted Wii U mod whose text packs were made a texts log: a BCML package now)
     try:
         if pkg:
             try:
@@ -1942,6 +1943,15 @@ def add_mod(lib: Library, src: str, name: str | None = None, *, convert: bool = 
                 check_zip(src)  # (password, compression Python can't read: refused as any .zip is)
             say(f"Converting {name} from Wii U (a big mod takes a while)...")
             rep = convert_wiiu(src, stage, name, game_romfs(lib))
+            # (whole text packs: their changed labels made a texts log, the mod a BCML package installed from it, so
+            # its texts merge label by label with the game's and other mods'; never the whole Wii U text pack)
+            try:
+                texts = bnp.text_packs_to_package(stage, os.path.join(lib.install, "extracted") if lib.install else "",
+                                                 name, say)
+            except bnp.BnpError as e:
+                raise ModmanError(f"Not added: {name}: {e}") from None
+            notes += texts
+            text_pkg = os.path.isfile(os.path.join(stage, bnp.META, "bnp.json"))
         elif os.path.isdir(src):
             linked, copied, more = store_folder(src, stage)
             notes += more
@@ -1954,8 +1964,8 @@ def add_mod(lib: Library, src: str, name: str | None = None, *, convert: bool = 
         else:
             os.makedirs(stage, exist_ok=True)
             store_file(src, stage)
-        if not (pkg or upkg):  # (a Pack/*.pack copied whole from another game version, a converted Wii U one too:
-            notes += bnp.fill_old_packs(stage, game_romfs(lib))   # filled from yours)
+        if not (pkg or upkg or text_pkg):  # (a Pack/*.pack copied whole from another game version, a converted Wii U
+            notes += bnp.fill_old_packs(stage, game_romfs(lib))   # one too: filled from yours)
         note = example_dll(src, stage)
         if note:
             notes.append(note)

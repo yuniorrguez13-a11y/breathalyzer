@@ -3259,6 +3259,185 @@ def stored_problems(root: str) -> list[str]:
     return out
 
 
+# ------------------------------------------------------------------------------- whole text packs made a texts log
+# A Wii U text mod (linkle-dialogue-fix) ships whole Pack/Bootup_XXxx.pack files. Converted, they are the Wii U game's
+# 1.5.0 texts with the mod's changes: they lack the Switch's own message files and labels, and carry Wii U system
+# wording. Shipped whole they would drop those; merged with other mods per message file, a package's texts log would
+# still win over them. So the labels they change or add (system texts left out) become a texts log (BCML 3
+# texts.json), and the mod a BCML package installed from it: its texts merge label by label, in load order, with
+# every other mod's (install(), then deploy's merge_packages).
+
+TEXT_PACK_RE = re.compile(r"Bootup_([A-Z]{2}[a-z]{2})\.pack")
+TEXT_SKIP = ("StaticMsg/ErrorMessage.msbt", "LayoutMsg/SystemWindow_00.msbt")   # (system wording: the Switch's own)
+TEXT_SKIP_PREFIX = ("StaticMsg/StaffRoll",)
+
+
+@dataclass
+class TextDiff:
+    labels: dict[str, dict[str, dict]] = field(default_factory=dict)   # msbt name -> label -> texts.json entry
+    skipped: list[str] = field(default_factory=list)    # system message files left out (they differ from the game's)
+    bad: list[str] = field(default_factory=list)        # labels whose text can't be written as a log entry
+    rest: bytes | None = None    # the pack without the mod's texts (the game's archive), when it holds more; else None
+
+
+def _msg_archive(pack: Blob, lang: str) -> str | None:
+    names = [n for n in pack.open() if n.startswith("Message/Msg_") and n.endswith(".product.ssarc")]
+    want = f"Message/Msg_{lang}.product.ssarc"
+    return want if want in names else (names[0] if len(names) == 1 else None)
+
+
+def text_pack_diff(mod_pack: bytes, game_pack: bytes | None, lang: str) -> TextDiff:
+    """The labels a whole Bootup_<lang>.pack's message archive changes or adds against the game's (game_pack None:
+    every label), as texts.json entries. Labels the game has and the mod lacks stay the game's (it isn't in the log).
+    Raises BnpError when it isn't a text pack, TextError/FormatError when it can't be read."""
+    import bcml_texts as bt
+    pack = Blob(mod_pack)
+    if not pack.is_sarc():
+        raise BnpError("not a pack")
+    inner = _msg_archive(pack, lang)
+    if inner is None:
+        raise BnpError("no message archive (Message/Msg_XXxx.product.ssarc) in it")
+    arc = pack.child(inner)
+    gpack = Blob(game_pack) if game_pack is not None else None
+    ginner = _msg_archive(gpack, lang) if gpack is not None and gpack.is_sarc() else None
+    garc = gpack.child(ginner) if ginner else None
+    gfiles = garc.open() if garc is not None and garc.is_sarc() else {}
+    out = TextDiff()
+    for name, (content, _) in sorted(arc.open().items()):
+        data = content.data() if isinstance(content, Blob) else content
+        if not name.lower().endswith(".msbt") or (name in gfiles and gfiles[name][0] == data):
+            continue
+        if name in TEXT_SKIP or name.startswith(TEXT_SKIP_PREFIX):
+            out.skipped.append(name)
+            continue
+        m = bt.msbt_read(data)
+        game: dict[str, tuple[bytes, str | None]] = {}
+        if name in gfiles:
+            g = bt.msbt_read(gfiles[name][0])
+            game = {lb: (g.texts[i], g.attrs[i] if g.attr_size == 4 else None) for i, lb in enumerate(g.labels)}
+        for i, label in enumerate(m.labels):
+            text = m.texts[i]
+            attr = m.attrs[i] if m.attr_size == 4 else None
+            if game.get(label) == (text, attr):
+                continue
+            try:
+                contents = bt.decode_text(text)
+                if bt.encode_contents(contents) != text:
+                    raise bt.TextError("its control tags don't read back the same")
+            except (bt.TextError, struct.error, IndexError, UnicodeDecodeError) as e:
+                out.bad.append(f"{name} {label} ({e})")
+                continue
+            out.labels.setdefault(name, {})[label] = {"contents": contents,
+                                                      **({"attributes": attr} if attr is not None else {})}
+    # (the pack's other files: kept only when they differ from the game's, with the game's texts in it)
+    others = {n: c for n, c in pack.open().items() if n != inner}
+    gall = gpack.open() if gpack is not None and gpack.is_sarc() else {}
+    if any(gall.get(n) is None or _plain_bytes(gall[n][0]) != _plain_bytes(c[0]) for n, c in others.items()):
+        if ginner and ginner == inner:
+            pack.set(inner, _plain_bytes(gpack.open()[ginner][0]))
+        else:
+            del pack.open()[inner]
+            pack.changed = True
+        out.rest = pack.data()
+    return out
+
+
+def _plain_bytes(x) -> bytes:
+    return x.data() if isinstance(x, Blob) else x
+
+
+def text_packs_to_package(stage: str, game: str, name: str, say=print) -> list[str]:
+    """When stage (a converted Wii U mod in wiiu_convert's layout: romfs/, 01007EF00011F001/romfs/) has whole
+    Pack/Bootup_XXxx.pack files: the labels they change become logs/texts.json (text_pack_diff, each language against
+    the game's own pack), and stage is made a BCML package installed from it (install(): its texts merged into the
+    game's label by label, its other files as they were; the library copy keeps the log, so deploy merges it with the
+    other mods' texts in load order). Byte-identical packs of several languages are read once. Returns notes ([]:
+    nothing to do, stage unchanged). `game`: Savage Wind's extracted folder (only read)."""
+    import bcml_texts as bt
+    pack_dir = os.path.join(stage, wc.BASE_OUT, "Pack")
+    try:
+        found = sorted((n, m.group(1)) for n in os.listdir(pack_dir) if (m := TEXT_PACK_RE.fullmatch(n))
+                       and os.path.isfile(os.path.join(pack_dir, n)))
+    except OSError:
+        return []
+    if not found:
+        return []
+    if not game or not os.path.isdir(os.path.join(game, "romfs", "Pack")):
+        return [f"its text packs ({_some([n for n, _ in found])}) are used whole: Savage Wind's game files aren't "
+                "set up, so they can't be made a texts log"]
+    log: dict[str, dict] = {}
+    notes: list[str] = []
+    rewrite: dict[str, bytes | None] = {}     # pack file -> what stays of it (None: nothing, removed)
+    seen: dict[str, str] = {}                 # a pack's sha256 -> the first language with those bytes
+    for fname, lang in found:
+        path = os.path.join(pack_dir, fname)
+        data = _read(path)
+        digest = hashlib.sha256(data).hexdigest()
+        gpath = os.path.join(game, "romfs", "Pack", f"Bootup_{lang}.pack")
+        try:
+            diff = text_pack_diff(data, _read(gpath) if os.path.isfile(gpath) else None, lang)
+        except (BnpError, bt.TextError, wc.FormatError, struct.error, IndexError, OSError) as e:
+            notes.append(f"{fname}: its texts can't be read ({e}); the pack is used whole")
+            continue
+        if digest in seen:
+            notes.append(f"{fname} holds the same bytes as Bootup_{seen[digest]}.pack: read once, compared with your "
+                         f"game's {lang} texts")
+        seen.setdefault(digest, lang)
+        if diff.labels:
+            log[lang] = diff.labels
+        n = sum(len(v) for v in diff.labels.values())
+        say(f"  {fname}: {n} label(s) in {len(diff.labels)} message file(s) differ from your game's")
+        if diff.skipped:
+            notes.append(f"{fname}: {len(diff.skipped)} system message file(s) left out, your game's wording kept "
+                         f"({_some(diff.skipped)})")
+        if diff.bad:
+            notes.append(f"{fname}: {len(diff.bad)} text(s) can't be made a log entry and stay the game's "
+                         f"({_some(diff.bad, 2)})")
+        rewrite[fname] = diff.rest
+    if not rewrite:
+        return notes
+    labels = sum(len(x) for files in log.values() for x in files.values())
+    work, pkg = stage + ".texts", stage + ".pkg"
+    for p in (work, pkg):
+        if os.path.lexists(p):
+            _remove(p)
+    try:
+        for fname, rest in rewrite.items():
+            path = os.path.join(pack_dir, fname)
+            os.unlink(path)
+            if rest is not None:
+                _write_new(path, rest)
+        os.makedirs(os.path.join(work, "logs"))
+        info = {"name": name, "version": "", "platform": "switch",
+                "desc": "Its whole text packs made a texts log by Breathalyzer (tools/bnp.py text_packs_to_package)"}
+        write_json(os.path.join(work, "info.json"), info)
+        with open(os.path.join(work, "logs", "texts.json"), "w", encoding="utf-8") as f:
+            json.dump(log, f, ensure_ascii=False)
+        for sub, to in ((wc.BASE_OUT, f"{BASE_TID}/romfs"), (wc.DLC_OUT, f"{DLC_TID}/romfs")):
+            src = os.path.join(stage, *sub.split("/"))
+            if os.path.isdir(src) and _walk(src):
+                dst = os.path.join(work, *to.split("/"))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                os.rename(src, dst)
+        res = install(work, pkg, game, info=parse_info(json.dumps(info).encode()), move=True, say=say)
+        for n in os.listdir(stage):   # (what isn't RomFS: the converter's leftovers, kept next to the package)
+            if n not in (wc.BASE_OUT, DLC_TID) and not os.path.lexists(os.path.join(pkg, n)):
+                os.rename(os.path.join(stage, n), os.path.join(pkg, n))
+        _remove(stage)
+        os.rename(pkg, stage)
+    finally:
+        for p in (work, pkg):
+            if os.path.lexists(p):
+                _remove(p)
+    langs = sorted(log)
+    out = [f"texts: its whole text pack(s) ({_some([n for n in rewrite], 4)}) made a texts log of the {labels} "
+           f"label(s) they change or add ({', '.join(langs) or 'none'}): merged into your game's texts label by "
+           "label, and with other mods' texts in load order (the Wii U pack is never used whole)"]
+    out += notes
+    out += [x for x in res.summary()[1:] if x.startswith(("logs merged", "size table", "needs attention"))]
+    return out
+
+
 @dataclass
 class DeployHook:
     rstb: rm.MergedRstb | None = None
