@@ -236,6 +236,70 @@ class Layout(unittest.TestCase):
         self.assertEqual(self.d[txt:txt + 2 + 17 + 1], struct.pack("<H", 17) + b"Msg/TestPal:Hello\0")
 
 
+class LayoutRules(unittest.TestCase):
+    """Layout rules seen in the game's flows that the made-up talk above doesn't use."""
+
+    @staticmethod
+    def slots(d: bytes) -> set:
+        r = struct.unpack_from("<I", d, 0x18)[0]
+        n = struct.unpack_from("<I", d, r + 0x24)[0]
+        out = set()
+        for k in range(n):
+            base, mask = struct.unpack_from("<II", d, r + 0x28 + 8 * k)
+            out.update(base + 8 * b for b in range(32) if mask >> b & 1)
+        return out
+
+    def test_actor_id_value(self):
+        # an actor named by its two names: count 2, two ptrs, the two copies after them, the second 2-aligned
+        f = evfl.Flow("Who")
+        f.entry("E", f.act("A", "LookAt", {"Target": evfl.ActorId("Pal_Odd", "Two"), "Me": evfl.ActorId("Me")}))
+        d = evfl.dump(f)
+        g = evfl.load(d)
+        self.assertEqual(g.events[0].params["Target"], evfl.Param(evfl.ACTOR_ID, ("Pal_Odd", "Two")))
+        self.assertEqual(g.events[0].params["Me"].value, ("Me", ""))
+        self.assertEqual(evfl.dump(g), d)
+        events = struct.unpack_from("<Q", d, 0x90 + 0x30)[0]
+        grp = struct.unpack_from("<Q", d, events + 0x10)[0]
+        keys = [d[p + 2:p + 2 + struct.unpack_from("<H", d, p)[0]].decode()
+                for p in dicts.read_nx_dict(d, struct.unpack_from("<Q", d, grp + 8)[0])[1]]
+        item = struct.unpack_from("<Q", d, grp + 0x10 + 8 * keys.index("Target"))[0]
+        self.assertEqual(d[item:item + 0x10], bytes([evfl.ACTOR_ID, 0, 2, 0]) + bytes(12))
+        a, b = struct.unpack_from("<2Q", d, item + 0x10)
+        self.assertEqual(a, item + 0x20)
+        self.assertEqual(d[a:a + 10], struct.pack("<H", 7) + b"Pal_Odd\0")
+        self.assertEqual(b, a + 10)                                   # 2 + 7 + 1 = 10: already even
+        self.assertEqual(d[b:b + 6], struct.pack("<H", 3) + b"Two\0")
+        self.assertTrue({item + 0x10, item + 0x18} <= self.slots(d))
+        me = struct.unpack_from("<Q", d, grp + 0x10 + 8 * keys.index("Me"))[0]
+        a, b = struct.unpack_from("<2Q", d, me + 0x10)
+        self.assertEqual((a, b), (me + 0x20, me + 0x26))             # 2 + 2 + 1 = 5, padded to 6
+        self.assertEqual(d[b:b + 3], b"\0\0\0")                      # the empty second name: its own copy
+
+    def test_empty_lists_have_no_ptr(self):
+        d = evfl.dump(evfl.Flow("Nothing"))
+        ptrs = struct.unpack_from("<4Q", d, 0x90 + 0x28)
+        self.assertEqual((ptrs[0], ptrs[1], ptrs[3]), (0, 0, 0))     # actors, events, entry points
+        self.assertEqual(d[ptrs[2]:ptrs[2] + 4], b"DIC ")             # the entry dictionary is always there
+        self.assertTrue({0x90 + 0x28 + 8 * k for k in range(4)} <= self.slots(d))
+        f = evfl.Flow("NoActors")                                     # a talk that only runs another flow
+        f.entry("Talk", f.subflow("Common", "Hello", evfl.params(Arg_Turn=0)))
+        d = evfl.dump(f)
+        ptrs = struct.unpack_from("<4Q", d, 0x90 + 0x28)
+        self.assertEqual(ptrs[0], 0)
+        self.assertEqual(ptrs[1], 0x90 + 0x48)
+        self.assertEqual(evfl.dump(evfl.load(d)), d)
+
+    def test_switch_without_cases_lists_its_cases_ptr(self):
+        f = evfl.Flow("S")
+        f.entry("E", f.switch("A", "Ask"))
+        d = evfl.dump(f)
+        events = struct.unpack_from("<Q", d, 0x90 + 0x30)[0]
+        self.assertEqual(struct.unpack_from("<Q", d, events + 0x18)[0], 0)
+        self.assertIn(events + 0x18, self.slots(d))
+        self.assertNotIn(events + 0x10, self.slots(d))               # no parameters: not listed
+        self.assertEqual(evfl.dump(evfl.load(d)), d)
+
+
 class Builder(unittest.TestCase):
     def test_actors_and_actions_once(self):
         f = evfl.Flow("X")
@@ -310,7 +374,10 @@ class Errors(unittest.TestCase):
             lambda f: setattr(f.entries[0], "subflows", [1]),     # not a subflow event
             lambda f: setattr(f.events[3], "name", f.events[4].name),
             lambda f: f.events[1].params.update(W=evfl.Param(evfl.WTEXT, "x")),
-            lambda f: f.events[1].params.update(W=evfl.Param(evfl.ACTOR_ID, ("a", "b"))),
+            lambda f: f.events[1].params.update(W=evfl.Param(evfl.TEXTS, ["a", "b"])),
+            lambda f: f.events[1].params.update(W=evfl.Param(evfl.ACTOR_ID, ("a",))),
+            lambda f: f.events[1].params.update(W=evfl.Param(evfl.ACTOR_ID, ("a", 2))),
+            lambda f: f.events[1].params.update(W=evfl.Param(evfl.TEXT, ("a", "b"))),
             lambda f: f.events[1].params.update(W=3),
             lambda f: f.events[1].params.update(W=evfl.Param(evfl.INTS, [])),
             lambda f: f.events.append("not an event"),
@@ -338,8 +405,19 @@ class Errors(unittest.TestCase):
         events = struct.unpack_from("<Q", data, 0x90 + 0x30)[0]
         grp = struct.unpack_from("<Q", data, events + 0x10)[0]
         item = struct.unpack_from("<Q", data, grp + 0x10)[0]
-        data[item] = evfl.ACTOR_ID
-        with self.assertRaisesRegex(evfl.EvflError, "kind 12"):
+        data[item] = evfl.TEXTS
+        with self.assertRaisesRegex(evfl.EvflError, "kind 10"):
+            evfl.load(bytes(data))
+
+    def test_actor_id_count_checked(self):
+        f = evfl.Flow("K")
+        f.entry("E", f.act("A", "Do", {"Who": evfl.ActorId("Pal")}))
+        data = bytearray(evfl.dump(f))
+        events = struct.unpack_from("<Q", data, 0x90 + 0x30)[0]
+        grp = struct.unpack_from("<Q", data, events + 0x10)[0]
+        item = struct.unpack_from("<Q", data, grp + 0x10)[0]
+        struct.pack_into("<H", data, item + 2, 1)
+        with self.assertRaisesRegex(evfl.EvflError, "actor with count 1"):
             evfl.load(bytes(data))
 
 

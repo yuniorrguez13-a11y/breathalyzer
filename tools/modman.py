@@ -136,6 +136,7 @@ CHEAT_RE = re.compile(r"(^|/)cheats/([0-9a-f]{16})\.txt$", re.I)  # (any case: W
 CHEAT_FILE_RE = re.compile(r"[0-9a-f]{16}\.txt")
 AOC_RE = re.compile(r"aoc\d+", re.I)
 MAX_NATIVE = 64   # modhost loads at most this many DLLs from its mods folder (native/modhost/modhost.c MAX_MODS)
+FRAME_JOB_DLLS = ("basics_inf_stamina.dll", "ghost.dll", "zelda_view.dll")  # each wraps the game's frame job
 BAD_CHARS = set('<>:"|?*\\') | {chr(i) for i in range(32)}
 # Folders deploy\ holds: modman's own, and the overlay romfs_mods owns (it keeps its own marker file).
 OWN_TOP = ("root", "native", "cheats", "vanilla-lib", ".work", "pictures", "fonts")
@@ -2249,7 +2250,8 @@ def game_folders(extracted: str) -> list[str]:
 def inputs_hash(lib: Library) -> str:
     """What a deploy is made from: the library's place (launch.json holds full paths into it), the Savage Wind folder
     and its game files (with the DLC folders set up), the enabled mods in order and their files (names, sizes,
-    times), and modhost when a native mod is on. `run` and `status` compare it."""
+    times), modhost when a native mod is on, and (when their tools are there and use any) the deploy settings and
+    the font. `run` and `status` compare it."""
     h = hashlib.sha256()
     install = lib.install or ""
     enabled = lib.enabled()
@@ -2276,6 +2278,9 @@ def inputs_hash(lib: Library) -> str:
     values = deploy_setting_values(lib, rels)  # (only when a mod has applies = "deploy" settings: else as before)
     if values:
         h.update(json.dumps({"deploy_settings": values}, sort_keys=True).encode())
+    font = _feature_call("font", "hash_inputs", lib)  # (what deploy's font files are made from; None: it makes none)
+    if font is not None:
+        h.update(json.dumps({"font": font}, sort_keys=True, default=str).encode())
     return h.hexdigest()
 
 
@@ -2504,7 +2509,9 @@ def history_append(lib: Library, record: dict) -> None:
     with open(path, "a", encoding="utf-8", newline="\n") as f:
         f.write(line + "\n")
     try:
-        if os.path.getsize(path) > 4096 * HISTORY_KEEP:  # (cheap test first: read it only when it may be long)
+        # (cheap test first: every line holds at least "time" and "type", over 40 bytes, so a shorter file can't
+        # have too many lines)
+        if os.path.getsize(path) > 40 * 2 * HISTORY_KEEP:
             with open(path, encoding="utf-8") as f:
                 lines = f.read().splitlines()
             if len(lines) > 2 * HISTORY_KEEP:
@@ -2702,6 +2709,13 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False, mer
         if len(native) > MAX_NATIVE:
             attention.append(f"{len(native)} native mod and helper DLLs, but modhost loads at most {MAX_NATIVE}: "
                              "the ones last in name order are left out. Turn some native mods off.")
+        # (only the first DLL by file name that wraps the game's frame job runs: docs/game-basics.md, botw_on_frame.
+        # In the game 2026-11-12: Infinite Stamina on, the ghost mod never ran, so `iam daruk` did nothing)
+        frame = sorted(n for n in native if n in FRAME_JOB_DLLS and not native[n][2])
+        if len(frame) > 1:
+            names = [native[n][0]["name"] for n in frame]
+            attention.append(f"{' and '.join(names)} use the same frame hook, and only {names[0]} runs (first by "
+                             f"file name). {' and '.join(names[1:])} won't run: turn {names[0]} off to use it.")
 
     # Hooks: the union of what the deployed native mods' mod.toml files ask for, built into the game code
     hooks = collect_hooks(scans, native)
@@ -3412,16 +3426,18 @@ def find_profile(lib: Library, name: str) -> str:
 
 def profile_snapshot(lib: Library, name: str) -> dict:
     """The library's mod set as a profile: the mods in order, on or off, the options chosen for .bnp and UKMM
-    packages, and the setting values the player changed (settings\\<id>.json)."""
+    packages, the setting values the player changed (settings\\<id>.json) and the font settings (tools/font.py's
+    profile_part: {"choice", "fix_symbols"}; left out without the font tool)."""
     options = {}
     for m in lib.mods:
         pkg = m.get("bnp") or m.get("ukmm")
         if isinstance(pkg, dict) and isinstance(pkg.get("options"), list):
             options[m["id"]] = [str(o) for o in pkg["options"]]
     settings = {m["id"]: v for m in lib.mods if (v := read_setting_values(lib, m["id"]))}
+    font = _feature_call("font", "profile_part", lib)
     return {"tool": TOOL_ID, "format": 1, "kind": "profile", "name": name, "saved": _now(),
             "mods": [{"id": m["id"], "enabled": bool(m.get("enabled"))} for m in lib.mods],
-            "options": options, "settings": settings}
+            "options": options, "settings": settings, **({"font": dict(font)} if isinstance(font, dict) else {})}
 
 
 def save_profile(lib: Library, name: str) -> str:
@@ -3438,8 +3454,8 @@ def save_profile(lib: Library, name: str) -> str:
 
 
 def apply_profile(lib: Library, data: dict) -> list[str]:
-    """Make the library's mod set the profile's: order, on/off and setting values. Mods added since the profile was
-    saved go last, turned off; mods it names that the library no longer has are skipped. Returns notes."""
+    """Make the library's mod set the profile's: order, on/off, setting values and the font. Mods added since the
+    profile was saved go last, turned off; mods it names that the library no longer has are skipped. Returns notes."""
     notes: list[str] = []
     rows = [x for x in data.get("mods", []) if isinstance(x, dict) and isinstance(x.get("id"), str)]
     on = {x["id"]: bool(x.get("enabled")) for x in rows}
@@ -3469,7 +3485,10 @@ def apply_profile(lib: Library, data: dict) -> list[str]:
                 "options") or [])):
             notes.append(f"{m['name']} was added with other options than this set had. To change them: remove it and "
                          "add it again with --option.")
-    return notes
+    if isinstance(data.get("font"), dict):   # (after the mods' on/off: a font mod the set has off is named)
+        res = _feature_call("font", "apply_profile_part", lib, data["font"], problems=notes, what="Font")
+        notes += [str(n) for n in res] if isinstance(res, list) else []
+    return notes   # (a set saved without the font tool leaves the font as it is)
 
 
 def use_profile(lib: Library, name: str) -> list[str]:

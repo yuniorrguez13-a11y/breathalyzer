@@ -381,6 +381,18 @@ class Hooks(Tmp):
         cfg = json.loads((self.libdir / "config.json").read_text(encoding="utf-8"))
         self.assertEqual(list(cfg), ["tool", "format", "install", "mods"])  # (no "profile": Default)
 
+    def test_the_font_settings_are_part_of_the_hash(self):
+        with mock.patch.dict(mm._FEATURE_CACHE, {k: None for k in mm.FEATURES}):
+            self.add("Plain", {"romfs/Actor/Pack/Hero.txt": "plain hero"})
+        h = mm.inputs_hash(self.lib)   # (the fake font tool has no hash_inputs yet: as without it)
+        self.fakes["font"].hash_inputs = lambda lib: None   # (deploy makes no font files: the hash stays)
+        self.assertEqual(mm.inputs_hash(self.lib), h)
+        self.fakes["font"].hash_inputs = lambda lib: {"font": "easy-read", "fix_symbols": True}
+        h2 = mm.inputs_hash(self.lib)
+        self.assertNotEqual(h2, h)
+        self.fakes["font"].hash_inputs = lambda lib: {"font": "game", "fix_symbols": True}
+        self.assertNotEqual(mm.inputs_hash(self.lib), h2)
+
     def test_run_records_the_start(self):
         with mock.patch.dict(mm._FEATURE_CACHE, {k: None for k in mm.FEATURES}):
             self.add("Plain", {"romfs/Actor/Pack/Hero.txt": "plain hero"})
@@ -403,7 +415,8 @@ class History(Tmp):
         with mock.patch.object(mm, "HISTORY_KEEP", 3):
             for k in range(8):
                 mm.history_append(lib, {"type": "deploy", "n": k, "pad": "x" * 5000})
-        (self.tmp / "lib" / "deploy" / mm.HISTORY).open("a", encoding="utf-8").write("not json\n[1]\n")
+        with (self.tmp / "lib" / "deploy" / mm.HISTORY).open("a", encoding="utf-8") as f:
+            f.write("not json\n[1]\n")
         recs = mm.read_history(lib)
         self.assertEqual([r["n"] for r in recs], [4, 5, 6, 7])  # (cut to 3 past 6 lines, then one more)
         self.assertTrue(all("time" in r for r in recs))
@@ -484,6 +497,40 @@ class Profiles(Tmp):
         (self.root / "profiles" / "other.json").write_text(json.dumps(data), encoding="utf-8")
         notes = mm.use_profile(self.lib, "Other")
         self.assertTrue(any("B was added with other options" in n for n in notes), notes)
+
+    def test_the_font_follows_the_set(self):
+        font = mm.feature("font")
+        if font is None or not callable(getattr(font, "apply_profile_part", None)):
+            self.skipTest("no tools/font.py with profile_part")
+        font.save_settings(str(self.root), choice="easy-read")
+        mm.new_profile(self.lib, "Other")
+        other = self.root / "profiles" / "other.json"
+        self.assertEqual(json.loads(other.read_text(encoding="utf-8"))["font"]["choice"], "easy-read")
+        font.save_settings(str(self.root), choice="game")
+        mm.use_profile(self.lib, "Default")
+        self.assertEqual(font.load_settings(str(self.root))["choice"], "easy-read")
+        mm.use_profile(self.lib, "Other")
+        self.assertEqual(font.load_settings(str(self.root))["choice"], "game")
+        # a hand-edited choice that can't be one, and a set saved without the font tool: the font stays as it is
+        mm.use_profile(self.lib, "Default")
+        data = json.loads(other.read_text(encoding="utf-8"))
+        data["font"] = {"choice": "..\\x"}
+        other.write_text(json.dumps(data), encoding="utf-8")
+        mm.use_profile(self.lib, "Other")
+        self.assertEqual(font.load_settings(str(self.root))["choice"], "easy-read")
+        mm.use_profile(self.lib, "Default")
+        data.pop("font")
+        other.write_text(json.dumps(data), encoding="utf-8")
+        mm.use_profile(self.lib, "Other")
+        self.assertEqual(font.load_settings(str(self.root))["choice"], "easy-read")
+
+    def test_without_the_font_tool_a_set_has_no_font(self):
+        real = mm.feature
+        with mock.patch.object(mm, "feature", side_effect=lambda m, f=None: None if m == "font" else real(m, f)):
+            mm.new_profile(self.lib, "Other")
+        data = json.loads((self.root / "profiles" / "other.json").read_text(encoding="utf-8"))
+        self.assertNotIn("font", data)
+        self.assertFalse((self.root / "font.json").exists())
 
     def test_refusals(self):
         with self.assertRaises(mm.ModmanError):

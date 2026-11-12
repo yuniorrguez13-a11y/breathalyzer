@@ -21,10 +21,12 @@ game: see [What is tested](#what-is-tested).
 python tools\font.py status                 # the font in use and what you can choose
 python tools\font.py fix-symbols on         # draw the missing symbols
 python tools\font.py choose easy-read       # or: game, auto, or a font mod's id
-python tools\modman.py deploy               # (Play deploys too)
+python tools\modman.py deploy               # builds the font files
 ```
 
-Every change applies at your next start. `--library <folder>` picks the mod library (as for `modman.py`).
+After a change, Play deploys again by itself (or run `python tools\modman.py deploy`). `status` says whether the
+last deploy has your settings. Fonts load once when the game starts, so the change shows at your next start.
+`--library <folder>` picks the mod library (as for `modman.py`).
 
 ## Choosing the font
 
@@ -37,6 +39,10 @@ Every change applies at your next start. `--library <folder>` picks the mod libr
 
 Your choice wins over the mod order. When the chosen mod is off or removed, `auto` is used and deploy says so.
 The font choice and the symbol fix are saved in `font.json` in the library.
+
+There is one chooser. This tool, Mod Manager's window and the game's Mods page all set the same choice in the
+same way, so they never disagree. A mod set ([profiles](profiles.md)) keeps its font choice and symbol fix with
+its mods: switch sets, and the font switches too.
 
 The fix for missing symbols is off by default until it is checked in the game. A font (easy-read or a mod's) adds
 the missing symbols it has by itself.
@@ -70,6 +76,8 @@ How the font is drawn:
 - NormalS_00 gets the game's dark ring around each letter (2 pixels).
 - Licences: `python tools\font.py check <font.ttf>` shows what the font says about itself. A font that isn't free
   (Arial, Segoe UI) is fine on your own PC: deploy warns, and never blocks. Don't share what it builds.
+- Sharing a font mod shares its font file. Share it only when the font's licence allows that (Fira Sans and other
+  SIL Open Font License fonts do).
 
 ## What happens at deploy
 
@@ -112,13 +120,29 @@ on black. Write them in `out\`: they hold game data. `build` refuses to write in
 - Every menu font change applies at the next start (the game loads fonts once).
 - Korean, Chinese, Thai and Traditional Chinese text uses outline fonts, which this tool doesn't edit yet.
 
+## For other tools
+
+All in `tools/font.py`; modman loads it lazily, so without it fonts are simply off.
+
+| Call | What it is for |
+|---|---|
+| `deploy_files(lib, plan)` | Deploy: the edited `Font/Font_xx.sbfarc` files over the plan's winner, as `(path, bytes, size-table entry or None)`. The list also carries `symbols_full`, `font`, `font_key`, `fix_symbols`, `notes`, `attention` (launch.json `made["fonts"]`) |
+| `choices(lib)`, `current(lib)` | The chooser's rows (game, easy-read, each font mod that is on) and the font in use |
+| `choose(lib, key)` | Set the font: `auto`, `game`, `easy-read` or a font mod's id. Refuses a font mod that is off or broken with one plain line |
+| `load_settings(lib)`, `save_settings(lib, fix_symbols=...)` | `font.json` |
+| `hash_inputs(lib)` | For modman's deploy check: what the fonts are made from, or None when deploy makes none |
+| `profile_part(lib)`, `apply_profile_part(lib, part)` | A mod set saves and restores its font settings |
+| `on_add(lib, entry, folder, manifest)` | Notes when a font mod is added (its licence, a font it can't draw) |
+| `share_notes(mod folder)` | A warning when a shared mod would hand on a font that doesn't say it is free |
+
 ## What is tested
 
 Offline (tests/test_font.py, with made-up fonts and archives; and on the game's own US, EU and JP archives):
 - the 10 symbols (US, EU) and 17 (JP) are added; nothing else changes; the archive keeps its size;
 - the easy-read font redraws 130 (US), 199 (EU) and 82 (JP) caption characters, about 335 in each other menu font,
   with no letter cut off;
-- External_00 stays byte for byte; the cache is used on the second deploy.
+- External_00 stays byte for byte; the cache is used on the second deploy;
+- the chooser, the deploy check's inputs and the mod-set round trip.
 
 Not yet checked in the game (the final game check): that the symbols show on the Mods page, that other texts look
 the same, the look of the easy-read font and of NormalS_00's ring.

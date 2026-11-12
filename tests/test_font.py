@@ -657,6 +657,134 @@ class Settings(unittest.TestCase):
         self.assertEqual(F._ascii_label("Caf\u00e9 font with a very long name indeed"), "Caf? font with a very lon...")
 
 
+class Chooser(unittest.TestCase):
+    """choose(): the one way every chooser sets the font."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.lib = Lib(root=self.tmp.name, install=None, mods=[])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_named_choices_and_mod_ids(self):
+        self.lib.mods = [font_mod(self.tmp.name, "My.Font")]
+        self.assertEqual(F.choose(self.lib, " Easy-Read ")[0].key, "easy-read")
+        self.assertEqual(F.choose(self.lib, "my.font")[0].key, "mod:My.Font")
+        self.assertEqual(F.load_settings(self.lib)["choice"], "mod:My.Font")
+        self.assertEqual(F.choose(self.lib, "mod:MY.FONT")[0].label, "Font My.Font")
+        self.assertEqual(F.choose(self.lib, "auto")[0].key, "mod:My.Font")   # (auto: the last font mod that is on)
+        self.assertEqual(F.choose(self.lib, "game")[0].key, "game")
+
+    def test_refuses_off_missing_and_broken_font_mods(self):
+        self.lib.mods = [font_mod(self.tmp.name, "off", enabled=False), font_mod(self.tmp.name, "bad", file_ok=False)]
+        for want, words in (("off", "is off"), ("bad", "can't be used"), ("nope", "No font mod")):
+            with self.assertRaises(F.FontError) as cm:
+                F.choose(self.lib, want)
+            self.assertIn(words, str(cm.exception))
+        self.assertEqual(F.load_settings(self.lib)["choice"], "auto")   # (nothing written)
+
+    def test_easy_read_needs_its_font(self):
+        with mock.patch.object(F, "fira_path", side_effect=F.FontError("gone")):
+            with self.assertRaises(F.FontError):
+                F.choose(self.lib, "easy-read")
+
+
+class HashInputs(unittest.TestCase):
+    """hash_inputs(): what makes modman's Play deploy again after a font change."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.lib = Lib(root=self.tmp.name, install=None, mods=[])
+        self.fira = os.path.join(self.tmp.name, "fira.ttf")
+        with open(self.fira, "wb") as f:
+            f.write(b"x")
+        self.p = mock.patch.object(F, "fira_path", lambda file, install=None: self.fira)
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+        self.tmp.cleanup()
+
+    def test_none_when_deploy_makes_no_font_files(self):
+        self.assertIsNone(F.hash_inputs(self.lib))
+        F.save_settings(self.lib, choice="game")
+        self.assertIsNone(F.hash_inputs(self.lib))
+
+    def test_changes_with_choice_fix_and_font_file(self):
+        F.save_settings(self.lib, fix_symbols=True)
+        fix = F.hash_inputs(self.lib)
+        self.assertEqual((fix["font"], fix["fix_symbols"]), ("game", True))
+        F.save_settings(self.lib, choice="easy-read")
+        easy = F.hash_inputs(self.lib)
+        self.assertNotEqual(fix, easy)
+        with open(self.fira, "wb") as f:   # (Savage Wind's copy updated: a new size)
+            f.write(b"xy")
+        self.assertNotEqual(easy, F.hash_inputs(self.lib))
+        json.dumps(easy)   # (modman hashes it as JSON)
+
+    def test_auto_with_a_font_mod_on(self):
+        self.lib.mods = [font_mod(self.tmp.name, "f")]
+        got = F.hash_inputs(self.lib)
+        self.assertEqual(got["font"], "mod:f")
+        self.lib.mods[0]["enabled"] = False
+        self.assertIsNone(F.hash_inputs(self.lib))
+
+
+class Profiles(unittest.TestCase):
+    """profile_part() / apply_profile_part(): a mod set keeps its font."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.lib = Lib(root=self.tmp.name, install=None, mods=[])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_round_trip(self):
+        F.save_settings(self.lib, choice="easy-read", fix_symbols=True)
+        part = json.loads(json.dumps(F.profile_part(self.lib)))   # (kept in the profile's JSON file)
+        F.save_settings(self.lib, choice="game", fix_symbols=False)
+        notes = F.apply_profile_part(self.lib, part)
+        self.assertEqual(F.load_settings(self.lib), {"choice": "easy-read", "fix_symbols": True})
+        self.assertEqual(notes, [f"Font: {F.EASY_READ} (missing symbols fixed)."])
+        self.assertEqual(F.apply_profile_part(self.lib, part), [])   # (already so: nothing written, nothing said)
+
+    def test_old_sets_and_bad_values_change_nothing(self):
+        F.save_settings(self.lib, choice="easy-read")
+        before = F.load_settings(self.lib)
+        for part in (None, [], {}, {"choice": "comic-sans"}, {"choice": "mod:"}, {"fix_symbols": "yes"}):
+            self.assertEqual(F.apply_profile_part(self.lib, part), [], part)
+        self.assertEqual(F.load_settings(self.lib), before)
+        F.apply_profile_part(self.lib, {"choice": "nope", "fix_symbols": True})   # (the good half is used)
+        self.assertEqual(F.load_settings(self.lib), {"choice": "easy-read", "fix_symbols": True})
+
+    def test_a_font_mod_the_set_has_off_is_said(self):
+        self.lib.mods = [font_mod(self.tmp.name, "a", enabled=False)]
+        notes = F.apply_profile_part(self.lib, {"choice": "mod:a", "fix_symbols": False})
+        self.assertEqual(F.load_settings(self.lib)["choice"], "mod:a")   # (kept: on again, it is used again)
+        self.assertIn("isn't available", notes[0])
+        self.assertEqual(notes[-1], f"Font: {F.GAME_FONT}.")
+        self.lib.mods[0]["enabled"] = True
+        self.assertEqual(F.current(self.lib)[0].key, "mod:a")
+
+
+class Sharing(unittest.TestCase):
+    def test_warns_only_for_a_font_that_isnt_free(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(F.share_notes(tmp), [])                 # (no mod.toml)
+            font_mod(tmp, "m")
+            folder = os.path.join(tmp, "mods", "m")
+            self.assertEqual(F.share_notes(folder), [])              # (OFL)
+            with open(os.path.join(folder, "fonts", "F.ttf"), "wb") as f:
+                f.write(make_ttf(notice="All rights reserved"))
+            notes = F.share_notes(folder)
+            self.assertEqual(len(notes), 1)
+            self.assertIn("free to share", notes[0])
+            os.remove(os.path.join(folder, "fonts", "F.ttf"))
+            self.assertEqual(F.share_notes(folder), [])              # (no font file: modman says that at add)
+
+
 class Deploy(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -689,6 +817,7 @@ class Deploy(unittest.TestCase):
         gen = F.deploy_files(self.lib, None, game_romfs=self.game)
         self.assertEqual([g.path for g in gen], [f"Font/Font_{x}.sbfarc" for x in F.LANGS])
         self.assertTrue(gen.symbols_full)
+        self.assertTrue(gen.fix_symbols)
         self.assertTrue(all(g.rstb is None for g in gen))
         self.assertEqual(gen.owner, "generated:fonts")
         more = gen + [F.GenFile("Pack/Title.pack", b"", None)]  # (other jobs' files join the list)
@@ -795,6 +924,42 @@ class CommandLine(unittest.TestCase):
         code, _, err = self.run_main(["build", __file__, "--out", "y"])
         self.assertEqual(code, 1)
         self.assertIn("nothing to do", err)
+
+    def test_choose_fix_and_status_say_whether_to_deploy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = Lib(root=tmp, install=None, mods=[])
+            with mock.patch.object(F, "_library", lambda arg: lib), \
+                    mock.patch.object(F, "deployed", lambda lib_: None):
+                code, out, _ = self.run_main(["choose", "easy-read"])
+                self.assertEqual(code, 0)
+                self.assertIn(f"Font: {F.EASY_READ}. It applies at your next start: Play deploys it", out)
+                code, out, _ = self.run_main(["fix-symbols", "on"])
+                self.assertIn("Missing symbols fixed: yes", out)
+                code, _, err = self.run_main(["choose", "nope"])
+                self.assertEqual(code, 1)
+                self.assertIn("No font mod 'nope'", err)
+            made = {"font": F.EASY_READ, "font_key": "easy-read", "fix_symbols": True, "symbols_full": True}
+            with mock.patch.object(F, "_library", lambda arg: lib), \
+                    mock.patch.object(F, "deployed", lambda lib_: made):
+                code, out, _ = self.run_main(["status"])
+            self.assertEqual(code, 0)
+            self.assertIn("The last deploy has these fonts.", out)
+            self.assertIn("Easy-read [easy-read]", out)
+            F.save_settings(lib, choice="auto", fix_symbols=False)   # (nothing to make; a deploy without fonts)
+            with mock.patch.object(F, "deployed", lambda lib_: {}):
+                self.assertEqual(F._deploy_line(lib), "The last deploy has these fonts.")
+            with mock.patch.object(F, "deployed", lambda lib_: None):
+                self.assertIn("next start", F._deploy_line(lib))
+
+    def test_deployed_reads_launch_made(self):
+        import modman
+        lib = Lib(root="x", install=None, mods=[])
+        with mock.patch.object(modman, "read_launch", lambda l: {"made": {"fonts": {"font_key": "game"}}}):
+            self.assertEqual(F.deployed(lib), {"font_key": "game"})
+        with mock.patch.object(modman, "read_launch", lambda l: {}):
+            self.assertEqual(F.deployed(lib), {})
+        with mock.patch.object(modman, "read_launch", side_effect=modman.ModmanError("Nothing deployed yet")):
+            self.assertIsNone(F.deployed(lib))
 
     def test_build_refuses_the_game_folder(self):
         with self.assertRaises(F.FontError):

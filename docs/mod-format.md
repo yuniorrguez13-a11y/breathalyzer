@@ -125,14 +125,16 @@ RomFS files, so it replaces them, and mods later in the list still win over it.
 In this order, each step only when its tool is there:
 
 1. The settings tool names the option folders the chosen settings want, and they join the RomFS overlay.
-2. The RomFS overlay is planned as before (with the BCML, UKMM and Wii U parts).
+2. The RomFS overlay is planned as before (with the BCML, UKMM and Wii U parts). A pack that two mods that are on
+   both change is merged file by file ([BCML packages](bnp.md)).
 3. The font tool builds the chosen font into the font files that win.
 4. The title picture is built (the player's pick, else the last mod's `title_picture`).
 5. The pictures tool builds the Mods-page pictures, last, on top of the files that win in the end.
 6. The settings tool writes `deploy\native\settings.txt` for modhost.
 
-Files made at deploy are listed in the overlay's `.mod-deploy.json` with `generated:fonts`, `generated:title` or
-`generated:pictures` as their mod. A tool that fails is off for that deploy, and deploy says so under Needs attention.
+Files made at deploy are listed in the overlay's `.mod-deploy.json` with `generated:merged` (the merged packs),
+`generated:fonts`, `generated:title` or `generated:pictures` as their mod. A tool that fails is off for that deploy,
+and deploy says so under Needs attention.
 
 ## Files in the library
 

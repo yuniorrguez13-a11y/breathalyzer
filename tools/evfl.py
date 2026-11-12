@@ -40,6 +40,7 @@ Layout (all little-endian, every block 8-aligned; "ptr" = u64 offset from the fi
   ptr entry points.
 - actors, 0x38 each: ptr name, ptr second name, ptr argument name, ptr actions, ptr queries, ptr parameters, u16
   actions, u16 queries, u16 argument entry point (0xFFFF none), u16 1. Actions and queries are lists of name ptrs.
+  An empty actor, event or entry point list has a 0 ptr (the entry dictionary's ptr is always set).
 - events, 0x28 each: ptr name, u8 kind, u8 0, then by kind (u16 x3, ptr x3):
   0 action   next, actor, action;  parameters, 0, 0
   1 switch   case count, actor, query;  parameters, cases, 0      (a case: u32 value, u16 event, u16 0)
@@ -53,19 +54,20 @@ Layout (all little-endian, every block 8-aligned; "ptr" = u64 offset from the fi
   per entry point its subflow list and 0x18 zero bytes.
 - parameters: a group (u8 1, u8 0, u16 count, u32 0, ptr dictionary, one ptr per value; then the dictionary, then the
   values in order) or a value (u8 kind, u8 0, u16 count, u32 0, u64 0, then the data). Kinds: 0 argument name and
-  5 text (a ptr to its own copy: u16 length, bytes, 0, right after the value), 2 int, 3 bool (true = 0x80000001),
-  4 float (4 bytes each, `count` of them), 7 ints, 8 bools, 9 floats (arrays of `count`).
+  5 text (a ptr to its own copy: u16 length, bytes, 0, right after the value), 12 actor (count 2: ptrs to the
+  actor's name and second name, the two copies right after the value, the second 2-aligned), 2 int, 3 bool (true =
+  0x80000001), 4 float (4 bytes each, `count` of them), 7 ints, 8 bools, 9 floats (arrays of `count`).
 - "STR " 0x10 (all zero after the magic), u32 string count, the empty string, then every name once (u16 length,
   bytes, 0, padded to 2). The order is the dictionaries' bit order: strings sorted by their bits counted from bit 0
   of the last byte. A ptr to a name points at its length.
 - "RELT": u32 its own offset, u32 1, u32 0; one section (u64 0, u32 0, u32 end of the string pool, u32 0, u32 entry
   count); entries (u32 offset, u32 mask: bit i = the ptr at offset + 8 * i). Listed even when 0: the header's,
-  flowchart's, dictionaries', parameters' and name lists' ptrs, an actor's names, actions and queries, an entry
-  point's first and third ptr. Listed only when set: an event's ptrs after its name, an actor's parameters, an entry
-  point's second ptr.
+  flowchart's, dictionaries', parameters' and name lists' ptrs, an actor's names, actions and queries, a switch's
+  cases, an entry point's first and third ptr. Listed only when set: the other ptrs of an event after its name, an
+  actor's parameters, an entry point's second ptr.
 
-Not seen in the checked flows, so refused: more than one flowchart, timelines, entry point variables, parameter
-kinds 6 and 10-12 (text in UTF-16, text lists, actor ids). The full round trip of every game flow (S2) will show them.
+Not seen in any of the player's 2817 flows, so refused: more than one flowchart, timelines, entry point variables,
+parameter kinds 6, 10 and 11 (text in UTF-16, text lists).
 """
 from __future__ import annotations
 
@@ -90,7 +92,7 @@ KIND_NAMES = {ARG: "arg", GROUP: "group", INT: "int", BOOL: "bool", FLOAT: "floa
               INTS: "ints", BOOLS: "bools", FLOATS: "floats", TEXTS: "texts", WTEXTS: "wtexts", ACTOR_ID: "actor"}
 _SCALAR = {INT: "i", BOOL: "I", FLOAT: "f"}
 _ARRAY = {INTS: "i", BOOLS: "I", FLOATS: "f"}
-_INLINE_TEXT = (ARG, TEXT)
+_INLINE_TEXT = {ARG: 1, TEXT: 1, ACTOR_ID: 2}    # kinds whose value is that many texts copied after it
 
 HEADER_SIZE, FLOWCHART_SIZE, ACTOR_SIZE, EVENT_SIZE, ENTRY_SIZE = 0x48, 0x48, 0x38, 0x28, 0x20
 ENTRY_GAP = 0x18         # zero bytes after each entry point's subflow list
@@ -106,7 +108,8 @@ class EvflError(ValueError):
 @dataclass(frozen=True)
 class Param:
     """One parameter: kind (ARG, INT, ...) and value. INT/FLOAT: a number; BOOL: a bool (or the raw u32 when the game
-    used other bits); INTS/BOOLS/FLOATS: a list (of the same); ARG/TEXT: a str; GROUP: a dict of Params."""
+    used other bits); INTS/BOOLS/FLOATS: a list (of the same); ARG/TEXT: a str; ACTOR_ID: a (name, second name)
+    tuple; GROUP: a dict of Params."""
     kind: int
     value: object
 
@@ -130,6 +133,11 @@ def Text(s: str) -> Param:
 def Arg(name: str) -> Param:
     """A value taken from the entry point's argument of that name."""
     return Param(ARG, str(name))
+
+
+def ActorId(name: str, sub: str = "") -> Param:
+    """An actor by name and second name (as the game's flows name "Self" or another NPC)."""
+    return Param(ACTOR_ID, (str(name), str(sub)))
 
 
 def Ints(v) -> Param:
@@ -448,12 +456,12 @@ class _Reader:
                 vals = [bool(v) if v in (0, TRUE_BITS) else v for v in vals]
             return Param(kind, vals)
         if kind in _INLINE_TEXT:
-            if n != 1:
+            if n != _INLINE_TEXT[kind]:
                 raise EvflError(f"{what}: {KIND_NAMES[kind]} with count {n}")
-            s = self.text(self.ptr(b), what)
-            if s is None:
+            texts = [self.text(self.ptr(b + 8 * i), what) for i in range(n)]
+            if None in texts:
                 raise EvflError(f"{what}: {KIND_NAMES[kind]} without text")
-            return Param(kind, s)
+            return Param(kind, texts[0] if n == 1 else tuple(texts))
         raise EvflError(f"{what}: parameter kind {kind} ({KIND_NAMES.get(kind, 'unknown')}) is not supported yet")
 
     def events(self, p: int, n: int, actors: list) -> list:
@@ -574,12 +582,14 @@ class _Writer:
         return at
 
     def inline_text(self, s: str) -> int:
+        """A text copy where the buffer ends, 2-aligned (an actor's two names sit next to each other)."""
         b = s.encode("utf-8")
         if len(b) > 0xFFFF:
             raise EvflError(f"text too long ({len(b)} bytes)")
-        at = self.alloc(2 + len(b) + 1)
-        self.put("H", at, len(b))
-        self.buf[at + 2:at + 2 + len(b)] = b
+        if len(self.buf) % 2:
+            self.buf.append(0)
+        at = len(self.buf)
+        self.buf += struct.pack("<H", len(b)) + b + b"\0"
         return at
 
     def group(self, prm: dict, what: str, depth: int = 0) -> int:
@@ -621,11 +631,14 @@ class _Writer:
             self.put(f"{len(vals)}{_ARRAY[k]}", at + 0x10, *vals)
             return at
         if k in _INLINE_TEXT:
-            if not isinstance(v.value, str):
-                raise EvflError(f"{what}: {KIND_NAMES[k]} needs a str")
-            at = self.alloc(0x18)
-            self.put("BxH", at, k, 1)
-            self.ptr(at + 0x10, self.inline_text(v.value), True)
+            n = _INLINE_TEXT[k]
+            texts = [v.value] if n == 1 else v.value
+            if not (isinstance(texts, (list, tuple)) and len(texts) == n and all(isinstance(s, str) for s in texts)):
+                raise EvflError(f"{what}: {KIND_NAMES[k]} needs {'a str' if n == 1 else f'{n} strs'}")
+            at = self.alloc(0x10 + 8 * n)
+            self.put("BxH", at, k, n)
+            for i, s in enumerate(texts):
+                self.ptr(at + 0x10 + 8 * i, self.inline_text(s), True)
             return at
         raise EvflError(f"{what}: parameter kind {k} ({KIND_NAMES.get(k, 'unknown')}) is not supported yet")
 
@@ -709,11 +722,10 @@ def dump(flow: Flow) -> bytes:
                 w.ptr(at + 0x10, w.group(e.params, what), False)
         elif isinstance(e, Switch):
             w.put("3H", at + 0xA, len(e.cases), e.actor, e.query)
-            if e.cases:
-                cp = w.alloc(8 * len(e.cases))
-                for k, (val, t) in enumerate(e.cases):
-                    w.put("IH", cp + 8 * k, val, t)
-                w.ptr(at + 0x18, cp, False)
+            cp = w.alloc(8 * len(e.cases)) if e.cases else 0
+            for k, (val, t) in enumerate(e.cases):
+                w.put("IH", cp + 8 * k, val, t)
+            w.ptr(at + 0x18, cp, True)                     # listed even with no cases
             if e.params is not None:
                 w.ptr(at + 0x10, w.group(e.params, what), False)
         elif isinstance(e, Fork):
@@ -770,7 +782,8 @@ def dump(flow: Flow) -> bytes:
     w.put("5H", fc + 0x10, len(flow.actors), sum(len(a.actions) for a in flow.actors),
           sum(len(a.queries) for a in flow.actors), len(flow.events), len(flow.entries))
     w.put("Q", fc + 0x20, spos[flow.name])
-    for k, p in enumerate((actors, events, ep_dic, eps)):
+    for k, p in enumerate((actors if flow.actors else 0, events if flow.events else 0, ep_dic,
+                           eps if flow.entries else 0)):
         w.put("Q", fc + 0x28 + 8 * k, p)
     w.rel.update(fc + 0x20 + 8 * k for k in range(5))
     for k, p in enumerate((fc_list, fc_dic, 0, tl_dic)):
@@ -818,6 +831,8 @@ def show_param(p: Param) -> str:
         return "{" + ", ".join(f"{k}={show_param(v)}" for k, v in p.value.items()) + "}"
     if p.kind == ARG:
         return f"<arg {p.value}>"
+    if p.kind == ACTOR_ID:
+        return f"<actor {p.value[0]}{'/' + p.value[1] if p.value[1] else ''}>"
     return repr(p.value)
 
 

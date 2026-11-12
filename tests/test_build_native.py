@@ -374,14 +374,17 @@ class ModHeader(unittest.TestCase):
         self.assertIn("#define SWMOD_HAS(api, field)", self.text)
 
     def test_version_2_only_adds_fields_at_the_end(self):
-        """Version 1 mods keep working: every version 1 field is where it was, the hook fields come after it."""
+        """Older mods keep working: every version 1 field is where it was, the hook fields (2) come after it, then
+        the settings fields (3)."""
         self.assertIn(f"#define SWMOD_API_VERSION {bn.API_VERSION}\n", self.text)
         body = self.text[self.text.index("typedef struct SwModApi {"):self.text.index("} SwModApi;")]
         fields = re.findall(r"^    [^/\n]*?\(?\*?(\w+)\)?(?:\([^;]*\))?;", body, re.M)
         v1 = ["api_version", "size", "host_version", "game_version", "mod_name", "log", "control_register",
               "reply_str", "reply_int", "reply_num", "reply_bool", "reply_text", "reply_fail", "dev_mode",
               "dispatch_lookup", "find_site", "hle_override", "guest_call", "current_cpu"]
-        self.assertEqual(fields, v1 + ["hook", "can_hook"])
+        v2 = ["hook", "can_hook"]
+        v3 = ["mod_id", "setting_int", "setting_num", "setting_str", "setting_watch", "setting_set", "settings_ui"]
+        self.assertEqual(fields, v1 + v2 + v3)  # settings (v3) appended after v2, never in between
 
 
 # ------------------------------------------------------------------ install planning
@@ -770,7 +773,8 @@ def good_result() -> dict:
         "#overrides": {"ok": True, "data": {"count": 1, "0.addr": 0x7000001000, "0.name": "probe_override"}},
         "#guest_calls": {"ok": True, "data": {"count": 1, "0.cpu": 0x5FF000, "0.addr": 0x7000003000}},
         "#commands": {"ok": True, "data": {"0": "help", "1": "ping", "2": "mods", "3": "modload", "4": "modunload",
-                                           "5": "modreload", "6": "hello", "7": "probe", "8": "probe_more"}},
+                                           "5": "modreload", "6": "modsettings", "7": "modset", "8": "hello",
+                                           "9": "probe", "10": "probe_more"}},
     }
 
 

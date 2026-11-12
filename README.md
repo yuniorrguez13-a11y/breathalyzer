@@ -59,6 +59,7 @@ proven on your own Switch files but not yet tried with a real Wii U model mod or
 | `tools/launcher.py` | The launcher: finds and checks Savage Wind, one big Play button (deploys when needed, then starts the game), your mods with what each does, Settings, the Plus mod picker | [launcher](docs/launcher.md) |
 | `tools/modman_gui.py` | A large-print window for the mod manager (big text, every button works with the keyboard) | [mod-manager](docs/mod-manager.md#window) |
 | `tools/quality.py` | Quality presets Low, Medium, High and Original: more fps on a weak PC (grass, draw distance, shadows, effects) | [performance](docs/performance.md) |
+| `tools/menu_bg.py` | Your own picture on the game's main menu (a mod's `[mod] title_picture` is being built) | [menu-background](docs/menu-background.md) |
 | `tools/wiiu_convert.py` | Converts a Wii U mod to a Switch mod on your PC: texts, maps, actor data, models and textures (audio not yet). `modman add` uses it | [wiiu-mods](docs/wiiu-mods.md), [wiiu-models](docs/wiiu-models.md) |
 | `tools/mod_inspect.py` | Says what kind of mod a folder or .zip is, and whether it can be used | [MOD-COMPAT](docs/MOD-COMPAT.md) |
 | `tools/romfs_mods.py` | Puts Switch RomFS mods into one overlay folder for Savage Wind | [romfs-mods](docs/romfs-mods.md) |
@@ -97,7 +98,7 @@ the path); a listed path skips every check.
 |---|---|
 | `docs/` | Plan, mod compatibility, how-tos for each tool, and the [game addresses](docs/addresses.md) the mods and tools use (1.9.0) |
 | `native/` | The native mod host, its mod API header (`swmod.h`), the [game basics](docs/game-basics.md) header (`botw.h`) and the example mods (hello, stamina_hook, ghost, basics_show_pos, basics_inf_stamina, basics_teleport_up, settings_demo), and the recipes `tools/quality.py` builds its performance mods from (perf_effects, perf_shadows) |
-| `tools/` | Python tools (standard library only; Pillow, when installed, adds JPG and WEBP pictures and font mods) |
+| `tools/` | Python tools (standard library only; Pillow, when installed, adds JPG and WEBP mod pictures) |
 | `tests/` | Tests built from dummy files |
 | `site/` | The project's web page: static `index.html`, CSS and a small script, no trackers (design: [site/DESIGN.md](site/DESIGN.md)) |
 | `out/`, `build/` | What the tools make on your PC (ignored by git; never commit) |

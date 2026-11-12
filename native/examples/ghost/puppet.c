@@ -716,6 +716,14 @@ static void cmd_puppet(int argc, char **argv, SwModReply *r) {
 }
 
 // iam.c's hooks: the sentence for `iam`, and `iam self on|off`.
+// A save is loaded but this mod's frame tick never ran: another mod wraps the same frame job and loaded first (only
+// the first runs: docs/game-basics.md, botw_on_frame; Infinite Stamina does, and basics_inf_stamina.dll sorts first).
+// Seen in the game 2026-11-12 (out\showcase-lib): `iam daruk` did nothing, `ghost` said 0 ticks.
+#define PUP_NO_TICK_TEXT "You stay Link: the ghost mod isn't running. Another mod (Infinite Stamina?) uses the same " \
+                         "frame hook and starts first. Turn that one off and restart the game."
+static int pup_in_world_real(void) { return botw_in_world(api); }
+static int (*g_pup_in_world)(void) = pup_in_world_real;  // (the selftest fakes it)
+
 static void pup_iam_text(const char *picked, char *out, size_t cap) {
     PupStatus *p = calloc(1, sizeof *p);
     out[0] = 0;
@@ -723,8 +731,10 @@ static void pup_iam_text(const char *picked, char *out, size_t cap) {
     lock();
     *p = g_pup;
     int off = g_pup_req.self_off;
+    int64_t ticks = g_status.ticks;
     unlock();
-    if (off) snprintf(out, cap, "You see yourself as Link (iam self on: as your pick).");
+    if (ticks == 0 && g_pup_in_world()) snprintf(out, cap, "%s", PUP_NO_TICK_TEXT);
+    else if (off) snprintf(out, cap, "You see yourself as Link (iam self on: as your pick).");
     else pup_sentence(p, picked, out, cap);
     free(p);
 }

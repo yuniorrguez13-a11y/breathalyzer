@@ -85,7 +85,7 @@ use (1.9.0 only), with how each one was verified, are listed in [addresses](addr
 mode. Over the socket:
 
 ```
-{"ok":true,"data":{"host":"0.4.0","api":3,"game_version":"1.9.0","game_lib":"...\\extracted\\swgame.dll",
+{"ok":true,"data":{"host":"0.4.1","api":3,"game_version":"1.9.0","game_lib":"...\\extracted\\swgame.dll",
  "dir":"...\\mods\\native","found":1,"loaded":1,"hot":0,"hook_slots":0,"hooked":0,"mods.0.name":"hello",
  "mods.0.id":1,"mods.0.file":"hello.dll","mods.0.hot":false,"mods.0.ok":true,"mods.0.status":"ok",
  "mods.0.commands":"hello","mods.0.skipped":"","mods.0.hooks":"","mods.0.overrides":""}}

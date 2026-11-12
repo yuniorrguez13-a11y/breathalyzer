@@ -125,6 +125,8 @@ static uint32_t g_st_writer;     // 1: the writer thread runs
 static uint32_t g_st_write_ms = 30;
 static uint32_t g_st_writes;     // files written (for `modsettings`)
 static uint32_t g_st_write_fails;
+static bool g_st_exiting;        // the game is closing (st_flush_at_exit)
+static void st_flush_at_exit(void);
 
 static void st_text_lock(void) {
     while (__atomic_exchange_n(&g_st_text_lock, 1, __ATOMIC_ACQUIRE)) Sleep(0);
@@ -670,6 +672,7 @@ static void st_load(void) {
     for (int i = 0; i < g_nst; i++) st_init_values(&g_st[i]);
     g_st_event = CreateEventW(NULL, 0, 0, NULL);  // (auto-reset, not set)
     g_st_loaded = true;
+    atexit(st_flush_at_exit);  // (a change made just before the game closes is saved too)
     int total = 0;
     for (int i = 0; i < g_nst; i++) total += g_st[i].n;
     host_log("settings: %d setting%s of %d mod%s from %s", total, total == 1 ? "" : "s", g_nst, g_nst == 1 ? "" : "s",
@@ -811,9 +814,21 @@ static void st_save(StMod *m) {
         __atomic_fetch_add(&g_st_writes, 1, __ATOMIC_RELAXED);
     } else {
         __atomic_fetch_add(&g_st_write_fails, 1, __ATOMIC_RELAXED);
-        host_log("settings: can't write %s (error %lu); the change stays until the game closes", path, GetLastError());
+        if (!g_st_exiting)  // (at exit Savage Wind's log may be closed already)
+            host_log("settings: can't write %s (error %lu); the change stays until the game closes", path,
+                     GetLastError());
     }
     free(out);
+}
+
+// When the game closes: save the changes the writer thread hadn't saved yet (made in its last g_st_write_ms). Runs
+// from modhost's exit list (atexit), when the other threads are gone, so the text lock is only checked: a thread that
+// ended while holding it can't let go of it any more, and then nothing is written.
+static void st_flush_at_exit(void) {
+    g_st_exiting = true;
+    if (!g_st_loaded || !*g_st_library || __atomic_load_n(&g_st_text_lock, __ATOMIC_ACQUIRE)) return;
+    for (int i = 0; i < g_nst; i++)
+        if (__atomic_exchange_n(&g_st[i].dirty, 0, __ATOMIC_ACQ_REL)) st_save(&g_st[i]);
 }
 
 static DWORD WINAPI st_writer(void *arg) {

@@ -37,7 +37,7 @@
 #include "swmod.h"
 
 #define MODHOST_C  // (settings.c is part of this file: see the #include before fill_api)
-#define MODHOST_VERSION "0.4.0"
+#define MODHOST_VERSION "0.4.1"
 #define MAX_MODS 64
 #define PATH_W 1024  // wide characters
 #define PATH_U 3072  // UTF-8 bytes

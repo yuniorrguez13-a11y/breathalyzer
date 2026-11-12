@@ -20,9 +20,15 @@ Files:
 
 The deploy hooks modman calls (each import is lazy there):
     option_romfs(lib, mods)              -> [(mod, folder) or (mod, folder, True) for DLC files]: option folders,
-                                            each right after its mod's own RomFS (romfs_mods' Layer)
+                                            each right after its mod's own RomFS (romfs_mods' Layer;
+                                            add_option_layers(plan, lib, mods) puts them into a Plan made already)
     deploy_values(lib, mods)             -> {mod id: {key: value}} of the `deploy` settings (launch.json, deploy hash)
     write_settings_txt(lib, mods, deploy) -> the path written (or None: no library mod has settings)
+
+For a settings screen on the PC (the Mod Manager window, `modmenu.py setting`): library_schemas(lib) or
+load_schema(mod folder), load_values, rows (each setting with its value text, shown / enabled, lock line, the same
+words as the game), set_value or apply_change + save_values, reset_values, deploy_pending. Writes are refused while
+Savage Wind runs. Mod sets (profiles, modman) keep their own copy of these values and put them back on a switch.
 """
 from __future__ import annotations
 
@@ -1048,6 +1054,54 @@ def locked_line(schema: Schema, s: Setting, names: dict[str, str] | None = None)
     return line if len(line) <= WORDS_MAX else "Locked: needs other settings changed first."
 
 
+WAITING_LINE = "Changes at your next start."  # (the Mod menu's words for a changed restart / deploy setting)
+
+
+@dataclass
+class Row:
+    """One setting as a settings screen shows it (the Mod Manager window, `modmenu.py settings`): the same facts and
+    words as modhost's settings_ui gives the game's Mod menu."""
+    key: str
+    type: str
+    page: str | None             # its [[pages]] key, None on the mod's first page
+    label: str
+    description: str             # what to show under it: the lock line when locked, else its description
+    value: object                # the typed value (None for a button)
+    value_text: str              # "ON", "120 percent", "Fast", "F6" / "None", the text, the button's text
+    applies: str
+    shown: bool                  # its show_if now
+    enabled: bool                # its enable_if now
+    lock_line: str               # "Locked: needs ..." when locked, else ""
+    waiting: bool                # a deploy setting changed since the last deploy (then add WAITING_LINE)
+    choices: list[tuple[str, str]] = field(default_factory=list)   # choice: (value, label)
+    min: float = 0
+    max: float = 0
+    step: float = 1
+    max_length: int = 0          # text
+
+
+def rows(schema: Schema, values: dict | None = None, mods_on: dict[str, bool] | None = None,
+         deployed: dict | None = None, names: dict[str, str] | None = None) -> list[Row]:
+    """Every setting of the mod as a Row, in mod.toml order (pick a page's rows by .page; hide rows that aren't
+    .shown). values: load_values(...) (defaults when None). deployed: the values the last deploy used for this mod
+    (launch.json "settings"[mod id]); a `deploy` setting that differs is .waiting."""
+    vals = {s.key: s.default for s in schema.settings if s.type != "button"} if values is None else values
+    st = state(schema, vals, mods_on)
+    out = []
+    for s in schema.settings:
+        v = vals.get(s.key, s.default) if s.type != "button" else None
+        lock = "" if st[s.key]["enabled"] else locked_line(schema, s, names) or "Locked."
+        waiting = (s.applies == "deploy" and deployed is not None and s.key in deployed
+                   and deployed[s.key] != v)
+        out.append(Row(key=s.key, type=s.type, page=s.page, label=s.label,
+                       description=lock or s.description, value=v,
+                       value_text=value_text(s, v) if s.type != "button" else s.button, applies=s.applies,
+                       shown=st[s.key]["shown"], enabled=st[s.key]["enabled"], lock_line=lock, waiting=waiting,
+                       choices=[(c.value, c.label) for c in s.choices], min=s.min, max=s.max, step=s.step,
+                       max_length=s.max_length if s.type == "text" else 0))
+    return out
+
+
 # ---------------------------------------------------------------- the library (modman) side
 
 def _modman():
@@ -1135,12 +1189,28 @@ def option_romfs(lib, mods) -> list[tuple]:
     return out
 
 
+def add_option_layers(plan, lib, mods) -> list[tuple]:
+    """Put the option folders option_romfs picks into a romfs_mods Plan made already (Plan.add_layer: each right after
+    its mod, whose name in the plan is its library id). Mods the plan doesn't have are skipped. Returns what was
+    added. (modman's deploy passes them to romfs_mods.plan as Layers at once instead: the same result.)"""
+    names = {os.path.basename(os.path.abspath(s)) for s in getattr(plan, "sources", []) if isinstance(s, str)}
+    added = []
+    for item in option_romfs(lib, mods):
+        m, folder, *rest = item
+        if m["id"] in names:
+            plan.add_layer(m["id"], folder, bool(rest and rest[0]))
+            added.append(item)
+    return added
+
+
 def deploy_values(lib, mods) -> dict[str, dict]:
-    """{mod id: {key: value}} of the enabled mods' `deploy` settings now (for launch.json and the deploy hash)."""
+    """{mod id: {key: value}} of the enabled mods' `deploy` settings now (for launch.json and the deploy hash). Reads
+    only the enabled mods (modman's inputs_hash calls it on every run and status)."""
     out: dict[str, dict] = {}
-    on = {m["id"] for m in mods}
-    for m, sch in library_schemas(lib):
-        if m["id"] not in on:
+    for m in mods:
+        d = os.path.join(lib.mods_dir, m["id"])
+        sch = load_schema(d) if os.path.isdir(d) else None
+        if sch is None:
             continue
         vals = load_values(lib.root, sch)
         dv = {s.key: vals[s.key] for s in sch.settings if s.applies == "deploy"}

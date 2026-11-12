@@ -14,6 +14,7 @@ import re
 import shlex
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -28,11 +29,11 @@ import modman  # noqa: E402
 import romfs_mods  # noqa: E402
 import sw_rebuild as sw  # noqa: E402
 
-# The docs these tests cover. (docs/ghost.md and docs/multiplayer.md can join once their own work is done, and so can
-# the Mods page v2 docs being written: docs/mod-settings.md, docs/fonts.md, docs/mod-pictures.md.)
+# The docs these tests cover. (docs/ghost.md and docs/multiplayer.md can join once their own work is done.)
 DOCS = ["README.md", "NOTICE.md", "docs/cheats.md", "docs/code-mods.md", "docs/mod-manager.md", "docs/MOD-COMPAT.md",
         "docs/mod-format.md", "docs/rebuild.md", "docs/exefs-patches.md", "docs/hooks.md", "docs/romfs-mods.md",
-        "docs/code-map.md", "docs/PLAN.md", "docs/addresses.md", "native/modhost/README.md", "docs/profiles.md"]
+        "docs/code-map.md", "docs/PLAN.md", "docs/addresses.md", "native/modhost/README.md", "docs/profiles.md",
+        "docs/fonts.md", "docs/mod-settings.md", "docs/mod-pictures.md"]
 
 BUILD_190 = "cd57b23fa4bbad65"
 CMD_RE = re.compile(r"^python\s+tools[\\/]((?:mp[\\/])?[A-Za-z_]+)\.py(?:\s+(.*))?$")
@@ -334,9 +335,10 @@ class ModFormatV2(unittest.TestCase):
         order = [steps.find(w) for w in ("option folders", "font tool", "title picture", "pictures tool",
                                          "settings.txt")]
         self.assertTrue(all(i >= 0 for i in order) and order == sorted(order), order)
-        for owner in modman.GENERATED_OWNER.values():
+        owners = [*modman.GENERATED_OWNER.values(), modman.MERGED_OWNER]
+        for owner in owners:
             self.assertIn(f"`{owner}`", steps)
-        self.assertTrue(all(o.startswith(romfs_mods.GENERATED) for o in modman.GENERATED_OWNER.values()))
+        self.assertTrue(all(o.startswith(romfs_mods.GENERATED) for o in owners))
 
     def test_library_files(self):
         files = flat(section(self.text, "Files in the library"))
@@ -355,9 +357,15 @@ class ProfilesDocs(unittest.TestCase):
     def test_file_example_is_what_modman_writes(self):
         sample = json.loads(re.search(r"```json\n(.*?)```", self.text, re.S).group(1))
         lib = modman.Library(tempfile.gettempdir(), None, [{"id": "x", "name": "X", "enabled": True, "kinds": []}])
-        with mock.patch.object(modman, "read_setting_values", return_value={}):
+        font = types.SimpleNamespace(profile_part=lambda _lib: {"choice": "auto", "fix_symbols": False})
+        with mock.patch.object(modman, "read_setting_values", return_value={}), \
+                mock.patch.dict(modman._FEATURE_CACHE, {"font": font}):   # (as tools/font.py's profile_part)
             snap = modman.profile_snapshot(lib, "Hard mode")
         self.assertEqual(list(sample), list(snap))
+        real = modman.feature("font", "profile_part")
+        if real is not None:   # (the font tool's own part has the keys the example shows)
+            with tempfile.TemporaryDirectory() as tmp:
+                self.assertEqual(sorted(real(tmp)), sorted(sample["font"]))
         self.assertEqual((sample["tool"], sample["kind"]), (modman.TOOL_ID, "profile"))
         self.assertEqual(os.path.basename(modman.profile_file(lib, sample["name"])), "hard-mode.json")
         self.assertIn("`hard-mode.json`", self.text)

@@ -1331,6 +1331,7 @@ static char g_pp_current[32];              // what it plays
 static int g_pp_free = 1, g_pp_paused, g_pp_shows, g_pp_plays, g_pp_plays_missing;
 static int pp_free(void) { return g_pp_free; }
 static int pp_paused(void) { return g_pp_paused; }
+static int pp_in_world(void) { return 1; }
 static const char *const PACK33[] = {"Wait", "Walk", "Run", "RunGear2", "CutS1", "CutS2", "CutS3", "CutSF", "CutDash",
                                      "CutJumpSt", "CutCharge", "CutS1_Lsword", "CutSF_Lsword", "CutS1_Spear",
                                      "CutS2_Spear", "CutSF_Spear", "BowCharge", "BowShoot", "GuardJust", "Jump", "Fall",
@@ -1591,6 +1592,24 @@ static void check_puppet(void) {
     g_refuse_name = was;
     pup_want("link");
     pup_run("Wait", 0, 0.1);
+    // another mod holds the frame job (the tick never ran) while a save is loaded: `iam` says so plainly
+    g_pup_in_world = pp_in_world;
+    lock();
+    int64_t ticks_was = g_status.ticks;
+    g_status.ticks = 0;
+    unlock();
+    char no_tick[300], ticking[300];
+    pup_iam_text("daruk", no_tick, sizeof no_tick);
+    lock();
+    g_status.ticks = 5;
+    unlock();
+    pup_iam_text("daruk", ticking, sizeof ticking);
+    lock();
+    g_status.ticks = ticks_was;
+    unlock();
+    g_pup_in_world = pup_in_world_real;
+    check("puppet", "no_tick_says_why", strstr(no_tick, "isn't running") && strstr(no_tick, "Infinite Stamina") &&
+          !strstr(ticking, "isn't running"), "no tick: %s | ticking: %s", no_tick, ticking);
     g_pup_free = pup_free_real, g_pup_paused = pup_paused_real, g_pup_check_files = 1;
     lock();
     memset(&g_iam, 0, sizeof g_iam);

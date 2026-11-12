@@ -411,6 +411,27 @@ class Values(unittest.TestCase):
         self.assertEqual(ms.value_text(by["sprint_key"], ""), "None")
         self.assertEqual(ms.value_text(by["numbers"], False), "OFF")
 
+    def test_rows_for_a_settings_screen(self):
+        rows = {r.key: r for r in ms.rows(self.sch)}           # (defaults)
+        self.assertEqual(list(rows), [s.key for s in self.sch.settings])
+        d = rows["drain"]
+        self.assertEqual((d.page, d.enabled, d.value_text, d.min, d.max, d.step), ("advanced", False, "1.0x", 0.5, 2.0,
+                                                                                   0.1))
+        self.assertEqual(d.description, "Locked: needs Sprint mode not Classic and Sprint speed 100 percent or more.")
+        self.assertEqual(d.lock_line, d.description)
+        self.assertFalse(rows["speed"].shown)                   # (show_if mode == 'custom')
+        self.assertEqual((rows["mode"].choices[1], rows["mode"].value_text), (("fast", "Fast"), "Classic"))
+        self.assertEqual((rows["reset_record"].value, rows["reset_record"].value_text), (None, "Reset"))
+        self.assertEqual((rows["title"].max_length, rows["sprint_key"].value_text), (20, "F6"))
+        self.assertFalse(rows["look"].waiting)                  # (no deploy known: nothing waits)
+        vals = ms.apply_change(self.sch, ms.load_values(self.lib, self.sch), "mode", "custom")[0]
+        vals = ms.apply_change(self.sch, vals, "look", "gold")[0]
+        rows = {r.key: r for r in ms.rows(self.sch, vals, deployed={"look": "green", "hd": False})}
+        self.assertTrue(rows["speed"].shown and rows["drain"].enabled)
+        self.assertEqual((rows["drain"].description, rows["drain"].lock_line), ("", ""))
+        self.assertEqual((rows["look"].waiting, rows["hd"].waiting), (True, False))
+        self.assertEqual(ms.WAITING_LINE, "Changes at your next start.")
+
 
 class Deploy(unittest.TestCase):
     def setUp(self):
@@ -453,6 +474,30 @@ class Deploy(unittest.TestCase):
         self.assertTrue(ms.deploy_pending(self.lib, launch))
         self.assertTrue(ms.deploy_pending(self.lib, None))
 
+    def test_option_folders_into_a_plan(self):
+        import romfs_mods as rm
+        mod = str(Path(self.lib.root) / "mods" / "better-sprint")
+        p = rm.plan([mod])
+        self.assertEqual(ms.add_option_layers(p, self.lib, self.lib.enabled()), [])
+        self.assertEqual(sorted(p.winners), ["System/x.txt"])
+        ms.set_value(self.lib.root, self.sch, "look", "gold")
+        added = ms.add_option_layers(p, self.lib, self.lib.enabled())
+        self.assertEqual(len(added), 2)
+        self.assertEqual(p.winner("UI/y.txt").mod, "better-sprint option gold")
+        self.assertEqual(p.winner("aoc/0010/Map/w.txt").mod, "better-sprint option gold-dlc")
+        self.assertEqual(p.winner("System/x.txt").mod, "better-sprint")
+        self.assertIsNone(p.winner("Pack/z.txt"))                   # (hd is off)
+
+    def test_deploy_values_reads_only_the_enabled_mods(self):
+        # (modman hashes these on every run and status: a mod that is off isn't read, not even its mod.toml)
+        make_mod(Path(self.lib.root) / "mods" / "hud", EXAMPLE.replace("giruka.better-sprint", "giruka.hud-pack"))
+        read = []
+        real = ms.load_schema
+        with mock.patch.object(ms, "load_schema", lambda d, notes=None: read.append(os.path.basename(d)) or real(d)):
+            got = ms.deploy_values(self.lib, self.lib.enabled())
+        self.assertEqual(sorted(read), ["better-sprint", "plain"])
+        self.assertEqual(list(got), ["giruka.better-sprint"])
+
     def test_settings_txt(self):
         ms.set_value(self.lib.root, self.sch, "look", "gold")
         text = ms.settings_txt(self.lib, self.lib.enabled())
@@ -487,6 +532,56 @@ class Deploy(unittest.TestCase):
         self.lib.mods = [self.lib.mods[0]]
         self.assertIsNone(ms.write_settings_txt(self.lib, self.lib.enabled(), os.path.join(self.lib.root, "d")))
         self.assertFalse(os.path.exists(os.path.join(self.lib.root, "d")))
+
+
+class ProfilesKeepSettings(unittest.TestCase):
+    """Mod sets (modman's profiles, docs/profiles.md) keep each set's setting values: a switch puts them back, and the
+    next deploy follows them (option folders, the values in the deploy hash, settings.txt)."""
+
+    MOD = "giruka.better-sprint"   # (a mod added with a mod.toml has its [mod] id as its library id)
+
+    def setUp(self):
+        import modman as mm
+        if not all(hasattr(mm, f) for f in ("new_profile", "use_profile", "Library")):
+            self.skipTest("modman has no mod sets")
+        self.mm = mm
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "lib"
+        make_mod(self.root / "mods" / self.MOD, EXAMPLE)
+        mm.Library(str(self.root), None, [{"id": self.MOD, "name": "Better Sprint", "enabled": True,
+                                           "kinds": ["romfs", "native"]}]).save()
+        self.sch = ms.load_schema(str(self.root / "mods" / self.MOD))
+        for target, attr, value in ((mm, "game_running", lambda *a, **k: False),
+                                    (ms, "_check_game", lambda refuse: None)):
+            p = mock.patch.object(target, attr, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def lib(self):
+        return self.mm.Library.load(str(self.root))
+
+    def test_switching_sets_switches_the_values(self):
+        mm, root = self.mm, str(self.root)
+        ms.set_value(root, self.sch, "look", "gold")                  # (Default: the gold wheel)
+        lib = self.lib()
+        launch = {"settings": ms.deploy_values(lib, lib.enabled())}   # (as the last deploy recorded it)
+        mm.new_profile(lib, "Plain look")                             # (starts as a copy, and is in use)
+        ms.set_value(root, self.sch, "look", "green")
+        ms.set_value(root, self.sch, "speed", "120")
+        lib = self.lib()
+        self.assertTrue(ms.deploy_pending(lib, launch))
+        self.assertEqual(ms.option_romfs(lib, lib.enabled()), [])
+        mm.use_profile(lib, "Default")
+        lib = self.lib()
+        vals = ms.load_values(root, self.sch)
+        self.assertEqual((lib.profile, vals["look"], vals["speed"]), ("Default", "gold", 100))
+        self.assertFalse(ms.deploy_pending(lib, launch))
+        self.assertEqual([Path(f).name for _, f, *_ in ms.option_romfs(lib, lib.enabled())], ["gold", "gold-dlc"])
+        self.assertIn(f"deployed\t{self.MOD}\tlook\tgold", ms.settings_txt(lib, lib.enabled()).splitlines())
+        mm.use_profile(lib, "Plain look")
+        vals = ms.load_values(root, self.sch)
+        self.assertEqual((self.lib().profile, vals["look"], vals["speed"]), ("Plain look", "green", 120))
 
 
 class KeysMatchC(unittest.TestCase):
@@ -637,6 +732,20 @@ class Native(unittest.TestCase):
         bres, cls.bare_log = bn._run_fake_game(OUT, OUT / "selftest" / "fake_swgame.dll", bare,
                                                ["settings_demo", "modsettings"], ENV)
         cls.b = bres.get("steps", [])
+        # a change made just before the game closes: the writer still waits (10 s here), the exit list saves it
+        late_lib, late = root / "late-lib", root / "late" / "native"
+        (late / "mods").mkdir(parents=True)
+        late_lib.mkdir()
+        shutil.copy2(run / "settings.txt", late / "settings.txt")
+        shutil.copy2(OUT / "dlls" / "settings_probe.dll", late / "mods" / "settings_probe.dll")
+        lres, cls.late_log = bn._run_fake_game(OUT, OUT / "selftest" / "fake_swgame.dll", late / "mods",
+                                               ["modset probe-lib t 1", "modsettings"],
+                                               {**ENV, "SWMOD_SETTINGS_WRITE_MS": "10000", "SWMOD_LIBRARY": str(late_lib)})
+        cls.late = lres.get("steps", [])
+        try:
+            cls.late_values = json.loads((late_lib / "settings" / f"{PROBE_ID}.json").read_text())
+        except (OSError, ValueError):
+            cls.late_values = None
 
     @classmethod
     def tearDownClass(cls):
@@ -736,6 +845,11 @@ class Native(unittest.TestCase):
         self.assertEqual(ms.load_values(self.lib.root, self.probe)["n"], last["n"])  # (Python reads what C wrote)
         demo = json.loads(Path(ms.values_path(self.lib.root, self.demo.mod_id)).read_text())["values"]
         self.assertEqual(demo, {"mode": "fast", "speed": 150, "drain": 1.5, "hotkey": "", "note_file": True})
+
+    def test_a_change_just_before_the_game_closes_is_saved(self):
+        self.assertTrue(self.late[0].get("ok"), self.late)
+        self.assertEqual(self.late[1].get("data", {}).get("writes"), 0)   # (the writer thread was still waiting)
+        self.assertEqual(self.late_values, {"format": 1, "mod": PROBE_ID, "values": {"t": True}}, self.late_log)
 
     def test_unload_takes_the_watcher_out(self):
         h = self.h

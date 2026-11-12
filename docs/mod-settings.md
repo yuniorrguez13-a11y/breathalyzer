@@ -244,8 +244,9 @@ changed it:
 ```
 
 Both writers use a temp file and a rename, so the file is never half written. modhost writes from its own thread,
-which starts with the first change (about 30 ms later), and keeps keys it doesn't know as they were. A value that
-doesn't fit the mod any more (the mod changed) is ignored, and its default is used.
+which starts with the first change (about 30 ms later), and keeps keys it doesn't know as they were. A change made
+just before the game closes is saved as it closes (modhost 0.4.1). A value that doesn't fit the mod any more (the
+mod changed) is ignored, and its default is used.
 
 `settings.txt` is tab text, one record a line, made at deploy from every library mod that has settings (the format
 is in `tools/mod_settings.py`, `compile_lines`). modhost finds it next to its mods folder (`SWMOD_SETTINGS` to point
@@ -278,13 +279,16 @@ elsewhere) and the library from its `library` line. Without it, every mod uses i
 Checked on this PC without the game (`tests/test_mod_settings.py`):
 
 - The schema accepts every kind of row and refuses the problems above, with the line that says why.
+- Mod sets: switching sets puts each set's values back, and the next deploy follows them (option folders, "at your
+  next start", settings.txt). Option folders go into the deploy plan right after their mod.
 - 35 conditions with 8 sets of values: Python and modhost give the same answer in all 280 cases (a choice value "2"
   stays a text; 0.5 + 5 x 0.1 equals 1).
 - modhost against a fake game: settings.txt is read, the getters give the start value for `restart` and `deploy`
   settings, watchers run once per Mod-menu change and not for `setting_set`, `setting_watch` is refused after
   `swmod_init`, locked rows are refused with their words, `sets` apply, two threads read values while a third changes
   them, no writer thread runs before the first change, the writer keeps unknown keys, Python reads what modhost wrote,
-  a mod loaded with `modload` loses its watcher at `modunload`, and a mod without settings.txt gets its defaults.
+  a mod loaded with `modload` loses its watcher at `modunload`, a mod without settings.txt gets its defaults, and a
+  change made just before the game closes is still saved.
 
 Not verified yet (needs the game): the Mod menu's pages, key capture, held left/right on a slider, how a locked
 ON/OFF row looks, and rebuilding a page for `show_if`.

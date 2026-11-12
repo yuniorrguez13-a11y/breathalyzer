@@ -4,8 +4,10 @@ Like a ped selector: you pick a character on a wheel, and your friend sees you a
 Tier 1, 2026-11-12. Tier 2 (2026-11-12): [you see yourself as your pick too](#see-yourself-as-your-pick), live in the
 game with no restart, or [at the next start](#play-as-at-the-next-start-the-restart-way) as a fallback.
 
-**Status: built and checked without the game. Nothing here has run in the game yet.** The bodies, the wheel and the
-network part are done and tested with made-up data. The [in-game check](#in-game-check) decides what really works.
+**Status (2026-11-12):** in the game, Hylian, Paya, Bokoblin and Moblin load as ghosts and as your live self;
+Zelda, Urbosa, Daruk, Revali and Mipha don't load live yet, but Daruk works as your own body at the next start
+([play as](#play-as-at-the-next-start-the-restart-way)). The wheel and the network part are tested with made-up data
+only. The [in-game check](#in-game-check) has the details.
 
 ## Use it
 
@@ -140,10 +142,23 @@ the keys. All text is 18 pt or larger, white on dark green, blue and red (contra
 
 ## See yourself as your pick
 
-**Live, no restart (ghost mod 0.9.0, `native/examples/ghost/puppet.c`). Built and tested without the game; not yet
-run in the game.** Type `iam daruk` in the game's console (F12): you see yourself as Daruk within a second, and your
-friends do too. `iam link` brings Link back. `iam self off` keeps your friends' view but shows you Link (`iam self on`
-again). `iam` alone says what you see.
+**Live, no restart (ghost mod 0.9.0, `native/examples/ghost/puppet.c`).** Type `iam paya` in the game's console
+(F12): you see yourself as Paya within a second, and your friends do too. `iam link` brings Link back. `iam self off`
+keeps your friends' view but shows you Link (`iam self on` again). `iam` alone says what you see.
+
+**In the game, 2026-11-12 (`out\showcase-lib`):**
+
+- **Works for the bodies whose pack loads:** `iam paya`: the puppet spawned in 0.6 s, Link was hidden, it played `Wait`
+  and held Link's weapon and shield. Those are Hylian, Paya, Bokoblin and Moblin (the same as the character check).
+- **Daruk does not load live:** "Daruk did not load (the game could not create it): you stay Link", after 5 tries,
+  and `iam` says to restart with `charsel playas daruk`. The same for Zelda, Urbosa, Revali and Mipha, on any free
+  name (the character check moved Zelda and Daruk to names that work for others: still refused). What they share:
+  their own big model (380-710 KB, textures 1.5-2.6 MB); Paya's is 250 KB. The cause is not found yet. **For these
+  five, use the restart way below** (it works: Daruk in the game, rolling sprint and all).
+- **The ghost mod must be the only frame-hook mod.** With Infinite Stamina on, the ghost mod never runs (only the
+  first DLL by file name that wraps the game's frame job runs, [game basics](game-basics.md)): `iam daruk` did
+  nothing at all. `iam` now says so ("the ghost mod isn't running ... Infinite Stamina?"), and `modman deploy` warns
+  when both are on. Infinite Stamina is off in `out\showcase-lib` for this.
 
 How it works:
 
@@ -168,10 +183,8 @@ How it works:
   `ghost puppet lift <m>` (raise or lower it, for a hip that floats or sinks), `ghost puppet retry`, `ghost puppet
   off|on`, `ghost puppet map id=Actor,...` (another actor name per character).
 
-Not known until the game run [G]: whether the game shows Link again every frame by itself (he would flicker), whether
-his shadow goes with him, one frame of lag behind Link, the puppet's hip height. The Daruk pack did not spawn in the
-first character check (`charsel-ingame-results.txt` in the research notes, goron FAIL), so Daruk may need the restart
-way until that is fixed.
+Not checked in the game yet [G]: moving, climbing, gliding and swimming with a live puppet, whether the game shows
+Link again by itself (`rehides`), his shadow, one frame of lag, the puppet's hip height.
 
 ## Play as, at the next start (the restart way)
 
@@ -207,6 +220,11 @@ the background and says "Done. Restart the game to play as Daruk."
   another body. Take it off for the best look. The body also shows in the pause menu and in cutscenes.
 - Also [G] until the game run: feet slide a little (stride is Link's), the face doesn't move, tall bodies keep Link's
   hitbox (Daruk's head goes through low ceilings), and hips may float or sink on Link's clips.
+- **In the game (Daruk, 2026-11-12, `out\showcase-lib`): works.** Daruk is the player from the start: standing (front
+  and back look right), and the sprint is his rolling ball. No crash, nothing in `savagewind.log`. Pictures:
+  `out\shots\playas_daruk_*.png`. `playas off` was checked on the same library without the game: the library's mod
+  list came back exactly as before (The Linkle Mod on, the play-as mod gone), and the deployed `TitleBG.pack` has
+  Linkle's own model again (the same bytes). Not checked yet: climb, glide, swim, the pause-menu Link, cutscenes.
 - Checked without the game (Daruk, 2026-11-12): the model reads back and passes the model self-check, Link's 121
   bones come first with his parents, every body bone keeps its rest pose, every skin matrix keeps its bone, the
   textures are all there, the size entries cover every file. Tests with made-up data:
@@ -221,7 +239,10 @@ versions and names travel. The Linkle body comes from the Linkle mod on that PC 
 
 ## In-game check
 
-Not run yet. `python tools\mp\charsel_ingame_check.py` does steps 1-4, 6 and 8-9 in one go (it starts the game once
+First run 2026-11-12 (`out\research\charsel-ingame-results.txt`): 15 pass, 6 fail. Hylian, Paya, Bokoblin and
+Moblin spawn, animate and cost nothing measurable (30 frames a second with and without); Zelda, Urbosa, Daruk, Revali
+and Mipha never spawn (also on other free names: `charsel-ingame-results-swap.txt`), so the bot step (R1) failed on
+them too; `iam` and the no-pack step pass. `python tools\mp\charsel_ingame_check.py` does steps 1-4, 6 and 8-9 in one go (it starts the game once
 with its own overlay: the Link body and the characters, built into `out\charsel-check-packs`, so your own
 `out\charsel-packs` is never touched; or `--no-launch` on a running game, with the characters deployed with your mods).
 By hand, in a game with the ghost mod 0.8.0, the Link body and `out\charsel-packs` deployed (`modman add`, then Play),

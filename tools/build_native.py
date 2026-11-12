@@ -608,7 +608,8 @@ def _api_version() -> int:
 API_VERSION = _api_version()  # swmod.h SWMOD_API_VERSION (the host the selftest builds)
 SELFTEST_LINES = ("mods", "hello", "probe", "probe fail", "#overrides", "#guest_calls", "#commands")
 FAKE_BUILTINS = ["help", "ping"]  # the fake savagewind.exe's own commands (fake_runtime.c)
-HOST_COMMANDS = ["mods", "modload", "modunload", "modreload"]  # the commands modhost adds (modhost.c swgame_tables)
+# the commands modhost adds (modhost.c swgame_tables; modsettings and modset: mod settings, API 3, settings.c)
+HOST_COMMANDS = ["mods", "modload", "modunload", "modreload", "modsettings", "modset"]
 PROBE_SKIPPED = "help,ping,mods,hello,probe,probe_full"  # taken names, then one that no longer fits the fake table
 
 

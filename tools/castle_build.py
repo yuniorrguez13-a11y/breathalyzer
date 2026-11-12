@@ -25,15 +25,16 @@ text changes are merged by tools/bcml_maps.py, bcml_data.py and bcml_texts.py th
                                    the Study and the two door triggers (Area -> LinkTagAnd -> EventTag)
   logs/texts.json                  Zelda's name and lines (EventFlowMsg/SwZelda), no voice
   logs/eventinfo.yml, Event/...    SwZelda<Talk>, SwCastleDoor<ToStudy>/<ToRoom> and their event packs (with the
-                                   game's InitTalk and Common flows they call, from a villager's event pack): only
-                                   when tools/evfl.py rebuilds that pack's flows byte for byte; without it (or with
-                                   --no-events) the doors and Zelda are placed, but no trigger or talk event is (a
-                                   missing event could stop the game)
+                                   game's InitTalk and Common flows they call or their event info lists, copied
+                                   from a villager's event pack): only when tools/evfl.py rebuilds that pack's flows
+                                   byte for byte; without it (or with --no-events) the doors and Zelda are placed,
+                                   but no trigger or talk event is (a missing event could stop the game)
   logs/rstb.json                   size entries for the new files, from the game's entries for the files they come from
 
-With --unit static and another enabled mod that ships Pack/TitleBG.pack (a character mod, say), the castle's
-TitleBG.pack is built on that mod's copy and the castle goes last in the load order, so both mods' changes reach the
-game (modman deploy doesn't merge two mods' packs yet). Build again after you change that mod.
+With --unit static the castle's map change lands in Pack/TitleBG.pack (modman add merges logs/map.yml into your
+game's copy). Another mod that ships TitleBG.pack too (Linkle's body, say) still works next to it, in any load order:
+modman deploy merges two mods' packs file by file and applies the castle's map log again on the merged copy
+(bnp.merge_packages), so nothing here depends on the other mod and nothing needs rebuilding when it changes.
 
 The event flows are described as plain data (flow_specs): {"name", "entry_points": {entry: event key}, "events":
 {key: event}}, an event being {"kind": "action", "actor", "action", "params", "next"}, {"kind": "switch", "actor",
@@ -497,7 +498,8 @@ def check_flow(spec: dict) -> list[str]:
             out.append(f"{spec['name']}<{entry}> starts at {key}, which isn't an event")
     for key, e in ev.items():
         nxt = [e.get("next")] if e.get("kind") != "switch" else list((e.get("cases") or {}).values())
-        out += [f"{spec['name']}: {key} goes to {n}, which isn't an event" for n in nxt if n is not None and n not in ev]
+        out += [f"{spec['name']}: {key} goes to {n}, which isn't an event" for n in nxt
+                if n is not None and n not in ev]
         if e.get("kind") == "switch" and not e.get("cases"):
             out.append(f"{spec['name']}: {key} has no cases")
     return out
@@ -526,7 +528,10 @@ def evfl_ready(shared: dict[str, tuple[bytes, int]]) -> str | None:
     if not flows:
         return f"{VILLAGER}'s event pack has no flows to check tools/evfl.py on"
     for name, data in sorted(flows.items()):
-        ok, _, why = evfl.round_trip(data)
+        try:
+            ok, _, why = evfl.round_trip(data)
+        except (struct.error, IndexError, ValueError, UnicodeDecodeError) as e:   # (a damaged file: not trusted)
+            ok, why = False, f"{type(e).__name__}: {e}"
         if not ok:
             return f"tools/evfl.py doesn't rebuild your {name} byte for byte yet ({why})"
     return None
@@ -582,6 +587,35 @@ def event_pack(flow: str, data: bytes, shared: dict[str, tuple[bytes, int]], sub
 
 def subflows_of(spec: dict) -> list[str]:
     return sorted({e["flow"] for e in spec["events"].values() if e.get("kind") == "subflow" and e.get("flow")})
+
+
+DOOR_INFO = {"is_timeline": False, "mode": "Seamless", "subfile": [{"file": "Common.bfevfl"}]}   # (as the castle's
+#                                                                           own EventTag events: Common only)
+TALK_INFO = {"exist_enable_camera_input": True, "is_timeline": False, "mode": "Seamless",
+             "subfile": [{"file": "InitTalk.bfevfl"}, {"file": "Common.bfevfl"}]}
+
+
+def event_infos(specs: dict[str, dict], villager_talk: dict | None) -> dict[str, dict]:
+    """The event info entries ("Flow<Entry>" -> entry): Zelda's talk as the villager's own (TALK_INFO when the
+    game's has none), each door warp as the castle's own EventTag events."""
+    out = {f"{ACTOR}<Talk>": copy.deepcopy(villager_talk if isinstance(villager_talk, dict) else TALK_INFO)}
+    for entry_name in specs[DOOR_FLOW]["entry_points"]:
+        out[f"{DOOR_FLOW}<{entry_name}>"] = copy.deepcopy(DOOR_INFO)
+    return out
+
+
+def carried_flows(specs: dict[str, dict], infos: dict[str, dict]) -> dict[str, list[str]]:
+    """The game's shared flows each event pack carries: the ones its flow calls and the ones its event info entries
+    list (a villager's talk pack carries both InitTalk and Common, as its entry says)."""
+    out = {}
+    for name, spec in specs.items():
+        have = set(subflows_of(spec))
+        for key, info in infos.items():
+            if key.split("<", 1)[0] == name:
+                have |= {s["file"][:-len(".bfevfl")] for s in info.get("subfile") or []
+                         if isinstance(s, dict) and isinstance(s.get("file"), str) and s["file"].endswith(".bfevfl")}
+        out[name] = sorted(have - {name})
+    return out
 
 
 # ---------------------------------------------------------------------------------------------------- the map
@@ -701,13 +735,13 @@ class Built:
     folder: str
     unit: str
     events: bool
-    base: str | None = None           # the mod whose TitleBG.pack the castle's is built on
     notes: list[str] = field(default_factory=list)
     objects: list[dict] = field(default_factory=list)
     flows: dict = field(default_factory=dict)
 
 
 def mod_file(root: str, rel: str) -> str | None:
+    """A mod folder's copy of a RomFS file (at its root, under romfs\\ or <title id>\\romfs\\), else None."""
     for pre in ROMFS_PREFIXES:
         p = os.path.join(root, *(pre + rel).split("/"))
         if os.path.isfile(p):
@@ -715,18 +749,41 @@ def mod_file(root: str, rel: str) -> str | None:
     return None
 
 
-def base_titlebg(lib: mm.Library | None, own_id: str) -> tuple[str, str] | None:
-    """(path, mod name) of the TitleBG.pack that wins in the game now: the last enabled mod (not the castle) that
-    ships one. None: the game's."""
+def titlebg_mods(lib: mm.Library | None, own_id: str) -> list[str]:
+    """The names of the enabled mods (not the castle) that ship their own TitleBG.pack: deploy merges theirs with
+    the castle's file by file."""
     if lib is None:
-        return None
-    for m in reversed(lib.enabled()):
-        if m["id"] == own_id:
+        return []
+    return [m["name"] for m in lib.enabled() if m["id"] != own_id
+            and mod_file(os.path.join(lib.mods_dir, m["id"]), TITLEBG)]
+
+
+def map_log_hash_ids(lib: mm.Library | None, mods: list[dict]) -> dict[int, str]:
+    """The HashIds these library mods' map changes add (a BCML package's .bnp/logs/map.yml and its options'):
+    HashId -> the mod's name. A log that can't be read adds none (deploy names it)."""
+    out: dict[int, str] = {}
+    for m in (mods if lib is not None else []):
+        root = os.path.join(lib.mods_dir, m["id"])
+        info = bnp.stored(root)
+        if not info:
             continue
-        p = mod_file(os.path.join(lib.mods_dir, m["id"]), TITLEBG)
-        if p:
-            return p, m["name"]
-    return None
+        try:
+            logs = bnp.package_logs(root, info, {"map.yml": bm})[0]
+        except Exception:  # noqa: BLE001 (another mod's damaged logs never stop the castle)
+            continue
+        for diff in logs.get("map.yml", []):
+            for unit in (diff.values() if isinstance(diff, dict) else []):
+                for sec in (unit.values() if isinstance(unit, dict) else []):
+                    for o in ((sec.get("add") or []) if isinstance(sec, dict) else []):
+                        h = o.get("HashId") if isinstance(o, dict) else None
+                        if isinstance(h, int) and not isinstance(h, bool):
+                            out.setdefault(int(h) & 0xFFFFFFFF, m.get("name") or m["id"])
+    return out
+
+
+def other_hash_ids(lib: mm.Library | None, own_id: str) -> dict[int, str]:
+    """map_log_hash_ids of every library mod but the castle (on or off: one turned on later counts too)."""
+    return map_log_hash_ids(lib, [m for m in lib.mods if m["id"] != own_id]) if lib is not None else {}
 
 
 def _write(path: str, data) -> None:
@@ -792,11 +849,13 @@ def build_package(game: Game, recipe: Recipe, out: str, *, unit: str = "static",
         flows = {name: build_flow(spec) for name, spec in specs.items()}
     if flows:
         res.events = True
+        infos = event_infos(specs, game.eventinfo().get(f"{VILLAGER}<Talk>"))
+        carry = carried_flows(specs, infos)
         epraw = game.read(FILES["villager_events"])
         align = struct.unpack_from(">I", epraw, 8)[0] if epraw[:4] == b"Yaz0" else 0
         ref_flow = f"EventFlow/{VILLAGER}.bfevfl"
         for name, data in flows.items():
-            pdata, plen = event_pack(name, data, shared, subflows_of(specs[name]), align)
+            pdata, plen = event_pack(name, data, shared, carry[name], align)
             _write(os.path.join(romfs, "Event", f"{name}.sbeventpack"), pdata)
             for ename, ref, rl, nl, pk in [(f"Event/{name}.beventpack", f"Event/{VILLAGER}.beventpack",
                                             ukmm.unpacked_size(epraw), plen, True),
@@ -805,29 +864,18 @@ def build_package(game: Game, recipe: Recipe, out: str, *, unit: str = "static",
                 size = _estimate(rstb, ref, rl, nl, pk, res.notes, ename)
                 if size:
                     rstb_json[ename] = size
-        info_src = game.eventinfo().get(f"{VILLAGER}<Talk>")
-        talk_info = copy.deepcopy(info_src) if isinstance(info_src, dict) else {
-            "exist_enable_camera_input": True, "is_timeline": False, "mode": "Seamless",
-            "subfile": [{"file": "InitTalk.bfevfl"}, {"file": "Common.bfevfl"}]}
-        events = {f"{ACTOR}<Talk>": talk_info}
-        for entry_name in specs[DOOR_FLOW]["entry_points"]:
-            events[f"{DOOR_FLOW}<{entry_name}>"] = {"is_timeline": False, "mode": "Seamless",
-                                                    "subfile": [{"file": "Common.bfevfl"}]}
-        logs["eventinfo.yml"] = bd.to_text(events)
+        logs["eventinfo.yml"] = bd.to_text(infos)
 
     # the map: the gate, doors, Zelda, triggers
     _log(log, f"Placing the doors and Zelda in {res.unit}...")
-    used = game.hash_ids(log)
+    used = game.hash_ids(log) | set(other_hash_ids(lib, recipe.manifest["id"]))   # (the game's and other mods')
     res.objects = map_objects(layout, used, res.events)
     logs["map.yml"] = bd.to_text({res.unit: {"Objs": {"add": res.objects}}})
     if unit == "static":
-        base = base_titlebg(lib, recipe.manifest["id"])
-        if base:
-            path, name = base
-            mm.link_or_copy(path, os.path.join(romfs, *TITLEBG.split("/")))
-            res.base = name
-            res.notes.append(f"the castle's {TITLEBG} is built on {name}'s (modman deploy doesn't merge two mods' "
-                             f"packs yet): build the castle again after you change {name}")
+        others = titlebg_mods(lib, recipe.manifest["id"])
+        if others:
+            res.notes.append(f"{', '.join(others)} also ship{'s' if len(others) == 1 else ''} {TITLEBG}: modman "
+                             "deploy merges it with the castle's file by file (any load order)")
 
     # texts and sizes
     logs["texts.json"] = json.dumps(texts_log(texts), indent=1, ensure_ascii=False) + "\n"
@@ -843,7 +891,6 @@ def build_package(game: Game, recipe: Recipe, out: str, *, unit: str = "static",
         "# Castle date: built on this PC by tools/castle_build.py from the player's own game files.",
         "", f"- map unit: {res.unit}", f"- {ACTOR}: {'cloth on' if cloth else 'light physics, no cloth'}",
         f"- event flows: {'built' if res.events else 'not built'}",
-        f"- {TITLEBG} built on: {res.base or ('the game' if unit == 'static' else '(not changed)')}",
         f"- layout measured in game: {'yes' if layout.get('measured') else 'no (guessed)'}", ""]))
     if not layout.get("measured"):
         res.notes.append("the door, trigger and Zelda spots are guessed from the rooms' bounds (castle/layout.json): "
@@ -871,8 +918,8 @@ def check_logs(logs: dict[str, str]) -> None:
 
 
 def add_to_library(lib: mm.Library, folder: str, mod_id: str, log=None) -> tuple[dict, list[str]]:
-    """The built folder into the library through modman's normal add (the castle's old copy removed first, its
-    on/off kept), then the castle last in the load order (it holds what it was built on)."""
+    """The built folder into the library through modman's normal add. A rebuild removes the castle's old copy
+    first and keeps its on/off and its place in the load order; a first build goes last, as any add does."""
     idx = next((i for i, m in enumerate(lib.mods) if m["id"] == mod_id), None)
     was_on = lib.mods[idx]["enabled"] if idx is not None else True
     if idx is not None:
@@ -888,7 +935,7 @@ def add_to_library(lib: mm.Library, folder: str, mod_id: str, log=None) -> tuple
     i = next(i for i, m in enumerate(lib.mods) if m["id"] == entry["id"])
     m = lib.mods.pop(i)
     m["enabled"] = was_on
-    lib.mods.append(m)
+    lib.mods.insert(len(lib.mods) if idx is None else min(idx, len(lib.mods)), m)
     lib.save()
     return m, notes
 
@@ -924,8 +971,9 @@ def build(library: str | None = None, *, install: str | None = None, unit: str =
 def check(library: str | None = None, *, install: str | None = None, recipe_dir: str = RECIPE,
           log=None) -> list[str]:
     """Offline checks on the player's files (reads only): every name the castle uses exists, the gate flag is a
-    game flag, no placed object is a pick-up, chest or enemy, the new HashIds are free, and the texts the flows
-    name are there. Returns the problems (empty: all good)."""
+    game flag, no placed object is a pick-up, chest or enemy, the castle in the library (if any) uses no HashId the
+    game's map or another library mod's map changes use, and the texts the flows name are there. Returns the
+    problems (empty: all good)."""
     recipe = load_recipe(recipe_dir)
     lib = mm.Library.load(mm.resolve_library(library))
     game = find_game(install, lib)
@@ -939,7 +987,8 @@ def check(library: str | None = None, *, install: str | None = None, recipe_dir:
     if GATE_FLAG not in flags:
         out.append(f"the flag {GATE_FLAG} isn't in your game's game data")
     used = game.hash_ids(log)
-    objs = map_objects(recipe.layout, used, True)
+    others = other_hash_ids(lib, recipe.manifest["id"])
+    objs = map_objects(recipe.layout, used | set(others), True)
     for o in objs:
         actor = o["UnitConfigName"]
         prof = (ai.get(actor) or ai.get(ZELDA_SRC if actor == ACTOR else actor) or {}).get("profile")
@@ -950,10 +999,15 @@ def check(library: str | None = None, *, install: str | None = None, recipe_dir:
                 out.append(f"a {actor} of ours would save its own flag (MakeSaveFlag/IncrementSave)")
         elif actor not in ("EventTag", "Area") and any(f.startswith(f"MainField_{actor}_") for f in flags):
             out.append(f"the game saves placed {actor}s one by one (MainField_{actor}_* flags): it can't be placed")
-        if int(o["HashId"]) in used:
-            out.append(f"HashId 0x{int(o['HashId']):08x} is in use")
     if len({int(o["HashId"]) for o in objs}) != len(objs):
         out.append("two of the castle's objects share a HashId")
+    # the castle already in the library: its objects' HashIds against the game's map and the other mods' changes
+    own = [m for m in (lib.mods if lib is not None else []) if m["id"] == recipe.manifest["id"]]
+    for h in sorted(map_log_hash_ids(lib, own)):
+        if h in used:
+            out.append(f"HashId {h} of the castle in your library is in your game's map too: build it again")
+        elif h in others:
+            out.append(f"HashId {h} of the castle in your library is added by {others[h]} too: build it again")
     gate = next(o for o in objs if o["!Parameters"].get("SaveFlag") == GATE_FLAG)
     if any(int(gate["HashId"]) == int(lk["DestUnitHashId"]) for o in objs for lk in o.get("LinksToObj") or []):
         out.append("the GameClear gate has an input: it would write the flag")
@@ -1043,7 +1097,7 @@ def main(argv: list[str] | None = None) -> int:
         r = build(args.library, install=args.game, unit=args.unit, cloth=args.cloth, events=not args.no_events,
                   out=args.out, add=not args.no_add, log=print)
         made = r["built"]
-        where = f"in your library as {r['entry']['name']} (last in the load order)" if r["entry"] else made.folder
+        where = f"in your library as {r['entry']['name']}" if r["entry"] else made.folder
         print(f"Castle date built ({made.unit}, {len(made.objects)} map objects, event flows "
               f"{'built' if made.events else 'not built'}): {where}.")
         for n in made.notes:

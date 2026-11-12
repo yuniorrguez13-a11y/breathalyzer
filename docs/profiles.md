@@ -1,7 +1,8 @@
 # Mod sets (profiles)
 
 A mod set is a named list of your mods: which are on, in which order, the options you picked for BCML and UKMM
-packages, and the settings you changed. Switch between sets to play with other mods, without adding or removing any.
+packages, the settings you changed and the font you picked ([fonts](fonts.md)). Switch between sets to play with
+other mods, without adding or removing any.
 
 ```
 python tools/modman.py profile                    # the sets, and the one in use
@@ -12,7 +13,7 @@ python tools/modman.py profile remove "Hard mode"
 
 - **Default** is the set you had before you made any. A library that never used sets stays as it was.
 - The set in use is what `list`, `enable`, `disable` and `move` change. Switching keeps it as it is, then puts the
-  other set's order, on/off and settings in place. Run `deploy` after a switch.
+  other set's order, on/off, settings and font in place. Run `deploy` after a switch.
 - A mod added while another set was in use is off in this set, at the end of the list. A mod a set names that was
   removed from the library is left out (the switch says so).
 - Options of a BCML or UKMM package are fixed when it is added. When a set had other options, the switch says so: to
@@ -36,11 +37,15 @@ A set's file:
 {"tool": "botw-mod-loader modman", "format": 1, "kind": "profile", "name": "Hard mode", "saved": "2026-11-07T17:00:00",
  "mods": [{"id": "better-sprint", "enabled": true}, {"id": "linkle", "enabled": false}],
  "options": {"linkle": ["Linkle with hood"]},
- "settings": {"someone.better-sprint": {"speed": 150}}}
+ "settings": {"someone.better-sprint": {"speed": 150}},
+ "font": {"choice": "easy-read", "fix_symbols": true}}
 ```
 
 `mods` is in load order (later mods win). `settings` holds the values as `settings\<id>.json` does: only those
-unlike the default.
+unlike the default. `font` holds the font settings as `font.json` does ([fonts](fonts.md)): the font picked
+(`auto`, `game`, `easy-read` or `mod:<id>`) and the symbols fix. It is there only when the font tool is; a set without
+it leaves the font as it is. When a set picks a font mod that is off in it, the switch says so and the game's font
+choice goes back to automatic.
 
 ## History
 

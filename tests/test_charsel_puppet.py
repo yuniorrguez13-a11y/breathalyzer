@@ -99,7 +99,8 @@ class Selftest(unittest.TestCase):
     def test_puppet(self):
         names = ["move_by_speed", "near_names", "unmirrored_shows_link", "ids", "sentences", "spawns_and_swaps",
                  "at_link", "sprint_and_walk", "rehide", "climb_near_name", "horse_shows_link", "cutscene_shows_link",
-                 "pause_keeps", "items_to_puppet", "stage_change", "iam_link_back", "self_off", "refused_gives_up"]
+                 "pause_keeps", "items_to_puppet", "stage_change", "iam_link_back", "self_off", "refused_gives_up",
+                 "no_tick_says_why"]
         if ("puppet", "world") in self.rows:      # (the made-up globals' page was taken: the pure part only)
             names = names[:5]
         for name in names:

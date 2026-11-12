@@ -25,6 +25,8 @@ that is in use (a RomFS mod's, else the game's own; both only read):
 External_00 (button icons; Savage Wind finds it by its hash) is never touched. The output holds Nintendo's glyphs, so
 it is built on this PC for this PC and never shared. modman's deploy calls deploy_files(lib, plan). The settings
 (choice, fix-symbols) are kept in <library>\\font.json; built archives are cached in <library>\\fonts\\cache\\.
+For modman: choose() (every chooser), hash_inputs() (its inputs_hash), profile_part() / apply_profile_part() (mod
+sets keep their font), on_add(), share_notes() (sharing a font mod).
 Nothing here comes from a decompilation; the formats were read from the user's own files (docs/fonts.md).
 """
 from __future__ import annotations
@@ -1458,6 +1460,114 @@ def current(lib, settings: dict | None = None) -> tuple[Choice, list[str]]:
     return (mods[-1] if mods else opts[0]), notes
 
 
+def choose(lib, want: str) -> tuple[Choice, list[str]]:
+    """Set the font: "auto", "game", "easy-read", or a font mod's id ("mod:<id>" or the id alone, any case). Every
+    chooser goes through here: this tool's `choose`, Mod Manager's window and the game's chooser row (at the next
+    start). A font mod that is off, missing or broken is refused with one plain line (FontError). Returns (the font
+    in use now, notes)."""
+    w = (want or "").strip()
+    key = w.lower()
+    if key not in CHOICES:
+        mid = w[4:] if key.startswith("mod:") else w
+        fm = next((m for m in font_mods(lib) if m.id.lower() == mid.lower()), None)
+        if fm is None:
+            raise FontError(f"No font mod '{mid}'. Choices: auto, game, easy-read, or a font mod's id "
+                            "(python tools/font.py status lists them).")
+        if not fm.enabled:
+            raise FontError(f"{fm.name} is off. Turn it on first: python tools/modman.py enable {fm.id}")
+        if fm.problems:
+            raise FontError(f"{fm.name} can't be used: {fm.problems[0]}")
+        key = "mod:" + fm.id
+    elif key == "easy-read" and not any(c.key == key for c in choices(lib)):
+        raise FontError(f"The easy-read font ({FIRA_SEMIBOLD}) isn't in Savage Wind's folder or in {ASSETS}")
+    save_settings(lib, choice=key)
+    return current(lib)
+
+
+def _stat(path: str | None) -> list:
+    if not path:
+        return ["none"]
+    try:
+        s = os.stat(path)
+        return [os.path.normcase(os.path.abspath(path)), s.st_size, s.st_mtime_ns]
+    except OSError:
+        return [os.path.normcase(os.path.abspath(path)), "missing"]
+
+
+def hash_inputs(lib) -> dict | None:
+    """What deploy's font files are made from, for modman's inputs_hash, so a new choice or the symbol fix makes
+    Play deploy again: the font in use, its languages, the fix, this tool's build version and the font files' sizes
+    and times. None when deploy makes no font files (then the hash stays what it was without this tool). Cheap: it
+    reads font.json and the mods' mod.toml, never a font or an archive."""
+    st = load_settings(lib)
+    pick, _ = current(lib, st)
+    if pick.file is None and not st["fix_symbols"]:
+        return None
+    fix = None
+    if st["fix_symbols"]:
+        try:
+            fix = fira_path(FIRA_MEDIUM, getattr(lib, "install", None))
+        except FontError:
+            fix = None
+    return {"v": BUILD_VERSION, "font": pick.key, "languages": list(pick.languages),
+            "fix_symbols": st["fix_symbols"], "files": [_stat(pick.file), _stat(fix)]}
+
+
+def profile_part(lib) -> dict:
+    """The font settings a mod set keeps (profiles, docs/profiles.md): {"choice", "fix_symbols"} as in font.json."""
+    return load_settings(lib)
+
+
+def apply_profile_part(lib, part) -> list[str]:
+    """Switching to a mod set: make the font settings the set's. A set saved before sets kept fonts (part None or
+    not a dict) leaves them as they are; values this tool doesn't know are skipped. Call it after the set's mods are
+    turned on or off (in memory is enough): a chosen font mod the set has off is said here, and deploy then uses the
+    automatic choice. Returns notes."""
+    if not isinstance(part, dict):
+        return []
+    changes: dict = {}
+    c = part.get("choice")
+    if isinstance(c, str) and (c in CHOICES or (c.startswith("mod:") and len(c) > 4)):
+        changes["choice"] = c
+    if isinstance(part.get("fix_symbols"), bool):
+        changes["fix_symbols"] = part["fix_symbols"]
+    cur = load_settings(lib)
+    if not changes or {**cur, **changes} == cur:
+        return []
+    save_settings(lib, **changes)
+    pick, notes = current(lib)
+    return [f"Font: {n}" for n in notes] + [f"Font: {pick.label}" + (
+        " (missing symbols fixed)." if load_settings(lib)["fix_symbols"] else ".")]
+
+
+def share_notes(folder: str) -> list[str]:
+    """Sharing a mod (a .breath export, say): a font mod whose font doesn't say it is free to share gets one plain
+    warning (the mod hands its font file on). Never refuses; only reads. [] for a mod without [font]."""
+    found = _mod_toml(folder)
+    if not found:
+        return []
+    try:
+        with open(found[0], "rb") as f:
+            data = tomllib.loads(f.read().decode("utf-8-sig"))
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+        return []
+    if "font" not in data:
+        return []
+    clean = check_font_table(data["font"])[0]
+    if "file" not in clean:
+        return []
+    try:
+        tt = load_truetype(os.path.join(folder, *(found[1] + clean["file"]).split("/")))
+    except FontError:
+        return []
+    info = license_info(tt)
+    if info["free"] and not info["warnings"]:
+        return []
+    name = info["family"] or clean["file"]
+    return [f"Its font ({name}) doesn't say it is free to share, and sharing this mod shares the font file. Share it "
+            "only if the font's licence allows that."]
+
+
 # ================================================================================================= deploy
 
 class GenFile(NamedTuple):
@@ -1471,11 +1581,12 @@ class Generated(list):
     owner = "generated:fonts"
 
     def __init__(self, items=(), *, symbols_full: bool = False, font: str = GAME_FONT, font_key: str = "game",
-                 notes: list[str] | None = None, attention: list[str] | None = None):
+                 fix_symbols: bool = False, notes: list[str] | None = None, attention: list[str] | None = None):
         super().__init__(items)
         self.symbols_full = symbols_full   # every menu font of US, EU and JP has all printable ASCII
         self.font = font                   # the font in use (ASCII, for menu.txt's `font` record)
         self.font_key = font_key
+        self.fix_symbols = fix_symbols     # the symbol fix was asked for (font.json), for `status`
         self.notes = notes if notes is not None else []
         self.attention = attention if attention is not None else []
 
@@ -1568,7 +1679,8 @@ def deploy_files(lib, plan=None, *, game_romfs: str | None = None) -> Generated:
             fix_tt = load_truetype(fira_path(FIRA_MEDIUM, install))
         except FontError as e:
             attention.append(f"Missing symbols can't be fixed: {e}")
-    gen = Generated(font=pick.label, font_key=pick.key, notes=notes, attention=attention)
+    gen = Generated(font=pick.label, font_key=pick.key, fix_symbols=bool(st["fix_symbols"]), notes=notes,
+                    attention=attention)
     if font_tt is None and fix_tt is None:
         return gen
     full = True
@@ -1720,6 +1832,29 @@ def _library(arg: str | None):
     return lib
 
 
+def deployed(lib) -> dict | None:
+    """What the last finished deploy made with fonts (launch.json "made" -> "fonts": font, font_key, symbols_full);
+    {} when it made none, None when nothing is deployed yet or modman can't say."""
+    try:
+        import modman
+        launch = modman.read_launch(lib)
+    except Exception:  # (no deploy yet, or a modman without it: nothing to compare)
+        return None
+    made = (launch.get("made") or {}).get("fonts")
+    return dict(made) if isinstance(made, dict) else {}
+
+
+def _deploy_line(lib) -> str:
+    """One line on whether the last deploy has the fonts as they are set now."""
+    st = load_settings(lib)
+    pick, _ = current(lib, st)
+    done = deployed(lib)
+    if done and done.get("font_key") == pick.key and done.get("fix_symbols") == bool(st["fix_symbols"]) \
+            or done == {} and pick.file is None and not st["fix_symbols"]:   # (a deploy without font files)
+        return "The last deploy has these fonts."
+    return "It applies at your next start: Play deploys it (or: python tools/modman.py deploy)."
+
+
 def cmd_status(args) -> int:
     lib = _library(args.library)
     st = load_settings(lib)
@@ -1733,33 +1868,23 @@ def cmd_status(args) -> int:
             print(f"  {fm.name}: {p}")
     for n in notes:
         print(n)
-    print("Changes apply at the next deploy (python tools/modman.py deploy, or Play).")
+    print(_deploy_line(lib))
     return 0
 
 
 def cmd_choose(args) -> int:
     lib = _library(args.library)
-    want = args.choice.strip().lower()
-    if want not in CHOICES:
-        want = "mod:" + want.removeprefix("mod:")
-        fm = next((m for m in font_mods(lib) if "mod:" + m.id == want), None)
-        if fm is None:
-            raise FontError(f"No font mod '{want[4:]}'. Choices: auto, game, easy-read, or a font mod's id "
-                            "(python tools/font.py status lists them).")
-        if not fm.enabled:
-            raise FontError(f"{fm.name} is off. Turn it on first: python tools/modman.py enable {fm.id}")
-        if fm.problems:
-            raise FontError(f"{fm.name} can't be used: {fm.problems[0]}")
-    save_settings(lib, choice=want)
-    pick, _ = current(lib)
-    print(f"Font: {pick.label}. It applies at the next deploy (or Play).")
+    pick, notes = choose(lib, args.choice)
+    for n in notes:
+        print(n)
+    print(f"Font: {pick.label}. {_deploy_line(lib)}")
     return 0
 
 
 def cmd_fix(args) -> int:
     lib = _library(args.library)
     save_settings(lib, fix_symbols=args.state == "on")
-    print(f"Missing symbols fixed: {'yes' if args.state == 'on' else 'no'}. It applies at the next deploy (or Play).")
+    print(f"Missing symbols fixed: {'yes' if args.state == 'on' else 'no'}. {_deploy_line(lib)}")
     return 0
 
 
