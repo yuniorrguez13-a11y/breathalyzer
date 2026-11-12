@@ -162,7 +162,10 @@ removed when the add ends (or by the next add, if one was cut short):
 
 Plain Switch mods (packed or not) get one more step at `add` (`bnp.fill_old_packs`): a `Pack/*.pack` that lacks
 files your game's copy has, as a whole copy from another game version does, gets them from your game (the mod's own
-files win), and `add` names the files it changes (some may be that version's rather than the mod's).
+files win), and `add` names the files it changes (some may be that version's rather than the mod's). Map files
+(`Map/...`) and files the mod has outside the pack are never filled in: a mod leaves those out on purpose so the game
+reads its own (Relics of the Past's `TitleBG.pack` has none of the game's 162 map files; its maps are in its DLC
+files).
 
 ## Wii U packages
 

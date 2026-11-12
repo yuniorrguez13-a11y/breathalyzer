@@ -1577,6 +1577,8 @@ LAUNCH_WORDS = ((PRESS_DEPLOY, "Play uses the change."), ("Press Deploy to use i
                 ("Press Play to start the game.", "Press Play to start the game."))
 HOME_ROWS = 3          # the mod list always has room for this many
 ABOUT_LINES = 2        # the selected mod's text under the list: this many lines (longer text is cut with "...")
+BREATH_LINES = 4       # "Add this mod?": the description in this many lines at most (the warning and buttons fit)
+WHEEL_EVENTS = ("<MouseWheel>", "<Shift-MouseWheel>", "<Button-4>", "<Button-5>")
 GAME_POLL_TICKS = 25   # while the game is open, ask whether it still runs every this many ticks (2.5 s)
 OPEN_POLL_TICKS = 5    # look for .breath files a second start handed over every this many ticks (0.5 s)
 
@@ -1595,6 +1597,36 @@ def wrap_text(text: str, font, width: int) -> list[str]:
                 line = test
         lines.append(line)
     return lines
+
+
+def library_sources(backend) -> list[str] | None:
+    """Every mod's `source` in the library (what a received .breath package is kept for), or None when the library
+    can't be read now (then nothing is removed for it)."""
+    try:
+        with backend.files:
+            lib = backend.mm.Library.load(backend.root)
+    except Exception:  # (can't tell: keep everything)
+        return None
+    if lib is None:
+        return None
+    return [m.get("source") for m in lib.mods if isinstance(m.get("source"), str)]
+
+
+def unwarned_code(library: str, mod_ids: list[str], warned: list[str]) -> list[str]:
+    """Code files (DLLs, programs) in these mods' library copies whose names "Add this mod?" didn't show: a package
+    can unpack into more than its listing said. Paths relative to the mods folder."""
+    import breath as br
+    known = {br.shown_name(w).casefold() for w in warned}
+    out = []
+    for mod_id in mod_ids:
+        root = os.path.join(library, "mods", mod_id)
+        for folder, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(folder, d))]
+            for f in files:
+                if br.is_code(f) and br.shown_name(f).casefold() not in known:
+                    out.append(os.path.relpath(os.path.join(folder, f), os.path.join(library, "mods")).replace(
+                        "\\", "/"))
+    return sorted(out)
 
 
 def cut_lines(text: str, font, width: int, n: int) -> str:
@@ -1737,7 +1769,10 @@ class LaunchController(Controller):
         self.installing: list[str] | None = None   # while the picked mods are added: the ones that failed
         self.install_total = 0
         self.breath = None                          # a checked .breath (breath.Received): "Add this mod?" asks
-        self.adding_breath = None                   # (job, breath.Received) while modman adds it
+        self.adding_breath = None                   # (job, breath.Received, the mod ids before) while modman adds it
+        self.breath_stop = threading.Event()        # Cancel while a .breath is checked
+        self.breath_removing = None                 # the id of a .breath's mod with code it didn't show, going out
+        self.status_was: list[str] = []             # (and what the status said about it)
         super().__init__(backend, clock, port)
 
     def _first_status(self) -> Status:
@@ -1761,10 +1796,12 @@ class LaunchController(Controller):
             return False
         job = self.jobs.get("main")
         if action == "cancel":
-            return job is not None and job.action in ("prepare", "apply", "deploy") and not job.cancelled
+            return job is not None and job.action in ("prepare", "apply", "deploy", "breath") and not job.cancelled
         if job is not None:
             return False
-        if action in ("play", "play_plain", "deploy", "more"):
+        if action in ("play", "play_plain", "deploy", "more", "add", "export", "breath"):
+            # (add: Add mod, a .breath and Export wait until the game is closed: no heavy work, no window, while
+            # you play)
             return "play" not in self.jobs and not self.game_open
         return True
 
@@ -1898,6 +1935,11 @@ class LaunchController(Controller):
         self.status = launcher_words(self.status)
         if self.adding_breath is not None and self.adding_breath[0] is job:
             self._breath_added(job, code)
+        elif job.action == "remove" and self.breath_removing is not None and job.mod_id == self.breath_removing:
+            self.breath_removing = None
+            self.status = Status("error", [self.status_was[0], "It was taken out again." if code == 0 else
+                                           "It couldn't be taken out: remove it with More..., then Remove.",
+                                           "Only add mods from people you trust."])
         if job is not self.step:
             return
         self.step = None
@@ -1948,14 +1990,23 @@ class LaunchController(Controller):
             self.status = launcher_words(failed("Your changes from the game's Mods page couldn't be used.", text))
 
     def cancel(self) -> None:
-        """Stop getting the mods ready (Cancel). The next Play starts over."""
+        """Stop getting the mods ready, or checking a .breath (Cancel). The next Play starts over."""
         job = self.jobs.get("main")
         if not self.can("cancel"):
             return
         job.cancelled = True
+        if job.action == "breath":
+            self.breath_stop.set()   # (the check stops between two blocks and keeps nothing)
+            self.status = Status("busy", ["Stopping..."])
+            return
         self.chain = []
         kill_tree(job.proc)
         self.status = Status("busy", ["Stopping..."])
+
+    def stop(self) -> None:
+        """Closing the window: a .breath being checked stops too (nothing of it is kept)."""
+        self.breath_stop.set()
+        super().stop()
 
     def play_plain(self) -> None:
         """Play without mods: savagewind.exe as it is (the mod variables cleared). Your mods stay as they are."""
@@ -2035,16 +2086,20 @@ class LaunchController(Controller):
         if not self.free("add"):
             return
         self.drop_breath(quiet=True)
-        name = os.path.basename(path)
+        import breath as br
+        name = br.shown_name(path)
         job = Job("breath", [path], name=name, started=self.clock())
         self.jobs["main"] = job
-        self.status = Status("busy", [f"Checking {name}...", "Every file in it is checked before you are asked."])
+        self.breath_stop = stop = threading.Event()
+        self.status = Status("busy", [f"Checking {name}...", "Every file in it is checked before you are asked. "
+                                      "Cancel stops it."])
+        backend = self.backend
 
         def work():
             try:
-                import breath as br
-                br.sweep(received)
-                value = br.unpack(path, os.path.join(received, br.new_name()))
+                with contextlib.suppress(Exception):   # (left-over copies; a package no mod names any more)
+                    br.sweep(received, in_use=library_sources(backend))
+                value = br.unpack(path, os.path.join(received, br.new_name()), stop=stop.is_set)
             except Exception as e:  # (BreathError says it in plain words; anything else is shown as it is)
                 value = e
             self.events.put(("breath", job, value))
@@ -2059,8 +2114,16 @@ class LaunchController(Controller):
             job.code = 1
             job.lines = [str(value)]
             self.details_job = job
+            if type(value).__name__ == "Stopped":
+                self.status = Status("info", ["Stopped.", f"{job.name} wasn't added. Nothing of it was kept."])
+                return
             text = str(value) if type(value).__name__ == "BreathError" else f"{type(value).__name__}: {value}"
             self.status = Status("error", [f"{job.name} wasn't added.", plain(text)])
+            return
+        if job.cancelled:   # (Cancel came after the last block: nothing is kept all the same)
+            import breath as br
+            br.dropped(value)
+            self.status = Status("info", ["Stopped.", f"{job.name} wasn't added. Nothing of it was kept."])
             return
         job.code = 0
         self.breath = value
@@ -2073,8 +2136,9 @@ class LaunchController(Controller):
             return
         self.breath = None
         title = rec.manifest.title
-        job = Job("add", ["add", rec.payload, "--name", title], name=title)
-        self.adding_breath = (job, rec)
+        # (--name=<title> in one piece: a title starting with "-" isn't taken for an option)
+        job = Job("add", ["add", rec.payload, f"--name={title}"], name=title)
+        self.adding_breath = (job, rec, {r.id for r in self.listing.rows})
         self._start(job)
         self.status = Status("busy", [f"Adding {title}...", "A big mod takes a minute."])
 
@@ -2089,19 +2153,54 @@ class LaunchController(Controller):
             self.status = Status("info", ["Not added.", f"{rec.manifest.title} wasn't added. Nothing of it was kept."])
 
     def _breath_added(self, job: Job, code: int) -> None:
-        _, rec = self.adding_breath
+        _, rec, before = self.adding_breath
         self.adding_breath = None
         import breath as br
-        if code == 0:
-            br.added(rec)
-        else:
+        if code != 0:
             br.dropped(rec)
+            return
+        br.added(rec)
+        # (a backstop: code in the mod's library copy that "Add this mod?" didn't name is taken out again)
+        new = [r for r in self.listing.rows if r.id not in before]
+        surprise = [] if rec.maybe_code else unwarned_code(self.backend.root, [r.id for r in new], rec.code)
+        if surprise:
+            row = new[-1]
+            names = ", ".join(br.shown_name(p) for p in surprise[:3])
+            self._start(Job("remove", ["remove", row.id], name=row.name, mod_id=row.id, number=row.number))
+            self.status_was = [f"{row.name} wasn't added: it had code it didn't show ({names})."]
+            self.status = Status("error", [*self.status_was, "It is being taken out again."])
+            self.breath_removing = row.id
 
-    def export_breath(self, mod_id: str | None, dest: str, recipes=()) -> None:
-        """Make a .breath file of a mod (in the background: a big mod takes a while)."""
+    def plan_export(self, mod_id: str | None, dest: str, recipes=()):
+        """What Export as .breath would put in the file (breath.ExportPlan), every check made and nothing written;
+        None when it can't (the status says why)."""
+        row = self._ready("export", mod_id)
+        if row is None:
+            return None
+        import breath as br
+        backend = self.backend
+        try:
+            with backend.files:
+                lib = backend.mm.Library.load(backend.root)
+            entry = next((m for m in (lib.mods if lib is not None else []) if m.get("id") == row.id), None)
+            if entry is None:
+                raise br.BreathError(f"{row.name} isn't in your mod list any more.")
+            return br.plan_export(backend.root, entry, dest, recipes=recipes,
+                                  install=getattr(lib, "install", None) or backend.install)
+        except Exception as e:  # (said in the window, never a crash)
+            text = str(e) if isinstance(e, br.BreathError) else f"{type(e).__name__}: {e}"
+            self.details_job = Job("export", [dest], name=row.name, mod_id=row.id, lines=[text], code=1,
+                                   started=self.clock(), ended=self.clock())
+            self.status = Status("error", ["The .breath file wasn't made.", plain(text)])
+            return None
+
+    def export_breath(self, mod_id: str | None, dest: str, recipes=(), plan=None) -> None:
+        """Make a .breath file of a mod (in the background: a big mod takes a while). plan: what plan_export said
+        (the window showed it and the player said yes); without it, it is planned here first."""
         row = self._ready("export", mod_id)
         if row is None:
             return
+        dest = plan.dest if plan is not None else dest
         job = Job("export", [dest], name=row.name, mod_id=row.id, started=self.clock())
         self.jobs["main"] = job
         self.status = Status("busy", [f"Making {os.path.basename(dest)}...", "A big mod takes a minute."])
@@ -2110,13 +2209,16 @@ class LaunchController(Controller):
         def work():
             try:
                 import breath as br
-                with backend.files:
-                    lib = backend.mm.Library.load(backend.root)
-                entry = next((m for m in (lib.mods if lib is not None else []) if m.get("id") == mod_id), None)
-                if entry is None:
-                    raise br.BreathError(f"{row.name} isn't in your mod list any more.")
-                value = br.export(backend.root, entry, dest, recipes=recipes,
-                                  install=getattr(lib, "install", None) or backend.install)
+                todo = plan
+                if todo is None:
+                    with backend.files:
+                        lib = backend.mm.Library.load(backend.root)
+                    entry = next((m for m in (lib.mods if lib is not None else []) if m.get("id") == mod_id), None)
+                    if entry is None:
+                        raise br.BreathError(f"{row.name} isn't in your mod list any more.")
+                    todo = br.plan_export(backend.root, entry, dest, recipes=recipes,
+                                          install=getattr(lib, "install", None) or backend.install)
+                value = br.write_export(todo)
             except Exception as e:  # (said in the window, never a crash)
                 value = e
             self.events.put(("exported", job, value))
@@ -2185,6 +2287,9 @@ class LauncherView(BigText):
         self.reg_base = reg_base         # where the .breath file type goes (HKEY_CURRENT_USER; tests: a test key)
         self.running = running or la.game_running   # (Settings' frame rate changes only while the game is closed)
         home = os.path.dirname(os.path.abspath(settings_file))
+        self.home = home
+        self.window_published = False   # (launcher_main: window.json says which window this is, and if you play)
+        self.hidden_for_play = False     # (minimized while you play: nothing brings it up until the game closes)
         self.open_dir = os.path.join(home, la.OPEN_DIR)       # .breath files a second start hands to this window
         self.received_dir = os.path.join(home, "received")   # .breath files unpacked for "Add this mod?"
         self.pending_breath: list[str] = []                   # .breath files waiting until Home is open
@@ -2768,11 +2873,7 @@ class LauncherView(BigText):
             return
         try:
             self.ticks += 1
-            if self.ticks % OPEN_POLL_TICKS == 0:
-                for path in la.take_files(self.open_dir):   # (a double-click while this window is open)
-                    self.open_breath(path)
-            if self.pending_breath:
-                self.next_breath()
+            changed = False
             if self.ctl is not None:
                 changed = self.ctl.poll()
                 if self.ctl.game_open and self.ticks % GAME_POLL_TICKS == 0:
@@ -2783,6 +2884,12 @@ class LauncherView(BigText):
                     if playing:
                         self.fps_note = ""   # (the game reads the new frame rate now: "next start" is over)
                     self.hide_while_playing(playing)
+                    self.publish_window()
+            if self.ticks % OPEN_POLL_TICKS == 0:   # (a double-click while this window is open: asked when it can)
+                self.pending_breath += la.take_files(self.open_dir)
+            if self.pending_breath:
+                self.next_breath()
+            if self.ctl is not None:
                 if changed:
                     self.render()
                 elif self.screen == "home" and (self.ctl.jobs or self.ctl.game_open):
@@ -2791,15 +2898,40 @@ class LauncherView(BigText):
             if not self.closed:
                 self.root.after(POLL_MS, self.tick)
 
+    def playing(self) -> bool:
+        """The game is open (or Play is starting it), or this window hid itself for it: then nothing brings the
+        window up, and nothing heavy runs, until the game is closed."""
+        ctl = self.ctl
+        return self.hidden_for_play or (ctl is not None and (ctl.game_open or "play" in ctl.jobs))
+
     def hide_while_playing(self, playing: bool) -> None:
-        if not self.settings.hide_while_playing:
-            return
-        with contextlib.suppress(tk.TclError):
-            if playing:
-                self.root.iconify()
-            else:
+        """Settings > Hide while playing: minimized when the game starts, back when it closes. Only this brings the
+        window back after it hid itself."""
+        if playing:
+            if self.settings.hide_while_playing:
+                with contextlib.suppress(tk.TclError):
+                    self.root.iconify()
+                self.hidden_for_play = True
+        elif self.hidden_for_play:
+            self.hidden_for_play = False
+            with contextlib.suppress(tk.TclError):
                 self.root.deiconify()
                 self.root.lift()
+
+    def start_publishing(self) -> None:
+        """launcher_main: from now on window.json says which window this is and whether you play (a second start
+        brings only this window up, and never while you play)."""
+        self.window_published = True
+        self.publish_window()
+
+    def publish_window(self) -> None:
+        if not self.window_published:
+            return
+        try:
+            hwnd = int(self.root.wm_frame(), 16)
+        except (tk.TclError, ValueError):
+            return
+        la.publish_window(self.home, os.getpid(), hwnd, self.playing())
 
     def selected_id(self) -> str | None:
         sel = self.tree.selection()
@@ -2917,12 +3049,12 @@ class LauncherView(BigText):
     def next_breath(self) -> None:
         ctl = self.ctl
         if not self.pending_breath or ctl is None or self.closed or ctl.breath is not None \
-                or self.screen not in ("home", "settings") or not ctl.can("add"):
-            return
+                or self.screen not in ("home", "settings") or self.playing() or not ctl.can("add"):
+            return   # (it waits: while you play it is never checked, unpacked or shown; it is asked after)
         path = self.pending_breath.pop(0)
         if self.screen != "home":
             self.show("home")
-        with contextlib.suppress(tk.TclError):   # (a minimized window comes back; a hidden one stays hidden)
+        with contextlib.suppress(tk.TclError):   # (a window you minimized comes back: you opened a .breath)
             state = self.root.state()
             if state == "iconic":
                 self.root.deiconify()
@@ -2948,7 +3080,21 @@ class LauncherView(BigText):
             return None
         path = os.path.normpath(path)
         recipes = {m["id"] for m in self.bundled if m.get("kind") == "recipe"}
-        self.after_action(lambda: self.ctl.export_breath(row.id, path, recipes))
+        self.root.configure(cursor="watch")   # (what goes in is listed first: a big mod takes a moment)
+        self.root.update_idletasks()
+        try:
+            plan = self.ctl.plan_export(row.id, path, recipes)
+        finally:
+            self.root.configure(cursor="")
+        if plan is None:   # (the status says why)
+            return self.render()
+        # (what goes in, before anything is written: the files the mod was added with, nothing else of that folder)
+        if not self.ask("Export as .breath", f"Make {os.path.basename(plan.dest)}?",
+                        f"It will hold {plan.summary()}\n\nAnyone you send it to gets these files.",
+                        [("Make it", True), ("Cancel", None)], default=0):
+            self.ctl.status = Status("info", ["Not made.", "Nothing was written."])
+            return self.render()
+        self.after_action(lambda: self.ctl.export_breath(row.id, path, recipes, plan=plan))
         return None
 
     def build_breath(self) -> None:
@@ -2971,8 +3117,10 @@ class LauncherView(BigText):
             self.breath_buttons[self.breath_focus].focus_set()
 
     def fill_breath(self) -> None:
-        """The title big, who made it and its version, what it does, what it is, the file, and for a mod with code
-        a warning in red; then Add this mod and Not now (focused for a mod with code)."""
+        """The title big; for a mod with code (or that may have code) a warning in red right under it, and for code
+        patches or cheats a milder one; who made it and its version; what it does (a few lines at most, so the
+        warning and the buttons always fit); what it is, the file; then Add this mod and Not now (focused for a mod
+        with code)."""
         t, body, rec = self.t, self.breath_body, self.ctl.breath
         import breath as br
         man = rec.manifest
@@ -2984,38 +3132,83 @@ class LauncherView(BigText):
         self.breath_buttons, self.breath_flow.items = [], []
         row = 0
 
-        def line(text: str, font=None, fg=None, pady=(0, 4)) -> None:
+        def line(text: str, font=None, fg=None, pady=(0, 4)):
             nonlocal row
-            self.wrap_label(body, font, text=text, fg=fg or t["fg"]).grid(row=row, column=0, columnspan=2,
-                                                                           sticky="w", pady=pady)
+            lab = self.wrap_label(body, font, text=text, fg=fg or t["fg"])
+            lab.grid(row=row, column=0, columnspan=2, sticky="w", pady=pady)
+            row += 1
+            return lab
+
+        def names_of(paths: list[str]) -> str:
+            shown = list(dict.fromkeys(br.shown_name(p) for p in paths))
+            return ", ".join(shown[:4]) + (f" and {len(shown) - 4} more" if len(shown) > 4 else "")
+
+        def warning(color: str, head: str, more: str) -> None:
+            nonlocal row
+            box = tk.Frame(body, bg=t["bg"])
+            box.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(2, 8))
+            box.columnconfigure(1, weight=1)
+            tk.Frame(box, width=10, bg=color).grid(row=0, column=0, rowspan=2, sticky="ns", padx=(0, 14))
+            self.wrap_label(box, self.head, share=0.9, text=head, fg=color).grid(row=0, column=1, sticky="w")
+            self.wrap_label(box, self.bold, share=0.9, text=more).grid(row=1, column=1, sticky="w")
             row += 1
 
         line(man.title, self.head, pady=(0, 6))
+        code = list(dict.fromkeys(rec.code))
+        trust = "Only add it if you trust the person who made it."
+        if code:
+            warning(t["error"], f"Careful: this mod has code ({names_of(code)}).",
+                    f"Code runs on your PC like a program, with your rights. {trust}")
+        elif rec.maybe_code:
+            warning(t["error"], "Careful: this package may have code.",
+                    f"Breathalyzer couldn't look all through it, and code runs on your PC like a program. {trust}")
+        patches = list(dict.fromkeys(rec.patches))
+        if patches:
+            warning(t["warn"], f"This mod changes the game's code ({names_of(patches)}).",
+                    f"Code patches and cheats can make the game crash or act oddly. {trust}")
         by = [f"By {man.author}" if man.author else "Author not given", f"Version {man.version}" if man.version
               else ""]
         line(". ".join(x for x in by if x) + ".")
-        line(man.description or "No description.", pady=(4, 8))
+        self.breath_desc = (line("", pady=(4, 8)), man.description or "No description.")
+        self.cut_breath_desc()
         line(man.what())
         have = {r.id: r for r in self.ctl.listing.rows}
         if man.id in have:
             line(f"You already have this mod ({have[man.id].name}). To use this copy, remove yours first (More...).",
                  self.bold, t["warn"])
-        line(f"{os.path.basename(rec.source)}, {br.size_text(man.size)}. Checked: every file in it is as it was "
-             "made.", fg=t["disabled"], pady=(4, 8))
-        code = list(dict.fromkeys(rec.code))
-        if code:
-            box = tk.Frame(body, bg=t["bg"])
-            box.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6, 4))
-            box.columnconfigure(1, weight=1)
-            tk.Frame(box, width=10, bg=t["error"]).grid(row=0, column=0, rowspan=2, sticky="ns", padx=(0, 14))
-            names = ", ".join(c.rsplit("/", 1)[-1] for c in code[:4]) + (f" and {len(code) - 4} more"
-                                                                         if len(code) > 4 else "")
-            self.wrap_label(box, self.head, share=0.9, text=f"Careful: this mod has code ({names}).",
-                            fg=t["error"]).grid(row=0, column=1, sticky="w")
-            self.wrap_label(box, self.bold, share=0.9, text="Code runs on your PC like a program, with your rights. "
-                            "Only add it if you trust the person who made it.").grid(row=1, column=1, sticky="w")
-            row += 1
-        self.breath_focus = 1 if code else 0
+        line(f"{br.shown_name(rec.source)}, {br.size_text(man.size)}. Not damaged. This doesn't mean it is safe: "
+             "only add mods from people you trust.", fg=t["disabled"], pady=(4, 8))
+        self.breath_focus = 1 if code or rec.maybe_code else 0
+        self.fill_breath_buttons()
+
+    def cut_breath_desc(self) -> None:
+        """The description in BREATH_LINES lines at most, at the width it has now (a word too long for one line is
+        broken, as Tk would show it): whoever made the .breath can't push the warning or the buttons off the
+        screen with it."""
+        lab, full = getattr(self, "breath_desc", (None, ""))
+        if lab is None or not lab.winfo_exists():
+            return
+        width = int(lab.cget("wraplength") or 0) or self.text_width()
+        paras = []
+        for para in full.split("\n"):
+            words = []
+            for word in para.split(" "):
+                while word and self.font.measure(word) > width:
+                    lo, hi = 1, len(word)
+                    while lo < hi:   # (the longest start of the word that fits)
+                        mid = (lo + hi + 1) // 2
+                        if self.font.measure(word[:mid]) <= width:
+                            lo = mid
+                        else:
+                            hi = mid - 1
+                    words.append(word[:lo])
+                    word = word[lo:]
+                words.append(word)
+            paras.append(" ".join(words))
+        lab.configure(text=cut_lines("\n".join(paras), self.font, width, BREATH_LINES))
+
+    def fill_breath_buttons(self) -> None:
+        """Add this mod and Not now, under the rest."""
         for k, (text, command) in enumerate((("Add this mod", self.on_breath_add), ("Not now", self.on_breath_skip))):
             b = self.make_button(self.breath_flow.frame, text, command, self.breath_buttons, bold=k == 0)
             self.breath_flow.items.append(b.ring)
@@ -3226,12 +3419,14 @@ class LauncherView(BigText):
         install = (self.ctl.backend.install if self.ctl else None) or s.install or ""
         library = (self.ctl.backend.root if self.ctl else None) or s.library or ""
         rep = getattr(self, "home_report", None)
-        has_ini, fps, fps_raw = la.read_fps(install) if install else (False, None, None)
+        has_ini, fps, fps_raw, fps_problem = la.fps_info(install) if install else (False, None, None, "")
         playing = self.game_open_now()
         if not install:
             fps_text = "Not set"
         elif not has_ini:
             fps_text = "Start Savage Wind once first."
+        elif fps_problem:
+            fps_text = fps_problem
         elif playing:
             fps_text = "Close the game to change it."
         elif self.fps_note:
@@ -3248,12 +3443,15 @@ class LauncherView(BigText):
         breath = {"here": ("ON: a double-click adds one", [("Unregister .breath", self.on_unregister)]),
                   "other": ("ON, for another Breathalyzer folder", [("Register .breath", self.on_register),
                                                                     ("Unregister .breath", self.on_unregister)]),
+                  "taken": ("Another program opens .breath files: right-click one, Open with, Breathalyzer, Always",
+                            [("Unregister .breath", self.on_unregister)]),
                   None: ("OFF: a double-click does nothing", [("Register .breath", self.on_register)])}[state]
         rows = [
             ("Savage Wind", sw, [("Change...", self.on_change_folder), ("Check", self.on_check),
                                  ("Open", lambda: la.open_path(install))]),
             ("Frame rate", [("text", fps_text)],
-             [("widget", lambda parent: self.fps_box_for(parent, fps, fps_raw, has_ini and not playing))]
+             [("widget", lambda parent: self.fps_box_for(parent, fps, fps_raw,
+                                                         has_ini and not playing and not fps_problem))]
              + ([("Game settings", lambda: la.open_path(tool))] if os.path.isfile(tool) else [])),
             ("Mod library", [("path", library)] if library else [("text", "Not set")],
              [("Open", lambda: la.open_path(la.nearest_existing(library)))] if library else []),
@@ -3397,6 +3595,10 @@ class LauncherView(BigText):
         box.bind("<<ComboboxSelected>>", lambda e: self.root.after_idle(self.on_fps, box.get()))
         for key in ("<Return>", "<space>", "<KP_Enter>"):   # (open the list from the keyboard too)
             box.bind(key, lambda e: (box.event_generate("<Down>"), "break")[1])
+        # (the mouse wheel over a closed dropdown would pick the next frame rate and write it, unseen: it does
+        # nothing here; a frame rate is written only when picked from the open list)
+        for seq in WHEEL_EVENTS:
+            box.bind(seq, lambda e: "break")
         self.fps_box = box
         return ring
 
@@ -3573,6 +3775,7 @@ class LauncherView(BigText):
             self.size_columns()
         if self.screen == "settings" or width is not None:
             self.layout_settings(width)
+        self.cut_breath_desc()   # (the description's few lines at the new width)
 
     # --- closing
 
@@ -3585,6 +3788,8 @@ class LauncherView(BigText):
         if self.ctl is not None:
             self.ctl.stop()
         self.save_settings()
+        if self.window_published:
+            la.forget_window(self.home, os.getpid())
         self.closed = True
         self.root.destroy()
 
@@ -3628,6 +3833,7 @@ def launcher_main(args) -> int:
     first = la.FirstRun(settings, places=places, library=args.library)
     starting.destroy()
     view = LauncherView(root, settings, path, first_run=first, port=args.port, library=args.library)
+    view.start_publishing()   # (window.json: a second start brings only this window up, never while you play)
     if breath_file:   # (asked once Home is open: now, or after the first-run screens)
         view.open_breath(breath_file)
     if note:   # (on Home now, or on Home after the first-run screens: never dropped)

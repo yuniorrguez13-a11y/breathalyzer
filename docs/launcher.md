@@ -74,14 +74,19 @@ adds them to your list (a mod built from your game files is built when you turn 
 - **Your mods**: ON or OFF, the mod's name and what it does; the whole text of the selected mod is under the list.
   **Space** (or a click on ON/OFF) turns a mod on or off. The next Play uses the change.
 - **Export as .breath**: the selected mod in one `.breath` file, to send to a friend (saved on your Desktop at
-  first). A mod built from your own game files can't be exported.
+  first). Before anything is written it says what goes in ("12 files, 3.4 MB: romfs, mod.toml.") and asks **Make
+  it** or **Cancel**. A mod built from your own game files can't be exported.
 - **Add mod**, **Add a .breath** (or a double-click on a `.breath` file), **Open mods folder**, **Settings**, and
   **More...**: the Mod Manager window (order, remove, check, details) for the same mods.
-- **Add this mod?**: a `.breath` file is checked first (every file in it must be as it was made), then its title,
-  who made it, its version and what it does are shown, with **Add this mod** and **Not now** (Esc). A mod with code
-  (a DLL) gets a red warning, "Careful: this mod has code", and Not now is picked first. Not now keeps nothing. A
-  `.breath` that fails a check is refused in plain words ("... wasn't added"). [The .breath file](breath-format.md)
-  has the details.
+- **Add this mod?**: a `.breath` file is checked first (every file in it must be as it was made; **Cancel** stops
+  that and keeps nothing), then its title, who made it, its version and what it does (a few lines) are shown, with
+  **Add this mod** and **Not now** (Esc). A mod with code (a DLL), or a package Breathalyzer couldn't look all
+  through, gets a red warning right under its title, "Careful: this mod has code" ("... may have code"), and Not now
+  is picked first. Code patches and cheats get a milder one, "This mod changes the game's code". "Not damaged" only
+  means the file is as it was made, not that it is safe. Not now keeps nothing. A `.breath` that fails a check is
+  refused in plain words ("... wasn't added"). [The .breath file](breath-format.md) has the details.
+- **While you play** (the game is open), Add mod, Add a .breath and Export as .breath wait, and nothing brings the
+  window up: a `.breath` you double-click then is asked about once the game is closed.
 - After something failed, **Details** shows what happened, with **Copy** for a bug report (your home folder is
   written as `%USERPROFILE%`, so the report doesn't carry your name).
 
@@ -96,12 +101,15 @@ files**, and in Breathalyzer Plus the mod picker again.
   of `savagewind.ini` (No limit is `off`, as the game writes it); every other byte of the file stays as it was. The
   first change keeps the file as it was in `savagewind.ini.breathalyzer-backup`, once. It says "Used from your next
   start". While Savage Wind is open the dropdown is grey ("Close the game to change it."): the game writes the file
-  itself when it closes. Without `savagewind.ini` it says "Start Savage Wind once first." You can still change it in
-  the game too (F1, Video), or with **Game settings**.
+  itself when it closes. Without `savagewind.ini` it says "Start Savage Wind once first." A file saved in another
+  format (UTF-16, "Unicode" in Notepad) is left alone: "use F1, Video in the game". The mouse wheel over the
+  dropdown does nothing: a frame rate is written only when you pick one from its open list. You can still change it
+  in the game too (F1, Video), or with **Game settings**.
 - **.breath files**: **Register .breath** makes a double-click on a `.breath` file open this Breathalyzer, which
   asks before it adds the mod. Only for your Windows user (no admin rights). **Unregister .breath** undoes it. The
-  line says ON, OFF, or "ON, for another Breathalyzer folder" (after you unpacked a new one: press Register .breath
-  again).
+  line says ON, OFF, "ON, for another Breathalyzer folder" (after you unpacked a new one: press Register .breath
+  again), or "Another program opens .breath files: right-click one, Open with, Breathalyzer, Always" (you once picked
+  another program for them in Windows, which wins).
 
 - **Developer commands** (OFF at first): some commands you type in the game's command box (F12) only work in the
   game's developer mode, like `up` (Teleport Up) and `infstamina off` (Infinite Stamina). While a mod that needs
@@ -140,8 +148,9 @@ Your own things are not in this folder:
 
 - your mods and mod list: the `modloader` folder next to your Savage Wind folder;
 - the launcher's choices (your Savage Wind folder, your mod list, the window's text size): `%LOCALAPPDATA%\Breathalyzer`,
-  with `received\` (`.breath` files being added, and the packages added from them) and `open\` (a double-clicked
-  `.breath` on its way to the open window).
+  with `received\` (`.breath` files being added, and the packages added from them: one goes when no mod in your list
+  comes from it any more), `open\` (a double-clicked `.breath` on its way to the open window) and `window.json`
+  (while the window is open: which window it is, and whether you play).
 
 ## Update or remove
 
@@ -178,11 +187,17 @@ you use it, connects only to the friend you choose.
 - From the repo: `python tools/launcher.py [--library <folder>] [--size N] [--dark] [--port N] [<file.breath>]`.
   The launcher's choices go to `%LOCALAPPDATA%\Breathalyzer\launcher.json`, or to the folder `BREATHALYZER_HOME`
   names (use one for tests). `--search-in <folder>` looks for Savage Wind only there and one level below. One window
-  per settings folder: a second start brings the open one to the front (a named mutex), and hands a `.breath` file
-  over through `open\` (`la.pass_file`, `la.take_files`).
-- The frame rate: `la.read_fps`, `la.set_frame_rate` (`FPS_CHOICES`; only the `frame_rate` line, a temp file and a
-  rename, never while `savagewind.exe` runs). The `.breath` file type: `la.register_breath`,
-  `la.unregister_breath`, `la.breath_state` (a `base` key other than `Software\Classes` for tests). The format and
+  per settings folder (a named mutex): a second start hands a `.breath` file over through `open\` (`la.pass_file`,
+  `la.take_files`) and brings the open window to the front (`la.bring_to_front`): only the window `window.json`
+  names (`la.publish_window`: its process id and window handle, checked to be that process's Tk window; never a
+  window found by its title), and never while the game is open or the window hid itself for play. While you play
+  the window takes in handed-over files but checks and shows them only once the game is closed
+  (`LauncherView.next_breath`), and `LaunchController.can` keeps add, export and `.breath` waiting.
+- The frame rate: `la.fps_info`, `la.read_fps`, `la.set_frame_rate` (`FPS_CHOICES`; only the `frame_rate` line, a
+  temp file and a rename, never while `savagewind.exe` runs, never in a UTF-16 file or one with NUL bytes). The
+  dropdown's own `<MouseWheel>` bindings return `break` (ttk's would pick the next value and write it). The `.breath`
+  file type: `la.register_breath`, `la.unregister_breath`, `la.breath_state` (a `base` key other than
+  `Software\Classes` for tests; it also reads, only reads, Explorer's `FileExts\.breath\UserChoice`). The format and
   its checks: `tools/breath.py`, [the .breath file](breath-format.md).
 - `tools/launcher.py` has the parts without a window: finding and checking Savage Wind, the first-run steps
   (`FirstRun`), the settings file, the mod texts (mod.toml's `description`, else what the mod holds), the running

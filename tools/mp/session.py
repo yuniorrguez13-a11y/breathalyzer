@@ -21,6 +21,14 @@ New message kinds (all host-only except story_offer; the relay writes "from", "i
     rules       {"type":"rules","friends_story":false}
     kick / ban  {"type":"kick","id":4}
     end         {"type":"end"}
+
+Who am I (feature "look", docs/charsel.md; anyone may send it, ghost clients too):
+    hello       adds "look":{"id":"zelda","v":1,"name":"Zelda"}   the character the sender picked on the wheel
+    welcome     each peer's "look" (peers that said "look"); join carries the joiner's "look"
+    look        {"type":"look","look":{...}}   a new pick: at most one every LOOK_EVERY s per player; the relay keeps
+                the latest for late joiners and passes it on as {"type":"look","id","name","look"}
+A look is only an id (lower-case letters, digits, -; up to 24), a version and a name for people: never game data.
+Each receiver turns the id into a body through its own built packs (tools/charsel.py Looks), else the Link body.
 """
 from __future__ import annotations
 
@@ -28,17 +36,20 @@ import re
 
 from . import encode, finite
 
-FEATURES = ("coop1", "story1")                  # what this Breathalyzer speaks
+FEATURES = ("coop1", "story1", "look")          # what this Breathalyzer speaks
 KNOWN_FEATURES = frozenset({"coop1", "story1", "look", "mods1"})
 FEATURE_OF = {"time": "coop1", "weather": "coop1", "story": "story1", "story_offer": "story1", "rules": "coop1"}
 MAX_HELLO = 1024
 MAX_STORY_HEX = 512        # 1,075 flags today = 270 characters
 MAX_WEATHER_HEX = 512
+LOOK_EVERY = 2.0           # s: the relay takes one look change per player this often
+MAX_LOOK_NAME = 28
 
 _FEATURE_RE = re.compile(r"[a-z0-9]{1,16}")
 _HASH_RE = re.compile(r"[0-9a-f]{8}")
 _HEX_RE = re.compile(r"(?:[0-9a-f]{2})+")
 _VER_RE = re.compile(r"[\w.+-]{1,24}")
+_LOOK_ID_RE = re.compile(r"(?:built:)?[a-z0-9][a-z0-9-]{0,23}")
 
 
 def clean_features(v) -> list[str] | None:
@@ -125,6 +136,25 @@ def clean_story(msg: dict, offer: bool = False) -> dict | None:
         if not isinstance(seq, int) or isinstance(seq, bool) or not 0 <= seq < 2 ** 31:
             return None
         out["seq"] = seq
+    return out
+
+
+def clean_look(v) -> dict | None:
+    """A look as a player sends it (hello, `look`), checked: {"id", "v", "name"?}; None if unusable. Unknown keys are
+    dropped, so nothing else can ride along."""
+    if not isinstance(v, dict):
+        return None
+    lid = v.get("id")
+    if not isinstance(lid, str) or not _LOOK_ID_RE.fullmatch(lid):
+        return None
+    lid = lid.removeprefix("built:")
+    ver = v.get("v")
+    out = {"id": lid, "v": ver if isinstance(ver, int) and not isinstance(ver, bool) and 0 < ver < 10000 else 1}
+    name = v.get("name")
+    if isinstance(name, str):
+        name = " ".join(name.split())[:MAX_LOOK_NAME]
+        if name and name.isascii() and name.isprintable():
+            out["name"] = name
     return out
 
 

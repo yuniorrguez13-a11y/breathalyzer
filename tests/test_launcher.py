@@ -348,6 +348,27 @@ class FrameRate(Temp):
         with self.assertRaises(la.FpsError):
             la.set_frame_rate(str(self.sw), "60", running=lambda: False)
 
+    def test_a_file_in_another_format_is_left_alone(self):
+        """Saved as UTF-16 ("Unicode" in Notepad), or with NUL bytes: a plain-text line would damage it."""
+        for data in ("frame_rate = 30\r\nvsync = fast\r\n".encode("utf-16"),
+                     b"\xfe\xff" + "frame_rate = 30\r\n".encode("utf-16-be"),
+                     b"frame_rate = 30\n\x00\x00junk\n"):
+            ini = self.ini(data)
+            with self.assertRaises(la.FpsError) as cm:
+                la.set_frame_rate(str(self.sw), "60", running=lambda: False)
+            self.assertEqual(str(cm.exception), la.INI_OTHER_FORMAT)
+            self.assertEqual(ini.read_bytes(), data)
+            self.assertFalse((self.sw / la.INI_BACKUP).exists())
+            self.assertEqual(la.fps_info(str(self.sw)), (True, None, None, la.INI_OTHER_FORMAT))
+            self.assertEqual(la.read_fps(str(self.sw)), (True, None, None))   # (never "60" for a file it can't read)
+
+    def test_cant_read_is_not_the_default(self):
+        self.ini()
+        with mock.patch("builtins.open", side_effect=PermissionError(13, "Access is denied")):
+            has, value, raw, problem = la.fps_info(str(self.sw))
+        self.assertEqual((has, value, raw), (True, None, None))
+        self.assertIn("can't be read: Access is denied", problem)
+
 
 # ---------------------------------------------------------------- .breath files: the file type and the hand-over
 
@@ -397,6 +418,18 @@ class BreathFileType(Temp):
             self.reg.OpenKey(self.reg.HKEY_CURRENT_USER, f"{self.base}\\.breath").Close()
         self.assertFalse(la.unregister_breath(self.base))
         self.changed.assert_not_called()   # (only for the real key)
+
+    def test_another_program_picked_by_the_player_wins(self):
+        """Explorer's "Always use this app" choice (FileExts\\.breath\\UserChoice) wins over Software\\Classes."""
+        cmd, icon = la.breath_command()
+        la.register_breath(cmd, icon, self.base)
+        choice = f"{self.top}\\FileExts\\.breath\\UserChoice"   # (under the test key: never the real one)
+        with self.reg.CreateKeyEx(self.reg.HKEY_CURRENT_USER, choice, 0, self.reg.KEY_WRITE) as k:
+            self.reg.SetValueEx(k, "ProgId", 0, self.reg.REG_SZ, "Other.Program")
+        self.assertEqual(la.breath_state(self.base, cmd), "taken")
+        with self.reg.CreateKeyEx(self.reg.HKEY_CURRENT_USER, choice, 0, self.reg.KEY_WRITE) as k:
+            self.reg.SetValueEx(k, "ProgId", 0, self.reg.REG_SZ, la.BREATH_PROGID)
+        self.assertEqual(la.breath_state(self.base, cmd), "here")
 
     def test_another_programs_breath_is_left_to_it(self):
         la.register_breath(*la.breath_command(), self.base)
@@ -971,8 +1004,37 @@ class WindowsParts(Temp):
         self.assertIsNotNone(first)
         with mock.patch.object(la, "bring_to_front", return_value=False) as front:
             self.assertIsNone(la.single_instance(key))
-        front.assert_called_once_with(la.WINDOW_TITLE)
+        front.assert_called_once_with(key)
         self.assertIsNotNone(la.single_instance(key + "-other"))
+
+    def test_a_second_start_brings_up_only_its_window_and_never_while_you_play(self):
+        """Only the window window.json names (its process, a Tk window), never one found by its title, and never
+        while the game is open. No real window is touched here: the Windows calls are stand-ins."""
+        home = str(self.tmp / "home")
+        mine = (4242, "TkTopLevel")
+        with mock.patch.object(la, "window_owner", return_value=mine) as owner, \
+                mock.patch.object(la, "show_window", return_value=True) as show:
+            self.assertFalse(la.bring_to_front(home, running=lambda: False))   # (no window.json: nothing)
+            la.publish_window(home, 4242, 0x1234, playing=True)
+            self.assertFalse(la.bring_to_front(home, running=lambda: False))   # (hidden while you play)
+            la.publish_window(home, 4242, 0x1234, playing=False)
+            self.assertFalse(la.bring_to_front(home, running=lambda: True))    # (the game is open)
+            owner.return_value = (4242, "CabinetWClass")
+            self.assertFalse(la.bring_to_front(home, running=lambda: False))   # (not a Tk window)
+            owner.return_value = (999, "TkTopLevel")
+            self.assertFalse(la.bring_to_front(home, running=lambda: False))   # (another process's window)
+            show.assert_not_called()
+            owner.return_value = mine
+            self.assertTrue(la.bring_to_front(home, running=lambda: False))
+            show.assert_called_once_with(0x1234)
+            owner.assert_called_with(0x1234)
+        self.assertEqual(la.read_window(home), {"pid": 4242, "hwnd": 0x1234, "playing": False})
+        la.forget_window(home, 1)       # (another launcher's: kept)
+        self.assertIsNotNone(la.read_window(home))
+        la.forget_window(home, 4242)
+        self.assertIsNone(la.read_window(home))
+        write(Path(home) / la.WINDOW_FILE, '{"pid": "x", "hwnd": 5}')
+        self.assertIsNone(la.read_window(home))
 
 
 # ---------------------------------------------------------------- the window

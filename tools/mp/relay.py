@@ -27,6 +27,9 @@ Co-op and base security (docs/coop.md; tools/mp/session.py, security.py), used w
   per address. A room with a host (co-op) takes no states (ghosts use their own room). A friend's `story_offer`
   reaches the host only if the host's rules allow it (off by default). Cut off for flooding = kicked too.
 - A client without "features" in its hello is a visitor: states, join and leave only, never time or story.
+- Who am I (feature "look", docs/charsel.md): a hello's "look" (session.clean_look) is kept and shown to the others
+  that speak "look" (welcome peers, join); a `look` message changes it, at most one every session.LOOK_EVERY s, and
+  goes to those others as {"type":"look","id","name","look"}. Only an id, a version and a name: never game data.
 Without host_secret and room_code it works as before: anyone who can reach the port can join.
 """
 from __future__ import annotations
@@ -53,7 +56,7 @@ MAX_BUFFER = 256 * 1024    # bytes waiting to go to one client before it counts 
 class _Conn:
     __slots__ = ("id", "name", "room", "bot", "writer", "peer", "tokens", "stamp", "flood", "warned",
                  "state", "state_at", "closing", "joined", "hello_by", "features", "host", "key", "kinds", "ip",
-                 "nonce")
+                 "nonce", "look", "look_at")
 
     def __init__(self, writer, rate, now, hello_by=float("inf")):
         self.writer = writer
@@ -76,6 +79,8 @@ class _Conn:
         self.kinds = None          # security.KindLimiter (per message kind)
         self.ip = self.peer[0] if isinstance(self.peer, tuple) and self.peer else None
         self.nonce = security.new_nonce()   # (the room code challenge)
+        self.look = None           # Who am I: the look it picked (session.clean_look), if it speaks "look"
+        self.look_at = -1e9        # ... when it last changed it (one per session.LOOK_EVERY s)
 
     def has(self, feature: str) -> bool:
         return self.features is not None and feature in self.features
@@ -376,6 +381,7 @@ class Relay:
         self._next_id += 1
         conn.name, conn.room, conn.bot, conn.joined = name, room, bool(msg.get("bot")), True
         conn.features = session.clean_features(msg.get("features"))
+        conn.look = session.clean_look(msg.get("look")) if conn.has("look") else None
         conn.key = key
         conn.kinds = security.KindLimiter(clock=self.clock)
         if is_host:
@@ -388,6 +394,8 @@ class Relay:
             if conn.features is not None:
                 p["features"] = other.features
                 p["host"] = other.host
+            if conn.has("look") and other.look is not None:
+                p["look"] = other.look
             if other.state is not None:
                 p["state"] = dict(other.state, age=round(max(0.0, now - other.state_at), 3))
             peers.append(p)
@@ -410,8 +418,10 @@ class Relay:
         join = {"type": "join", "id": conn.id, "name": name, "bot": conn.bot}
         for other in list(members.values()):
             if other is not conn:
-                self._send(other, dict(join, features=conn.features, host=conn.host) if other.features is not None
-                           else join)
+                line = dict(join, features=conn.features, host=conn.host) if other.features is not None else join
+                if other.has("look") and conn.look is not None:
+                    line = dict(line, look=conn.look)
+                self._send(other, line)
         self._say(f"{name} joined room {room} ({len(members)} player{'s' if len(members) != 1 else ''})")
 
     def _message(self, conn: _Conn, msg: dict) -> None:
@@ -436,8 +446,26 @@ class Relay:
             self._send(conn, {"type": "pong", "t": t if finite(t) is not None else None})   # (NaN can't be sent)
         elif kind == "bye":
             self._kick(conn)
+        elif kind == "look" and conn.has("look"):
+            self._look(conn, msg)
         else:
             self._send(conn, {"type": "error", "error": f"unknown message type {kind[:20]!r}"})
+
+    # -- Who am I (docs/charsel.md) --
+
+    def _look(self, conn: _Conn, msg: dict) -> None:
+        """A new look: checked, at most one every LOOK_EVERY s, kept for late joiners, passed to the others that
+        speak "look"."""
+        now = self.clock()
+        if now - conn.look_at < session.LOOK_EVERY:
+            self._send(conn, {"type": "error", "error": f"look changes too often (one per {session.LOOK_EVERY:g} s)"})
+            return
+        look = session.clean_look(msg.get("look"))
+        if look is None:
+            self._send(conn, {"type": "error", "error": "bad look"})
+            return
+        conn.look, conn.look_at = look, now
+        self._broadcast_feature(conn, "look", {"type": "look", "id": conn.id, "name": conn.name, "look": look})
 
     # -- co-op (host-only kinds and story offers) --
 

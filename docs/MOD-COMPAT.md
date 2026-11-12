@@ -50,6 +50,11 @@ of its 3 mods (its ExeFS patch, needing a rebuild, with exlaunch code that can't
 the Linkle dialogue fix `.7z` unpacks but holds two region copies of a Wii U text pack, which `wiiu_convert.py`
 refuses as "several mods" (a text merge is planned for it).
 
+All 25 test downloads added again (2026-11-12, scratch library, not in the game): 10 work, 11 partly, 4 refused
+(2026-11-08: 6, 7 and 12). Refused, and right to be: a 1.6.0-only ExeFS patch, a mod with nothing usable, and the
+Multi Patch `.rar` until `--option` names one of its mods. Refused, to fix: the Linkle dialogue fix `.7z`. Relics of
+the Past's `TitleBG.pack` leaves out the game's map files on purpose (its maps are its DLC files): they now stay out.
+
 ## Wii U packages (2026-11-12, scratch library, not in the game yet)
 
 | Package | Result |

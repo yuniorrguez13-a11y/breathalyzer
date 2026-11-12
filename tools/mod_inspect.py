@@ -82,6 +82,9 @@ WIIU_KEPT = {
     "ecosystem": {"beco"},
 }
 WIIU_KEPT_EXT = {ext: kind for kind, exts in WIIU_KEPT.items() for ext in exts}
+# Kinds above that tools/wiiu_convert.py uses as they are in BotW's own form: its event flows and timelines are
+# little-endian on the Wii U too (wiiu_convert.is_le_event_flow)
+WIIU_SAME_KINDS = {"event flow"}
 RSTB_EXT = ("rsizetable", "srsizetable")  # the size table: wiiu_convert leaves a Wii U one out
 JUNK = {"thumbs.db", "desktop.ini", "__macosx", ".ds_store"}
 # Top-level folders of BotW's RomFS, to recognise a bare RomFS tree (lowercase; tools/romfs_mods.py uses these too)
@@ -259,8 +262,8 @@ def _bnp(src: Source, low: list[str]) -> Finding | None:
     wiiu = "wii" in platform
     if any(p.startswith("logs/") for p in low):
         # a packed BNP: its packs hold only what the mod changes. modman add installs a Switch one (tools/bnp.py:
-        # options, packs filled from the game, every BCML 3 log merged, size table); a Wii U one is refused
-        # (romfs_mods and wiiu_convert refuse both)
+        # options, packs filled from the game, every BCML 3 log merged, size table), and a Wii U one converted first
+        # (bnp.install_wiiu); romfs_mods and wiiu_convert refuse both
         if not wiiu:
             old = sorted({n for p in low if "/logs/" in f"/{p}" and ((n := p.rsplit("/", 1)[-1]) in BCML2_LOGS
                                                                       or n.startswith("texts_"))})
@@ -274,9 +277,11 @@ def _bnp(src: Source, low: list[str]) -> Finding | None:
                            "(actor parameters, animation lists, game data, save data, actor info, texts, drops, "
                            "shops, maps, quests) and a size table. Several packages' packs aren't merged with each "
                            "other yet (see docs/bnp.md)")
-        return Finding("BCML mod (BNP)", "wiiu", MERGE,
-                       "Wii U BCML package, whose packs only hold the changes: install it in UKMM or BCML (Switch "
-                       "mode), then use the merged output folder")
+        return Finding("BCML mod (BNP)", "wiiu", PARTIAL,
+                       f"Wii U BCML package: {BNP_ADD} as a Switch one: its chosen options converted with "
+                       "tools/wiiu_convert.py, its logs made the Switch's and merged, and a size table. What doesn't "
+                       "convert (voice lines, models the converter can't read yet) gives way to the game's files and "
+                       "is named. Not tried in the game yet")
     if wiiu:
         return Finding("BCML mod (BNP)", "wiiu", CONVERT, "Wii U BNP: its contents are checked below")
     return Finding("BCML mod (BNP)", "switch", WORKS, "a BCML mod folder (no logs/): its files are used as they are")
@@ -357,9 +362,12 @@ def _wiiu_data(low: list[str], overlay: list[str]) -> Finding | None:
     game = [p for p in data if WIIU_GAME_RE.search(p) and _ext(p) not in RSTB_EXT
             and not any(x in JUNK or x.startswith(".") for x in p.split("/"))]
     kept: dict[str, int] = {}
+    same = 0
     for p in game:
         kind = wiiu_kept_kind(p)
-        if kind:
+        if kind in WIIU_SAME_KINDS:
+            same += 1
+        elif kind:
             kept[kind] = kept.get(kind, 0) + 1
     models, no_mips, lone = wiiu_model_files(game)
     if lone:
@@ -368,11 +376,16 @@ def _wiiu_data(low: list[str], overlay: list[str]) -> Finding | None:
         return Finding("Wii U game data", "wiiu", LATER,
                        f"{len(data)} file(s), but none tools/wiiu_convert.py can use (only the size table (RSTB), or "
                        "files that aren't game data)")
-    if sum(kept.values()) == len(game):
+    used = f"; its {same} event flow(s) are used as they are (little-endian on the Wii U too)" if same else ""
+    if same == len(game):
+        return Finding("Wii U game data", "wiiu", WORKS,
+                       f"{same} file(s), all event flows: little-endian on the Wii U too, so used as they are "
+                       "(tools/modman.py add copies them)")
+    if sum(kept.values()) + same == len(game):
         # only audio, layouts, physics...: tools/wiiu_convert.py can't convert any of it yet
         return Finding("Wii U game data", "wiiu", LATER,
-                       f"{len(game)} file(s), all {_describe_counts(kept)}: tools/wiiu_convert.py can't convert "
-                       "these yet (it would keep them as Wii U data, which the game can't read)")
+                       f"{len(game)} file(s), {'' if same else 'all '}{_describe_counts(kept)}: tools/wiiu_convert.py "
+                       f"can't convert these yet (it would keep them as Wii U data, which the game can't read){used}")
     what = "text, maps, actor data" + (f", {len(models) - len(lone)} model/texture file(s)" if models else "")
     detail = (f"{len(game)} file(s): tools/wiiu_convert.py converts them on your PC ({what}); tools/modman.py add "
               "does it for you")
@@ -386,6 +399,8 @@ def _wiiu_data(low: list[str], overlay: list[str]) -> Finding | None:
         detail += f". Not converted yet, kept as Wii U data: {_describe_counts(kept)}"
         if lone:
             detail += f" (incl. {len(lone)} X.Tex2 without its X.Tex1)"
+    if same:
+        detail += f". Used as they are: {same} event flow(s) (little-endian on the Wii U too)"
     return Finding("Wii U game data", "wiiu", CONVERT, detail)
 
 
@@ -560,8 +575,9 @@ def inspect(src: Source) -> list[Finding]:
     if ukmm:
         return findings + [ukmm]  # UKMM stores its own processed data; nothing else to read
     bnp = _bnp(src, low)
-    if bnp and bnp.verdict == MERGE:
-        return findings + [bnp]  # its packs hold only the changes: none of its files is used as it is
+    if bnp and bnp.platform == "wiiu" and bnp.verdict == PARTIAL:
+        # a packed Wii U one: its packs hold only the changes, and modman add converts it as a whole (bnp.install_wiiu)
+        return findings + [bnp]
     overlay = _overlay(low)
     packs = _graphic_packs(src, low)   # (a Cemu graphic pack's folder isn't a bare RomFS tree, whatever its name)
     romfs = _switch_romfs(low, overlay) or (None if bnp or packs else _bare_tree(src, low))

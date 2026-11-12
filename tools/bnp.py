@@ -726,14 +726,17 @@ def fill_old_packs(root: str, romfs: str | None) -> list[str]:
     """For a plain Switch mod stored at root (a library stage folder): each whole pack in Pack/ (TitleBG.pack,
     Bootup.pack...) that lacks files the game's own copy has, as a copy taken from another game version does, gets
     those files from the game's copy (romfs: the game's RomFS, read only); the mod's own files win, and the files it
-    changes are named. Each such pack is written as a new file (never through a hard link to the player's own
-    copy). Returns notes for the player."""
+    changes are named. Never filled: map files (Map/...) and files the mod has outside the pack, as a mod leaves
+    them out of the pack on purpose so the game reads its own (RotP's TitleBG.pack has no maps: its maps are in its
+    DLC files). Each such pack is written as a new file (never through a hard link to the player's own copy).
+    Returns notes for the player."""
     if not romfs:
         return []
     try:
         mod = rm.load_mod(root)
     except (rm.DeployError, OSError, ValueError):
         return []
+    own = {e.rel.lower() for e in mod.entries}
     notes = []
     for e in mod.entries:
         low = e.rel.lower()
@@ -745,6 +748,9 @@ def fill_old_packs(root: str, romfs: str | None) -> list[str]:
         try:
             upper, lower = Blob(_read(e.src)), Blob(_read(game))
             have, want = upper.open(), lower.open()
+            kept = [n for n in want if n not in have and (n.lower().startswith("map/") or n.lower() in own)]
+            for n in kept:
+                del want[n]   # (lower is only read here: these stay out of the mod's pack)
             missing = [n for n in want if n not in have]
             if not missing:
                 continue
@@ -756,7 +762,9 @@ def fill_old_packs(root: str, romfs: str | None) -> list[str]:
             continue
         notes.append(f"{e.rel} looks like a whole copy from another game version: the {len(missing)} file(s) it lacks "
                      f"({_some(missing)}) come from your game. It changes {len(changed)} file(s)"
-                     + (f" ({_some(changed)}): some may be that version's, not the mod's" if changed else ""))
+                     + (f" ({_some(changed)}): some may be that version's, not the mod's" if changed else "")
+                     + (f". The {len(kept)} map or loose file(s) it leaves out stay out, so the game reads those "
+                        "outside the pack" if kept else ""))
     return notes
 
 

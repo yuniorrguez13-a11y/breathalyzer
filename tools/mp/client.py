@@ -17,6 +17,10 @@ Other players are drawn about 0.1 s behind, interpolated between their last two 
 move smoothly even when packets arrive unevenly. "Go to" moves your Link to the selected player with the game's
 `teleport` command. The other Link is not drawn inside the game, except with --ghost, which has the ghost mod
 (native/examples/ghost) put an actor where the nearest other player is (docs/ghost.md).
+
+Who am I (docs/charsel.md): the hello says who you picked on the wheel (--look, else your wheel choice), and
+`iam <name>` typed in the game's console (F12; ghost mod 0.8.0) changes it while you play. With --ghost-looks each
+other player is shown as the one they picked, from the packs this PC built (tools/charsel.py), else the Link body.
 """
 from __future__ import annotations
 
@@ -40,7 +44,8 @@ from control import DEFAULT_PORT as GAME_PORT, Control, ControlError  # noqa: E4
 from mp import (DEFAULT_RELAY_PORT, DEFAULT_ROOM, ITEM_KEYS, PROTOCOL_VERSION, REL_KEYS, clean_state,  # noqa: E402
                 decode, encode, parse_hostport, safe_console, safe_name, valid_anim, valid_name, valid_on_back,
                 valid_rel, valid_room)
-from mp import security  # noqa: E402
+from mp import security, session as mp_session  # noqa: E402
+import charsel  # noqa: E402  (Who am I: ids, the wheel choice, this PC's built packs; no game data)
 
 # The relay's answers that trying again can't change (a wrong or missing room code, kicked, banned, another version):
 # the client stops instead of retrying (retrying wrong codes would lock the friend's whole address out).
@@ -333,6 +338,7 @@ class Peer:
     def __init__(self, pid: int, name: str, bot: bool = False, delay: float = DEFAULT_DELAY):
         self.id, self.name, self.bot = pid, name, bot
         self.buffer = JitterBuffer(delay)
+        self.look: dict | None = None   # Who am I: the look they picked (session.clean_look), if they sent one
 
 
 class Session:
@@ -353,6 +359,8 @@ class Session:
         peer = self.peers.get(pid)
         if peer is None:
             peer = self.peers[pid] = Peer(pid, name, bool(p.get("bot")), self.delay)
+        if "look" in p:   # (welcome peers and join carry it; a bad one is dropped, the peer stays)
+            peer.look = mp_session.clean_look(p.get("look"))
         return peer
 
     def handle(self, msg: dict, now: float) -> None:
@@ -378,6 +386,11 @@ class Session:
                 self._add(msg)
             elif kind == "leave":
                 self.peers.pop(msg.get("id"), None)
+            elif kind == "look":
+                peer = self.peers.get(msg.get("id"))
+                look = mp_session.clean_look(msg.get("look"))
+                if peer is not None and look is not None:
+                    peer.look = look
             elif kind == "state":
                 clean = clean_state(msg)
                 peer = self._add(msg) if clean is not None else None
@@ -428,7 +441,7 @@ class Session:
             out = []
             for peer in self.peers.values():
                 v = {"id": peer.id, "name": peer.name, "bot": peer.bot, "dist": None, "dx": None, "dy": None,
-                     "dz": None, "age": None, "stale": True}
+                     "dz": None, "age": None, "stale": True, "look": peer.look}
                 s = peer.buffer.sample(now)
                 if s is not None:
                     v.update(x=s["x"], y=s["y"], z=s["z"], yaw=s.get("yaw"), speed=s.get("speed"))
@@ -681,8 +694,10 @@ class RelayLink:
 
     def __init__(self, host: str, port: int, name: str, room: str = DEFAULT_ROOM, *, bot: bool = False,
                  on_message=None, log=print, retry: float = 2.0, ping_every: float = 5.0, clock=time.monotonic,
-                 code: str | None = None):
+                 code: str | None = None, look: dict | None = None):
         self.host, self.port, self.name, self.room, self.bot = host, port, name, room, bot
+        self.look = look   # Who am I: said in every hello (features ["look"]); None: a plain visitor, as before
+        self.speaks_look = False   # the relay's welcome said "look": `look` changes can go to it
         self.code = code   # a co-op host's room code (docs/coop.md): proved in the hello, never sent as text
         self.gave_up: str | None = None   # the relay refused us for good (GIVE_UP): no more retries
         self.on_message = on_message
@@ -740,6 +755,7 @@ class RelayLink:
             finally:
                 was = self.connected
                 self.connected, self._writer, self.my_id, self.peer_count = False, None, None, 0
+                self.speaks_look = False
                 try:
                     writer.close()
                 except (OSError, RuntimeError):
@@ -764,6 +780,8 @@ class RelayLink:
         hello = {"type": "hello", "name": self.name, "room": self.room, "version": PROTOCOL_VERSION}
         if self.bot:
             hello["bot"] = True
+        if self.look is not None:
+            hello["features"], hello["look"] = ["look"], self.look
         nonce = cnonce = None
         msg = None
         if self.code:   # (a world with a code asks first: {"type":"challenge"}; the code itself is never sent)
@@ -808,6 +826,7 @@ class RelayLink:
             self.gave_up = self.error = "this host doesn't know the room code: it may not be your friend's world"
             return self.retry
         self.my_id, self.room, self.error = msg.get("id"), msg.get("room", self.room), None
+        self.speaks_look = "look" in (msg.get("features") or [])
         self.peer_count = len(msg.get("peers") or [])
         self.connected, self._writer = True, writer
         self._deliver(msg)
@@ -978,6 +997,11 @@ def valid_actor(name) -> str | None:
     return None
 
 
+def iam_list() -> str:
+    """The characters `iam` takes in the game (ghost mod 0.8.0, `ghost looks`): id/alias/alias,... in wheel order."""
+    return ",".join("/".join((cid,) + charsel.RECIPES[cid].aliases) for cid in charsel.order())
+
+
 class Ghost:
     """--ghost: one peer drawn in your own game as an actor, through the `ghost` command of the ghost mod
     (native/examples/ghost, docs/ghost.md).
@@ -1003,11 +1027,27 @@ class Ghost:
     items (--ghost-items, opt-in; ghost mod 0.6.0, its `ghost` reply says has_items): the ghost holds what they hold.
     `ghost items weapon shield bow mask` goes on each change, every GHOST_ITEMS_EVERY s and on a new game connection
     (items_command; mask: item_mask). Your own `on_back` (from `ghost self`) goes into the state you send.
+
+    looks (--ghost-looks; docs/charsel.md): the shown player as the one they picked on the wheel. Their look id goes
+    through this PC's own catalog (charsel.Looks: what it built, on which free name), never to `ghost spawn` raw; a
+    pick this PC lacks is the Link body, and the log says why. A new pick spawns the new body (the mod replaces the
+    old one). A body the mod gives up on is the Link body for the rest of the session. With a mod that has `iam`
+    (0.8.0, its `ghost` reply says has_iam) the client gives it the list of characters and your own pick
+    (`ghost looks`), and takes what you type there (`iam zelda`: take_iam).
     """
 
     def __init__(self, peer: str | None = None, actor: str | None = None, log=print, clock=time.monotonic,
-                 sync: bool = False, items: bool = False):
+                 sync: bool = False, items: bool = False, looks=None):
         self.peer, self.actor, self.log, self.clock, self.sync = peer, actor, log, clock, sync or items
+        self.looks = looks           # --ghost-looks: charsel.Looks (each player as the one they picked), or None
+        self.actor_now: str | None = None   # the actor of the last `ghost spawn` (None: the mod's default)
+        self.look_note = ""          # why the shown player is the Link body and not their pick ("": it is their pick)
+        self._look_said: tuple | None = None
+        self.has_iam = False         # the mod has `iam` (0.8.0): it gets the list of characters (`ghost looks`)
+        self.my_look = "link"        # your own pick, for `ghost looks` (the Runner sets it)
+        self._looks_sent: list[str] | None = None
+        self._iam_seen: int | None = None
+        self.iam_wanted: str | None = None   # what you typed with `iam`, not yet taken (take_iam)
         self.items = items           # --ghost-items: the ghost holds what the shown player holds (ghost mod 0.6.0)
         self.has_items = False       # ... the mod takes `ghost items` (its `ghost` reply said has_items)
         self._items_sent: list[str] | None = None   # the last `ghost items` sent on this connection
@@ -1057,6 +1097,7 @@ class Ghost:
             self.own = {}
             self._items_sent = None
             self.has_items_rel, self._rel_sent = False, [None, None, None]
+            self.has_iam, self._looks_sent, self._iam_seen = False, None, None
         self._sent, self._now = [], now
         if self.unavailable:
             return []
@@ -1064,6 +1105,11 @@ class Ghost:
         out: list[list[str]] = []
         if self.sync and self.has_self:
             out.append(["ghost", "self"])     # (your own Link, for the state you send: own_state)
+        if self.has_iam:                      # (0.8.0: the characters `iam` takes, and your pick)
+            cmd = ["ghost", "looks", iam_list(), self.my_look]
+            if cmd != self._looks_sent:
+                out.append(cmd)
+                self._looks_sent = cmd
         if v is None:
             if self.in_game:                  # (until the game answers it: a lost batch or a reconnect sends it again)
                 out.append(["ghost", "despawn"])
@@ -1071,11 +1117,16 @@ class Ghost:
                 self.log(f"Ghost: {self.shown_name or 'the other player'} is gone; ghost removed.")
             self.spawned, self.shown, self.shown_name, self._ask_at = False, None, "", None
             self._items_sent = None           # (the despawn removes its items too; the next one gets them anew)
+            self._look_said, self.look_note = None, ""
         else:
-            if not self.spawned or (self._ask_at is not None and now >= self._ask_at):
-                out.append(["ghost", "spawn"] + ([self.actor] if self.actor else []))
+            want = self._want_actor(v)
+            again = self.spawned and want != self.actor_now   # (a new pick, or another player: the new body)
+            if not self.spawned or again or (self._ask_at is not None and now >= self._ask_at):
+                out.append(["ghost", "spawn"] + ([want] if want else []))
                 self.spawned = self.in_game = True
-                self._spawn_at, self._ask_at = now, None
+                self._spawn_at, self._ask_at, self.actor_now = now, None, want
+                if again:
+                    self._items_sent, self._rel_sent = None, [None, None, None]   # (the new body gets them anew)
             if v["id"] != self.shown:
                 self.shown, self.shown_name = v["id"], v["name"]
                 self.heading.reset()
@@ -1108,6 +1159,23 @@ class Ghost:
             out.append(["ghost"])
         self._sent = out
         return out
+
+    def _want_actor(self, v: dict) -> str | None:
+        """The actor for this player: --ghost-looks: their pick through this PC's catalog (else the Link body, with
+        the reason logged once); otherwise the fixed one (--ghost-actor, --ghost-link) or the mod's default."""
+        if self.looks is None:
+            return self.actor
+        actor, note = self.looks.actor(v.get("look"))
+        said = (v["id"], charsel.display(v.get("look")), note)
+        if said != self._look_said:
+            self._look_said, self.look_note = said, note
+            self.log(f"Ghost: {v['name']} is {said[1]}" + (f" (shown as Link: {note})." if note else "."))
+        return actor
+
+    def take_iam(self) -> str | None:
+        """What you typed in the game with `iam` since the last call (the id; None: nothing new)."""
+        got, self.iam_wanted = self.iam_wanted, None
+        return got
 
     def held(self, v: dict) -> dict:
         """--ghost-items: what the shown player holds. A state without an item key (their game didn't answer `ghost
@@ -1195,6 +1263,8 @@ class Ghost:
                     return
                 if req[1:2] == ["items"] and "usage" in text:
                     self.has_items = False    # (it didn't take `ghost items` after all)
+                if req[1:2] == ["looks"]:
+                    self.has_iam = False      # (it didn't take the list after all)
                 if req[1:2] == ["pos"] and len(req) == 8 and ("usage" in text or "animation" in text):
                     self.takes_anim = False   # (it didn't take the name after all: no name from now on)
                 elif req[1:2] == ["pos"] and len(req) == 7 and "usage" in text:
@@ -1210,6 +1280,7 @@ class Ghost:
                 self.takes_speed = r.get("takes_speed") is True
                 self.takes_anim = r.get("takes_anim") is True and self.takes_speed
                 self.has_self = r.get("has_self") is True
+                self._take_iam(r)
                 was, self.has_items = self.has_items, r.get("has_items") is True
                 if r.get("has_items_rel") is not True:
                     self.has_items_rel = False
@@ -1227,12 +1298,33 @@ class Ghost:
                              "sync. Rebuild it: python tools\\build_native.py build")
                 self._check_mod(r, state)
 
+    def _take_iam(self, r: dict) -> None:
+        """A `ghost` reply (0.8.0): has_iam, and a new `iam` you typed (iam_seq went up): kept for take_iam()."""
+        was, self.has_iam = self.has_iam, r.get("has_iam") is True
+        if self.has_iam and not was:
+            self._looks_sent = None           # (send it the list at once)
+        seq, typed = r.get("iam_seq"), r.get("iam")
+        if not self.has_iam or not isinstance(seq, int) or isinstance(seq, bool):
+            return
+        if seq != self._iam_seen:
+            if seq > 0 and isinstance(typed, str) and charsel.find_id(typed):
+                self.iam_wanted = charsel.find_id(typed)
+            self._iam_seen = seq
+
     def _check_mod(self, r: dict, state: str) -> None:
-        """A `ghost` reply: a ghost that stayed resets the back-off; a mod that stopped trying gets asked again."""
+        """A `ghost` reply: a ghost that stayed resets the back-off; a mod that stopped trying gets asked again (a
+        character body it gave up on: the Link body at once, for the rest of the session)."""
         live_s = r.get("live_s")
         if state == "live" and isinstance(live_s, (int, float)) and live_s >= GHOST_STABLE:
             self._ask_wait = GHOST_ASK_AGAIN
         # (wanted false in the reply to the batch that carried the spawn is from before the mod saw it: skip that)
+        late = self._spawn_at is not None and self._now - self._spawn_at >= 1.0
+        if (r.get("wanted") is False and self.spawned and self._ask_at is None and late and self.looks is not None
+                and self.actor_now and self.looks.mark_failed(self.actor_now)):
+            self.log(f"Ghost: that character didn't load in your game ({self.actor_now}); showing "
+                     f"{self.shown_name or 'them'} as Link instead.")
+            self.spawned, self._look_said = False, None
+            return
         if (r.get("wanted") is False and self.spawned and self._ask_at is None and self._spawn_at is not None
                 and self._now - self._spawn_at >= 1.0):
             self._ask_at = self._now + self._ask_wait
@@ -1251,6 +1343,8 @@ class Ghost:
         if self._ask_at is not None:
             return f"showing {self.shown_name} (the mod stopped trying; asking again soon)"
         text = f"showing {self.shown_name}" + (f" ({self.state})" if self.state else "")
+        if self.looks is not None and self._look_said:
+            text += f" as {self._look_said[1]}" + (" (Link body here)" if self.look_note else "")
         if self.sync:
             text += f"; you: {self.own.get('anim', '-')}" if self.has_self else "; no animation sync (old mod)"
         if self.items:
@@ -1266,13 +1360,18 @@ class Runner:
     def __init__(self, relay: tuple[str, int], name: str, room: str = DEFAULT_ROOM, *, game_port: int = GAME_PORT,
                  hz: float = DEFAULT_HZ, delay: float = DEFAULT_DELAY, record: str | None = None,
                  control_factory=None, clock=time.monotonic, log=print, print_every: float | None = None, out=print,
-                 ghost: Ghost | None = None, code: str | None = None):
+                 ghost: Ghost | None = None, code: str | None = None, look: dict | None = None, on_look=None):
         self.clock, self.log, self.out = clock, log, out
         self.ghost = ghost
         self.session = Session(name, room, delay)
         self.game = GameLink(game_port, connect=control_factory, clock=clock, log=log)
         self.relay = RelayLink(relay[0], relay[1], name, room, on_message=self._on_message, log=log, clock=clock,
-                               code=code)
+                               code=code, look=look)
+        self.on_look = on_look       # Who am I: called with a new pick typed in the game (`iam`): keeps it
+        self._look_msg: dict | None = None   # a `look` change to send (one per session.LOOK_EVERY s)
+        self._look_at = -1e9
+        if ghost is not None and look is not None:
+            ghost.my_look = look["id"]
         self.period = 1.0 / hz
         self.record = record
         self.print_every = print_every
@@ -1287,6 +1386,36 @@ class Runner:
 
     def _on_message(self, msg: dict) -> None:
         self.session.handle(msg, self.clock())
+
+    def set_look(self, cid: str) -> bool:
+        """Who am I: a new pick (an id). The next hello carries it; a joined relay that speaks "look" gets a `look`
+        message (at most one every session.LOOK_EVERY s: the newest waits). False: not a character."""
+        if charsel.find_id(cid) != cid:
+            return False
+        look = charsel.look_message(cid)
+        if self.relay.look is not None and look == self.relay.look:
+            return True
+        self.relay.look = look
+        self._look_msg = look
+        if self.ghost is not None:
+            self.ghost.my_look = cid
+        self.log(f"Others see you as {charsel.display(look)} now.")
+        if self.on_look is not None:
+            try:
+                self.on_look(cid)
+            except (OSError, charsel.CharselError) as e:
+                self.log(f"Your pick couldn't be kept for next time: {e}")
+        return True
+
+    def _send_look(self) -> None:
+        msg = self._look_msg
+        if msg is None or not self.relay.connected or not self.relay.speaks_look:
+            return
+        now = self.clock()
+        if now - self._look_at < mp_session.LOOK_EVERY:
+            return
+        if self.relay.send({"type": "look", "look": msg}):
+            self._look_msg, self._look_at = None, now
 
     def request_goto(self, pid: int) -> None:
         """Ask for a teleport to this peer on the next tick (any thread)."""
@@ -1362,6 +1491,11 @@ class Runner:
         pos, cam = await loop.run_in_executor(executor, self.game.poll, extra)
         if self.ghost is not None:
             self.ghost.replies(self.game.extra_replies)
+            typed = self.ghost.take_iam()
+            if typed and self.relay.look is not None:
+                self.set_look(typed)
+        if self.relay.look is not None:
+            self._send_look()
         msg = self.session.update_local(pos, cam, self.clock(), self.ghost.own_state() if self.ghost else None)
         if msg is not None:
             if rec is not None:
@@ -1398,6 +1532,8 @@ class Runner:
         else:
             relay = f"connecting to {r.host}:{r.port}" + (f" ({r.error})" if r.error else "")
         text = f"Game: {game}\nRelay: {relay}"
+        if r.look is not None:
+            text += f"\nYou: {charsel.display(r.look)} (others see you as this)"
         if self.ghost is not None:
             text += f"\nGhost: {self.ghost.status_text()}"
         return text
@@ -1581,8 +1717,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="show them with the Link body (build and deploy it first: tools/mp/ghost_link_pack.py; "
                          "implies --ghost-sync; not yet tested in the game)")
     ap.add_argument("--ghost-items", action="store_true",
-                    help="the ghost also holds what they hold (weapon, shield, bow); needs --ghost-link and ghost mod "
-                         "0.6.0 on your PC (implies --ghost-sync; docs/ghost.md)")
+                    help="the ghost also holds what they hold (weapon, shield, bow); needs --ghost-link (or "
+                         "--ghost-looks) and ghost mod 0.6.0 on your PC (implies --ghost-sync; docs/ghost.md)")
+    ap.add_argument("--look", metavar="NAME",
+                    help="who you are for the others (zelda, goron, bokoblin...: python tools\\charsel.py list; "
+                         "default: your pick on the wheel, else Link; docs/charsel.md)")
+    ap.add_argument("--no-look", action="store_true", help="don't say who you are (join as before, as a visitor)")
+    ap.add_argument("--ghost-looks", nargs="?", const="", metavar="DIR",
+                    help="show each player as the one they picked, from the characters you built (python "
+                         "tools\\charsel.py build; DIR: their folder, default your wheel's or out\\charsel-packs); "
+                         "anyone else is the Link body. Implies --ghost-link")
     args = ap.parse_args(argv)
     safe_console()
     name = valid_name(args.name) if args.name is not None else default_name()
@@ -1602,16 +1746,28 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("bad --ghost-peer (1-20 letters, digits, space, _ . ' -)")
     if args.ghost_actor is not None and valid_actor(args.ghost_actor) is None:
         ap.error("bad --ghost-actor (an actor name: letters, digits and _, up to 63)")
-    if args.ghost_link and args.ghost_actor is not None:
-        ap.error("--ghost-link and --ghost-actor both pick the actor: use one")
+    if (args.ghost_link or args.ghost_looks is not None) and args.ghost_actor is not None:
+        ap.error("--ghost-link (or --ghost-looks) and --ghost-actor both pick the actor: use one")
+    choice = charsel.load_choice()
+    look_id = charsel.find_id(args.look) if args.look is not None else choice["look"]
+    if look_id is None:
+        ap.error(f"no character {args.look!r}: pick one of {', '.join(charsel.order())}")
+    look = None if args.no_look else charsel.look_message(look_id)
+    looks = None
+    if args.ghost_looks is not None:
+        args.ghost_link = True
+        folder = args.ghost_looks or choice["packs"] or str(charsel.DEFAULT_OUT)
+        looks = charsel.Looks(charsel.load_catalog(folder), GHOST_LINK_ACTOR)
+        print(f"--ghost-looks: {len(looks.slots)} characters built here ({folder}); a pick this PC lacks shows as "
+              "the Link body.")
     ghost = None
     sync = args.ghost_sync or args.ghost_link or args.ghost_items
     if args.ghost or args.ghost_peer is not None or args.ghost_actor is not None or sync:
         ghost = Ghost(args.ghost_peer, GHOST_LINK_ACTOR if args.ghost_link else args.ghost_actor, sync=sync,
-                      items=args.ghost_items)
+                      items=args.ghost_items, looks=looks)
     if args.ghost_items and not args.ghost_link:
-        print("--ghost-items: only the Link body has the hand bones the items go on; without --ghost-link the ghost "
-              "holds nothing.")
+        print("--ghost-items: the Link body and the people's bodies have the hand bones the items go on; without "
+              "--ghost-link (or --ghost-looks) the stand-in holds nothing.")
     if args.ghost_link:
         print("--ghost-link: the ghost looks like Link only with the Link body deployed (build it with "
               "python tools\\mp\\ghost_link_pack.py build; docs/ghost.md). Without it you see the Sheikah man. "
@@ -1624,13 +1780,15 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError:
             print("No tkinter in this Python; printing instead of a window.")
             ui = False
+    keep = None if args.look is not None else (lambda cid: charsel.save_choice(cid))   # (`iam` in the game: kept)
     runner = Runner(relay, name, args.room, code=args.code, game_port=args.game_port, hz=args.hz, delay=args.delay,
-                    record=args.record, print_every=None if ui else 1.0, ghost=ghost)
+                    record=args.record, print_every=None if ui else 1.0, ghost=ghost, look=look, on_look=keep)
     try:
         runner.open_record()
     except OSError as e:
         ap.error(f"can't write --record {args.record}: {e.strerror or e}")
-    print(f"{name} joining room {args.room} on {relay[0]}:{relay[1]}; game on port {args.game_port}.")
+    print(f"{name} joining room {args.room} on {relay[0]}:{relay[1]}; game on port {args.game_port}."
+          + (f" Others see you as {charsel.display(look)}." if look else ""))
     if not ui:
         try:
             asyncio.run(runner.run())

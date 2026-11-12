@@ -103,8 +103,6 @@ class InspectTests(unittest.TestCase):
             "UI layouts": ({"content/Layout/Common.sblarc": b"x", "content/Layout/Title.bflyt": b"x"},
                            "2 UI layout"),
             "effects": ({"content/Effect/Fire.sesetlist": b"x"}, "1 effect"),
-            "event flows": ({"content/EventFlow/Demo.bfevfl": b"x", "aoc/0010/EventFlow/Dlc.bfevfl": b"x"},
-                            "2 event flow"),
             "Havok physics": ({"content/Physics/RigidBody/A.hkrb": b"x"}, "1 Havok physics"),
             "only the RSTB": ({rstb: b"x"}, "only the size table (RSTB)"),
         }
@@ -296,8 +294,8 @@ class InspectTests(unittest.TestCase):
         self.assertIn("install it in UKMM (Switch mode)", kinds["UKMM package"].detail)
 
     def test_packed_bnp(self):
-        """A packed Switch BNP (info.json + logs/) works through modman add (tools/bnp.py installs it); a Wii U one
-        still needs UKMM or BCML (made-up mods)."""
+        """A packed Switch BNP (info.json + logs/) works through modman add (tools/bnp.py installs it); a Wii U one is
+        converted first, and what doesn't convert is left out: partial (made-up mods)."""
         cases = {"switch": {"01007EF00011E000/romfs/Pack/A.pack": b"x"}, "wiiu": {"content/Pack/A.pack": b"x"}}
         for platform, files in cases.items():
             with self.subTest(platform=platform), tempfile.TemporaryDirectory() as d:
@@ -310,9 +308,24 @@ class InspectTests(unittest.TestCase):
                     self.assertEqual(mi.overall(findings), "works as is")
                     continue
                 self.assertEqual([(f.kind, f.platform, f.verdict) for f in findings],
-                                 [("BCML mod (BNP)", platform, mi.MERGE)])
-                self.assertIn("install it in UKMM or BCML (Switch mode)", findings[0].detail)
-                self.assertEqual(mi.overall(findings), "works after merging in UKMM (Switch mode)")
+                                 [("BCML mod (BNP)", platform, mi.PARTIAL)])
+                self.assertIn("tools/modman.py add installs it (tools/bnp.py) as a Switch one", findings[0].detail)
+                self.assertEqual(mi.overall(findings), mi.VERDICTS[mi.PARTIAL])
+
+    def test_wiiu_event_flows_are_used_as_they_are(self):
+        # BotW's event flows are little-endian on the Wii U too: wiiu_convert copies them (is_le_event_flow)
+        flows = {"content/EventFlow/A.bfevfl": b"x", "aoc/0010/Event/B.bfevtm": b"x"}
+        cases = {"only event flows": ({}, mi.WORKS, "2 file(s), all event flows"),
+                 "with audio": ({"content/Sound/C.bfstm": b"x"}, mi.LATER, "its 2 event flow(s) are used as they are"),
+                 "with data": ({"content/Actor/C.byml": b"x"}, mi.CONVERT, "Used as they are: 2 event flow(s)")}
+        for name, (more, verdict, want) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                findings = mi.inspect(mi.open_source(make(Path(d), {**flows, **more})))
+                f = {x.kind: x for x in findings}["Wii U game data"]
+                self.assertEqual(f.verdict, verdict, f.detail)
+                self.assertIn(want, f.detail)
+                if verdict == mi.WORKS:
+                    self.assertEqual(mi.overall(findings), mi.VERDICTS[mi.WORKS])
 
     def test_bnp_logs(self):
         """Every BCML 3 log is merged (works); a BCML 2 log (savedata.sarc, deepmerge.yml, texts_*) isn't: partial

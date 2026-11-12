@@ -15,6 +15,8 @@
     python tools/mp/bot.py --items "Weapon_Sword_001/Weapon_Shield_001/Weapon_Bow_001/0:5,-/-/-/0:3"
                                                             ... changing in a loop (WEAPON/SHIELD/BOW/MASK:seconds,
                                                             - for none)
+    python tools/mp/bot.py --look zelda                     who it is for the others (Who am I, docs/charsel.md)
+    python tools/mp/bot.py --look "zelda:5,goron:5,bokoblin:5"   ... changing in a loop (NAME:seconds, at least 2)
 
 It joins the relay like client.py (marked as a bot) and sends 20 states a second, each with its speed measured from
 its own positions, as client.py does.
@@ -34,7 +36,9 @@ if _TOOLS not in sys.path:
     sys.path.insert(0, _TOOLS)
 from mp import (DEFAULT_RELAY_PORT, DEFAULT_ROOM, clean_state, parse_hostport, safe_console, valid_anim,  # noqa: E402
                 valid_name, valid_on_back, valid_room)
+from mp import session as mp_session  # noqa: E402
 from mp.client import DEFAULT_HZ, RelayLink, Session, SpeedMeter, _sleep, interpolate  # noqa: E402
+import charsel  # noqa: E402
 
 
 MAX_GAP = 1.0                 # no position for longer than this (s): a loading screen or a pause. Jump, don't glide.
@@ -263,6 +267,45 @@ class ItemScript:
         return w, sh, b, m
 
 
+class LookScript:
+    """--look: who it is for the others, one pick or a loop of them (NAME:SECONDS, each at least the relay's
+    session.LOOK_EVERY). Example: "zelda:5,goron:5,bokoblin:5"."""
+
+    def __init__(self, steps: list[tuple[str, float]]):
+        if not steps:
+            raise ValueError("a --look script needs at least one character")
+        self.steps = steps
+        self.duration = sum(d for _, d in steps)
+
+    @classmethod
+    def parse(cls, text: str) -> "LookScript":
+        steps = []
+        for part in text.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            name, _, secs = part.partition(":")
+            cid = charsel.find_id(name)
+            if cid is None:
+                raise ValueError(f"no character {name!r} (one of {', '.join(charsel.order())})")
+            try:
+                d = float(secs) if secs else 3600.0
+            except ValueError:
+                raise ValueError(f"bad --look step {part!r} (NAME:SECONDS)") from None
+            if not mp_session.LOOK_EVERY <= d <= 3600:
+                raise ValueError(f"bad --look step {part!r} ({mp_session.LOOK_EVERY:g}-3600 s)")
+            steps.append((cid, d))
+        return cls(steps)
+
+    def at(self, elapsed: float) -> str:
+        e = elapsed % self.duration
+        for cid, d in self.steps:
+            if e < d:
+                return cid
+            e -= d
+        return self.steps[-1][0]
+
+
 def valid_item(name) -> bool:
     """An item's actor name as the state carries it: letters, digits and _, 1-63."""
     return isinstance(name, str) and 0 < len(name) <= 63 and all(c.isascii() and (c.isalnum() or c == "_")
@@ -294,17 +337,21 @@ async def run_bot(relay: tuple[str, int], name: str = "bot", room: str = DEFAULT
                   center: tuple[float, float, float] | None = None, absolute: bool = False, hz: float = DEFAULT_HZ,
                   stop: asyncio.Event | None = None, clock=time.monotonic, log=print, anims: AnimScript | None = None,
                   weapon: str | None = None, shield: str | None = None, bow: str | None = None,
-                  on_back: int | None = None, items: ItemScript | None = None, send_on_back: bool = True) -> int:
+                  on_back: int | None = None, items: ItemScript | None = None, send_on_back: bool = True,
+                  looks: LookScript | None = None) -> int:
     """Send states until `stop` is set. Returns how many were sent. anims: names to send (--anim); weapon, shield,
     bow: item names to send (--weapon, --shield, --bow); on_back: the mask to send (--on-back); items: what it holds,
     changing in a loop (--items: replaces weapon, shield, bow and on_back; each change is logged with the clock's
     time: "items step K: W S B mask M at T"); send_on_back False: never send on_back (a client older than 0.6.0,
-    --no-on-back)."""
+    --no-on-back); looks: who it is for the others (--look; each change is logged: "look NAME at T")."""
     path = path or CirclePath()
     stop = stop or asyncio.Event()
     session = Session(name, room)
+    look_t0 = clock()
+    look_now = looks.at(0.0) if looks is not None else None
     link = RelayLink(relay[0], relay[1], name, room, bot=True, log=log, clock=clock,
-                     on_message=lambda m: session.handle(m, clock()))
+                     on_message=lambda m: session.handle(m, clock()),
+                     look=charsel.look_message(look_now) if look_now else None)
     task = asyncio.create_task(link.run(stop))
     t0 = None
     following = None
@@ -317,6 +364,13 @@ async def run_bot(relay: tuple[str, int], name: str = "bot", room: str = DEFAULT
     try:
         while not stop.is_set():
             now = clock()
+            if looks is not None:
+                cid = looks.at(now - look_t0)
+                if cid != look_now and link.connected and link.speaks_look:
+                    msg = charsel.look_message(cid)
+                    if link.send({"type": "look", "look": msg}):
+                        look_now, link.look = cid, msg
+                        log(f"look {cid} at {now:.3f}")
             c = center
             if absolute and isinstance(path, ReplayPath):
                 c = None
@@ -406,6 +460,9 @@ def main(argv: list[str] | None = None) -> int:
                          '"Weapon_Sword_001/Weapon_Shield_001/Weapon_Bow_001/0:5,-/-/-/0:3"')
     ap.add_argument("--no-on-back", action="store_true",
                     help="never send on_back (acts as a client older than 0.6.0: the receiver guesses the mask)")
+    ap.add_argument("--look", metavar="SCRIPT",
+                    help='who it is for the others (Who am I): a character ("zelda") or a loop of them '
+                         '("zelda:5,goron:5,bokoblin:5", NAME:seconds, at least 2 s each)')
     args = ap.parse_args(argv)
     safe_console()
     if valid_name(args.name) is None:
@@ -429,6 +486,7 @@ def main(argv: list[str] | None = None) -> int:
         path = ReplayPath.load(args.replay) if args.replay else CirclePath(args.radius, args.speed)
         anims = AnimScript.parse(args.anim) if args.anim else None
         items = ItemScript.parse(args.items) if args.items else None
+        looks = LookScript.parse(args.look) if args.look else None
     except (ValueError, OSError) as e:
         ap.error(str(e))
     print(f"Bot {args.name} joining room {args.room} on {relay[0]}:{relay[1]}. Ctrl+C stops it.")
@@ -438,7 +496,7 @@ def main(argv: list[str] | None = None) -> int:
         asyncio.run(run_bot(relay, valid_name(args.name), args.room, path=path,
                             center=tuple(args.at) if args.at else None, absolute=args.absolute, hz=args.hz,
                             anims=anims, weapon=args.weapon, shield=args.shield, bow=args.bow,
-                            on_back=args.on_back, items=items, send_on_back=not args.no_on_back))
+                            on_back=args.on_back, items=items, send_on_back=not args.no_on_back, looks=looks))
     except KeyboardInterrupt:
         pass
     print("Bot stopped.")

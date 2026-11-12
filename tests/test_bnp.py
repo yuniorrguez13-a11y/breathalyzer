@@ -1908,6 +1908,26 @@ class DownloadsInModman(DownloadFiles, Base):
         self.assertIn("Pack/Title.pack looks like a whole copy from another game version: the 1 file(s) it lacks "
                       "(Other.txt) come from your game. It changes 1 file(s) (Actor/Pack/Inner.sbactorpack)", text)
 
+    def test_map_files_and_the_mods_own_files_stay_out_of_a_filled_pack(self):
+        # RotP's TitleBG.pack has no Map/ files (its maps are its DLC files): filling the game's in would hide them
+        game = write(self.tmp / "game-romfs", {"Pack/TitleBG.pack": sarc({
+            "Map/MainField/A-1/A-1_Static.smubin": "game map", "Model/Loose.txt": "game loose",
+            "EventFlow/New.bfevfl": "game new", "Kept.txt": "game kept"})})
+        mod = write(self.tmp / "rotp", {"Pack/TitleBG.pack": sarc({"Kept.txt": "mod kept"}),
+                                        "Model/Loose.txt": "mod loose"})
+        notes = bnp.fill_old_packs(str(mod), str(game))
+        stored = bnp.Blob((mod / "Pack" / "TitleBG.pack").read_bytes()).open()
+        self.assertEqual(sorted(stored), ["EventFlow/New.bfevfl", "Kept.txt"])
+        self.assertEqual(stored["Kept.txt"][0], b"mod kept")
+        self.assertIn("the 1 file(s) it lacks (EventFlow/New.bfevfl) come from your game", notes[0])
+        self.assertIn("The 2 map or loose file(s) it leaves out stay out", notes[0])
+        # a pack that only leaves out maps is used as it is, with nothing said
+        only = write(self.tmp / "maps-only", {"Pack/TitleBG.pack": sarc({"Kept.txt": "a", "EventFlow/New.bfevfl": "b",
+                                                                         "Model/Loose.txt": "c"})})
+        before = (only / "Pack" / "TitleBG.pack").read_bytes()
+        self.assertEqual(bnp.fill_old_packs(str(only), str(game)), [])
+        self.assertEqual((only / "Pack" / "TitleBG.pack").read_bytes(), before)
+
     def test_bare_wiiu_folders_added_directly_are_refused(self):
         mod = write(self.tmp / "downloads" / "WiiU Bare", {"Pack/Title.pack": wc.sarc_build([("A.txt", b"a")], wc.BE)})
         with self.assertRaises(mm.ModmanError) as cm:

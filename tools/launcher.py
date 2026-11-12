@@ -45,7 +45,7 @@ if TOOLS not in sys.path:
 
 APP_NAME = "Breathalyzer"
 APP_ID = "giruka.Breathalyzer"    # Windows groups the launcher's windows on the taskbar by this
-WINDOW_TITLE = "Breathalyzer"     # (a second start finds the open window by it)
+WINDOW_TITLE = "Breathalyzer"     # (a second start finds the open window by window.json, not by this)
 SETTINGS_FILE = "launcher.json"
 ENV_HOME = "BREATHALYZER_HOME"
 FORMAT = 1
@@ -422,8 +422,9 @@ def game_running() -> bool:
 
 
 def single_instance(key: str):
-    """One launcher window per settings folder: a named mutex. Returns its handle (keep it until the end), or None
-    when another launcher holds it: that one's window is then brought to the front. Off Windows: always a handle."""
+    """One launcher window per settings folder (key): a named mutex. Returns its handle (keep it until the end), or
+    None when another launcher holds it: that one's window is then brought to the front (bring_to_front: only that
+    window, and never while the game is open). Off Windows: always a handle."""
     w = _win()
     if w is None:
         return object()
@@ -435,22 +436,92 @@ def single_instance(key: str):
     h = k.CreateMutexW(None, False, name)
     if h and ctypes.get_last_error() == 183:   # ERROR_ALREADY_EXISTS
         k.CloseHandle(wintypes.HANDLE(h))
-        bring_to_front(WINDOW_TITLE)
+        bring_to_front(key)
         return None
     return h or object()
 
 
-def bring_to_front(title: str) -> bool:
+# The open launcher window says which window it is (its process and window handle) and whether the game is open, in
+# this file in its settings folder: a second start brings only that window up, and never while the game is open.
+WINDOW_FILE = "window.json"
+
+
+def publish_window(folder: str, pid: int, hwnd: int, playing: bool) -> None:
+    path = os.path.join(folder, WINDOW_FILE)
+    tmp = f"{path}.{pid}.tmp"
+    with contextlib.suppress(OSError):
+        os.makedirs(folder, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"pid": int(pid), "hwnd": int(hwnd), "playing": bool(playing)}, f)
+        os.replace(tmp, path)
+
+
+def forget_window(folder: str, pid: int) -> None:
+    """The window closes: its line goes (only its own: a newer launcher's stays)."""
+    info = read_window(folder)
+    if info is not None and info["pid"] == pid:
+        with contextlib.suppress(OSError):
+            os.remove(os.path.join(folder, WINDOW_FILE))
+
+
+def read_window(folder: str) -> dict | None:
+    try:
+        with open(os.path.join(folder, WINDOW_FILE), encoding="utf-8") as f:
+            info = json.loads(f.read(4096))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(info, dict) or type(info.get("pid")) is not int or type(info.get("hwnd")) is not int \
+            or info["hwnd"] <= 0:
+        return None
+    return {"pid": info["pid"], "hwnd": info["hwnd"], "playing": info.get("playing") is not False}
+
+
+def window_owner(hwnd: int) -> tuple[int, str] | None:
+    """(the process that owns this window, its window class), or None when there is no such window."""
+    w = _win()
+    if w is None:
+        return None
+    ctypes, wintypes = w
+    u = ctypes.windll.user32
+    h = wintypes.HWND(hwnd)
+    if not u.IsWindow(h):
+        return None
+    pid = wintypes.DWORD()
+    u.GetWindowThreadProcessId(h, ctypes.byref(pid))
+    buf = ctypes.create_unicode_buffer(64)
+    u.GetClassNameW(h, buf, 64)
+    return pid.value, buf.value
+
+
+def show_window(hwnd: int) -> bool:
+    """Restore a minimized window and put it in front."""
     w = _win()
     if w is None:
         return False
-    ctypes, _ = w
+    ctypes, wintypes = w
     u = ctypes.windll.user32
-    hwnd = u.FindWindowW("TkTopLevel", title)   # (Tk's own window class: never a folder window of that name)
-    if not hwnd:
+    h = wintypes.HWND(hwnd)
+    if u.IsIconic(h):
+        u.ShowWindow(h, 9)   # SW_RESTORE
+    return bool(u.SetForegroundWindow(h))
+
+
+def bring_to_front(key: str, running=None) -> bool:
+    """A second start: the open launcher window of this settings folder to the front. Only the window its
+    window.json names (owned by that process, a Tk window: never another window called Breathalyzer), and not at
+    all while the game is open (the window stays hidden while you play; a .breath handed over waits for after)."""
+    info = read_window(key)
+    if info is None or info["playing"]:
         return False
-    u.ShowWindow(hwnd, 9)   # SW_RESTORE
-    return bool(u.SetForegroundWindow(hwnd))
+    try:
+        if (running or game_running)():
+            return False
+    except Exception:  # (can't tell: then the game may be open, and the window stays where it is)
+        return False
+    owner = window_owner(info["hwnd"])
+    if owner is None or owner != (info["pid"], "TkTopLevel"):
+        return False
+    return show_window(info["hwnd"])
 
 
 def set_app_id(app_id: str = APP_ID) -> None:
@@ -960,20 +1031,51 @@ def fps_label(value: str | None) -> str:
     return dict(FPS_CHOICES).get(value or "", "")
 
 
-def read_fps(install: str) -> tuple[bool, str | None, str | None]:
-    """(savagewind.ini is there, the frame rate's value from FPS_CHOICES or None, what the file says). A file
-    without the line means the game's default, 60."""
+INI_OTHER_FORMAT = ("Savage Wind's settings file is in a format Breathalyzer doesn't change: use F1, Video in the "
+                    "game.")
+
+
+def ini_format_problem(data: bytes) -> str | None:
+    """Why Breathalyzer leaves this savagewind.ini alone, or None: one saved as UTF-16 ("Unicode" in Notepad), or
+    with NUL bytes, would be damaged by a plain-text line (and the game may then reset every setting)."""
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff") or b"\x00" in data:
+        return INI_OTHER_FORMAT
+    return None
+
+
+def fps_info(install: str) -> tuple[bool, str | None, str | None, str]:
+    """(savagewind.ini is there, the frame rate's value from FPS_CHOICES or None, what the file says, why it can't
+    be read or changed: "" when it can). A file without the line means the game's default, 60."""
     path = os.path.join(install, INI)
     if not os.path.isfile(path):
-        return False, None, None
-    raw = frame_rate(install)
-    return True, fps_value(raw) if raw is not None else FPS_DEFAULT, raw
+        return False, None, None, ""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(MAX_INI + 1)
+    except OSError as e:
+        return True, None, None, f"Savage Wind's settings file can't be read: {e.strerror or e}."
+    problem = ini_format_problem(data) or ("Savage Wind's settings file is far too big: it may be damaged."
+                                           if len(data) > MAX_INI else "")
+    if problem:
+        return True, None, None, problem
+    found = [m.group("value").decode("utf-8", "replace").strip() for m in FPS_LINE.finditer(data)]
+    found = [v for v in found if v]
+    raw = found[-1] if found else None
+    return True, fps_value(raw) if raw is not None else FPS_DEFAULT, raw, ""
+
+
+def read_fps(install: str) -> tuple[bool, str | None, str | None]:
+    """(savagewind.ini is there, the frame rate's value from FPS_CHOICES or None, what the file says). A file
+    without the line means the game's default, 60; one that can't be read or is in another format gives
+    (True, None, None): fps_info says why."""
+    return fps_info(install)[:3]
 
 
 def set_frame_rate(install: str, value: str, running=None) -> bool:
     """Write the frame rate into savagewind.ini: only the frame_rate line changes (every other byte stays as it is;
-    a file without the line gets it at the end). Only while Savage Wind is closed (it writes the file itself). The
-    file as it was is kept once, as savagewind.ini.breathalyzer-backup. True when the file changed."""
+    a file without the line gets it at the end). Only while Savage Wind is closed (it writes the file itself), and
+    only in a plain-text file (never one saved as UTF-16). The file as it was is kept once, as
+    savagewind.ini.breathalyzer-backup. True when the file changed."""
     if value not in {k for k, _ in FPS_CHOICES}:
         raise FpsError(f"{value!r} isn't a frame rate Savage Wind has.")
     running = running or game_running
@@ -989,6 +1091,9 @@ def set_frame_rate(install: str, value: str, running=None) -> bool:
         raise FpsError(f"Savage Wind's settings file can't be read: {e.strerror or e}.") from None
     if len(data) > MAX_INI:
         raise FpsError("Savage Wind's settings file is far too big: it may be damaged.")
+    problem = ini_format_problem(data)
+    if problem:
+        raise FpsError(problem)
     new_value = value.encode("ascii")
     if FPS_LINE.search(data):
         new = FPS_LINE.sub(lambda m: m.group("head") + new_value + m.group("tail"), data)
@@ -1206,9 +1311,30 @@ def _read_default(reg, root, path: str) -> str | None:
         return None
 
 
-def breath_state(base: str = CLASSES, command: str | None = None) -> str | None:
+# Where Explorer keeps the program the player picked with "Always use this app" (it wins over Software\Classes)
+FILE_EXTS = r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts"
+
+
+def breath_choice(choice_base: str = FILE_EXTS) -> str | None:
+    """The program Explorer opens .breath files with because the player picked it ("Always use this app"): its
+    ProgId, or None when there is no such choice. Only reads."""
+    try:
+        reg = _winreg()
+    except OSError:
+        return None
+    try:
+        with reg.OpenKey(reg.HKEY_CURRENT_USER, f"{choice_base}\\{BREATH_EXT}\\UserChoice") as k:
+            value, _ = reg.QueryValueEx(k, "ProgId")
+    except OSError:
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def breath_state(base: str = CLASSES, command: str | None = None, choice_base: str | None = None) -> str | None:
     """Whether a double-click on a .breath opens Breathalyzer: "here" (this copy), "other" (another Breathalyzer
-    folder, an older one), None (not set, or set to another program). Only reads."""
+    folder, an older one), "taken" (registered, but the player picked another program for .breath files, which
+    wins), None (not set, or set to another program). choice_base: where Explorer's choice is (tests: under their
+    own key; default: the real one for the real Software\\Classes, else <base's parent>\\FileExts). Only reads."""
     try:
         reg = _winreg()
     except OSError:
@@ -1219,6 +1345,11 @@ def breath_state(base: str = CLASSES, command: str | None = None) -> str | None:
     have = _read_default(reg, root, f"{base}\\{BREATH_PROGID}\\shell\\open\\command")
     if not have:
         return None
+    if choice_base is None:
+        choice_base = FILE_EXTS if base == CLASSES else base.rsplit("\\", 1)[0] + "\\FileExts"
+    picked = breath_choice(choice_base)
+    if picked is not None and picked != BREATH_PROGID:
+        return "taken"
     want = command if command is not None else breath_command()[0]
     return "here" if os.path.normcase(have) == os.path.normcase(want) else "other"
 
