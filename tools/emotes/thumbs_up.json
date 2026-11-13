@@ -1,0 +1,25 @@
+{
+  "id": "thumbs_up", "name": "Thumbs up", "aliases": ["like", "thumbsup", "nice"],
+  "page": "hello", "slot": 2, "by": "giruka",
+  "about": "Right arm out to the side and forward, fist with the thumb up, a firm nod, held for a second.",
+  "kind": "keys", "frames": 60, "loop": false, "face": "smile", "morph": 6, "fallback": "TalkYes",
+  "poses": {
+    "like": {"aim": {"Arm_1_R": [-0.6, -0.3, 0.74], "Arm_2_R": [-0.4, 0.3, 0.87], "Wrist_R": [-0.3, 0, 0.95]},
+             "palm": {"Wrist_R": [1, 0, 0]}, "hand": {"R": "thumb_up"}, "turn": {"Spine_1": [0, 6, 0]}}
+  },
+  "keys": [
+    {"f": 0},
+    {"f": 12, "pose": "like"},
+    {"f": 18, "turn": {"Head": [14, 0, 0]}},
+    {"f": 24, "turn": {"Head": [-4, 0, 0]}},
+    {"f": 30, "turn": {"Head": [10, 0, 0]}},
+    {"f": 36, "turn": {"Head": [0, 0, 0]}},
+    {"f": 48},
+    {"f": 60, "reset": true}
+  ],
+  "expect": [
+    {"f": 30, "thumb": ["R", "up"]},
+    {"f": 30, "in_front": ["Wrist_R", "Spine_2"]},
+    {"f": 30, "below": ["Wrist_R", "Head"]}
+  ]
+}

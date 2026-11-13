@@ -1,0 +1,25 @@
+{
+  "id": "thumbs_down", "name": "Thumbs down", "aliases": ["dislike", "thumbsdown", "boo"],
+  "page": "hello", "slot": 3, "by": "giruka",
+  "about": "Arm forward, thumb down, a slow head shake, the shoulders drop.",
+  "kind": "keys", "frames": 60, "loop": false, "face": "frown", "morph": 6,
+  "poses": {
+    "boo": {"aim": {"Arm_1_R": [-0.3, -0.5, 0.8], "Arm_2_R": [0, -0.05, 1], "Wrist_R": [0, 0, 1]},
+            "palm": {"Wrist_R": [-1, 0, 0]}, "hand": {"R": "thumb_up"},
+            "turn": {"Spine_1": [6, 4, 0], "Clavicle_L": [0, 0, -6], "Clavicle_R": [0, 0, 6], "Head": [8, 0, 0]}}
+  },
+  "keys": [
+    {"f": 0},
+    {"f": 12, "pose": "boo"},
+    {"f": 20, "turn": {"Head": [8, -14, 0]}},
+    {"f": 28, "turn": {"Head": [8, 14, 0]}},
+    {"f": 36, "turn": {"Head": [8, -14, 0]}},
+    {"f": 44, "turn": {"Head": [8, 0, 0]}},
+    {"f": 50},
+    {"f": 60, "reset": true}
+  ],
+  "expect": [
+    {"f": 30, "thumb": ["R", "down"]},
+    {"f": 30, "in_front": ["Wrist_R", "Spine_2"]}
+  ]
+}

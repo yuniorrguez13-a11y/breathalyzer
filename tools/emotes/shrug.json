@@ -1,0 +1,21 @@
+{
+  "id": "shrug", "name": "Shrug", "aliases": ["idk", "dunno", "whatever"],
+  "page": "hello", "slot": 6, "by": "giruka",
+  "about": "Palms up, shoulders up, a head tilt, elbows out.",
+  "kind": "keys", "frames": 45, "loop": false, "face": "surprise", "morph": 6,
+  "keys": [
+    {"f": 0},
+    {"f": 12,
+     "aim": {"Arm_1_R": [-0.45, -0.88, 0.15], "Arm_2_R": [-0.55, 0.05, 0.85], "Wrist_R": [-0.55, 0.2, 0.8],
+             "Arm_1_L": [0.45, -0.88, 0.15], "Arm_2_L": [0.55, 0.05, 0.85], "Wrist_L": [0.55, 0.2, 0.8]},
+     "palm": {"Wrist_R": [0, 1, 0], "Wrist_L": [0, 1, 0]}, "hand": {"R": "open", "L": "open"},
+     "turn": {"Clavicle_R": [0, 0, -14], "Clavicle_L": [0, 0, 14], "Head": [0, 0, 12]}},
+    {"f": 32},
+    {"f": 45, "reset": true}
+  ],
+  "expect": [
+    {"f": 20, "above": ["Wrist_R", "Skl_Root"]},
+    {"f": 20, "in_front": ["Wrist_R", "Spine_2"]},
+    {"f": 20, "in_front": ["Wrist_L", "Spine_2"]}
+  ]
+}

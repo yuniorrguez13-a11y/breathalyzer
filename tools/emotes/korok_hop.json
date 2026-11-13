@@ -1,0 +1,29 @@
+{
+  "id": "korok_hop", "name": "Korok hop", "aliases": ["yahaha", "hop", "korok"],
+  "page": "dances", "slot": 7, "by": "giruka",
+  "about": "Happy hops on the spot, arms flung up on every \"Yahaha!\" jump.",
+  "kind": "keys", "frames": 24, "loop": true, "face": "smile", "morph": 6,
+  "poses": {
+    "crouch": {"hips": [0, -0.1, 0],
+               "aim": {"Arm_1_R": [-0.35, -0.75, 0.4], "Arm_2_R": [-0.2, -0.3, 0.9],
+                       "Arm_1_L": [0.35, -0.75, 0.4], "Arm_2_L": [0.2, -0.3, 0.9]},
+               "hand": {"R": "fist", "L": "fist"}, "turn": {"Spine_1": [12, 0, 0], "Head": [-8, 0, 0]}},
+    "air":    {"hips": [0, 0.16, 0], "step": {"Ankle_L": [0, 0.2, 0], "Ankle_R": [0, 0.2, 0]},
+               "aim": {"Arm_1_R": [-0.5, 0.85, 0.1], "Arm_2_R": [-0.45, 0.9, 0.05], "Wrist_R": [-0.4, 0.9, 0],
+                       "Arm_1_L": [0.5, 0.85, 0.1], "Arm_2_L": [0.45, 0.9, 0.05], "Wrist_L": [0.4, 0.9, 0]},
+               "palm": {"Wrist_R": [0, 0, 1], "Wrist_L": [0, 0, 1]}, "hand": {"R": "open", "L": "open"},
+               "turn": {"Spine_1": [-6, 0, 0], "Head": [-14, 0, 0]}}
+  },
+  "keys": [
+    {"f": 0, "pose": "crouch"},
+    {"f": 9, "pose": "air"},
+    {"f": 12, "pose": "air"},
+    {"f": 21, "pose": "crouch"},
+    {"f": 24, "pose": "crouch"}
+  ],
+  "expect": [
+    {"f": 10, "above": ["Wrist_R", "Head"]},
+    {"f": 10, "above": ["Wrist_L", "Head"]},
+    {"f": 0, "feet_on_ground": true}
+  ]
+}

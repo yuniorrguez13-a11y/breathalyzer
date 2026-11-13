@@ -1,0 +1,21 @@
+{
+  "id": "salute", "name": "Salute", "aliases": ["guard", "attention"],
+  "page": "hyrule", "slot": 1, "by": "giruka",
+  "about": "A Hylian guard's salute: heels together, right fist to the heart, chin up, held.",
+  "kind": "keys", "frames": 50, "loop": false, "face": "serious", "morph": 5, "contact": ["Wrist_R"],
+  "keys": [
+    {"f": 0},
+    {"f": 8, "ease": "linear",
+     "reach": {"Wrist_R": {"on": "Spine_2", "at": [0.0, 0.15, 0.18]}}, "aim": {"Wrist_R": [1, 0.1, 0],
+               "Arm_1_L": [0.1, -1, 0], "Arm_2_L": [0.06, -1, 0.03]},
+     "palm": {"Wrist_R": [0, 0, -1]}, "hand": {"R": "fist", "L": "fist"}, "elbow": {"R": [-1, 0, 0.15]},
+     "step": {"Ankle_L": [-0.035, 0, 0], "Ankle_R": [0.035, 0, 0]},
+     "turn": {"Head": [-10, 0, 0], "Spine_1": [-3, 0, 0]}},
+    {"f": 40},
+    {"f": 50, "reset": true}
+  ],
+  "expect": [
+    {"f": 20, "near": ["Wrist_R", "Spine_2", 30]},
+    {"f": 20, "in_front": ["Wrist_R", "Spine_2"]}
+  ]
+}

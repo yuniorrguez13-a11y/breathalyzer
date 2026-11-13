@@ -1,0 +1,28 @@
+{
+  "id": "mipha_wave", "name": "Mipha wave", "aliases": ["mipha", "shy wave", "shy"],
+  "page": "hyrule", "slot": 5, "by": "giruka",
+  "about": "A small shy wave near the chin, head tilted, a little step back, blushing.",
+  "kind": "keys", "frames": 60, "loop": false, "face": "blush", "morph": 6, "contact": ["Wrist_L"],
+  "poses": {
+    "shy": {"reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.08, 0.27, 0.24]}, "Wrist_L": {"on": "Spine_2", "at": [0.0, 0.12, 0.18]}},
+            "aim": {"Wrist_R": [-0.1, 1, 0.15]}, "palm": {"Wrist_R": [0, 0, 1], "Wrist_L": [0, 0, -1]},
+            "hand": {"R": "open", "L": "relaxed"}, "elbow": {"R": [-0.6, -1, 0], "L": [1, -1, 0]},
+            "turn": {"Head": [10, -6, 14]}, "step": {"Ankle_R": [0, 0, -0.08]}, "hips": [0, -0.01, -0.03]}
+  },
+  "keys": [
+    {"f": 0},
+    {"f": 12, "pose": "shy"},
+    {"f": 18, "pose": "shy", "aim": {"Wrist_R": [-0.45, 0.9, 0.15]}},
+    {"f": 24, "pose": "shy", "aim": {"Wrist_R": [0.2, 1, 0.15]}},
+    {"f": 30, "pose": "shy", "aim": {"Wrist_R": [-0.45, 0.9, 0.15]}},
+    {"f": 36, "pose": "shy", "aim": {"Wrist_R": [0.2, 1, 0.15]}},
+    {"f": 42, "pose": "shy", "aim": {"Wrist_R": [-0.45, 0.9, 0.15]}},
+    {"f": 48, "pose": "shy"},
+    {"f": 60, "reset": true}
+  ],
+  "expect": [
+    {"f": 24, "above": ["Wrist_R", "Spine_2"]},
+    {"f": 24, "below": ["Wrist_R", "Head"]},
+    {"f": 24, "behind": ["Ankle_R", "Ankle_L"]}
+  ]
+}

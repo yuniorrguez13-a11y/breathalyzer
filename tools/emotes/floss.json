@@ -1,0 +1,31 @@
+{
+  "id": "floss", "name": "Floss", "aliases": ["flossing"],
+  "page": "dances", "slot": 1, "by": "giruka",
+  "about": "Straight arms swing side to side, one crossing in front of the hips and one behind; the hips swing the other way.",
+  "kind": "keys", "frames": 24, "loop": true, "face": "smile", "morph": 6,
+  "poses": {
+    "left": {"aim": {"Arm_1_R": [0.78, -0.62, 0.3], "Arm_2_R": [0.78, -0.62, 0.3], "Wrist_R": [0.78, -0.62, 0.3],
+                     "Arm_1_L": [0.7, -0.62, -0.35], "Arm_2_L": [0.7, -0.62, -0.35], "Wrist_L": [0.7, -0.62, -0.35]},
+             "hand": {"R": "fist", "L": "fist"}, "hips": [-0.12, 0, 0],
+             "turn": {"Spine_1": [0, 0, -13], "Head": [0, 0, 12]}},
+    "mid":  {"aim": {"Arm_1_R": [-0.05, -0.92, 0.38], "Arm_2_R": [-0.05, -0.92, 0.38], "Wrist_R": [-0.05, -0.92, 0.38],
+                     "Arm_1_L": [0.05, -0.92, -0.38], "Arm_2_L": [0.05, -0.92, -0.38], "Wrist_L": [0.05, -0.92, -0.38]},
+             "hand": {"R": "fist", "L": "fist"}}
+  },
+  "keys": [
+    {"f": 0, "pose": "left"},
+    {"f": 6, "pose": "mid", "ease": "linear"},
+    {"f": 12, "pose": "left", "mirror": true, "ease": "linear"},
+    {"f": 18, "pose": "mid", "mirror": true, "ease": "linear"},
+    {"f": 24, "pose": "left", "ease": "linear"}
+  ],
+  "expect": [
+    {"f": 0, "left_of": ["Wrist_R", "Skl_Root"]},
+    {"f": 0, "in_front": ["Wrist_R", "Wrist_L"]},
+    {"f": 12, "right_of": ["Wrist_L", "Skl_Root"]},
+    {"f": 12, "in_front": ["Wrist_L", "Wrist_R"]},
+    {"f": 0, "right_of": ["Skl_Root", "Neck"]},
+    {"f": 12, "left_of": ["Skl_Root", "Neck"]},
+    {"f": 0, "feet_on_ground": true}
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "id": "point", "name": "Point", "aliases": ["you", "pointing"],
+  "page": "hello", "slot": 5, "by": "giruka",
+  "about": "\"You!\": the arm snaps forward pointing, the other hand on the hip, a lean in.",
+  "kind": "keys", "frames": 50, "loop": false, "face": "smile", "morph": 5,
+  "keys": [
+    {"f": 0},
+    {"f": 6, "ease": "linear",
+     "aim": {"Arm_1_R": [-0.12, 0.08, 1], "Arm_2_R": [-0.05, 0.1, 1], "Wrist_R": [-0.03, 0.08, 1]},
+     "palm": {"Wrist_R": [0.4, -1, 0]}, "hand": {"R": "point", "L": "fist"},
+     "reach": {"Wrist_L": {"on": "Skl_Root", "at": [0.21, 0.03, -0.02]}}, "elbow": {"L": [1, 0, -0.4]},
+     "turn": {"Spine_1": [8, 8, 0], "Head": [-4, 0, 0]}},
+    {"f": 10, "turn": {"Spine_1": [10, 9, 0], "Head": [-4, 0, 0]}},
+    {"f": 38},
+    {"f": 50, "reset": true}
+  ],
+  "expect": [
+    {"f": 20, "in_front": ["Finger_B_3_R", "Head"]},
+    {"f": 20, "near": ["Wrist_L", "Skl_Root", 30]}
+  ]
+}

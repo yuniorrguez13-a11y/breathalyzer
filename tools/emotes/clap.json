@@ -1,0 +1,30 @@
+{
+  "id": "clap", "name": "Clap", "aliases": ["applause", "clapping"],
+  "page": "hello", "slot": 4, "by": "giruka",
+  "about": "Hands meet in front of the chest twice a second, with a small bounce.",
+  "kind": "keys", "frames": 30, "loop": true, "face": "smile", "morph": 6,
+  "poses": {
+    "apart":    {"reach": {"Wrist_R": [-0.17, 1.17, 0.32], "Wrist_L": [0.17, 1.17, 0.32]},
+                 "aim": {"Wrist_R": [-0.25, 0.6, 0.75], "Wrist_L": [0.25, 0.6, 0.75]},
+                 "palm": {"Wrist_R": [1, 0, 0], "Wrist_L": [-1, 0, 0]}, "hand": {"R": "open", "L": "open"},
+                 "elbow": {"R": [-0.6, -0.6, -0.4], "L": [0.6, -0.6, -0.4]}},
+    "together": {"reach": {"Wrist_R": [-0.035, 1.15, 0.34], "Wrist_L": [0.035, 1.15, 0.34]},
+                 "aim": {"Wrist_R": [0, 0.6, 0.8], "Wrist_L": [0, 0.6, 0.8]},
+                 "palm": {"Wrist_R": [1, 0, 0], "Wrist_L": [-1, 0, 0]}, "hand": {"R": "open", "L": "open"},
+                 "elbow": {"R": [-0.6, -0.6, -0.4], "L": [0.6, -0.6, -0.4]}, "hips": [0, -0.015, 0]}
+  },
+  "keys": [
+    {"f": 0, "pose": "apart"},
+    {"f": 6, "pose": "together", "ease": "linear"},
+    {"f": 8, "pose": "together"},
+    {"f": 15, "pose": "apart"},
+    {"f": 21, "pose": "together", "ease": "linear"},
+    {"f": 23, "pose": "together"},
+    {"f": 30, "pose": "apart"}
+  ],
+  "expect": [
+    {"f": 7, "near": ["Wrist_R", "Wrist_L", 10]},
+    {"f": 0, "far": ["Wrist_R", "Wrist_L", 25]},
+    {"f": 7, "feet_on_ground": true}
+  ]
+}

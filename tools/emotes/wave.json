@@ -1,0 +1,30 @@
+{
+  "id": "wave", "name": "Wave", "aliases": ["hi", "hello", "waving"],
+  "page": "hello", "slot": 1, "by": "giruka",
+  "about": "Right hand high over the head, four big side-to-side swings, a smile.",
+  "kind": "keys", "frames": 64, "loop": false, "face": "smile", "morph": 6, "fallback": "TalkHello",
+  "poses": {
+    "up":  {"aim": {"Arm_1_R": [-0.55, 0.62, 0.2], "Arm_2_R": [-0.08, 1, 0.1], "Wrist_R": [-0.05, 1, 0]},
+            "palm": {"Wrist_R": [0, 0, 1]}, "hand": {"R": "open"}, "turn": {"Head": [0, 0, -7]}},
+    "out": {"aim": {"Arm_1_R": [-0.55, 0.62, 0.2], "Arm_2_R": [-0.45, 0.89, 0.1], "Wrist_R": [-0.55, 0.83, 0]},
+            "palm": {"Wrist_R": [0, 0, 1]}, "hand": {"R": "open"}, "turn": {"Head": [0, 0, -7]}},
+    "in":  {"aim": {"Arm_1_R": [-0.55, 0.62, 0.2], "Arm_2_R": [0.22, 0.97, 0.1], "Wrist_R": [0.3, 0.95, 0]},
+            "palm": {"Wrist_R": [0, 0, 1]}, "hand": {"R": "open"}, "turn": {"Head": [0, 0, -7]}}
+  },
+  "keys": [
+    {"f": 0},
+    {"f": 12, "pose": "up"},
+    {"f": 20, "pose": "out"},
+    {"f": 28, "pose": "in"},
+    {"f": 36, "pose": "out"},
+    {"f": 44, "pose": "in"},
+    {"f": 52, "pose": "up"},
+    {"f": 64, "reset": true}
+  ],
+  "expect": [
+    {"f": 12, "above": ["Wrist_R", "Head"]},
+    {"f": 12, "above": ["Finger_C_3_R", "Wrist_R"]},
+    {"f": 20, "right_of": ["Finger_C_3_R", "Wrist_R"]},
+    {"f": 28, "left_of": ["Finger_C_3_R", "Wrist_R"]}
+  ]
+}

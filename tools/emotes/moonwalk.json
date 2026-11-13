@@ -1,0 +1,26 @@
+{
+  "id": "moonwalk", "name": "Moonwalk", "aliases": ["mj", "moon walk"],
+  "page": "dances", "slot": 5, "by": "giruka",
+  "about": "On the spot: one heel pops up high while the other foot slides back, then they swap; leaning back, the shoulders and hips roll.",
+  "kind": "keys", "frames": 40, "loop": true, "face": "smug", "morph": 6,
+  "poses": {
+    "pop":   {"step": {"Ankle_L": [0, 0.13, -0.12], "Ankle_R": [0, 0, 0.08]}, "turn": {"Ankle_L": [48, 0, 0],
+              "Spine_1": [-10, 0, 5], "Head": [-6, 0, -5], "Clavicle_L": [0, 0, 14], "Clavicle_R": [0, 0, -4]},
+              "aim": {"Arm_2_R": [-0.1, -0.8, 0.5], "Arm_2_L": [0.1, -0.9, 0.3]}, "hips": [0.04, -0.03, 0]},
+    "glide": {"step": {"Ankle_L": [0, 0.13, 0.06], "Ankle_R": [0, 0, -0.12]}, "turn": {"Ankle_L": [48, 0, 0],
+              "Spine_1": [-10, 0, -2], "Head": [-6, 0, 2], "Clavicle_L": [0, 0, 3], "Clavicle_R": [0, 0, 6]},
+              "aim": {"Arm_2_R": [-0.1, -0.9, 0.3], "Arm_2_L": [0.1, -0.8, 0.5]}, "hips": [-0.02, -0.03, 0]}
+  },
+  "keys": [
+    {"f": 0, "pose": "pop"},
+    {"f": 18, "pose": "glide", "ease": "linear"},
+    {"f": 20, "pose": "pop", "mirror": true, "ease": "snap"},
+    {"f": 38, "pose": "glide", "mirror": true, "ease": "linear"},
+    {"f": 40, "pose": "pop", "ease": "snap"}
+  ],
+  "expect": [
+    {"f": 0, "above": ["Ankle_L", "Ankle_R"]},
+    {"f": 20, "above": ["Ankle_R", "Ankle_L"]},
+    {"f": 18, "in_front": ["Ankle_L", "Ankle_R"]}
+  ]
+}

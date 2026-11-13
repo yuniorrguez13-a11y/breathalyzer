@@ -1,0 +1,21 @@
+{
+  "id": "facepalm", "name": "Facepalm", "aliases": ["ugh", "smh"],
+  "page": "hello", "slot": 7, "by": "giruka",
+  "about": "The hand rises to the face, the head drops into it, a slow shake.",
+  "kind": "keys", "frames": 75, "loop": false, "face": "frown", "morph": 6, "contact": ["Wrist_R"],
+  "keys": [
+    {"f": 0},
+    {"f": 14, "reach": {"Wrist_R": {"on": "Head", "at": [-0.02, 0.0, 0.17]}}, "aim": {"Wrist_R": [0.15, 1, 0]},
+     "palm": {"Wrist_R": [0, 0, -1]}, "hand": {"R": "open"}, "elbow": {"R": [-0.3, -1, 0.4]}},
+    {"f": 24, "turn": {"Head": [20, 0, 0], "Spine_1": [8, 0, 0]}},
+    {"f": 34, "turn": {"Head": [20, -10, 0], "Spine_1": [8, 0, 0]}},
+    {"f": 44, "turn": {"Head": [20, 10, 0], "Spine_1": [8, 0, 0]}},
+    {"f": 54, "turn": {"Head": [20, -8, 0], "Spine_1": [8, 0, 0]}},
+    {"f": 62, "turn": {"Head": [20, 0, 0], "Spine_1": [8, 0, 0]}},
+    {"f": 75, "reset": true}
+  ],
+  "expect": [
+    {"f": 30, "near": ["Wrist_R", "Head", 25]},
+    {"f": 30, "above": ["Wrist_R", "Spine_2"]}
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "id": "robot", "name": "Robot", "aliases": ["beep", "robot dance"],
+  "page": "dances", "slot": 4, "by": "giruka",
+  "about": "Stiff 90-degree arm poses that snap from one to the next while the head snaps left and right.",
+  "kind": "keys", "frames": 64, "loop": true, "face": "none", "morph": 4,
+  "poses": {
+    "a": {"aim": {"Arm_1_R": [-1, 0, 0], "Arm_2_R": [0, 1, 0], "Wrist_R": [0, 1, 0],
+                  "Arm_1_L": [1, -0.05, 0], "Arm_2_L": [0, -1, 0], "Wrist_L": [0, -1, 0]},
+          "palm": {"Wrist_R": [0, 0, 1], "Wrist_L": [-1, 0, 0]}, "hand": {"R": "open", "L": "open"},
+          "turn": {"Head": [0, -35, 0], "Spine_1": [0, -8, 0]}, "hips": [0, -0.015, 0]},
+    "b": {"aim": {"Arm_1_R": [-0.05, -1, 0], "Arm_2_R": [0, 0, 1], "Wrist_R": [0, 0, 1],
+                  "Arm_1_L": [0.05, 0, 1], "Arm_2_L": [0, 1, 0], "Wrist_L": [0, 1, 0]},
+          "palm": {"Wrist_R": [0, -1, 0], "Wrist_L": [0, 0, 1]}, "hand": {"R": "open", "L": "open"},
+          "turn": {"Head": [0, 35, 0], "Spine_1": [0, 8, 0]}}
+  },
+  "keys": [
+    {"f": 0, "pose": "a"},
+    {"f": 16, "pose": "b", "ease": "snap"},
+    {"f": 32, "pose": "a", "mirror": true, "ease": "snap"},
+    {"f": 48, "pose": "b", "mirror": true, "ease": "snap"},
+    {"f": 64, "pose": "a", "ease": "snap"}
+  ],
+  "expect": [
+    {"f": 8, "above": ["Wrist_R", "Head"]},
+    {"f": 40, "above": ["Wrist_L", "Head"]},
+    {"f": 24, "in_front": ["Wrist_R", "Spine_2"]},
+    {"f": 8, "feet_on_ground": true}
+  ]
+}

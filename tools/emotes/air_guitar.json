@@ -1,0 +1,28 @@
+{
+  "id": "air_guitar", "name": "Air guitar", "aliases": ["guitar", "rock"],
+  "page": "dances", "slot": 6, "by": "giruka",
+  "about": "Wide stance, the left hand on the neck, the right hand strums, head-banging on every strum.",
+  "kind": "keys", "frames": 30, "loop": true, "face": "battle", "morph": 6,
+  "poses": {
+    "down": {"step": {"Ankle_L": [0.08, 0, 0.03], "Ankle_R": [-0.08, 0, -0.03]}, "hips": [0, -0.07, 0],
+             "reach": {"Wrist_L": [0.42, 1.2, 0.3], "Wrist_R": [-0.06, 0.96, 0.25]},
+             "aim": {"Wrist_L": [0.3, 0.4, 0.85]}, "elbow": {"L": [1, -0.5, 0], "R": [-1, 0, -0.2]},
+             "hand": {"L": "grip", "R": "grip"}, "turn": {"Spine_1": [14, 10, 0], "Head": [22, 0, 0]}},
+    "up":   {"step": {"Ankle_L": [0.08, 0, 0.03], "Ankle_R": [-0.08, 0, -0.03]}, "hips": [0, -0.06, 0],
+             "reach": {"Wrist_L": [0.42, 1.21, 0.3], "Wrist_R": [-0.06, 1.12, 0.27]},
+             "aim": {"Wrist_L": [0.3, 0.4, 0.85]}, "elbow": {"L": [1, -0.5, 0], "R": [-1, 0, -0.2]},
+             "hand": {"L": "grip", "R": "grip"}, "turn": {"Spine_1": [6, 10, 0], "Head": [-8, 0, 0]}}
+  },
+  "keys": [
+    {"f": 0, "pose": "down"},
+    {"f": 7, "pose": "up"},
+    {"f": 15, "pose": "down", "ease": "linear"},
+    {"f": 22, "pose": "up"},
+    {"f": 30, "pose": "down", "ease": "linear"}
+  ],
+  "expect": [
+    {"f": 0, "left_of": ["Wrist_L", "Spine_2"]},
+    {"f": 7, "above": ["Wrist_R", "Skl_Root"]},
+    {"f": 7, "feet_on_ground": true}
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "id": "daruk_flex", "name": "Daruk flex", "aliases": ["daruk", "flex", "muscles"],
+  "page": "hyrule", "slot": 3, "by": "giruka",
+  "about": "Link's own muscle-man idle from the game: he flexes both arms with a proud face.",
+  "kind": "game_clip", "clip": "Random_Nml_Wait_Kinnikujiman", "loop": false, "face": "smile", "morph": 6
+}

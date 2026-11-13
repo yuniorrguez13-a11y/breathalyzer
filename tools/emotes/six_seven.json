@@ -1,0 +1,29 @@
+{
+  "id": "six_seven", "name": "Six seven", "aliases": ["67", "6 7", "sixseven", "scales"],
+  "page": "dances", "slot": 2, "by": "giruka",
+  "about": "The 6-7 meme: both palms up at waist height, bobbing up and down in turn like scales; shoulders and head bob.",
+  "kind": "keys", "frames": 20, "loop": true, "face": "smug", "morph": 6,
+  "poses": {
+    "rup": {"reach": {"Wrist_R": [-0.22, 1.11, 0.3], "Wrist_L": [0.22, 0.91, 0.3]},
+            "aim": {"Wrist_R": [0, 0, 1], "Wrist_L": [0, 0, 1]}, "palm": {"Wrist_R": [0, 1, 0], "Wrist_L": [0, 1, 0]},
+            "hand": {"R": "open", "L": "open"}, "elbow": {"R": [-0.3, -1, -0.3], "L": [0.3, -1, -0.3]},
+            "turn": {"Head": [4, 0, -7], "Clavicle_R": [0, 0, -6], "Spine_1": [0, 0, 3]}},
+    "mid": {"reach": {"Wrist_R": [-0.22, 1.01, 0.3], "Wrist_L": [0.22, 1.01, 0.3]},
+            "aim": {"Wrist_R": [0, 0, 1], "Wrist_L": [0, 0, 1]}, "palm": {"Wrist_R": [0, 1, 0], "Wrist_L": [0, 1, 0]},
+            "hand": {"R": "open", "L": "open"}, "elbow": {"R": [-0.3, -1, -0.3], "L": [0.3, -1, -0.3]},
+            "turn": {"Head": [4, 0, 0]}, "hips": [0, -0.025, 0]}
+  },
+  "keys": [
+    {"f": 0, "pose": "rup"},
+    {"f": 5, "pose": "mid"},
+    {"f": 10, "pose": "rup", "mirror": true},
+    {"f": 15, "pose": "mid"},
+    {"f": 20, "pose": "rup"}
+  ],
+  "expect": [
+    {"f": 0, "above": ["Wrist_R", "Wrist_L"]},
+    {"f": 10, "above": ["Wrist_L", "Wrist_R"]},
+    {"f": 0, "in_front": ["Wrist_R", "Spine_2"]},
+    {"f": 5, "feet_on_ground": true}
+  ]
+}

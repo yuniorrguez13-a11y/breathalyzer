@@ -1,0 +1,29 @@
+{
+  "id": "hestu_shake", "name": "Hestu shake", "aliases": ["maracas", "hestu", "shake"],
+  "page": "dances", "slot": 8, "by": "giruka",
+  "about": "Fists high shaking maracas, a side-step shuffle, the hips sway.",
+  "kind": "keys", "frames": 32, "loop": true, "face": "smile", "morph": 6,
+  "poses": {
+    "shake": {"reach": {"Wrist_R": [-0.3, 1.64, 0.14], "Wrist_L": [0.3, 1.54, 0.14]},
+              "aim": {"Wrist_R": [-0.1, 1, 0.3], "Wrist_L": [0.1, 1, 0.3]}, "palm": {"Wrist_R": [0, 0, 1], "Wrist_L": [0, 0, 1]},
+              "hand": {"R": "fist", "L": "fist"}, "elbow": {"R": [-1, -0.3, -0.2], "L": [1, -0.3, -0.2]},
+              "turn": {"Head": [0, 0, 6]}}
+  },
+  "keys": [
+    {"f": 0, "pose": "shake", "hips": [-0.04, 0, 0]},
+    {"f": 4, "pose": "shake", "mirror": true, "hips": [-0.025, 0, 0]},
+    {"f": 8, "pose": "shake", "hips": [0, 0, 0], "step": {"Ankle_R": [0, 0.05, 0.01]}},
+    {"f": 12, "pose": "shake", "mirror": true, "hips": [0.025, 0, 0]},
+    {"f": 16, "pose": "shake", "hips": [0.04, 0, 0]},
+    {"f": 20, "pose": "shake", "mirror": true, "hips": [0.025, 0, 0]},
+    {"f": 24, "pose": "shake", "hips": [0, 0, 0], "step": {"Ankle_L": [0, 0.05, 0.01]}},
+    {"f": 28, "pose": "shake", "mirror": true, "hips": [-0.025, 0, 0]},
+    {"f": 32, "pose": "shake", "hips": [-0.04, 0, 0]}
+  ],
+  "expect": [
+    {"f": 0, "above": ["Wrist_R", "Head"]},
+    {"f": 4, "above": ["Wrist_L", "Head"]},
+    {"f": 8, "above": ["Ankle_R", "Ankle_L"]},
+    {"f": 16, "feet_on_ground": true}
+  ]
+}

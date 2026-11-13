@@ -95,6 +95,12 @@ _SETTINGS_DEMO = NATIVE / "examples" / "settings_demo" / "settings_demo.c"
 SETTINGS_EXAMPLES = tuple(
     Target("settings_demo", (_SETTINGS_DEMO,), runtime=False, subdir="settings-mods", export="swmod_init")
     for _ in range(1 if _SETTINGS_DEMO.is_file() else 0))
+# The emotes mod (docs/emotes.md): calls game code by address (1.9.0 only), experimental: its own folder, not copied
+# by `install` (modman add native/examples/emotes takes it from there).
+EMOTES_EXAMPLES = (
+    Target("emotes", (NATIVE / "examples" / "emotes" / "emotes.c",), runtime=False, subdir="emotes-mods",
+           export="swmod_init"),
+)
 _ST = HOST_SRC / "selftest"
 SELFTEST = (
     Target("fake_runtime", (_ST / "fake_runtime.c",), runtime=False, out_name=RUNTIME_DLL, subdir="selftest"),
@@ -1125,7 +1131,8 @@ def main(argv: list[str] | None = None) -> int:
         tc = find_toolchain(install)
         if a.action == "selftest":
             return selftest(tc, a.out)
-        targets = (HOST, *EXAMPLES, *HOOK_EXAMPLES, *GHOST_EXAMPLES, *BASICS_EXAMPLES, *SETTINGS_EXAMPLES)
+        targets = (HOST, *EXAMPLES, *HOOK_EXAMPLES, *GHOST_EXAMPLES, *BASICS_EXAMPLES, *SETTINGS_EXAMPLES,
+                   *EMOTES_EXAMPLES)
         built = build(tc, a.out, targets)
         check_exports(zip(built, targets))
         print(f"Built {len(built)} file(s) in {a.out}")
@@ -1141,6 +1148,8 @@ def main(argv: list[str] | None = None) -> int:
         if SETTINGS_EXAMPLES:
             print(f"({', '.join(t.filename for t in SETTINGS_EXAMPLES)} in {a.out / 'settings-mods'} isn't installed:"
                   " add it with modman, see docs/mod-settings.md)")
+        print(f"({', '.join(t.filename for t in EMOTES_EXAMPLES)} in {a.out / 'emotes-mods'} is experimental and isn't"
+              " installed: add it with modman, see docs/emotes.md)")
         return 0
     except (BuildError, InstallError, PeError, OSError) as e:
         print(f"Error: {e}")

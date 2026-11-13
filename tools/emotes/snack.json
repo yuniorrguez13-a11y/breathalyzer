@@ -1,0 +1,6 @@
+{
+  "id": "snack", "name": "Snack time", "aliases": ["eat", "apple", "food", "snack time"],
+  "page": "hyrule", "slot": 7, "by": "giruka",
+  "about": "Link mimes a hearty bite with both hands (the game's own eating clip).",
+  "kind": "game_clip", "clip": "Eat_Normal", "loop": false, "face": "smile", "morph": 6
+}

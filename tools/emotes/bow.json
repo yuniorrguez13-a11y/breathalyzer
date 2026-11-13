@@ -1,0 +1,24 @@
+{
+  "id": "bow", "name": "Bow", "aliases": ["thanks", "bowing"],
+  "page": "hello", "slot": 8, "by": "giruka",
+  "about": "A polite bow from the waist, the right hand on the chest.",
+  "kind": "keys", "frames": 60, "loop": false, "face": "smile", "morph": 6, "contact": ["Wrist_R"],
+  "poses": {
+    "hand": {"reach": {"Wrist_R": {"on": "Spine_2", "at": [0.0, 0.16, 0.17]}}, "aim": {"Wrist_R": [1, 0.15, 0]},
+             "palm": {"Wrist_R": [0, 0, -1]}, "hand": {"R": "open"}, "elbow": {"R": [-1, -0.4, 0.2]}}
+  },
+  "keys": [
+    {"f": 0},
+    {"f": 10, "pose": "hand"},
+    {"f": 24, "pose": "hand", "turn": {"Spine_1": [35, 0, 0], "Head": [10, 0, 0]}, "hips": [0, 0, -0.05],
+     "aim": {"Arm_1_L": [0.15, -1, 0.12], "Arm_2_L": [0.08, -1, 0.15]}},
+    {"f": 40, "pose": "hand", "turn": {"Spine_1": [35, 0, 0], "Head": [10, 0, 0]}, "hips": [0, 0, -0.05],
+     "aim": {"Arm_1_L": [0.15, -1, 0.12], "Arm_2_L": [0.08, -1, 0.15]}},
+    {"f": 47, "pose": "hand"},
+    {"f": 60, "reset": true}
+  ],
+  "expect": [
+    {"f": 30, "in_front": ["Head", "Ankle_L"]},
+    {"f": 30, "feet_on_ground": true}
+  ]
+}

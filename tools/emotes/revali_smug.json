@@ -1,0 +1,29 @@
+{
+  "id": "revali_smug", "name": "Revali smug", "aliases": ["revali", "smug", "crossed"],
+  "page": "hyrule", "slot": 2, "by": "giruka",
+  "about": "Arms crossed, head tilted back and turned away, one foot taps.",
+  "kind": "keys", "frames": 48, "loop": true, "face": "smug", "morph": 6, "contact": ["Wrist_R", "Wrist_L"],
+  "poses": {
+    "base": {"reach": {"Wrist_R": {"on": "Spine_2", "at": [0.15, 0.08, 0.21]}, "Wrist_L": {"on": "Spine_2", "at": [-0.14, 0.04, 0.17]}},
+             "elbow": {"R": [-0.7, -0.5, 0.5], "L": [0.7, -0.5, 0.5]}, "hand": {"R": "open", "L": "relaxed"},
+             "turn": {"Head": [-16, 12, 0], "Spine_1": [-4, 0, 0]}, "step": {"Ankle_R": [0, 0, 0.03]}},
+    "tap":  {"reach": {"Wrist_R": {"on": "Spine_2", "at": [0.15, 0.08, 0.21]}, "Wrist_L": {"on": "Spine_2", "at": [-0.14, 0.04, 0.17]}},
+             "elbow": {"R": [-0.7, -0.5, 0.5], "L": [0.7, -0.5, 0.5]}, "hand": {"R": "open", "L": "relaxed"},
+             "turn": {"Head": [-16, 12, 0], "Spine_1": [-4, 0, 0], "Ankle_R": [-22, 0, 0]},
+             "step": {"Ankle_R": [0, 0.025, 0.05]}}
+  },
+  "keys": [
+    {"f": 0, "pose": "base"},
+    {"f": 6, "pose": "tap"},
+    {"f": 10, "pose": "base"},
+    {"f": 16, "pose": "tap"},
+    {"f": 20, "pose": "base"},
+    {"f": 48, "pose": "base"}
+  ],
+  "expect": [
+    {"f": 30, "left_of": ["Wrist_R", "Spine_2"]},
+    {"f": 30, "right_of": ["Wrist_L", "Spine_2"]},
+    {"f": 30, "in_front": ["Wrist_R", "Spine_2"]},
+    {"f": 30, "feet_on_ground": true}
+  ]
+}

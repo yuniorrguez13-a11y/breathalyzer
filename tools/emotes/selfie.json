@@ -1,0 +1,7 @@
+{
+  "id": "selfie", "name": "Photo pose", "aliases": ["photo", "pose", "slate"],
+  "page": "hyrule", "slot": 6, "by": "giruka",
+  "about": "One hand up high, posing for a photo (the game's own selfie pose, no Slate in hand).",
+  "kind": "game_clip", "clip": "SelfCameraPose_RaiseHandL", "loop": true, "face": "selfie", "morph": 6,
+  "fallback": "SelfCameraPause"
+}
