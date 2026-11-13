@@ -5,9 +5,10 @@ are built and pass their tests on made-up saves and on save **copies**. **Checke
 PC with the bot as a stand-in host** (save copies only): an early save joined, got the 100 % save's story before
 loading, and played it (see "Game check 2026-11-12" at the end). **Not yet checked:** two PCs, a host running the
 real game, a room code, a kick, a reconnect, a third player, and the fixes of the second review (the save lock, whole
-units only, the new backups). Live reading of story flags in the game is **off** (no safe getter yet). The
-Multiplayer menu (Host / Join / Solo) is a small window started from a terminal; Breathalyzer's Play button doesn't
-open it yet, and the same menu over the game's title screen is not built yet.
+units only, the new backups). Live reading of story flags in the game is **off** (no safe getter yet). In
+Breathalyzer Plus, Home > **Multiplayer** does all of this without a terminal (Host, Join, Story together, a room
+code, Stop: [multiplayer.md](multiplayer.md)); the terminal's Multiplayer menu below stays for developers, and the
+same menu over the game's title screen is not built yet.
 
 ## What you get
 
@@ -189,9 +190,11 @@ the host set no room code or the client sends it (`client.py --code`).
 - Cutscenes already seen are shared as they are; a cutscene tied to an unfinished quest step could be skipped
   (not seen in the game check).
 - The friend needs his own save that has left the first cave (beta rule); a host's brand-new world is not built yet.
-- The menu is not on Breathalyzer's Play button yet (the launcher's owner: Play with the multiplayer mod on calls
-  `tools.mp.lobby.choose()`, then starts the game with the co-op folder and the agent), and not over the game's title
-  screen yet (needs a probe of the overlay). The agent doesn't start or stop the game itself yet.
+- Breathalyzer's Multiplayer page (`tools/mp_page.py`) makes the co-op copy, starts the agent (`--stdin`: it ends
+  it through that pipe, so a host tells his friends), starts the game through Play on the copy
+  (`SAVAGEWIND_SAVE_DIR`) once the host hosts or the friend's story is in (join prints `Ready: start your game`), and
+  starts the ghost client. Not over the game's title screen yet (needs a probe of the overlay). The agent on its own
+  doesn't start or stop the game.
 - The ghosts (tools/mp/client.py) still use their own connection: point it at the host's address, with
   `--code "<the room code>"` when the host set one (without it, or with a wrong one, it stops instead of retrying).
 - Home network only for the beta. The host's `python.exe` needs inbound TCP and UDP 7788 (Windows asks the first

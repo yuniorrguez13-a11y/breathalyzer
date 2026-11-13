@@ -1102,7 +1102,8 @@ class Window(Temp):
         self.assertEqual([r[:2] for r in rows], [("ON", "Alpha"), ("OFF", "Bravo"), ("ON", "Charlie")])
         self.assertEqual(rows[0][2], "Changes game files.")
         self.assertTrue(view.about.cget("text").startswith("Alpha: "))
-        for w in (view.play, view.tree, *view.by_action.values()):
+        # (Multiplayer shows only with Ghost multiplayer, which this made-up library and app lack)
+        for w in (view.play, view.tree, *(b for k, b in view.by_action.items() if k != "multiplayer")):
             self.assertTrue(self.visible(view, w), w)
         # Space in the list turns the mod off; the text says Play uses it
         view.tree.focus_set()
@@ -1153,7 +1154,7 @@ class Window(Temp):
             view.set_size(size)
             root.update()
             self.assertLessEqual(root.winfo_height(), root.winfo_screenheight())
-            for w in (view.play, *view.by_action.values()):
+            for w in (view.play, *(b for k, b in view.by_action.items() if k != "multiplayer")):
                 self.assertTrue(self.visible(view, w), f"{w.cget('text')} at {view.size} pt")
         self.assertGreater(view.size, la.DEFAULT_SIZE)
         saved, _ = la.load_settings(view.settings_file)

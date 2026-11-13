@@ -1731,6 +1731,25 @@ def default_name() -> str:
     return safe_name(os.environ.get("USERNAME") or os.environ.get("USER") or "player")
 
 
+def stop_on_stdin(runner: Runner, stream=None) -> threading.Thread:
+    """--stdin: end the runner cleanly (the ghost taken out of your game, the relay told) when stdin says stop or
+    closes. Breathalyzer's Multiplayer page stops the client this way (a killed client would leave the ghost)."""
+    def watch() -> None:
+        try:
+            for text in stream if stream is not None else sys.stdin:
+                if text.strip().lower() in ("stop", "end", "quit"):
+                    break
+        except (OSError, ValueError):
+            pass
+        while runner._stop is None:   # (run() hasn't started yet: stop it as soon as it has)
+            time.sleep(0.05)
+        runner.stop()
+
+    t = threading.Thread(target=watch, name="stdin", daemon=True)
+    t.start()
+    return t
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Share your position with other players and show them on a radar.")
     ap.add_argument("--relay", default="127.0.0.1", help=f"relay address, HOST or HOST:PORT (default port {DEFAULT_RELAY_PORT})")
@@ -1765,6 +1784,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="show each player as the one they picked, from the characters you built (python "
                          "tools\\charsel.py build; DIR: their folder, default your wheel's or out\\charsel-packs); "
                          "anyone else is the Link body. Implies --ghost-link")
+    ap.add_argument("--library", metavar="DIR",
+                    help="your mod library, where --ghost-looks finds the characters your game gets (default: "
+                         "modman's usual one next to Savage Wind)")
+    ap.add_argument("--stdin", action="store_true",
+                    help="started by Breathalyzer's Multiplayer page: stop cleanly (the ghost taken out of your game) "
+                         "when stdin closes or says stop")
     args = ap.parse_args(argv)
     safe_console()
     name = valid_name(args.name) if args.name is not None else default_name()
@@ -1794,7 +1819,9 @@ def main(argv: list[str] | None = None) -> int:
     looks = None
     if args.ghost_looks is not None:
         args.ghost_link = True
-        cat, where = charsel.here_catalog(args.ghost_looks or choice["packs"])
+        # (a DIR given wins; else --library's deployed characters; else the wheel's remembered folder)
+        cat, where = charsel.here_catalog(args.ghost_looks or (None if args.library else choice["packs"]),
+                                          library=args.library)
         looks = charsel.Looks(cat, GHOST_LINK_ACTOR)
         gone = cat.get("not_deployed") or []
         print(f"--ghost-looks: {len(looks.slots)} characters in your game ({where}); a pick this PC lacks shows as "
@@ -1829,6 +1856,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error(f"can't write --record {args.record}: {e.strerror or e}")
     print(f"{name} joining room {args.room} on {relay[0]}:{relay[1]}; game on port {args.game_port}."
           + (f" Others see you as {charsel.display(look)}." if look else ""))
+    if args.stdin and sys.stdin is not None:
+        stop_on_stdin(runner)
     if not ui:
         try:
             asyncio.run(runner.run())

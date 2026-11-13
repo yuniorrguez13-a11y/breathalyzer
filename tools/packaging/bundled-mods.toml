@@ -98,10 +98,11 @@ title = "Ghost multiplayer"
 description = "See a friend in your world as a stand-in figure (home network only)."
 default = "off"
 why = "It uses the network, and playing the story together isn't tested on two PCs yet."
-tags = ["Experimental", "Uses the network (home network only)", 'Started by hand for now: app\docs\multiplayer.md',
+tags = ["Experimental", "Uses the network (home network only)", "Host or join on Home: Multiplayer",
         "Doesn't run while Infinite Stamina is on", "While it is on, Play turns on developer commands",
         "Comes with a surprise, built when you first turn it on (about 1 minute)"]
-# (developer: Play opens the game's control port, which tools\mp\client.py talks to)
+# (developer: Play opens the game's control port, which tools\mp\client.py and coop_agent.py talk to; the launcher's
+# Multiplayer page, tools/mp_page.py, starts them)
 developer = true
 ready = false
 kind = "code"
@@ -113,6 +114,23 @@ dll = "build/native/ghost-mods/ghost.dll"
 # --optional: a build that can't be made never stops the multiplayer mod; --quiet: its output names nothing.
 after_on = [["ak47_build.py", "build", "--optional", "--quiet"]]
 after_on_makes = "giruka.ak47"
+
+# Who am I (docs/charsel.md): the character packs, built on the player's PC from their own game files (names only
+# here). One card, never one per character. The mod it adds takes assets/characters/mod.toml: [mod] part_of the
+# multiplayer mod, so it is used only while Ghost multiplayer is on. The Multiplayer page's Who am I builds it too
+# ("Build the characters"), with the same command.
+[[mod]]
+id = "botw-mod-loader.characters"
+title = "Characters for multiplayer"
+description = "See your friends as who they pick: Zelda, a Goron, a Bokoblin and more."
+default = "off"
+why = "It is part of Ghost multiplayer and is built from your game files: only for players who want it."
+tags = ["Experimental", "Built from your game files the first time (a few minutes)",
+        "Used only while Ghost multiplayer is on", "Pick who you are: Home, Multiplayer, Who am I"]
+ready = false
+kind = "recipe"
+folder = "assets/characters"
+build = [["charsel.py", "build", "--add"]]
 
 [[mod]]
 id = "botw-mod-loader.zelda-view"

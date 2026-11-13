@@ -2362,6 +2362,55 @@ def _playas_cmd(args) -> int:
     return 0
 
 
+RECIPE_TOML = REPO / "assets" / "characters" / "mod.toml"   # (build --add: the mod.toml the library copy gets)
+
+
+def _build_add(args) -> int:
+    """charsel build --add (Breathalyzer Plus' Characters recipe, the launcher's --library last): build from the
+    library's own Savage Wind into a temp folder, give it the recipe's mod.toml ([mod] part_of the multiplayer mod),
+    and put it in the library ON. A rebuild replaces the old copy and keeps its ON/OFF and its place."""
+    import shutil
+    import tempfile
+    import modman as mm
+    lib = _open_library(args.library)
+    romfs = args.romfs or (Path(lib.install) / "extracted" / "romfs" if lib.install else DEFAULT_ROMFS)
+    _low_priority()
+    tmp = Path(tempfile.mkdtemp(prefix="charsel-build-"))
+    out = args.out or tmp / MOD_ID
+    try:
+        print("Building the characters from your own game files (a few minutes)...")
+        cat = build(romfs, out, args.ids, library=lib.root, slots=parse_slots(args.slot),
+                    model_copies=args.model_copies, monster_link=args.monster_link_clips,
+                    link_retarget=args.link_retarget, cache=args.cache or tmp / "cache.json")
+        if not cat["built"]:
+            print(f"No character could be built ({len(cat['skipped'])} skipped).")
+            return 1
+        if RECIPE_TOML.is_file():
+            import tomllib
+            text = RECIPE_TOML.read_text(encoding="utf-8")
+            if (tomllib.loads(text).get("mod") or {}).get("id") != MOD_ID:
+                raise CharselError(f"{RECIPE_TOML.name} isn't the characters' mod.toml")
+            (out / "mod.toml").write_text(text, encoding="utf-8")
+        idx = next((i for i, m in enumerate(lib.mods) if m["id"] == MOD_ID), None)
+        was_on = lib.mods[idx]["enabled"] if idx is not None else True
+        if idx is not None:
+            mm.remove_mod(lib, MOD_ID)
+        print("Adding them to your mods...")
+        entry, _scan, _notes = mm.add_mod(lib, str(out))
+        i = next(k for k, m in enumerate(lib.mods) if m["id"] == entry["id"])
+        m = lib.mods.pop(i)
+        m["enabled"] = was_on
+        lib.mods.insert(len(lib.mods) if idx is None else min(idx, len(lib.mods)), m)
+        lib.save()
+    except mm.ModmanError as e:
+        raise CharselError(str(e)) from None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print(f"Built {len(cat['built'])} characters: {', '.join(RECIPES[c].name.split(' (')[0] for c in cat['built'])}."
+          + (f" Not built: {', '.join(cat['skipped'])}." if cat["skipped"] else ""))
+    return 0
+
+
 # Each body's flesh around its main bones, for the live costume's ragdoll (ghost mod 0.9.1, puppet.c, docs/charsel.md
 # "Ragdoll"): per bone, the box its vertices fill in that bone's own frame at rest (cm: x-, x+, y-, y+, z-, z+). A vertex
 # counts for its heaviest bone, or the nearest of these above it (a hand for the wrist, the skirt for the hips).
@@ -2520,15 +2569,18 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("list", help="the characters on the wheel").add_argument("--out", type=Path, default=DEFAULT_OUT)
     b = sub.add_parser("build", help="build the character packs from your own game files")
     b.add_argument("ids", nargs="*", help="characters (default: all)")
-    b.add_argument("--romfs", type=Path, default=DEFAULT_ROMFS)
-    b.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    b.add_argument("--romfs", type=Path, help=f"default: the library's Savage Wind with --add, else {DEFAULT_ROMFS}")
+    b.add_argument("--out", type=Path, help=f"default: a temp folder with --add, else {DEFAULT_OUT}")
     b.add_argument("--library", type=Path, default=DEFAULT_LIBRARY if DEFAULT_LIBRARY.is_dir() else None)
+    b.add_argument("--add", action="store_true",
+                   help="then put it in your mod library, ON, used only while Ghost multiplayer is on (Breathalyzer "
+                        "Plus' Characters recipe: assets/characters/mod.toml)")
     b.add_argument("--slot", action="append", metavar="ID=ACTOR")
     b.add_argument("--model-copies", action="store_true")
     b.add_argument("--monster-link-clips", action="store_true")
     b.add_argument("--link-retarget", choices=LINK_RETARGET, default="auto",
                    help="fit Link's clips to each body: by the heap estimate (auto), always (on) or never (off)")
-    b.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
+    b.add_argument("--cache", type=Path, help=f"default {DEFAULT_CACHE} (with --add: none kept)")
     c = sub.add_parser("check", help="read every built pack back")
     c.add_argument("--out", type=Path, default=DEFAULT_OUT)
     w = sub.add_parser("wheel", help="pick who you are on the wheel (a window)")
@@ -2565,11 +2617,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "list":
             _print_list(load_catalog(args.out))
             return 0
+        if args.cmd == "build" and args.add:
+            return _build_add(args)
         if args.cmd == "build":
+            args.romfs, args.out = args.romfs or DEFAULT_ROMFS, args.out or DEFAULT_OUT
             print(f"Building from {args.romfs} into {args.out}:")
             cat = build(args.romfs, args.out, args.ids, library=args.library, slots=parse_slots(args.slot),
                         model_copies=args.model_copies, monster_link=args.monster_link_clips,
-                        link_retarget=args.link_retarget, cache=args.cache)
+                        link_retarget=args.link_retarget, cache=args.cache or DEFAULT_CACHE)
             print(f"Built {len(cat['built']) - len(cat['kept'])}, kept {len(cat['kept'])}, skipped "
                   f"{len(cat['skipped'])}. Linkle: {cat['linkle']['how']}.")
             print(f"Next: python tools\\modman.py add {args.out} (once), then Play or deploy: only deployed "

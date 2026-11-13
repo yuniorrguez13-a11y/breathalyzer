@@ -6,8 +6,9 @@
     python tools/mp/coop_agent.py copy --own-save S --library L --world "Ana's world" [--check "w w w w"] [--host]
     python tools/mp/coop_agent.py host --library L --name Ana --story-from WORLD [--game-port 7777 | --time 21]
                                        [--code "apple river stone"] [--friends-story]
-    python tools/mp/coop_agent.py join --library L --name Ben --save-dir COOP_SAVE [--address IP] [--code ...]
-                                       [--yes | --no] [--game-port 7777] [--same-pc]
+    python tools/mp/coop_agent.py join --library L --name Ben --save-dir COOP_SAVE [--address IP [--check WORDS]]
+                                       [--code ...] [--yes | --no] [--game-port 7777] [--same-pc]
+    (host and join take --stdin when Breathalyzer's Multiplayer page starts them: it ends them through that pipe)
 
 host: runs the relay on this PC (players connect to it; no project servers), answers Join lists, and is the only
 player whose time and story count. The story comes from the host's world save (--story-from: its newest slot,
@@ -412,7 +413,10 @@ async def host_session(library: Path, name: str, game, story_list: story.StoryLi
     bans = security.BanList(Path(library) / "mp" / "bans.json")
     relay = Relay(relay_host, port, host_secret=secret, room_code=code, bans=bans, friends_story=friends_story,
                   lan_only=True, log=log, **(relay_kw or {}))
-    _, port = await relay.start()
+    try:
+        _, port = await relay.start()
+    except OSError as e:   # (the port in use: said as "Stopped: ...", never a traceback; the launcher reads it)
+        raise RuntimeError(f"couldn't open port {port}: {e}") from None
     if started is not None:
         started(port)
     names = story_list.names(dlc)
@@ -785,22 +789,57 @@ def _host_game(a, names: list[str], story_from: Path | None, log=print):
 
 
 async def _run_host(a, sl, game, **kw) -> dict:
-    """host_session with the host's typed commands (a thread reads the terminal)."""
+    """host_session with the host's typed commands (a thread reads the terminal). --stdin (the launcher): the
+    commands come through a pipe instead, and the pipe closing ends the session as `end` does (friends are told)."""
     loop = asyncio.get_running_loop()
     q: asyncio.Queue = asyncio.Queue()
     stop = asyncio.Event()
+    piped = bool(getattr(a, "stdin", False))
 
     def typed():
-        for text in sys.stdin:
-            loop.call_soon_threadsafe(q.put_nowait, text)
-            if text.strip().lower() in ("end", "quit", "stop"):
-                return
+        try:
+            for text in sys.stdin:
+                loop.call_soon_threadsafe(q.put_nowait, text)
+                if text.strip().lower() in ("end", "quit", "stop"):
+                    return
+        except (OSError, ValueError):
+            pass
+        if piped:   # (the launcher closed the pipe: it wants the session over)
+            loop.call_soon_threadsafe(q.put_nowait, "end")
 
-    if sys.stdin is not None and sys.stdin.isatty():
+    if sys.stdin is not None and (piped or sys.stdin.isatty()):
         threading.Thread(target=typed, daemon=True).start()
-        print("Type: players, kick <name>, ban <name>, unban <name>, code <3 words>, code off, end")
+        if not piped:
+            print("Type: players, kick <name>, ban <name>, unban <name>, code <3 words>, code off, end")
     return await host_session(a.library, a.name, game, sl, dlc=a.dlc, code=a.code, port=a.port,
                               discovery_port=discovery.DISCOVERY_PORT, stop=stop, commands=q, **kw)
+
+
+READY = "Ready: start your game"   # (join prints it once the story is in the co-op save: the launcher starts the game)
+
+
+async def _run_join(a, sl, game, address: str, check: str | None) -> dict:
+    """join_session for the command line. Says READY (with the folder to start the game on) once the host's story
+    is in the co-op save. --stdin (the launcher): `end` on stdin, or the pipe closing, leaves the session."""
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+
+    def watch():
+        try:
+            for text in sys.stdin:
+                if text.strip().lower() in ("end", "quit", "stop"):
+                    break
+        except (OSError, ValueError):
+            pass
+        loop.call_soon_threadsafe(stop.set)
+
+    if getattr(a, "stdin", False) and sys.stdin is not None:
+        threading.Thread(target=watch, daemon=True).start()
+    return await join_session(a.library, a.name, address, a.save_dir, sl, game=game, dlc=a.dlc, code=a.code,
+                              port=a.port, share=a.share, check=check, stop=stop,
+                              processes=[] if a.same_pc else None,
+                              before_game=lambda: print(f"{READY} with SAVAGEWIND_SAVE_DIR={a.save_dir} and press "
+                                                        "Continue.", flush=True))
 
 
 def menu(a, sl: story.StoryList, n: int) -> int:
@@ -872,6 +911,10 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--code", help="room code: 3 words")
         p.add_argument("--port", type=int, default=DEFAULT_RELAY_PORT)
         p.add_argument("--game-port", type=int, help="your game's control port (SAVAGEWIND_CONTROL)")
+        if name != "menu":   # (Breathalyzer's Multiplayer page: tools/mp_page.py)
+            p.add_argument("--stdin", action="store_true",
+                           help="started by the launcher: commands come through stdin, and when it closes the "
+                                "session ends cleanly (a host tells its friends)")
     h = sub.choices["host"]
     h.add_argument("--story-from", type=Path, help="your world's save folder: its newest slot is the story you share")
     h.add_argument("--time", type=float, help="no game: start the shared hour here (it runs like the game's clock)")
@@ -881,6 +924,8 @@ def main(argv: list[str] | None = None) -> int:
     j.add_argument("--save-dir", required=True, type=Path, help="your CO-OP save copy (never your own save)")
     j.add_argument("--same-pc", action="store_true",
                    help="the host's game runs on this PC: trust Savage Wind's save lock alone")
+    j.add_argument("--check", help="the host's 4 check words from the Join list (with --address): story stays off "
+                                   "if the host's key doesn't match them")
     g = j.add_mutually_exclusive_group()
     g.add_argument("--yes", dest="share", action="store_true", default=None)
     g.add_argument("--no", dest="share", action="store_false")
@@ -928,11 +973,11 @@ def main(argv: list[str] | None = None) -> int:
                                   friends_story=a.friends_story))
         except KeyboardInterrupt:
             pass
-        except RuntimeError as e:
-            print(f"Stopped: {e}")
+        except (RuntimeError, OSError) as e:
+            print(f"Stopped: {e}", flush=True)
             return 1
         return 0
-    address, check = a.address, None
+    address, check = a.address, (a.check or None) if a.address else None
     if not address:
         hosts = discovery.search(3.0)
         if not hosts:
@@ -945,9 +990,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Joining {pick['world']} ({address}; check words {pick['check']})")
     game = ControlGame(a.game_port, n, a.list, a.dlc) if a.game_port else None
     try:
-        out = asyncio.run(join_session(a.library, a.name, address, a.save_dir, sl, game=game, dlc=a.dlc, code=a.code,
-                                       port=a.port, share=a.share, check=check,
-                                       processes=[] if a.same_pc else None))
+        out = asyncio.run(_run_join(a, sl, game, address, check))
     except KeyboardInterrupt:
         return 0
     except OSError as e:

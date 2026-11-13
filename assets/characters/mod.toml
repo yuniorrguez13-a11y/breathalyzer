@@ -1,0 +1,15 @@
+# The Characters recipe of Breathalyzer Plus (tools/packaging/bundled-mods.toml): `python tools/charsel.py build --add`
+# builds the character packs on the player's PC from their own game files and gives the mod it adds to the library
+# this mod.toml. part_of: it is used only while Ghost multiplayer is on (docs/charsel.md, docs/multiplayer.md).
+# Nothing from the game is here: only this file.
+[mod]
+id = "botw-mod-loader.characters"
+name = "Characters for multiplayer"
+version = "0.1.0"
+authors = ["giruka"]
+description = "See your friends as who they pick: Zelda, a Goron, a Bokoblin and more."
+game_versions = ["1.9.0"]
+part_of = "botw-mod-loader.ghost"
+
+[data]
+romfs = "romfs"

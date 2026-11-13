@@ -27,9 +27,20 @@ Some are built from your own game files the first time you turn them on.
 
 MULTIPLAYER (EXPERIMENTAL)
 
-- Ghost multiplayer: see a friend in your world. Home network only (both PCs on the same Wi-Fi or router).
-- For now you start it by hand. The steps: app\docs\multiplayer.md ("With Breathalyzer Plus").
-- It doesn't run while Infinite Stamina is on.
+Play with a friend on your home network (both PCs on the same Wi-Fi or router). Nothing to type.
+1. On Home, press Multiplayer. Ghost multiplayer: press Turn on.
+2. Who am I: pick a character. Each PC presses Build the characters once (a few minutes): then you see
+   your friends as who they picked. Anyone else (and Link, for now) is a stand-in figure.
+3. One of you presses Host and types a name (everyone on your home network sees it).
+   The first time, Windows asks whether Python may use the network: press Allow. Your Wi-Fi must be
+   set to Private (Windows Settings, Network). Then press Start the game.
+4. The others press Join and pick the host's world.
+5. Breathalyzer starts the game: press Continue. Stop ends multiplayer. The game then keeps running on
+   your multiplayer copy: close it and press Play to play your own save.
+- Story together (the host's choice): your friends get your towers, quests and freed Divine Beasts.
+  They are asked first, and nothing is ever taken away.
+- Multiplayer plays on a copy of your save. Your own save stays as it is.
+- It doesn't run while Infinite Stamina is on. More help: app\docs\multiplayer.md
 
 SHARE A MOD
 

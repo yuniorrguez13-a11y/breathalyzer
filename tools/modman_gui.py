@@ -223,6 +223,7 @@ class Job:
     proc: object = None
     cancelled: bool = False
     hide: tuple = ()           # words its output never shows (a secret mod's id, title, folder): see hide_words
+    env: dict = field(default_factory=dict)   # play: more variables for the game (the Multiplayer page's save copy)
 
     @property
     def slot(self) -> str:
@@ -584,9 +585,25 @@ class Backend:
         def on_line(line: str) -> None:
             events.put(("line", job, line))
 
-        with self.piped_cheats(on_line) if job.action == "play" else contextlib.nullcontext():
+        play = job.action == "play"
+        with self.piped_cheats(on_line) if play else contextlib.nullcontext(), \
+                self.game_env_extra(job.env) if play and job.env else contextlib.nullcontext():
             code = self.call(job.args, on_line)
         events.put(("done", job, code))
+
+    @contextlib.contextmanager
+    def game_env_extra(self, extra: dict):
+        """Inside, modman.run starts the game with these variables too (only that game: this process's own
+        environment doesn't change). The Multiplayer page uses it for SAVAGEWIND_SAVE_DIR, the co-op save copy."""
+        real = getattr(self.mm, "game_env", None)
+        if real is None or not extra:
+            yield
+            return
+        self.mm.game_env = lambda base, launch, port: {**real(base, launch, port), **extra}
+        try:
+            yield
+        finally:
+            self.mm.game_env = real
 
     @contextlib.contextmanager
     def piped_cheats(self, on_line):
@@ -1840,6 +1857,7 @@ class LaunchController(Controller):
         self.breath_stop = threading.Event()        # Cancel while a .breath is checked
         self.breath_removing = None                 # the id of a .breath's mod with code it didn't show, going out
         self.status_was: list[str] = []             # (and what the status said about it)
+        self.play_env: dict = {}                    # this Play's extra game variables (launch(env=...): Multiplayer)
         super().__init__(backend, clock, port)
 
     def _first_status(self) -> Status:
@@ -1936,10 +1954,13 @@ class LaunchController(Controller):
 
     # --- Play
 
-    def launch(self, no_rebuild: bool = False) -> None:
-        """Play: find out what it takes (in the background), then do it step by step."""
+    def launch(self, no_rebuild: bool = False, env: dict | None = None) -> None:
+        """Play: find out what it takes (in the background), then do it step by step. env: more variables for the
+        game this Play starts (the Multiplayer page: SAVAGEWIND_SAVE_DIR, the co-op save copy); every other Play
+        starts it without them."""
         if not self.free("play"):
             return
+        self.play_env = dict(env or {})
         self.offer, self.rebuilding, self.no_rebuild = None, False, no_rebuild
         job = Job("prepare", [], started=self.clock())
         self.jobs["main"] = job
@@ -2023,6 +2044,7 @@ class LaunchController(Controller):
         self.step = job
         if job.action == "play":
             job.args = self.play_args()
+            job.env = dict(self.play_env)
         self._start(job)
         if self.installing is not None:
             n = len(self.install_mods)
@@ -2431,6 +2453,8 @@ class LauncherView(BigText):
         self.fps_note = ""                                    # Settings' frame rate line after a change
         self.bundled_key, self.bundled = la.read_bundled(app_dir)   # (Breathalyzer Plus: our mods for the picker)
         self.eggs = [m for m in self.bundled if m.get("egg")]      # (secret: one switch for all, never listed)
+        import mp_page
+        self.mp = mp_page.MpPage(self)   # Home > Multiplayer: Host, Join, Who am I (tools/mp_page.py)
         self.picks: dict[str, bool] = {}
         self.pick_buttons: dict[str, object] = {}
         self.picker_buttons: list = []
@@ -2514,7 +2538,8 @@ class LauncherView(BigText):
         self.label(top, self.head, text="Breathalyzer").grid(row=0, column=0, sticky="w")
         self.sw_label = self.label(top, anchor="e")
         self.sw_label.grid(row=0, column=1, sticky="e")
-        self.frames = {name: tk.Frame(r, bg=t["bg"]) for name in ("home", "setup", "settings", "picker", "breath")}
+        self.frames = {name: tk.Frame(r, bg=t["bg"]) for name in ("home", "setup", "settings", "picker", "breath",
+                                                                     "multiplayer", "who")}
         for f in self.frames.values():
             f.columnconfigure(0, weight=1)
         self.build_home()
@@ -2522,6 +2547,7 @@ class LauncherView(BigText):
         self.build_settings()
         self.build_picker()
         self.build_breath()
+        self.mp.build()
         self.style_tree()
         self.list_version = -1
 
@@ -2542,7 +2568,8 @@ class LauncherView(BigText):
         row = tk.Frame(f, bg=t["bg"])
         row.grid(row=1, column=0, sticky="ew", padx=PAD)
         row.columnconfigure(0, weight=1)
-        self.play = self.make_button(row, "Play", lambda: self.after_action(lambda: self.ctl.launch()),
+        self.play = self.make_button(row, "Play", lambda: self.mp_waits() or self.after_action(
+                                         lambda: self.ctl.launch()),
                                      self.home_buttons, why=lambda: self.after_action(lambda: self.ctl.free("play")))
         self.play.configure(font=self.play_font, bg=t["play"], fg=t["play_fg"], activebackground=t["active"],
                             activeforeground=t["fg"], pady=0)   # (a Tk button adds room of its own)
@@ -2592,6 +2619,7 @@ class LauncherView(BigText):
         group: list = []
         for action, text, command in (
                 ("toggle", "Turn off", self.on_toggle), ("export", "Export as .breath", self.on_export),
+                ("multiplayer", "Multiplayer", lambda: self.mp.show()),
                 ("add", "Add mod", self.on_add), ("breath", "Add a .breath", self.on_add_breath),
                 ("mods_folder", "Open mods folder", self.on_open_mods),
                 ("settings", "Settings", lambda: self.show_settings()), ("more", "More...", self.on_more)):
@@ -2719,9 +2747,11 @@ class LauncherView(BigText):
 
     def back(self) -> str:
         """Esc: back to Home (from Settings, the mod picker, Check my setup, or a folder change that is left); on
-        "Add this mod?" it is Not now."""
+        "Add this mod?" it is Not now; Who am I goes back to Multiplayer."""
         if self.screen == "breath":
             self.on_breath_skip()
+        elif self.screen in ("multiplayer", "who"):
+            self.mp.back()
         elif self.ctl is not None and self.screen != "home":
             self.setup_mode = "first"
             self.show("home")
@@ -2936,6 +2966,9 @@ class LauncherView(BigText):
         if self.ctl is not None and self.ctl.breath is not None and self.screen in ("home", "settings"):
             self.show_breath()   # (a .breath was checked: "Add this mod?")
             return
+        if self.screen in ("multiplayer", "who"):
+            self.mp.render()
+            return
         if self.screen != "home" or self.ctl is None:
             return
         ctl, t = self.ctl, self.t
@@ -2951,7 +2984,12 @@ class LauncherView(BigText):
         self.plain_button.configure(state="normal" if ctl.can("play_plain") else "disabled")
         empty = not ctl.shown_rows() and not ctl.listing.error   # (no mods: one Play, no Play without mods or Turn off)
         per_mod = {self.by_action["toggle"].ring, self.by_action["export"].ring}
-        self.show_flow([r for r in self.flow_all if not (empty and r in per_mod)])
+        mp_ring = None if self.mp.available() else self.by_action["multiplayer"].ring   # (only with Ghost multiplayer)
+        self.show_flow([r for r in self.flow_all if not (empty and r in per_mod) and r is not mp_ring])
+        mp_on = self.mp.session is not None and self.mp.session.running
+        if self.by_action["multiplayer"].cget("text") != ("Multiplayer: ON" if mp_on else "Multiplayer"):
+            self.by_action["multiplayer"].configure(text="Multiplayer: ON" if mp_on else "Multiplayer")
+            self.root.after_idle(lambda: self.flow.frame.winfo_exists() and self.flow.reflow(force=True))
         if ctl.can("cancel"):
             items = [self.cancel_button.ring]
         else:
@@ -3026,11 +3064,14 @@ class LauncherView(BigText):
                 self.pending_breath += la.take_files(self.open_dir)
             if self.pending_breath:
                 self.next_breath()
+            mp_changed = self.mp.tick()   # (Multiplayer: the tools' news, and the game's state for the session)
             if self.ctl is not None:
-                if changed:
+                if changed or (mp_changed and self.screen == "home"):
                     self.render()
                 elif self.screen == "home" and (self.ctl.jobs or self.ctl.game_open):
                     self.render_line()
+                elif self.screen in ("multiplayer", "who") and (mp_changed or self.ctl.jobs):
+                    self.mp.render()
         finally:
             if not self.closed:
                 self.root.after(POLL_MS, self.tick)
@@ -3113,7 +3154,19 @@ class LauncherView(BigText):
             self.after_action(lambda: self.ctl.launch(no_rebuild=True))
 
     def on_play_plain(self) -> None:
-        self.after_action(self.ctl.play_plain)
+        if not self.mp_waits():
+            self.after_action(self.ctl.play_plain)
+
+    def mp_waits(self) -> bool:
+        """Multiplayer is on (it starts the game itself, on the co-op copy): Play and Play without mods wait. True
+        when they wait (the status says why)."""
+        s = self.mp.session
+        if s is None or not s.running or self.ctl is None:
+            return False
+        self.ctl.status = Status("warn", ["Multiplayer is on.", "It starts the game itself: press Stop on the "
+                                                                "Multiplayer page first."])
+        self.render()
+        return True
 
     def on_details(self) -> None:
         """What the last step printed, in its own window, with Copy (the home folder is written as %USERPROFILE%,
@@ -3844,7 +3897,7 @@ class LauncherView(BigText):
         if self.screen == "picker":
             self.size_picker()
         for group in (self.home_buttons, list(self.by_action.values()), self.setup_buttons, self.settings_buttons,
-                      self.picker_buttons, self.breath_buttons):
+                      self.picker_buttons, self.breath_buttons, *self.mp.groups()):
             flat = group is self.settings_buttons
             for b in group:
                 with contextlib.suppress(tk.TclError):
@@ -3884,7 +3937,7 @@ class LauncherView(BigText):
         self.root.update_idletasks()
         top = self.sw_label.master.winfo_reqheight() + PAD + 4
         return top + max(f.winfo_reqheight() for k, f in self.frames.items()
-                         if k not in ("picker", "breath") or self.screen == k)
+                         if k not in ("picker", "breath", "multiplayer", "who") or self.screen == k)
 
     def fit(self, shrink: bool = False) -> bool:
         """Make the window as big as the text needs, up to the screen. False when it doesn't fit; with shrink, the
@@ -3939,6 +3992,13 @@ class LauncherView(BigText):
                 "Close", "Your mods are still being made ready.", "Closing now stops it; the next Play starts over.",
                 [("Stop and close", True), ("Keep going", False)], default=1):
             return
+        if self.mp.session is not None and self.mp.session.running and not self.ask(
+                "Close", "Multiplayer is on.", "Closing Breathalyzer stops it: your friends leave your world (or you "
+                "leave theirs). The game keeps running, on your multiplayer copy.",
+                [("Stop and close", True), ("Keep going", False)],
+                default=1):
+            return
+        self.mp.close()   # (Multiplayer ends with the window: a host tells its friends)
         if self.ctl is not None:
             self.ctl.stop()
         self.save_settings()

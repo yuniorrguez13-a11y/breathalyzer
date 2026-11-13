@@ -96,6 +96,39 @@ you turned on is built from your game files first").
   window up: a `.breath` you double-click then is asked about once the game is closed.
 - After something failed, **Details** shows what happened, with **Copy** for a bug report (your home folder is
   written as `%USERPROFILE%`, so the report doesn't carry your name).
+- **Multiplayer** (Breathalyzer Plus with Ghost multiplayer): the page below.
+
+### Multiplayer
+
+Play with friends on your home network, without a command line (Experimental; the steps for players are also in
+[multiplayer.md](multiplayer.md)). The page has big rows and buttons:
+
+- **Ghost multiplayer** ON/OFF (**Turn on** adds it as the mod picker does, and builds its surprise the first time).
+- **Your name**: what your friends see (**Change**: 1 to 20 letters, digits or spaces). Never your Windows name:
+  the first Host or Join asks for one (everyone on your home network sees it; your world is called by it).
+- **Who am I**: the character you picked (**Change** opens the Who am I page).
+- **Story together** ON/OFF (for the host): ON, your friends' co-op saves get your towers, quests and freed Divine
+  Beasts; each friend is asked first ("Share story progress with Ana?") and nothing is ever taken away.
+- **Room code**: **Make one** gives 3 words your friends type to join; OFF, anyone on your home network can join.
+- **Host**: opens your world on this PC, then starts the game through Play (so your mods, the multiplayer mod too,
+  are ready; the page shows Play's progress). The first Host on a PC waits at **Your world is open**: Windows asks
+  whether Python may use the network (press Allow; the Wi-Fi must be Private), then **Start the game**. Until a
+  friend has come in, the page says where to allow Python (Windows Security > Firewall & network protection > Allow
+  an app). Press Continue in the game. **Join**: the worlds on your home network show up by themselves; pick one
+  and Breathalyzer starts the game. **Stop** ends it: while the mods are still being made ready the game is cancelled
+  too; an open game keeps running on your multiplayer copy. Closing the game and closing Breathalyzer (it asks
+  first) end it too. **Details**: what the multiplayer tools said, your home folder as `%USERPROFILE%`.
+- Host and Join wait while the game is open (Breathalyzer starts it for you), and while Infinite Stamina is on.
+- Multiplayer plays on a **copy** of your save, made once in `modloader\multiplayer` (the host's world, a friend's
+  copy per host, story backups): your own save is only read. Play plays your own save, as always.
+- **Who am I** shows the characters in big buttons by group (Hylians, Races, Monsters), each with Ready, Not tried
+  yet (built, not yet seen in the game), Build first, Stand-in (Link: Breathalyzer doesn't build the Link body yet)
+  or Needs a mod (Linkle needs the Linkle mod). A press picks it: it is used from your next Host or Join, and while
+  your game is open it is sent at once (the page says "In your game now." once the game took it). **Each PC shows
+  the others from its own built characters**: **Build the characters** (once, a few minutes, from your own game
+  files; the line under the status shows how long it has run) lets you see your friends as who they picked, and they
+  see your pick if they built them too. They are one mod in your list, "Characters for multiplayer", used only while
+  Ghost multiplayer is on. A build that fails says why, with **Details**.
 
 ### Settings
 
@@ -153,8 +186,10 @@ Tk windows don't work with screen readers yet.
 
 Your own things are not in this folder:
 
-- your mods and mod list: the `modloader` folder next to your Savage Wind folder;
-- the launcher's choices (your Savage Wind folder, your mod list, the window's text size): `%LOCALAPPDATA%\Breathalyzer`,
+- your mods and mod list: the `modloader` folder next to your Savage Wind folder (with `multiplayer\`: the co-op
+  save copies, their story backups, your multiplayer key and bans, the story list);
+- the launcher's choices (your Savage Wind folder, your mod list, the window's text size, your multiplayer name and
+  choices; `charsel.json`: who you are in multiplayer): `%LOCALAPPDATA%\Breathalyzer`,
   with `received\` (`.breath` files being added, and the packages added from them: one goes when no mod in your list
   comes from it any more), `open\` (a double-clicked `.breath` on its way to the open window) and `window.json`
   (while the window is open: which window it is, and whether you play).
@@ -174,7 +209,9 @@ Your own things are not in this folder:
 ## Privacy
 
 Breathalyzer never goes online by itself: no update check, no statistics, nothing sent anywhere. Multiplayer, when
-you use it, connects only to the friend you choose.
+you use it, stays on your home network: Join asks your home network for worlds, Host answers those questions and
+takes friends from your home network only, and only what the game needs goes to them (your name, who you picked,
+where Link is and what he does; from the host, the time of day and the story).
 
 ## For developers
 
@@ -190,6 +227,12 @@ you use it, connects only to the friend you choose.
 - When the window can't start (an import error, Tk can't open, tkinter missing), `launcher.py` writes the traceback
   to `launcher-error.txt` in the settings folder and shows a Windows message box (ctypes, no Tk). It drops
   `TCL_LIBRARY` and `TK_LIBRARY` before Tk loads (another program's would break it).
+- The Multiplayer page: `tools/mp_page.py` (`MpSession` without widgets, `MpPage` in `LauncherView`). Its tools run
+  with `console_python()` (the runtime's `python.exe`, `CREATE_NO_WINDOW`), `--library` last, and end through their
+  stdin (`coop_agent.py --stdin`, `client.py --stdin`); the game goes through `LaunchController.launch(env=...)`,
+  which gives only that game `SAVAGEWIND_SAVE_DIR` (`Backend.game_env_extra`); Stop before the game opened uses
+  `LaunchController.cancel()`. Its choices are launcher.json's `"multiplayer"` (name, story, code, firewall: the
+  first Host's wait was seen). Tests: `tests/test_mp_page.py` (stand-in tools, a hidden window).
 - Developer mode: Play passes `--port 7777` to `modman run` when Settings > Developer commands is ON, while a mod
   that needs it is ON (`developer = true` in `bundled-mods.toml`, or `DEV_MODS` in `modman_gui.py`), or with
   `--port`; else `modman run` opens the port only for cheats.
