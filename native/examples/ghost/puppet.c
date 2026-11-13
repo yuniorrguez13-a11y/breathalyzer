@@ -41,6 +41,40 @@
 // If the pose can't be followed (a skeleton or the animation can't be read, too few bones named as Link's,
 // `ghost puppet ragdoll clip`), it plays its own lying clip (Dead) on that ground instead. [S: the addresses below,
 // from the code; G: all of it in the game]
+//
+// 0.9.2 (the 0.9.1 game check, 2026-11-13: Daruk's bomb and death ragdolls passed; three things didn't):
+// - Getting up, Daruk floated 0.3-0.5 m for 1-1.6 s, and the lift jumped up to 1 m a frame in a tumble. The lowest
+//   point is now each body box's ROUND flesh (the ellipsoid inside the box: a 2 m belly tilted forward reached as low
+//   as its box's corner), the ground is levelled as Link stands up and its slope smoothed, the costume stands on its
+//   feet as he gets upright (pup_rd_upness), and the lift goes up fast, down more gently, at most so many m/s
+//   (pup_rd_follow).
+// - Sliding fast down a hill, Link showed for 0.4 s: his real position's 1 m check against the player info's copy (a
+//   teleport's guard, botw_player_real_pos) said "no real position". Link now shows only for the game's own states
+//   (pup_busy_real: loading, an event, no body of his own), each held PUP_BUSY_S first.
+// - Zelda's animation "can't be paused" and she played her lying clip, bobbing 0.4-1.66 m. Every unit's animation is
+//   now held: paused (also one another unit owns), nothing (a unit with none), or posed again right after the game's
+//   own step (unit_step_wrapper) for one of another class. The clip's lift no longer feeds on its last lift.
+// 0.9.2, round 3 (the user as Daruk, 2026-11-13: "he just rolled around like a physics-less ball", then "the bomb
+// ragdoll just makes him walk, I can see him walking while falling through a hill"):
+// - The pose never reached the screen: the game puts a unit's clip into its bone locals BEFORE the unit's own step
+//   (0x7001051914: the unit's animation list, then vf_79 0x7000f969ac, then its world matrices), and these costumes'
+//   clips don't go through the unit's +0x188 animation at all (the user's game: Paya's and the Hylian's units have
+//   none there, yet they play Wait). So the "runs" bit paused nothing, the clip overwrote the pose written by the
+//   tick, and the costume showed its last clip (walk, or Daruk's rolling ball) placed at Link's tumbling matrix. Now
+//   EVERY posed unit gets the whole pose right after its own step, before its world matrices are made
+//   (unit_step_wrapper, all units, all bones): no clip can show during a ragdoll.
+// - Link's own "walking" states after the tumble: on a steep hill he gets up into Slide / SlideBrake / SlideLand, which
+//   the packs lack, so the costume fell back to Walk/Run by his speed at his feet, half in the hill. The pose is now
+//   followed through every lying, sliding and knock-down clip (pup_rd_now), the ground follows his motion's slope as
+//   he slides (never under the hill), and he is "up" only when standing (pup_rd_upness).
+// - The retarget is Link's turn relative to his rest, put on the costume's own rest (each skeleton's rest read from
+//   its resource), and the bones not named as Link's go to their own rest (hair, beard, cloth): Daruk's 21 main bones
+//   rest exactly as Link's (measured), but the face and Zora's ears were 20-112 degrees off, the monsters' necks 40-82.
+// - Loose limbs: the arms and legs swing behind the body's own motion (a damped spring per limb, `ghost puppet limp`).
+// - Daruk's sprint ball rolls: turned about the axis across his motion at speed / radius, its lowest point on the
+//   ground (the slope from Link's motion), started and stopped smoothly, facing the way he goes (pup_ball_*).
+// - A costume with no own ragdoll: no Goron or Champion pack has a ragdoll (Physics/Ragdoll/*.hkrg: only Link's and
+//   the monsters', Bokoblin, Moblin, Lizalfos, Lynel, Hinox), so the pose stays the way.
 
 #include "pup_bodies.h"
 
@@ -65,20 +99,53 @@
 #define RES_BONE_SIZE 0x50             // +RES_BONE_INDEX, s16 its parent at +RES_BONE_PARENT (tools/wiiu_model reads the
 #define RES_BONE_INDEX 0x18            // same layout from the files) [S]
 #define RES_BONE_PARENT 0x1a
+#define RES_FLAGS 0x38                 // 0.9.2: skeleton resource: u32 flags; RES_EULER: the bones' turns are Euler XYZ
+#define RES_EULER 0x1000u              // (else quaternions) (tools/wiiu_model/nx_model.py reads the same)
+#define RES_BONE_SCALE 0x28            // ... each bone's rest: scale (3 floats), turn (4: x y z, w or 1), place (3)
+#define RES_BONE_ROT 0x34
+#define RES_BONE_TRANS 0x44
 #define PUP_MAXB 256                   // bones read per skeleton
 #define PUP_RD_UNITS 4                 // the costume's model units posed (those with Link's bones; head parts follow)
 #define PUP_RD_MIN_MAP 8               // ... a unit with fewer bones named as Link's isn't
 #define PUP_RD_LEVEL 0.02              // the ground's gentle pull to level (m^2 a point)
 #define PUP_RD_SLOPE 0.7f              // ... and its steepest (35 degrees)
-#define PUP_RD_BAND 0.08f              // ... fitted again without the corners this far over the median (m)
+#define PUP_RD_BAND 0.08f              // ... fitted again without the points this far over the median (m)
+#define PUP_RD_SLOPE_S 0.25            // ... its slope smoothed over this long (a tumbling body's fit jumps)
 #define PUP_RD_UP_COS 0.82f            // Link is up again: his spine within 35 degrees of straight up ...
 #define PUP_RD_UP_HIP 0.65f            // ... and his hips this high over the ground (m; 0.99 standing)
+#define PUP_RD_UP_U 0.9f               // ... or as upright as this (pup_rd_upness: 1 standing, about 0.8 sliding)
+#define PUP_RD_MOVE_FROM 1.0f          // m/s: the ground's slope comes from Link's motion from this speed ...
+#define PUP_RD_MOVE_FULL 2.5f          // ... fully from this one (a slide, a tumble down a hill)
+#define PUP_RD_VEL_S 0.15              // ... his velocity smoothed over this long
+#define PUP_LIMP 0.5f                  // `ghost puppet limp`: how loosely the arms and legs swing (0: exactly his)
+#define PUP_LIMP_HZ 2.2f               // ... a limb's spring (Hz) and damping ratio
+#define PUP_LIMP_ZETA 0.35f
+#define PUP_LIMP_MAX 0.9f              // ... at most this far (rad) off his
+#define PUP_LIMP_N 4                   // the limbs: Arm_1_L, Arm_1_R, Leg_1_L, Leg_1_R
+#define PUP_BALL_SPIN_S 0.15           // Daruk's ball: its spin follows speed / radius this gently ...
+#define PUP_BALL_END_S 0.08            // ... it comes back upright this fast when the sprint ends ...
+#define PUP_BALL_END_MAX 0.4           // ... within this long (then his next clip)
+#define PUP_BALL_R_MIN 0.3f            // m: its radius (from its body boxes, posed by its clip) at least
+#define PUP_RD_TILT_COS 0.5f           // how upright he is: 0 with his spine 60 degrees or more off straight up, or
+#define PUP_RD_LOW_HIP 0.35f           // ... his hips this low over his lowest point (m); 1 from the two above
 #define PUP_RD_TAIL_S 0.3              // the pose is followed this long at least after the ragdoll ends ...
 #define PUP_RD_GETUP_S 4.0             // ... and at most this long while he gets up
-#define PUP_RD_EASE_S 0.2              // the lift goes down this gently (up: at once)
+#define PUP_RD_RISE_S 0.03             // the lift goes up fast (this time constant) ...
+#define PUP_RD_RISE_MPS 15.0f          // ... at most this many m/s (a 1 m jump in one frame is spread over 2) ...
+#define PUP_RD_FALL_S 0.25             // ... down more gently while he lies ...
+#define PUP_RD_FALL_MPS 2.5f           // ... (m/s) ...
+#define PUP_RD_STAND_S 0.08            // ... and down fast as he stands up (to the standing height)
+#define PUP_RD_STAND_MPS 6.0f
 #define PUP_RD_LIFT_MAX 3.0f           // m: the lift's range (up)
 #define PUP_RD_SINK_MAX 0.4f           // m: ... (down: a costume thinner than Link)
+#define PUP_RD_SINK_OK 0.15f           // m: standing, the body's lowest point may be this far under the ground (its feet on it)
 #define PUP_RD_RETRY_S 2.0             // a skeleton that can't be read is looked at again this often
+#define UNIT_ANIM_STEP 0x7000f969acull // model unit vf_79 (both unit classes; only called through the vtable [S]): its
+                                       // animation's step (0x7000f7f0c8, which writes the clip's bone locals), then
+                                       // "locals changed"; the world transforms are made from the locals after it
+#define PUP_BUSY_S 0.15                // a state that shows Link (an event, no body of his own) must last this long
+#define PUP_EVENT_MGR 0x7001e3a638ull  // u64: the event manager (zelda_view's EVENT_MGR_PTR) ...
+#define PUP_EVENT_RUNNING 0x1d2b8      // ... u64: not 0 while an event (a cutscene, a talk) runs [S, not yet run]
 
 #define MODEL_SHOW 0x7000f7739cull     // (model holder, on, bit): sets or clears `bit` in every model unit's flags
 #define UNIT_FLAGS 0x0c                // model unit: u16 flags; bit 0: drawn (MODEL_SHOW's own reads say so)
@@ -134,12 +201,23 @@ typedef struct {
     int retry_seq;                 // `ghost puppet retry`: a failed pack is tried again
     int rd_mode;                   // 0.9.1 `ghost puppet ragdoll pose|clip|off`: RDM_*
     float girth;                   // `ghost puppet girth x`: the body boxes times x (0: 1)
+    int limp_set;                  // 0.9.2 `ghost puppet limp x`: how loosely its limbs swing (not set: PUP_LIMP)
+    float limp;
+    int ball_off;                  // 0.9.2 `ghost puppet ball off|on`: Daruk's sprint ball rolls (on by default)
 } PupReq;
 
 enum { RDM_POSE, RDM_CLIP, RDM_OFF };
 static const char *const RDM_NAMES[] = {"pose", "clip", "off"};
 enum { RD_NONE, RD_POSE, RD_CLIP };
 static const char *const RD_NAMES[] = {"no", "pose", "clip"};
+// 0.9.2: how each posed unit's animation is held: paused (the "runs" bit), paused although another unit owns it, none
+// to hold, or posed again after the game's own step (unit_step_wrapper: an animation of another class)
+enum { AK_UNSET, AK_PAUSED, AK_SHARED, AK_NONE, AK_AFTER };
+static const char *const AK_NAMES[] = {"?", "paused", "shared", "none", "after"};
+// 0.9.2: why Link shows now, from the game's own states (0: he is free)
+enum { PB_FREE, PB_WORLD, PB_EVENT, PB_BODY };
+static const char *const PB_NAMES[] = {"", "loading", "event", "no_body"};
+static const char *const PB_WHY[] = {"", "loading", "an event or a cutscene", "riding or loading (no body of his own)"};
 
 typedef struct {
     int state;                     // PS_*
@@ -163,12 +241,22 @@ typedef struct {
     char missing[160];             // names the puppet lacks (the latest)
     int rd;                        // 0.9.1: RD_*: what the puppet does for Link's ragdoll now
     char rd_src[8];                // ... what said he ragdolls: "flag", "anim", "getup" (after it, until he is up)
-    char rd_why[80];               // ... why its lying clip, not his pose
+    char rd_why[120];              // ... why its lying clip, not his pose
     int rd_units, rd_mapped;       // ... model units posed, bones posed like his
     float rd_lift;                 // ... m it is raised (negative: lowered) to lie on the ground
     uint32_t rd_flags;             // his ragdoll manager's flags (0: not readable)
     uint64_t rd_mgr;
     int64_t rd_count, rd_frames;   // ragdolls followed, frames posed
+    char rd_anim[72];              // 0.9.2: how each posed unit's animation is held ("u0 paused", "u0 after 0x7001...")
+    float rd_up, rd_want;          // ... how upright Link is (0 lying, 1 standing); the lift it goes to
+    int busy;                      // ... PB_*: why Link shows now (after PUP_BUSY_S)
+    int event;                     // ... the event manager: 1 an event runs, 0 none, -1 unreadable, -2 not trusted yet
+    float real_gap, real_gap_max;  // ... m: his real position's lead over the copy now, and the most since the pick
+    int64_t gap_frames;            // ... frames the old 1 m check would have shown Link (a fast slide); none now
+    int rd_rest;                   // ... rests read: 1 Link's, 2 the costume's (both: the turns go rest to rest)
+    int ball;                      // ... Daruk's sprint ball rolls now (1), comes back upright (2)
+    float ball_r, ball_spin, ball_angle;  // ... its radius (m), spin (rad/s) and turn (rad, 0 upright)
+    int64_t balls;                 // ... sprints rolled
 } PupStatus;
 
 static PupReq g_pup_req;           // under lock()
@@ -188,10 +276,12 @@ static const char *t_pup_asked;                     // the name last asked for (
 static double t_pup_call_t, t_pup_read_t;
 static AnimAuto t_pup_anim;                         // Link's speed (his place each frame)
 static Missing t_pup_missing;                       // names this puppet lacks
-static int pup_free_real(void) { return botw_player_real_pos(api) != 0; }
+static int pup_busy_real(uint64_t pi, uint64_t player, double t);
 static int pup_paused_real(void) { return botw_paused(api); }
-static int (*g_pup_free)(void) = pup_free_real;      // (the selftest fakes these two)
+static int (*g_pup_busy)(uint64_t pi, uint64_t player, double t) = pup_busy_real;  // (the selftest fakes these two)
 static int (*g_pup_paused)(void) = pup_paused_real;
+static double t_pup_busy_since;                     // 0.9.2: a state that shows Link has lasted since then (0: none)
+static int t_pup_ev_zero;                           // ... the event manager's field was seen 0 (else it isn't trusted)
 static int g_pup_check_files = 1;                   // (the selftest has no overlay)
 
 // ---- pure parts (the selftest checks them)
@@ -226,8 +316,9 @@ static const char *pup_pick(const char *link, float v, int autoc, int *sprint, c
     }
     *sprint = 0;
     if (pup_prefix(link, "Horse") || pup_prefix(link, "Ride") || pup_prefix(link, "Sled") || pup_prefix(link, "Surf") ||
-        pup_prefix(link, "Demo") || pup_prefix(link, "Event"))
-        return NULL;  // (a horse, a shield surf, a cutscene's own move: Link shows)
+        pup_prefix(link, "Demo") || pup_prefix(link, "Event") || strstr(link, "Horse"))
+        return NULL;  // (a horse, a shield surf, a cutscene's own move: Link shows; 0.9.2: CutHorseRide, AimHorse... too:
+                      // a ride is told by his clips now, not by his real position, docs/charsel.md "Ragdoll")
     if (!missing_has(m, link)) return link;  // (the pack's own name: asked; a miss is learned)
     if (anim_is_attack(link)) return missing_has(m, "CutS1") ? speed : "CutS1";
     // a near name of the same family; NULL where that family can't be shown on the ground
@@ -263,9 +354,14 @@ static const char *pup_pick(const char *link, float v, int autoc, int *sprint, c
 
 // Link ragdolls now: his ragdoll manager's "on" bit, or he plays a ragdoll or lying clip (a second source, should the
 // manager's offset be wrong in this game version). mgr_ok: the manager was readable.
+// 0.9.2: also every clip of his that throws, slides or knocks him down and that no pack has (Player.baslist): the big
+// knock-back and its getting up (DamageL, DamageLStand), a hard landing (LandDamage, LandDamageStand), the slide down
+// a steep slope he gets up into after a tumble on a hill (Slide, SlideBrake, SlideLand: the costume walked there, by
+// his speed, half in the hill), and dying in water. The costume follows his pose through them.
 static int pup_rd_now(int mgr_ok, uint32_t flags, const char *anim) {
     if (mgr_ok && (flags & RD_ON)) return 1;
-    static const char *const LYING[] = {"SlippingDown", "DeadRagdoll", "Dead", "Rolldown"};
+    static const char *const LYING[] = {"SlippingDown", "DeadRagdoll", "Dead",     "Rolldown", "Slide",
+                                        "LandDamage",   "DamageL",     "SwimDead", "MasterSwordDead"};
     for (size_t i = 0; anim && i < sizeof LYING / sizeof *LYING; i++)
         if (pup_prefix(anim, LYING[i])) return 2;
     return 0;
@@ -331,32 +427,218 @@ typedef struct {
     int uidx, n, hip, head, nmap;
     int16_t parent[PUP_MAXB], order[PUP_MAXB], map[PUP_MAXB];
     int16_t keyidx[PUP_NBODY_BONES];  // bone index of each body box bone (-1: none)
+    int16_t limb[PUP_LIMP_N];         // 0.9.2: Arm_1_L, Arm_1_R, Leg_1_L, Leg_1_R (-1: none)
+    int rest;                         // 0.9.2: its rest pose was read (pup_rest_set): rw, rl
+    float rw[PUP_MAXB][9];            // ... each bone's turn at rest in model space (rows)
+    float rl[PUP_MAXB][12];           // ... its rest local (3x4 rows: turn and place, no scale)
 } PupSkel;
+
+static const char *const PUP_LIMBS[PUP_LIMP_N] = {"Arm_1_L", "Arm_1_R", "Leg_1_L", "Leg_1_R"};
+
+// 0.9.2: a bone's rest turn (rows) from the resource's numbers: Euler XYZ (r = Rz Ry Rx, as tools/charsel.py _rot3),
+// or a quaternion x y z w. 0: not a turn (not finite, a quaternion of no length).
+static int pup_rest_rot(const float q[4], int euler, float R[9]) {
+    for (int i = 0; i < 4; i++)
+        if (!(q[i] == q[i] && q[i] < 1e4f && q[i] > -1e4f)) return 0;
+    if (euler) {
+        float cx = __builtin_cosf(q[0]), sx = __builtin_sinf(q[0]), cy = __builtin_cosf(q[1]), sy = __builtin_sinf(q[1]);
+        float cz = __builtin_cosf(q[2]), sz = __builtin_sinf(q[2]);
+        float m[9] = {cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx,
+                      sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx,
+                      -sy,     cy * sx,                cy * cx};
+        memcpy(R, m, sizeof m);
+        return 1;
+    }
+    float l = __builtin_sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (!(l > 0.5f)) return 0;
+    float x = q[0] / l, y = q[1] / l, z = q[2] / l, w = q[3] / l;
+    float m[9] = {1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w),
+                  2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
+                  2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)};
+    memcpy(R, m, sizeof m);
+    return 1;
+}
+
+static void pup_r_mul(const float a[9], const float b[9], float o[9]);
+
+// 0.9.2: skeleton s's rest pose from each bone's resource numbers (rot: 4 floats, trans: 3; scale: 3, each must be
+// about 1: the game's people and monsters all are): rest locals and the turns at rest in model space. s->rest says it
+// worked (else the pose is followed the 0.9.1 way: his turns as they are).
+static void pup_rest_set(PupSkel *s, const float (*scale)[3], const float (*rot)[4], const float (*trans)[3], int euler) {
+    s->rest = 0;
+    if (s->n <= 0 || s->n > PUP_MAXB) return;
+    for (int i = 0; i < s->n; i++) {
+        int b = s->order[i];
+        float R[9];
+        for (int k = 0; k < 3; k++)
+            if (!(scale[b][k] > 0.5f && scale[b][k] < 2.0f) || !(trans[b][k] == trans[b][k]) ||
+                !(trans[b][k] < 1e3f && trans[b][k] > -1e3f))
+                return;
+        if (!pup_rest_rot(rot[b], euler, R)) return;
+        for (int r = 0; r < 3; r++) {
+            s->rl[b][r * 4] = R[r * 3], s->rl[b][r * 4 + 1] = R[r * 3 + 1], s->rl[b][r * 4 + 2] = R[r * 3 + 2];
+            s->rl[b][r * 4 + 3] = trans[b][r];
+        }
+        if (s->parent[b] < 0) memcpy(s->rw[b], R, sizeof R);
+        else pup_r_mul(s->rw[s->parent[b]], R, s->rw[b]);
+    }
+    s->rest = 1;
+}
+
+// 0.9.2: the loose limbs' state (one spring per limb, its tip in the world), kept by the tick.
+typedef struct {
+    int ok[PUP_LIMP_N];
+    float p[PUP_LIMP_N][3], v[PUP_LIMP_N][3];
+} PupLimp;
+
+static void pup_r_multt(const float a[9], const float b[9], float o[9]) {  // a b^T
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) o[i * 3 + j] = a[i * 3] * b[j * 3] + a[i * 3 + 1] * b[j * 3 + 1] + a[i * 3 + 2] * b[j * 3 + 2];
+}
+static void pup_r_apply(const float R[9], const float v[3], float o[3]) {
+    for (int r = 0; r < 3; r++) o[r] = R[r * 3] * v[0] + R[r * 3 + 1] * v[1] + R[r * 3 + 2] * v[2];
+}
+static float pup_dot3(const float a[3], const float b[3]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+
+// 0.9.2: the shortest turn (rows) taking unit vector a to unit vector b.
+static void pup_r_between(const float a[3], const float b[3], float R[9]) {
+    float c = pup_dot3(a, b), k[3] = {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+    memset(R, 0, 9 * sizeof *R);
+    R[0] = R[4] = R[8] = 1.0f;
+    if (c > 0.999999f || c < -0.99f) return;  // (no turn; nearly opposite never happens here: the swing is clamped)
+    float f = 1.0f / (1.0f + c);
+    float K[9] = {0, -k[2], k[1], k[2], 0, -k[0], -k[1], k[0], 0}, K2[9];
+    pup_r_mul(K, K, K2);
+    for (int i = 0; i < 9; i++) R[i] += K[i] + K2[i] * f;  // (Rodrigues: I + K + K^2 / (1 + c))
+}
+
+// 0.9.2: limb k's tip, a damped spring towards where his pose puts it (tgt) around its joint j at length len, dt s
+// (in steps of at most 1/60 s), never more than PUP_LIMP_MAX off; out: the direction it is drawn along, limp of the way
+// from his towards the spring's.
+static void pup_limp_step(PupLimp *lp, int k, const float j[3], const float tgt[3], float len, float dt, float limp,
+                          float out[3]) {
+    float dt_[3] = {tgt[0] - j[0], tgt[1] - j[1], tgt[2] - j[2]}, l0 = pup_len3(dt_);
+    if (!(l0 > 1e-4f)) {
+        memcpy(out, dt_, sizeof dt_);
+        return;
+    }
+    for (int r = 0; r < 3; r++) dt_[r] /= l0;
+    if (!lp->ok[k] || !(dt > 0.0f) || dt > 0.5f) {  // (new, or a long gap: from his pose, at rest)
+        if (!lp->ok[k] || dt > 0.5f) memcpy(lp->p[k], tgt, sizeof lp->p[k]), memset(lp->v[k], 0, sizeof lp->v[k]);
+        lp->ok[k] = 1;
+    } else {
+        const float w = 6.2831853f * PUP_LIMP_HZ, K = w * w, C = 2.0f * PUP_LIMP_ZETA * w;
+        int n = (int)(dt * 60.0f) + 1;
+        n = n > 8 ? 8 : n;
+        float h = dt / (float)n;
+        for (int s = 0; s < n; s++) {
+            float *p = lp->p[k], *v = lp->v[k], d[3];
+            for (int r = 0; r < 3; r++) v[r] += (K * (tgt[r] - p[r]) - C * v[r]) * h;
+            for (int r = 0; r < 3; r++) p[r] += v[r] * h, d[r] = p[r] - j[r];
+            float l = pup_len3(d);
+            if (!(l > 1e-4f)) {
+                memcpy(p, tgt, 3 * sizeof *p), memset(v, 0, 3 * sizeof *v);
+                continue;
+            }
+            for (int r = 0; r < 3; r++) d[r] /= l;
+            float vr = pup_dot3(v, d);
+            for (int r = 0; r < 3; r++) p[r] = j[r] + d[r] * len, v[r] -= vr * d[r];  // (on its sphere)
+        }
+    }
+    float s[3] = {lp->p[k][0] - j[0], lp->p[k][1] - j[1], lp->p[k][2] - j[2]}, ls = pup_len3(s);
+    if (!(ls > 1e-4f) || !(ls == ls)) {
+        memcpy(lp->p[k], tgt, sizeof lp->p[k]), memset(lp->v[k], 0, sizeof lp->v[k]);
+        memcpy(out, dt_, sizeof dt_);
+        return;
+    }
+    for (int r = 0; r < 3; r++) s[r] /= ls;
+    float c = pup_dot3(s, dt_), cmax = __builtin_cosf(PUP_LIMP_MAX);
+    if (c < cmax) {  // (too far off: back on the cone's edge, slower)
+        float q[3] = {s[0] - c * dt_[0], s[1] - c * dt_[1], s[2] - c * dt_[2]}, lq = pup_len3(q);
+        float sm = __builtin_sinf(PUP_LIMP_MAX);
+        for (int r = 0; r < 3; r++) s[r] = lq > 1e-5f ? dt_[r] * cmax + q[r] / lq * sm : dt_[r];
+        for (int r = 0; r < 3; r++) lp->p[k][r] = j[r] + s[r] * len, lp->v[k][r] *= 0.5f;
+    }
+    limp = limp < 0.0f ? 0.0f : limp > 1.0f ? 1.0f : limp;
+    float e[3] = {dt_[0] + (s[0] - dt_[0]) * limp, dt_[1] + (s[1] - dt_[1]) * limp, dt_[2] + (s[2] - dt_[2]) * limp};
+    float le = pup_len3(e);
+    for (int r = 0; r < 3; r++) out[r] = le > 1e-5f ? e[r] / le : dt_[r];
+}
 
 // The costume's new bone transforms (locals, 3x4 rows) and where each bone then is (wp): a bone named as Link's turns
 // as his does in the world (relative to its own parent: what a Link clip of that pose would set), keeping its own
 // length (cur's translation); the hips go to hip_at; any other bone keeps cur. base: the costume's matrix (its size).
-static void pup_rd_solve(const PupSkel *ps, const float (*wl)[12], const float (*cur)[12], const float base[12],
-                         const float hip_at[3], float (*out)[12], PupX *wp) {
+// 0.9.2: lk (Link's skeleton; NULL: none) and the costume both with their rest: his turn from HIS rest is put on ITS
+// rest (R = R_link * R_link_rest^T * R_its_rest, in the world), each bone keeps its rest length, and the bones not
+// named as his take their rest (no clip shows). lp (NULL: none): the limbs swing loosely (limp, dt s).
+static void pup_rd_solve(const PupSkel *ps, const PupSkel *lk, const float (*wl)[12], const float (*cur)[12],
+                         const float base[12], const float hip_at[3], float (*out)[12], PupX *wp, PupLimp *lp,
+                         float limp, float dt) {
+    static float sw[PUP_MAXB][9];  // (each bone's swing from the limbs above it; the tick's thread only)
     PupX b;
     if (!pup_x_from(base, &b)) {
         memset(&b, 0, sizeof b);
         b.R[0] = b.R[4] = b.R[8] = b.k = 1.0f;
         b.t[0] = base[3], b.t[1] = base[7], b.t[2] = base[11];
     }
+    const float I[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    int rest = ps->rest && lk && lk->rest;
     for (int i = 0; i < ps->n; i++) {
         int p = ps->order[i];
         const PupX *par = ps->parent[p] < 0 ? &b : &wp[ps->parent[p]];
+        const float *spar = ps->parent[p] < 0 ? I : sw[ps->parent[p]];
         PupX lc, lw;
         float Rl[9], tl[3];
-        if (!pup_x_from(cur[p], &lc)) {
-            memset(&lc, 0, sizeof lc);
-            lc.R[0] = lc.R[4] = lc.R[8] = lc.k = 1.0f;
-            lc.t[0] = cur[p][3], lc.t[1] = cur[p][7], lc.t[2] = cur[p][11];
+        if (ps->rest) {  // (0.9.2: its rest, not the clip it played)
+            for (int r = 0; r < 3; r++)
+                Rl[r * 3] = ps->rl[p][r * 4], Rl[r * 3 + 1] = ps->rl[p][r * 4 + 1], Rl[r * 3 + 2] = ps->rl[p][r * 4 + 2],
+                tl[r] = ps->rl[p][r * 4 + 3];
+        } else {
+            if (!pup_x_from(cur[p], &lc)) {
+                memset(&lc, 0, sizeof lc);
+                lc.R[0] = lc.R[4] = lc.R[8] = lc.k = 1.0f;
+                lc.t[0] = cur[p][3], lc.t[1] = cur[p][7], lc.t[2] = cur[p][11];
+            }
+            memcpy(Rl, lc.R, sizeof Rl), memcpy(tl, lc.t, sizeof tl);
         }
-        memcpy(Rl, lc.R, sizeof Rl), memcpy(tl, lc.t, sizeof tl);
+        memcpy(sw[p], spar, sizeof sw[p]);
         if (ps->map[p] >= 0 && pup_x_from(wl[ps->map[p]], &lw)) {
-            pup_r_tmul(par->R, lw.R, Rl);
+            float Rt[9], Rw[9], tmp[9];
+            if (rest) {
+                pup_r_multt(lw.R, lk->rw[ps->map[p]], tmp);
+                pup_r_mul(tmp, ps->rw[p], Rt);
+            } else {
+                memcpy(Rt, lw.R, sizeof Rt);
+            }
+            pup_r_mul(spar, Rt, Rw);
+            int k = -1;
+            for (int q = 0; lp && limp > 0.0f && q < PUP_LIMP_N; q++)
+                if (ps->limb[q] == p) k = q;
+            int c = -1;
+            float ct[3] = {0, 0, 0}, cl = 0;
+            for (int q = 0; k >= 0 && q < ps->n; q++) {  // (its longest child: along the limb, Arm_2, Leg_2; not
+                if (ps->parent[q] != p || ps->map[q] < 0) continue;  // Arm_1_Assist 6 cm off its start)
+                float qt[3];
+                if (ps->rest) qt[0] = ps->rl[q][3], qt[1] = ps->rl[q][7], qt[2] = ps->rl[q][11];
+                else qt[0] = cur[q][3], qt[1] = cur[q][7], qt[2] = cur[q][11];
+                float ql = pup_len3(qt);
+                if (ql > cl) c = q, cl = ql, memcpy(ct, qt, sizeof ct);
+            }
+            if (c >= 0) {
+                float len = cl * par->k;
+                if (cl > 1e-3f && len > 0.05f) {
+                    float j[3], ax[3], d[3], tgt[3], e[3], Q[9];
+                    pup_r_apply(par->R, tl, j);
+                    for (int r = 0; r < 3; r++) j[r] = par->t[r] + par->k * j[r], ax[r] = ct[r] / cl;
+                    pup_r_apply(Rw, ax, d);
+                    for (int r = 0; r < 3; r++) tgt[r] = j[r] + d[r] * len;
+                    pup_limp_step(lp, k, j, tgt, len, dt, limp, e);
+                    pup_r_between(d, e, Q);
+                    pup_r_mul(Q, Rw, tmp), memcpy(Rw, tmp, sizeof Rw);
+                    pup_r_mul(Q, spar, sw[p]);
+                }
+            }
+            pup_r_tmul(par->R, Rw, Rl);
             if (p == ps->hip) {
                 float d[3] = {hip_at[0] - par->t[0], hip_at[1] - par->t[1], hip_at[2] - par->t[2]};
                 for (int r = 0; r < 3; r++) tl[r] = (par->R[r] * d[0] + par->R[3 + r] * d[1] + par->R[6 + r] * d[2]) / par->k;
@@ -373,32 +655,72 @@ static void pup_rd_solve(const PupSkel *ps, const float (*wl)[12], const float (
     }
 }
 
-// The 8 corners of body box k around a bone placed at x, scaled by s (cm in the box; m out).
-static void pup_box_corners(const PupX *x, const short box[6], float s, float out[8][3]) {
-    for (int i = 0; i < 8; i++) {
-        float l[3] = {box[(i & 1) ? 1 : 0] * 0.01f * s, box[(i & 2) ? 3 : 2] * 0.01f * s, box[(i & 4) ? 5 : 4] * 0.01f * s};
-        for (int r = 0; r < 3; r++)
-            out[i][r] = x->t[r] + x->k * (x->R[r * 3] * l[0] + x->R[r * 3 + 1] * l[1] + x->R[r * 3 + 2] * l[2]);
+// 0.9.2: the lowest point of body box `box` (cm, in the bone's frame) around a bone placed at x, scaled by s, along up
+// = (n0, n1, n2) (a plane y = a x + b z + c has up (-a, 1, -b)): the flesh is taken as the ellipsoid inside the box.
+// Lying square in it, that is the box's own bottom; tilted, it stays higher than the box's corner (a round body: Daruk's
+// 2 m belly tilted 45 degrees reached 0.4 m lower as a box, and he floated getting up, 2026-11-13). Returns n . p (its
+// height along up, through 0); the point into p (NULL: not wanted).
+static float pup_box_low(const PupX *x, const short box[6], float s, const float n[3], float p[3]) {
+    float g[3], m[3], e[3], l[3], w[3];
+    for (int j = 0; j < 3; j++) {
+        g[j] = x->R[j] * n[0] + x->R[3 + j] * n[1] + x->R[6 + j] * n[2];  // (up in the bone's frame: R^T n)
+        m[j] = (float)(box[2 * j] + box[2 * j + 1]) * 0.005f * s;           // (the box's middle, m)
+        e[j] = (float)(box[2 * j + 1] - box[2 * j]) * 0.005f * s;           // (its half sizes)
     }
+    float q = __builtin_sqrtf(e[0] * e[0] * g[0] * g[0] + e[1] * e[1] * g[1] * g[1] + e[2] * e[2] * g[2] * g[2]);
+    for (int j = 0; j < 3; j++) l[j] = m[j] - (q > 1e-9f ? e[j] * e[j] * g[j] / q : 0.0f);
+    for (int r = 0; r < 3; r++) w[r] = x->t[r] + x->k * (x->R[r * 3] * l[0] + x->R[r * 3 + 1] * l[1] + x->R[r * 3 + 2] * l[2]);
+    if (p) memcpy(p, w, sizeof w);
+    return n[0] * w[0] + n[1] * w[1] + n[2] * w[2];
+}
+
+// The body boxes the costume stands on (shins and feet: Leg_2_*, Ankle_*), as a mask of PUP_BODY_BONES.
+static uint32_t pup_rd_feet(void) {
+    uint32_t m = 0;
+    for (int k = 0; k < PUP_NBODY_BONES && k < 32; k++)
+        if (pup_prefix(PUP_BODY_BONES[k], "Leg_2_") || pup_prefix(PUP_BODY_BONES[k], "Ankle_")) m |= 1u << k;
+    return m;
+}
+#define PUP_RD_ALL 0xffffffffu
+
+// How far the lowest point of the boxes in mask is over the plane (along its up, per m straight up; negative: under
+// it). 1e30: no box.
+static float pup_rd_drop_m(const PupX *x, const PupSkel *s, const PupBody *body, float scale, const float plane[3],
+                           uint32_t mask) {
+    float n[3] = {-plane[0], 1.0f, -plane[1]}, lowest = 1e30f;
+    for (int k = 0; k < PUP_NBODY_BONES; k++) {
+        int b = s->keyidx[k];
+        if (b < 0 || !body->has[k] || !(mask >> k & 1)) continue;
+        float h = pup_box_low(&x[b], body->box[k], scale, n, NULL) - plane[2];
+        if (h < lowest) lowest = h;
+    }
+    return lowest;
+}
+static float pup_rd_drop(const PupX *x, const PupSkel *s, const PupBody *body, float scale, const float plane[3]) {
+    return pup_rd_drop_m(x, s, body, scale, plane, PUP_RD_ALL);
+}
+
+// The plane's height (plane[2]) for its slope (plane[0], [1]): as low as the body's lowest point, so none of it is under.
+static void pup_rd_lower(const PupX *x, const PupSkel *s, const PupBody *body, float scale, float plane[3]) {
+    float c = plane[2];
+    plane[2] = 0.0f;
+    float d = pup_rd_drop(x, s, body, scale, plane);
+    plane[2] = d < 1e29f ? d : c;
 }
 
 // The ground under a body lying as w says (Link, his bones placed: x per bone), as a plane y = a x + b z + c: fitted
-// through the lowest corner of each body box (then again without the ones well above the rest: a raised knee; a
+// through the lowest point of each body box (then again without the ones well above the rest: a raised knee; a
 // gentle pull to level so a body lying across a slope doesn't tip it; at most PUP_RD_SLOPE steep), then lowered until
-// no corner is under it.
+// no box is under it.
 // 0: no box could be placed.
 static int pup_rd_ground(const PupX *x, const PupSkel *s, const PupBody *body, float scale, float plane[3]) {
     float q[PUP_NBODY_BONES][3];
+    const float up[3] = {0.0f, 1.0f, 0.0f};
     int nq = 0;
     for (int k = 0; k < PUP_NBODY_BONES; k++) {
         int b = s->keyidx[k];
         if (b < 0 || !body->has[k]) continue;
-        float cs[8][3];
-        pup_box_corners(&x[b], body->box[k], scale, cs);
-        int lo = 0;
-        for (int i = 1; i < 8; i++)
-            if (cs[i][1] < cs[lo][1]) lo = i;
-        memcpy(q[nq++], cs[lo], sizeof q[0]);
+        pup_box_low(&x[b], body->box[k], scale, up, q[nq++]);
     }
     if (nq < 1) return 0;
     float a = 0, bz = 0, c = 0;
@@ -436,35 +758,9 @@ static int pup_rd_ground(const PupX *x, const PupSkel *s, const PupBody *body, f
             break;
         }
     }
-    float lowest = 1e30f;  // (lowered under every corner of every box)
-    for (int k = 0; k < PUP_NBODY_BONES; k++) {
-        int b = s->keyidx[k];
-        if (b < 0 || !body->has[k]) continue;
-        float cs[8][3];
-        pup_box_corners(&x[b], body->box[k], scale, cs);
-        for (int i = 0; i < 8; i++) {
-            float h = cs[i][1] - (a * cs[i][0] + bz * cs[i][2]);
-            if (h < lowest) lowest = h;
-        }
-    }
-    plane[0] = a, plane[1] = bz, plane[2] = lowest;
+    plane[0] = a, plane[1] = bz, plane[2] = c;
+    pup_rd_lower(x, s, body, scale, plane);  // (lowered under every box)
     return 1;
-}
-
-// How far the body's lowest point is above the plane, straight up (m; negative: under it). 1e30: no box.
-static float pup_rd_drop(const PupX *x, const PupSkel *s, const PupBody *body, float scale, const float plane[3]) {
-    float lowest = 1e30f;
-    for (int k = 0; k < PUP_NBODY_BONES; k++) {
-        int b = s->keyidx[k];
-        if (b < 0 || !body->has[k]) continue;
-        float cs[8][3];
-        pup_box_corners(&x[b], body->box[k], scale, cs);
-        for (int i = 0; i < 8; i++) {
-            float h = cs[i][1] - (plane[0] * cs[i][0] + plane[1] * cs[i][2] + plane[2]);
-            if (h < lowest) lowest = h;
-        }
-    }
-    return lowest;
 }
 
 // Link is up again (after a ragdoll, once he has got up): his spine within PUP_RD_UP_DEG of straight up and his hips
@@ -478,6 +774,38 @@ static int pup_rd_upright(const PupX *x, const PupSkel *s, const float plane[3])
     return up[1] / l >= PUP_RD_UP_COS && over >= PUP_RD_UP_HIP;
 }
 
+static float pup_clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
+
+// 0.9.2: how upright Link is, 0 (lying) to 1 (standing): his spine (1 within PUP_RD_UP_COS of straight up, 0 from
+// PUP_RD_TILT_COS) times his hips' height over his own lowest point (1 from PUP_RD_UP_HIP, 0 under PUP_RD_LOW_HIP).
+// Unknown (no hips, head or boxes): 1.
+static float pup_rd_upness(const PupX *x, const PupSkel *s, const PupBody *body) {
+    if (s->hip < 0 || s->head < 0) return 1.0f;
+    const float *h = x[s->hip].t, *d = x[s->head].t;
+    float up[3] = {d[0] - h[0], d[1] - h[1], d[2] - h[2]}, l = pup_len3(up);
+    const float level[3] = {0.0f, 0.0f, 0.0f};
+    float low = pup_rd_drop(x, s, body, 1.0f, level);  // (his lowest point's height)
+    if (!(l > 1e-4f) || !(low < 1e29f)) return 1.0f;
+    float spine = pup_clamp01((up[1] / l - PUP_RD_TILT_COS) / (PUP_RD_UP_COS - PUP_RD_TILT_COS));
+    float hips = pup_clamp01((h[1] - low - PUP_RD_LOW_HIP) / (PUP_RD_UP_HIP - PUP_RD_LOW_HIP));
+    return spine * hips;
+}
+
+// 0.9.2: the lift that puts the costume posed as wp on the ground: its lowest point on the plane while Link lies
+// (u 0), its feet on it as he stands (u 1; its feet's lift is never more than its whole body's), in between as he
+// gets up; the rest of it never more than PUP_RD_SINK_OK under the ground for that (round 3: "falling through a
+// hill": a belly 1 m uphill of his feet). 1e30: no box.
+static float pup_rd_want(const PupX *wp, const PupSkel *s, const PupBody *body, float scale, const float plane[3],
+                         float u) {
+    float all = pup_rd_drop(wp, s, body, scale, plane);
+    if (!(all < 1e29f)) return 1e30f;
+    float feet = pup_rd_drop_m(wp, s, body, scale, plane, pup_rd_feet());
+    if (!(feet < 1e29f)) feet = all;  // (no feet boxes: the whole body)
+    float sink = feet - all;
+    sink = sink > PUP_RD_SINK_OK ? PUP_RD_SINK_OK : sink;
+    return -all - pup_clamp01(u) * sink;
+}
+
 // The body boxes for a pick (Link's for one with none: the Hylian's Mii-style parts).
 static const PupBody *pup_body(const char *id) {
     for (size_t i = 0; i < sizeof PUP_BODIES / sizeof *PUP_BODIES; i++)
@@ -485,12 +813,123 @@ static const PupBody *pup_body(const char *id) {
     return &PUP_BODIES[0];  // (charsel.py writes link first)
 }
 
-// The costume's next shown lift: up at once (never through the ground), down gently (PUP_RD_EASE_S).
-static float pup_rd_ease(float shown, float want, float dt) {
-    if (want >= shown) return want;
-    float f = dt > 0 ? dt / PUP_RD_EASE_S : 1.0f;
-    return shown + (want - shown) * (f > 1.0f ? 1.0f : f);
+// 0.9.2: the costume's next shown lift, from `shown` towards `want`: up fast (PUP_RD_RISE_S, at most PUP_RD_RISE_MPS:
+// a body that must rise isn't left in the ground, but a 1 m jump of one frame is spread over a few), down more gently
+// while Link lies (PUP_RD_FALL_S, PUP_RD_FALL_MPS), and down fast as he stands up (u: how upright he is; at the
+// standing height within a few frames, not 1.6 s later). dt 0: at once.
+static float pup_rd_follow(float shown, float want, float dt, float u) {
+    if (!(dt > 0.0f)) return want;
+    float d = want - shown, tau, mps;
+    if (d >= 0.0f) {
+        tau = (float)PUP_RD_RISE_S, mps = PUP_RD_RISE_MPS;
+    } else {
+        u = pup_clamp01(u);
+        tau = (float)(PUP_RD_FALL_S + (PUP_RD_STAND_S - PUP_RD_FALL_S) * u);
+        mps = PUP_RD_FALL_MPS + (PUP_RD_STAND_MPS - PUP_RD_FALL_MPS) * u;
+    }
+    float step = d * (dt >= tau ? 1.0f : dt / tau), cap = mps * dt;
+    step = step > cap ? cap : step < -cap ? -cap : step;
+    return shown + step;
 }
+
+// 0.9.2: the ground's slope from a velocity v (m/s): along the motion it rises as v does (a slide or a tumble down a
+// hill follows it), level across it, at most PUP_RD_SLOPE; into g (y = g0 x + g1 z + c). Returns how much it counts:
+// 0 under PUP_RD_MOVE_FROM m/s across the ground, 1 from PUP_RD_MOVE_FULL.
+static float pup_motion_slope(const float v[3], float g[2]) {
+    float h = __builtin_sqrtf(v[0] * v[0] + v[2] * v[2]);
+    g[0] = g[1] = 0.0f;
+    if (!(h > 1e-3f) || !(v[1] == v[1])) return 0.0f;
+    float s = v[1] / h;
+    s = s > PUP_RD_SLOPE ? PUP_RD_SLOPE : s < -PUP_RD_SLOPE ? -PUP_RD_SLOPE : s;
+    g[0] = s * v[0] / h, g[1] = s * v[2] / h;
+    return pup_clamp01((h - PUP_RD_MOVE_FROM) / (PUP_RD_MOVE_FULL - PUP_RD_MOVE_FROM));
+}
+
+// 0.9.2: a ball as a clip poses the body (x: its bones in its own frame, scaled): the middle of its body boxes (by
+// their size) and its radius about its own x axis (the mean reach of the boxes from the middle in 8 directions
+// around it). 0: no box.
+static int pup_ball_shape(const PupX *x, const PupSkel *s, const PupBody *body, float scale, float c[3], float *r) {
+    double sv = 0, sc[3] = {0, 0, 0};
+    for (int k = 0; k < PUP_NBODY_BONES; k++) {
+        int b = s->keyidx[k];
+        if (b < 0 || !body->has[k]) continue;
+        float m[3], w[3], v = 1.0f;
+        for (int j = 0; j < 3; j++) {
+            m[j] = (float)(body->box[k][2 * j] + body->box[k][2 * j + 1]) * 0.005f * scale;
+            v *= (float)(body->box[k][2 * j + 1] - body->box[k][2 * j]) * 0.01f * scale + 0.01f;
+        }
+        pup_r_apply(x[b].R, m, w);
+        for (int j = 0; j < 3; j++) sc[j] += v * (x[b].t[j] + x[b].k * w[j]);
+        sv += v;
+    }
+    if (!(sv > 0)) return 0;
+    for (int j = 0; j < 3; j++) c[j] = (float)(sc[j] / sv);
+    float sum = 0;
+    for (int i = 0; i < 8; i++) {
+        float a = 0.785398f * (float)i, n[3] = {0.0f, -__builtin_cosf(a), -__builtin_sinf(a)}, low = 1e30f;
+        for (int k = 0; k < PUP_NBODY_BONES; k++) {
+            int b = s->keyidx[k];
+            if (b < 0 || !body->has[k]) continue;
+            float h = pup_box_low(&x[b], body->box[k], scale, n, NULL);
+            if (h < low) low = h;
+        }
+        sum += -low - (-pup_dot3(n, c));  // (its reach along -n, from the middle)
+    }
+    *r = sum / 8.0f;
+    return *r > 0.0f;
+}
+
+// 0.9.2: the ball's actor matrix (rows) facing f (across the ground, unit: x z), rolled theta about its own x (forward
+// for theta growing), its lowest point (x posed in its own frame, its boxes) on the plane through gp with up n (unit),
+// its middle c (its own frame) straight over gp. Returns the radius at this turn (its middle over its lowest point).
+static float pup_ball_place(const PupX *x, const PupSkel *s, const PupBody *body, float scale, const float c[3],
+                            const float f[2], float theta, const float gp[3], const float n[3], float out[12]) {
+    float Y[9] = {f[1], 0, f[0], 0, 1, 0, -f[0], 0, f[1]}, ct = __builtin_cosf(theta), st = __builtin_sinf(theta);
+    float X[9] = {1, 0, 0, 0, ct, -st, 0, st, ct}, R[9], nl[3], rc[3];
+    pup_r_mul(Y, X, R);
+    for (int j = 0; j < 3; j++) nl[j] = R[j] * n[0] + R[3 + j] * n[1] + R[6 + j] * n[2];  // (R^T n)
+    float low = 1e30f;
+    for (int k = 0; k < PUP_NBODY_BONES; k++) {
+        int b = s->keyidx[k];
+        if (b < 0 || !body->has[k]) continue;
+        float h = pup_box_low(&x[b], body->box[k], scale, nl, NULL);
+        if (h < low) low = h;
+    }
+    float rad = low < 1e29f ? pup_dot3(nl, c) - low : 0.0f, ny = n[1] > 0.3f ? n[1] : 0.3f;
+    float C[3] = {gp[0], gp[1] + rad / ny, gp[2]};
+    pup_r_apply(R, c, rc);
+    for (int r = 0; r < 3; r++) {
+        out[r * 4] = R[r * 3], out[r * 4 + 1] = R[r * 3 + 1], out[r * 4 + 2] = R[r * 3 + 2];
+        out[r * 4 + 3] = C[r] - rc[r];
+    }
+    return rad;
+}
+
+// 0.9.2: a body's bones in its own frame (model space) from its locals cur, scaled by sc (no matrix of its own).
+static void pup_fk(const PupSkel *s, const float (*cur)[12], float sc, PupX *x) {
+    PupX b;
+    memset(&b, 0, sizeof b);
+    b.R[0] = b.R[4] = b.R[8] = 1.0f, b.k = sc;
+    for (int i = 0; i < s->n; i++) {
+        int p = s->order[i];
+        const PupX *par = s->parent[p] < 0 ? &b : &x[s->parent[p]];
+        PupX lc;
+        if (!pup_x_from(cur[p], &lc)) {
+            memset(&lc, 0, sizeof lc);
+            lc.R[0] = lc.R[4] = lc.R[8] = 1.0f;
+            lc.t[0] = cur[p][3], lc.t[1] = cur[p][7], lc.t[2] = cur[p][11];
+        }
+        pup_r_mul(par->R, lc.R, x[p].R);
+        float w[3];
+        pup_r_apply(par->R, lc.t, w);
+        for (int r = 0; r < 3; r++) x[p].t[r] = par->t[r] + par->k * w[r];
+        x[p].k = par->k;
+    }
+}
+
+// 0.9.2: the costume's sprint is a ball that rolls (Daruk: RunGear2 is his Common_Move_Ball, a still curled pose; the
+// game rolls the body itself).
+static int pup_ball_id(const char *id) { return !strcmp(id, "goron"); }
 
 // ---- the game side (the tick only)
 
@@ -508,6 +947,14 @@ typedef struct {
     PupSkel pu[PUP_RD_UNITS];
     uint64_t anim[PUP_RD_UNITS];   // each posed unit's animation we paused (0: not paused)
     uint8_t anim_was[PUP_RD_UNITS];
+    uint8_t akind[PUP_RD_UNITS];   // 0.9.2: how each is held (AK_*; 0: not looked at yet)
+    uint64_t aclass[PUP_RD_UNITS]; // ... its animation's class (AK_AFTER: not the one with the "runs" bit)
+    float slope[2];                // 0.9.2: the ground's slope (smoothed), slope_ok once it has one
+    int slope_ok;
+    float vel[3], vel_at[3];       // 0.9.2: Link's hips' velocity (smoothed, m/s) and where they were (vel_ok: read)
+    int vel_ok;
+    double vel_t;
+    PupLimp limp;                  // 0.9.2: the loose limbs (the body unit's)
     char lnames[PUP_MAXB][32], names[PUP_MAXB][32];
     float wl[PUP_MAXB][12], cur[PUP_MAXB][12], out[PUP_MAXB][12];
     PupX xl[PUP_MAXB], wp[PUP_MAXB];
@@ -516,11 +963,37 @@ static PupRd t_rd;
 static int t_pup_rd_mode;          // the request's RDM_* and girth (pup_tick copies them)
 static float t_pup_girth;
 
+// 0.9.2: EVERY posed unit gets the pose again right after the game's own step each frame (unit_step_wrapper, on the
+// game's threads), after its clip went into its locals and before its world matrices are made from them: the unit
+// and its skeleton (atomics; 0: none), and the tick's latest pose for it in a triple buffer (the tick writes the one
+// after the published one, never the one being read). Pausing its animation alone showed the clip (round 3, above).
+typedef struct {
+    int n;
+    int16_t bone[PUP_MAXB];
+    float m[PUP_MAXB][12];         // (3x4 rows, as pup_rd_solve gives them)
+} PupOvPose;
+static SwModGuestFn g_orig_unit_step;   // the game's unit step (0: not wrapped: no after-step pose)
+static uint64_t g_pup_ov_unit[PUP_RD_UNITS], g_pup_ov_sk[PUP_RD_UNITS];
+static int g_pup_ov_pub[PUP_RD_UNITS], g_pup_ov_any;
+static int64_t g_pup_ov_writes;         // poses written after a unit's step (`ghost puppet` ragdoll_after_writes)
+static PupOvPose g_pup_ov_pose[PUP_RD_UNITS][3];
+
+static void pup_ov_clear(void) {
+    __atomic_store_n(&g_pup_ov_any, 0, __ATOMIC_RELEASE);
+    for (int i = 0; i < PUP_RD_UNITS; i++) __atomic_store_n(&g_pup_ov_unit[i], 0, __ATOMIC_RELEASE);
+}
+
 // The puppet went (or a stage change took it): its ragdoll state is forgotten without touching it.
+static void pup_ball_forget(void);
 static void pup_rd_forget(void) {
-    t_rd.on = 0, t_rd.end_t = 0, t_rd.lift = 0, t_rd.pup_for = 0, t_rd.npu = 0;
+    pup_ov_clear();
+    t_rd.on = 0, t_rd.end_t = 0, t_rd.lift = 0, t_rd.pup_for = 0, t_rd.npu = 0, t_rd.slope_ok = 0, t_rd.vel_ok = 0;
     memset(t_rd.anim, 0, sizeof t_rd.anim);
-    t_pup.rd = RD_NONE, t_pup.rd_lift = 0, t_pup.rd_units = t_pup.rd_mapped = 0;
+    memset(t_rd.akind, 0, sizeof t_rd.akind);
+    memset(&t_rd.limp, 0, sizeof t_rd.limp);
+    t_pup.rd = RD_NONE, t_pup.rd_lift = 0, t_pup.rd_units = t_pup.rd_mapped = 0, t_pup.rd_rest = 0;
+    t_pup.rd_why[0] = t_pup.rd_anim[0] = t_pup.rd_src[0] = 0, t_pup.rd_up = t_pup.rd_want = 0;  // (0.9.2: no stale why)
+    pup_ball_forget();
 }
 
 static void pup_zero_link(void) {
@@ -704,8 +1177,9 @@ static uint64_t pup_unit(uint64_t a, int u, double t) {
 // Unit u's skeleton as PupSkel: parents (the resource's bone array, each bone's own index checked), an order, the
 // names into names, the body box bones, the hips and head. 0: not readable.
 static int pup_skel_read(uint64_t a, int u, PupSkel *s, char (*names)[32], double t) {
-    s->sk = s->unit = 0, s->n = s->nmap = 0, s->hip = s->head = -1, s->uidx = u;
+    s->sk = s->unit = 0, s->n = s->nmap = 0, s->hip = s->head = -1, s->uidx = u, s->rest = 0;
     for (int k = 0; k < PUP_NBODY_BONES; k++) s->keyidx[k] = -1;
+    for (int k = 0; k < PUP_LIMP_N; k++) s->limb[k] = -1;
     uint64_t unit = pup_unit(a, u, t), sk = unit ? model_skel(a, u, NULL, t) : 0;
     int n = sk ? skel_nbones(sk, t) : 0;
     uint64_t res = sk ? self_u64(sk, t) : 0;
@@ -722,11 +1196,23 @@ static int pup_skel_read(uint64_t a, int u, PupSkel *s, char (*names)[32], doubl
         if (!key || !self_text(key + 2, names[b], 32, t)) names[b][0] = 0;
         for (int k = 0; k < PUP_NBODY_BONES; k++)
             if (!strcmp(names[b], PUP_BODY_BONES[k])) s->keyidx[k] = (int16_t)b;
+        for (int k = 0; k < PUP_LIMP_N; k++)
+            if (!strcmp(names[b], PUP_LIMBS[k])) s->limb[k] = (int16_t)b;
         if (!strcmp(names[b], "Skl_Root")) s->hip = b;
         if (!strcmp(names[b], "Head")) s->head = b;
     }
     if (!pup_rd_order(s->parent, n, s->order)) return 0;
     s->unit = unit, s->sk = sk, s->n = n;
+    // 0.9.2: its rest pose (each bone's scale, turn and place in the resource, as the model file has them)
+    static float sc[PUP_MAXB][3], rot[PUP_MAXB][4], tr[PUP_MAXB][3];
+    int euler = (self_u32(res + RES_FLAGS, t) & RES_EULER) != 0;
+    for (int b = 0; b < n; b++) {
+        uint64_t e = bones + (uint64_t)b * RES_BONE_SIZE;
+        for (int k = 0; k < 3; k++)
+            sc[b][k] = rdf(e + RES_BONE_SCALE + 4 * (uint64_t)k), tr[b][k] = rdf(e + RES_BONE_TRANS + 4 * (uint64_t)k);
+        for (int k = 0; k < 4; k++) rot[b][k] = rdf(e + RES_BONE_ROT + 4 * (uint64_t)k);
+    }
+    pup_rest_set(s, (const float (*)[3])sc, (const float (*)[4])rot, (const float (*)[3])tr, euler);
     return 1;
 }
 
@@ -758,7 +1244,11 @@ static int pup_rd_puppet(uint64_t proc, double t) {
         t_rd.pup_for = 0;
     }
     if (t_rd.pup_for == proc && t < t_rd.pup_next) return 0;
-    if (t_rd.npu && t_rd.pup_for != proc) memset(t_rd.anim, 0, sizeof t_rd.anim);  // (another puppet: not ours to thaw)
+    if (t_rd.npu && t_rd.pup_for != proc) {  // (another puppet: not ours to thaw)
+        pup_ov_clear();
+        memset(t_rd.anim, 0, sizeof t_rd.anim);
+        memset(t_rd.akind, 0, sizeof t_rd.akind);
+    }
     t_rd.pup_for = proc, t_rd.pup_next = t + PUP_RD_RETRY_S, t_rd.npu = 0;
     int nunits = 0;
     model_skel(proc, 0, &nunits, t);
@@ -776,26 +1266,64 @@ static int pup_rd_puppet(uint64_t proc, double t) {
     return t_rd.npu > 0;
 }
 
-// Pause each posed unit's animation (the game's own "animations run" bit), so the pose written is the one drawn.
-// 0: one can't be (its animation isn't the class the bit belongs to).
-static int pup_rd_freeze(double t) {
-    for (int i = 0; i < t_rd.npu; i++) {
-        if (t_rd.anim[i]) continue;
-        uint64_t unit = t_rd.pu[i].unit, a = self_u64(unit + UNIT_ANIM, t);
-        if (!a || self_u64(a, t) != ANIM_VPTR || self_u64(a + ANIM_UNIT, t) != unit || !mem_ok(a + ANIM_FLAGS, 1, t))
+// Hold each posed unit's animation, so the pose written is the one drawn (0.9.2: per unit, AK_*, kept until thawed):
+// - its animation is the class with the "runs" bit: paused (the game's own bit). Also when another unit owns it
+//   (its +8): that is the same object, and every unit with it stops (the costume's own parts);
+// - it has none: nothing to hold (nothing animates it through its own step);
+// - another class (the bit isn't known for it; 0.9.1's "its animation can't be paused", Zelda 2026-11-13): it runs,
+//   and its pose is written again right after the game's own step each frame (unit_step_wrapper), when that is
+//   wrapped. 0 (why says which unit and class): it isn't.
+// A unit with none or another class also gets the after-step pose (one frame of the clip can't show either way).
+static int pup_rd_freeze(char *why, size_t cap, double t) {
+    for (int i = 0; i < t_rd.npu && !g_orig_unit_step; i++) {  // (first: can each be held? else none is paused)
+        uint64_t unit = t_rd.pu[i].unit, a = t_rd.akind[i] ? 0 : self_u64(unit + UNIT_ANIM, t);
+        uint64_t vp = a ? self_u64(a, t) : 0;
+        if (a && !(vp == ANIM_VPTR && mem_ok(a + ANIM_FLAGS, 1, t))) {
+            snprintf(why, cap, "its animation can't be paused (unit %d: class %#llx; no after-step pose)",
+                     t_rd.pu[i].uidx, (unsigned long long)vp);
             return 0;
-        t_rd.anim_was[i] = __atomic_fetch_and((uint8_t *)(uintptr_t)(a + ANIM_FLAGS), (uint8_t)~ANIM_RUNS,
-                                              __ATOMIC_SEQ_CST);
-        t_rd.anim[i] = a;
+        }
     }
+    for (int i = 0; i < t_rd.npu; i++) {
+        if (t_rd.akind[i]) continue;
+        uint64_t unit = t_rd.pu[i].unit, a = self_u64(unit + UNIT_ANIM, t);
+        uint64_t vp = a ? self_u64(a, t) : 0;
+        if (!a) {
+            t_rd.akind[i] = AK_NONE;
+        } else if (vp == ANIM_VPTR && mem_ok(a + ANIM_FLAGS, 1, t)) {
+            t_rd.anim_was[i] = __atomic_fetch_and((uint8_t *)(uintptr_t)(a + ANIM_FLAGS), (uint8_t)~ANIM_RUNS,
+                                                  __ATOMIC_SEQ_CST);  // (a second unit with the same one: was 0)
+            t_rd.anim[i] = a;
+            t_rd.akind[i] = self_u64(a + ANIM_UNIT, t) == unit ? AK_PAUSED : AK_SHARED;
+        } else {  // (another class, or unreadable: only with the after-step pose, checked above)
+            t_rd.akind[i] = AK_AFTER, t_rd.aclass[i] = vp;
+        }
+    }
+    (void)why, (void)cap;
     return 1;
 }
 
-// Its animations run again (where we paused them and they ran before; only the same animation of the same unit).
+// How each posed unit's animation is held, for `ghost puppet` (ragdoll_anim): "u0 paused", "u0 after 0x7001...".
+static void pup_rd_anim_text(char *out, size_t cap) {
+    size_t n = 0;
+    out[0] = 0;
+    for (int i = 0; i < t_rd.npu && n < cap; i++) {
+        int k = t_rd.akind[i] <= AK_AFTER ? t_rd.akind[i] : 0;
+        int w = k == AK_AFTER ? snprintf(out + n, cap - n, "%su%d after %#llx", n ? "; " : "", t_rd.pu[i].uidx,
+                                         (unsigned long long)t_rd.aclass[i])
+                              : snprintf(out + n, cap - n, "%su%d %s", n ? "; " : "", t_rd.pu[i].uidx, AK_NAMES[k]);
+        if (w < 0) break;
+        n += (size_t)w;
+    }
+}
+
+// Its animations run again (where we paused them and they ran before; only the same animation of the same unit), and
+// no after-step pose is written any more.
 static void pup_rd_thaw(double t) {
+    pup_ov_clear();
     for (int i = 0; i < PUP_RD_UNITS; i++) {
         uint64_t a = t_rd.anim[i];
-        t_rd.anim[i] = 0;
+        t_rd.anim[i] = 0, t_rd.akind[i] = 0;
         if (!a || i >= t_rd.npu || !(t_rd.anim_was[i] & ANIM_RUNS)) continue;
         if (self_u64(t_rd.pu[i].unit + UNIT_ANIM, t) == a && self_u64(a, t) == ANIM_VPTR)
             __atomic_fetch_or((uint8_t *)(uintptr_t)(a + ANIM_FLAGS), (uint8_t)ANIM_RUNS, __ATOMIC_SEQ_CST);
@@ -837,22 +1365,73 @@ static int pup_rd_locals(const PupSkel *s, float (*cur)[12], double t) {
     return 1;
 }
 
-// Write the bones named as Link's (as the game's own set-local does: 4 columns, the flags' bits 24-27 cleared, the
-// skeleton's and the unit's "locals changed" bits); the scale and every other bone stay.
+// One bone's local transform (3x4 rows), written as the game's own set-local writes it: 4 columns, the flags' bits
+// 24-27 cleared. arr: the skeleton's locals.
+static void pup_local_put(uint64_t arr, int b, const float m[12]) {
+    uint64_t e = arr + (uint64_t)b * LOCAL_SIZE;
+    volatile float *f = (volatile float *)(uintptr_t)(e + LOCAL_COLS);
+    for (int k = 0; k < 4; k++) {
+        for (int r = 0; r < 3; r++) f[k * 4 + r] = m[r * 4 + k];
+        f[k * 4 + 3] = 0.0f;
+    }
+    *(volatile uint32_t *)(uintptr_t)e &= LOCAL_FLAGS_KEEP;
+}
+
+// The skeleton's and the unit's "locals changed" bits (the world transforms are made again from them).
+static void pup_locals_changed(uint64_t sk, uint64_t unit) {
+    __atomic_fetch_or((uint16_t *)(uintptr_t)(sk + SKEL_FLAGS), (uint16_t)SKEL_LOCALS_SET, __ATOMIC_SEQ_CST);
+    __atomic_fetch_or((uint8_t *)(uintptr_t)(unit + UNIT_DIRTY), (uint8_t)UNIT_LOCALS_NEW, __ATOMIC_SEQ_CST);
+}
+
+// The bones the pose sets: those named as Link's; 0.9.2: with its rest read, every bone (the others at their rest).
+static int pup_rd_sets(const PupSkel *s, int b) { return s->map[b] >= 0 || s->rest; }
+
+// Write the bones the pose sets (as the game's own set-local does) and the "locals changed" bits; the scale and every
+// other bone stay.
 static void pup_rd_write(const PupSkel *s, const float (*out)[12]) {
     uint64_t arr = rd64(s->sk + SKEL_LOCAL);  // (pup_rd_locals checked it this frame)
-    for (int b = 0; b < s->n; b++) {
-        if (s->map[b] < 0) continue;
-        uint64_t e = arr + (uint64_t)b * LOCAL_SIZE;
-        volatile float *f = (volatile float *)(uintptr_t)(e + LOCAL_COLS);
-        for (int k = 0; k < 4; k++) {
-            for (int r = 0; r < 3; r++) f[k * 4 + r] = out[b][r * 4 + k];
-            f[k * 4 + 3] = 0.0f;
-        }
-        *(volatile uint32_t *)(uintptr_t)e &= LOCAL_FLAGS_KEEP;
+    for (int b = 0; b < s->n; b++)
+        if (pup_rd_sets(s, b)) pup_local_put(arr, b, out[b]);
+    pup_locals_changed(s->sk, s->unit);
+}
+
+// 0.9.2: unit i's pose for the after-step write (unit_step_wrapper): the bones it sets, into the buffer after the
+// published one, then published.
+static void pup_ov_publish(int i, const PupSkel *s, const float (*out)[12]) {
+    int k = (__atomic_load_n(&g_pup_ov_pub[i], __ATOMIC_ACQUIRE) + 1) % 3, n = 0;
+    PupOvPose *p = &g_pup_ov_pose[i][k];
+    for (int b = 0; b < s->n && n < PUP_MAXB; b++)
+        if (pup_rd_sets(s, b)) p->bone[n] = (int16_t)b, memcpy(p->m[n], out[b], sizeof p->m[n]), n++;
+    p->n = n;
+    __atomic_store_n(&g_pup_ov_pub[i], k, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_pup_ov_sk[i], s->sk, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_pup_ov_unit[i], s->unit, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_pup_ov_any, 1, __ATOMIC_RELEASE);
+}
+
+// 0.9.2: the game's per-frame step of a model unit (UNIT_ANIM_STEP, wrapped with hle_override by swmod_init; its only
+// caller 0x7001051914 runs the unit's animation list first and makes the world matrices right after it [S]). After
+// it, every posed costume unit gets the tick's latest pose again: its clip has just been put into the locals, and the
+// world transforms are made from them next. Any other unit: one atomic read. On the game's threads: only plain reads
+// of this unit and its skeleton, and writes of its own locals.
+static void unit_step_wrapper(struct Cpu *c) {
+    uint64_t unit = SWMOD_REGS(c)->x[0];
+    g_orig_unit_step(c);
+    if (!unit || !__atomic_load_n(&g_pup_ov_any, __ATOMIC_ACQUIRE)) return;
+    for (int i = 0; i < PUP_RD_UNITS; i++) {
+        if (__atomic_load_n(&g_pup_ov_unit[i], __ATOMIC_ACQUIRE) != unit) continue;
+        uint64_t sk = __atomic_load_n(&g_pup_ov_sk[i], __ATOMIC_ACQUIRE);
+        uint64_t arr = sk && rd64(unit + UNIT_SKEL) == sk ? rd64(sk + SKEL_LOCAL) : 0;  // (still its skeleton)
+        uint64_t res = arr ? rd64(sk) : 0;
+        if (!res) return;
+        int nb = *(volatile const uint16_t *)(uintptr_t)(res + RES_NBONES);
+        const PupOvPose *p = &g_pup_ov_pose[i][__atomic_load_n(&g_pup_ov_pub[i], __ATOMIC_ACQUIRE) % 3];
+        for (int j = 0; j < p->n && j < PUP_MAXB; j++)
+            if (p->bone[j] >= 0 && p->bone[j] < nb) pup_local_put(arr, p->bone[j], p->m[j]);
+        pup_locals_changed(sk, unit);
+        __atomic_fetch_add(&g_pup_ov_writes, 1, __ATOMIC_RELAXED);
+        return;
     }
-    __atomic_fetch_or((uint16_t *)(uintptr_t)(s->sk + SKEL_FLAGS), (uint16_t)SKEL_LOCALS_SET, __ATOMIC_SEQ_CST);
-    __atomic_fetch_or((uint8_t *)(uintptr_t)(s->unit + UNIT_DIRTY), (uint8_t)UNIT_LOCALS_NEW, __ATOMIC_SEQ_CST);
 }
 
 // Put the puppet at matrix m (rows), dy higher (its rigid bodies too, for a pack with physics: as the ghost).
@@ -872,8 +1451,8 @@ static void pup_place(struct Cpu *c, uint64_t proc, const float m[12], float dy)
 // The follow ends: its animations run again, its clip is asked again.
 static void pup_rd_stop(double t) {
     pup_rd_thaw(t);
-    t_rd.on = 0, t_rd.end_t = 0, t_rd.lift = 0;
-    t_pup.rd = RD_NONE, t_pup.rd_lift = 0, t_pup.rd_units = t_pup.rd_mapped = 0;
+    t_rd.on = 0, t_rd.end_t = 0, t_rd.lift = 0, t_rd.slope_ok = 0;
+    t_pup.rd = RD_NONE, t_pup.rd_lift = 0, t_pup.rd_units = t_pup.rd_mapped = 0, t_pup.rd_up = t_pup.rd_want = 0;
     t_pup_asked = NULL, t_pup_seen = 0;
 }
 
@@ -886,6 +1465,24 @@ static float pup_rd_scale(const PupBody *pb, const PupSkel *s, const PupX *wp) {
     for (int r = 0; r < 3; r++) a[r] = wp[s->head].t[r] - wp[s->hip].t[r], b[r] = t_rd.xl[l->head].t[r] - t_rd.xl[l->hip].t[r];
     float la = pup_len3(a), lb = pup_len3(b), f = lb > 1e-3f ? la / lb : 1.0f;
     return f < 0.5f ? 0.5f : f > 3.0f ? 3.0f : f;
+}
+
+static float t_pup_limp = PUP_LIMP;  // the request's limp (pup_tick copies it)
+
+// 0.9.2: Link's velocity from his place each frame (m/s, smoothed over PUP_RD_VEL_S): the ground's slope as he slides
+// or tumbles down a hill, and the ball's way and speed. A jump of more than 40 m/s (a teleport, a load) is ignored.
+static void pup_vel_sample(const float at[3], double t) {
+    if (t_rd.vel_ok && t > t_rd.vel_t && t - t_rd.vel_t < 0.25) {
+        float dt = (float)(t - t_rd.vel_t), f = dt >= (float)PUP_RD_VEL_S ? 1.0f : dt / (float)PUP_RD_VEL_S;
+        for (int r = 0; r < 3; r++) {
+            float v = (at[r] - t_rd.vel_at[r]) / dt;
+            if (!(v < 40.0f && v > -40.0f)) v = t_rd.vel[r];
+            t_rd.vel[r] += (v - t_rd.vel[r]) * f;
+        }
+    } else if (!t_rd.vel_ok || t - t_rd.vel_t >= 0.25) {
+        memset(t_rd.vel, 0, sizeof t_rd.vel);
+    }
+    memcpy(t_rd.vel_at, at, sizeof t_rd.vel_at), t_rd.vel_t = t, t_rd.vel_ok = 1;
 }
 
 // Each frame while live, Link's ragdoll: RD_POSE: the puppet was placed and posed here; RD_CLIP: placed here on the
@@ -905,47 +1502,80 @@ static int pup_rd_tick(struct Cpu *c, uint64_t player, uint64_t proc, const Self
     int now = pup_rd_now(mgr_ok, fl, self && self->found ? self->anim : "");
     if (!now && !t_rd.on) return RD_NONE;  // (his bones are read only while it matters)
     int link_ok = pup_rd_link(player, t) && pup_rd_worlds(&t_rd.link, t_rd.wl, t_rd.xl, t);
+    const PupBody *lb = pup_body("link");
     float plane[3] = {0, 0, m[7]};  // (Link's skeleton unread: level, at his feet)
-    if (link_ok && !pup_rd_ground(t_rd.xl, &t_rd.link, pup_body("link"), 1.0f, plane))
+    if (link_ok && !pup_rd_ground(t_rd.xl, &t_rd.link, lb, 1.0f, plane))
         plane[0] = plane[1] = 0, plane[2] = m[7];
+    // 0.9.2: how upright he is (0 lying, 1 standing; sliding on his feet about 0.8)
+    float u = link_ok ? pup_rd_upness(t_rd.xl, &t_rd.link, lb) : 0.0f;
     if (now) {
-        if (!t_rd.on) t_rd.on = 1, t_rd.mode = RD_NONE, t_pup.rd_count++;
+        if (!t_rd.on) {
+            t_rd.on = 1, t_rd.mode = RD_NONE, t_rd.slope_ok = 0, t_pup.rd_count++;
+            memset(&t_rd.limp, 0, sizeof t_rd.limp);
+        }
         t_rd.end_t = 0;
         snprintf(t_pup.rd_src, sizeof t_pup.rd_src, "%s", now == 1 ? "flag" : "anim");
     } else if (t_rd.on) {  // (he gets up: followed until he is up, PUP_RD_TAIL_S at least, PUP_RD_GETUP_S at most)
         if (!t_rd.end_t) t_rd.end_t = t;
         snprintf(t_pup.rd_src, sizeof t_pup.rd_src, "getup");
-        int up = !link_ok || pup_rd_upright(t_rd.xl, &t_rd.link, plane);
+        int up = !link_ok || u >= PUP_RD_UP_U || pup_rd_upright(t_rd.xl, &t_rd.link, plane);
         if ((up && t - t_rd.end_t >= PUP_RD_TAIL_S) || t - t_rd.end_t >= PUP_RD_GETUP_S) pup_rd_stop(t);
     }
     if (!t_rd.on) return RD_NONE;
+    // 0.9.2: the ground the costume goes on: his body's fit, levelled as he stands up (a standing body's fit tips), and
+    // the slope of his motion as he moves (a slide or a tumble down a hill follows the hill: across it, his lying body
+    // can't tell it, and Daruk's 2 m went into it uphill), its slope smoothed over PUP_RD_SLOPE_S (a tumbling body's
+    // fit jumps from frame to frame), then lowered under his body again
+    float ground[3];
+    memcpy(ground, plane, sizeof ground);
+    if (link_ok) {
+        float gs[2], wm = pup_motion_slope(t_rd.vel, gs) * (u > 0.5f ? u : 0.5f);
+        ground[0] = ground[0] * (1.0f - u) * (1.0f - wm) + gs[0] * wm;
+        ground[1] = ground[1] * (1.0f - u) * (1.0f - wm) + gs[1] * wm;
+        if (t_rd.slope_ok && dt > 0) {
+            float f = dt >= PUP_RD_SLOPE_S ? 1.0f : (float)(dt / PUP_RD_SLOPE_S);
+            ground[0] = t_rd.slope[0] + (ground[0] - t_rd.slope[0]) * f;
+            ground[1] = t_rd.slope[1] + (ground[1] - t_rd.slope[1]) * f;
+        }
+        t_rd.slope[0] = ground[0], t_rd.slope[1] = ground[1], t_rd.slope_ok = 1;
+        pup_rd_lower(t_rd.xl, &t_rd.link, lb, 1.0f, ground);
+    }
+    t_pup.rd_up = u;
     int first = t_rd.mode == RD_NONE;
-    const char *why = "";
-    if (t_pup_rd_mode == RDM_CLIP) why = "ghost puppet ragdoll clip";
-    else if (!link_ok) why = "Link's skeleton can't be read";
-    else if (!pup_rd_puppet(proc, t)) why = "its skeleton can't be read, or too few bones are named as Link's";
-    else if (!pup_rd_freeze(t)) why = "its animation can't be paused";
+    char why[sizeof t_pup.rd_why] = "";
+    if (t_pup_rd_mode == RDM_CLIP) snprintf(why, sizeof why, "ghost puppet ragdoll clip");
+    else if (!link_ok) snprintf(why, sizeof why, "Link's skeleton can't be read");
+    else if (!pup_rd_puppet(proc, t)) snprintf(why, sizeof why, "its skeleton can't be read, or too few bones are named as Link's");
+    else {
+        pup_rd_freeze(why, sizeof why, t);  // (why stays "" when every posed unit's animation is held)
+        pup_rd_anim_text(t_pup.rd_anim, sizeof t_pup.rd_anim);
+    }
     const PupBody *pb = pup_body(t_pup.id);
     float girth = t_pup_girth > 0 ? t_pup_girth : 1.0f, want = 0;
-    int has_drop = 0, units = 0, mapped = 0;
+    int has_drop = 0, units = 0, mapped = 0, rest = t_rd.link.rest ? 1 : 0;
     if (!*why) {  // his pose
         const float *h = t_rd.wl[t_rd.link.hip];
         float hip_at[3] = {h[3], h[7], h[11]}, base[12], sc = model_scale(proc, t);
         memcpy(base, m, sizeof base);  // (the costume is drawn at its matrix times its model's own scale)
         for (int k = 0; sc > 0.01f && sc < 100.0f && k < 12; k++) base[k] *= k % 4 == 3 ? 1.0f : sc;
+        int all_rest = 1;
         for (int i = 0; i < t_rd.npu; i++) {
             const PupSkel *s = &t_rd.pu[i];
             if (!pup_rd_locals(s, t_rd.cur, t)) continue;
-            pup_rd_solve(s, t_rd.wl, t_rd.cur, base, hip_at, t_rd.out, t_rd.wp);
-            if (!units) {  // (the body: its boxes)
-                float d = pup_rd_drop(t_rd.wp, s, pb, girth * pup_rd_scale(pb, s, t_rd.wp), plane);
-                if (d < 1e29f) want = -d, has_drop = 1;
+            pup_rd_solve(s, &t_rd.link, t_rd.wl, t_rd.cur, base, hip_at, t_rd.out, t_rd.wp, units ? NULL : &t_rd.limp,
+                         t_pup_limp, (float)dt);
+            if (!units) {  // (the body: its boxes, from this very pose, every frame)
+                float w = pup_rd_want(t_rd.wp, s, pb, girth * pup_rd_scale(pb, s, t_rd.wp), ground, u);
+                if (w < 1e29f) want = w, has_drop = 1;
             }
-            pup_rd_write(s, t_rd.out);
-            units++, mapped += s->nmap;
+            pup_rd_write(s, t_rd.out);  // (now, and again right after its own step: no clip shows)
+            if (g_orig_unit_step) pup_ov_publish(i, s, t_rd.out);
+            units++, mapped += s->nmap, all_rest &= s->rest;
         }
-        if (!units) why = "its bone transforms can't be read";
+        if (!units) snprintf(why, sizeof why, "its bone transforms can't be read");
+        if (units && all_rest) rest |= 2;
     }
+    t_pup.rd_rest = rest;
     snprintf(t_pup.rd_why, sizeof t_pup.rd_why, "%s", why);
     t_pup.rd_units = units, t_pup.rd_mapped = mapped;
     const float *at = m;
@@ -957,18 +1587,25 @@ static int pup_rd_tick(struct Cpu *c, uint64_t player, uint64_t proc, const Self
         if (t_rd.mode != RD_CLIP) pup_rd_thaw(t), t_rd.mode = RD_CLIP, first = 1;
         float x = link_ok ? t_rd.xl[t_rd.link.hip].t[0] : m[3], z = link_ok ? t_rd.xl[t_rd.link.hip].t[2] : m[11];
         memcpy(gm, m, sizeof gm);
-        gm[3] = x, gm[11] = z, gm[7] = plane[0] * x + plane[1] * z + plane[2];
+        gm[3] = x, gm[11] = z, gm[7] = ground[0] * x + ground[1] * z + ground[2];
         if (t_rd.npu && t_rd.pup_for == proc && pup_rd_worlds(&t_rd.pu[0], t_rd.cur, t_rd.wp, t)) {
-            // (its own bones, as the game placed them last frame: lifted from where it is)
-            float d = pup_rd_drop(t_rd.wp, &t_rd.pu[0], pb, girth * pup_rd_scale(pb, &t_rd.pu[0], t_rd.wp), plane);
-            if (d < 1e29f) want = t_rd.lift - d, has_drop = 1;
+            // 0.9.2: its own bones as the game placed them (a frame or two ago), moved so that its root is where it
+            // goes now, not lifted: the lift from that alone. 0.9.1 took its last lift minus that drop, and with the
+            // frames of lag it bobbed 0.4-1.66 m (Zelda, 2026-11-13).
+            const PupSkel *s0 = &t_rd.pu[0];
+            int r = s0->order[0];  // (a root: no parent)
+            float off[3] = {gm[3] - t_rd.wp[r].t[0], gm[7] - t_rd.wp[r].t[1], gm[11] - t_rd.wp[r].t[2]};
+            for (int b = 0; b < s0->n; b++)
+                for (int k = 0; k < 3; k++) t_rd.wp[b].t[k] += off[k];
+            float w = pup_rd_want(t_rd.wp, s0, pb, girth * pup_rd_scale(pb, s0, t_rd.wp), ground, 0.0f);
+            if (w < 1e29f) want = w, has_drop = 1;
         }
         at = gm;
     }
     if (!has_drop) want = 0;
     want = want < -PUP_RD_SINK_MAX ? -PUP_RD_SINK_MAX : want > PUP_RD_LIFT_MAX ? PUP_RD_LIFT_MAX : want;
-    t_rd.lift = first ? want : pup_rd_ease(t_rd.lift, want, (float)dt);
-    t_pup.rd = units ? RD_POSE : RD_CLIP, t_pup.rd_lift = t_rd.lift;
+    t_rd.lift = first ? want : pup_rd_follow(t_rd.lift, want, (float)dt, units ? u : 0.0f);
+    t_pup.rd = units ? RD_POSE : RD_CLIP, t_pup.rd_lift = t_rd.lift, t_pup.rd_want = want;
     pup_place(c, proc, at, t_rd.lift);
     return t_pup.rd;
 }
@@ -987,6 +1624,101 @@ static void pup_as_play(struct Cpu *c, uint64_t proc, const char *name) {
     t_pup.as_calls++;
 }
 
+// 0.9.2: Daruk's rolling sprint ball (the tick's; docs/charsel.md "Ragdoll"). His sprint clip (RunGear2 ->
+// Common_Move_Ball) is a still curled pose: the game rolls the body itself. So while it plays, the costume is turned
+// about its own x (across his motion) at his speed over the ball's radius, its lowest point on the ground under him
+// (the slope from his motion), facing the way he goes; the spin starts and stops gently, and when the sprint ends it
+// comes back upright (the nearest whole turn) before its next clip.
+typedef struct {
+    int on;                        // 1 rolling, 2 coming back upright, 0 none
+    double end_t, last_t;          // when the sprint ended (2); the last frame
+    float theta, spin;             // its turn about its own x (rad, 0 to 2 pi) and spin (rad/s)
+    float f[2];                    // the way it faces (x z, unit)
+    float r;                       // its radius (m, smoothed; 0: not yet)
+    int f_ok;
+} PupBall;
+static PupBall t_ball;
+static int t_pup_ball_off;         // the request's `ball off` (pup_tick copies it)
+
+static void pup_ball_forget(void) {
+    t_ball.on = 0, t_ball.theta = t_ball.spin = t_ball.r = 0, t_ball.f_ok = 0;
+    t_pup.ball = 0, t_pup.ball_r = t_pup.ball_spin = t_pup.ball_angle = 0;
+}
+
+// Each frame while live and not ragdolling: sprinting (the costume asked to play its ball clip) or not. 1: it rolled
+// the costume and placed it (it keeps its ball clip while it comes back upright); 0: nothing (place it at Link).
+static int pup_ball_tick(struct Cpu *c, uint64_t player, uint64_t proc, const float m[12], int sprinting, double t) {
+    double dt = t_ball.last_t > 0 && t > t_ball.last_t && t - t_ball.last_t < 0.5 ? t - t_ball.last_t : 0;
+    t_ball.last_t = t;
+    if (t_pup_ball_off || !pup_ball_id(t_pup.id)) sprinting = 0;
+    if (!sprinting && !t_ball.on) return 0;
+    if (sprinting) {
+        if (!t_ball.on) t_pup.balls++, t_ball.theta = t_ball.spin = 0;
+        t_ball.on = 1;
+    } else if (t_ball.on == 1) {
+        t_ball.on = 2, t_ball.end_t = t;
+    }
+    // its pose in its own frame (its clip's, from its locals) and its shape
+    const PupBody *pb = pup_body(t_pup.id);
+    float girth = t_pup_girth > 0 ? t_pup_girth : 1.0f, mid[3], r, sc = model_scale(proc, t);
+    if (!(sc > 0.01f && sc < 100.0f)) sc = 1.0f;
+    if (!pup_rd_link(player, t) || !pup_rd_puppet(proc, t) || !pup_rd_locals(&t_rd.pu[0], t_rd.cur, t)) {
+        pup_ball_forget();
+        return 0;
+    }
+    const PupSkel *s = &t_rd.pu[0];
+    pup_fk(s, (const float (*)[12])t_rd.cur, sc, t_rd.wp);
+    if (!pup_ball_shape(t_rd.wp, s, pb, girth, mid, &r)) {
+        pup_ball_forget();
+        return 0;
+    }
+    float fdt = (float)dt;
+    r = r < PUP_BALL_R_MIN ? PUP_BALL_R_MIN : r;
+    t_ball.r = t_ball.r > 0 && fdt > 0 ? t_ball.r + (r - t_ball.r) * (fdt >= 0.2f ? 1.0f : fdt / 0.2f) : r;
+    // the way he goes (his velocity; slow: the way he faces), smoothed
+    const float *v = t_rd.vel;
+    float h = __builtin_sqrtf(v[0] * v[0] + v[2] * v[2]), want_f[2];
+    if (h > 0.5f) want_f[0] = v[0] / h, want_f[1] = v[2] / h;
+    else {
+        float lz = __builtin_sqrtf(m[2] * m[2] + m[10] * m[10]);
+        want_f[0] = lz > 1e-4f ? m[2] / lz : 0.0f, want_f[1] = lz > 1e-4f ? m[10] / lz : 1.0f;
+    }
+    if (!t_ball.f_ok || !(fdt > 0)) {
+        memcpy(t_ball.f, want_f, sizeof t_ball.f), t_ball.f_ok = 1;
+    } else {
+        float k = fdt >= 0.1f ? 1.0f : fdt / 0.1f;
+        t_ball.f[0] += (want_f[0] - t_ball.f[0]) * k, t_ball.f[1] += (want_f[1] - t_ball.f[1]) * k;
+        float l = __builtin_sqrtf(t_ball.f[0] * t_ball.f[0] + t_ball.f[1] * t_ball.f[1]);
+        if (l > 1e-3f) t_ball.f[0] /= l, t_ball.f[1] /= l;
+        else memcpy(t_ball.f, want_f, sizeof t_ball.f);
+    }
+    // the ground under him: the slope of his motion; his speed along it
+    float gs[2], w = pup_motion_slope(v, gs), n[3] = {-gs[0] * w, 1.0f, -gs[1] * w};
+    float nl = pup_len3(n), speed = w > 0 ? pup_len3(v) : h;
+    for (int k = 0; k < 3; k++) n[k] /= nl;
+    const float TWO_PI = 6.2831853f;
+    if (t_ball.on == 1) {
+        float target = speed / t_ball.r;
+        t_ball.spin += (target - t_ball.spin) * (fdt >= (float)PUP_BALL_SPIN_S ? 1.0f : fdt / (float)PUP_BALL_SPIN_S);
+        t_ball.theta += t_ball.spin * fdt;
+        while (t_ball.theta >= TWO_PI) t_ball.theta -= TWO_PI;
+        while (t_ball.theta < 0) t_ball.theta += TWO_PI;
+    } else {  // (upright again: the nearest whole turn, then its next clip)
+        float goal = t_ball.theta > 3.14159265f ? TWO_PI : 0.0f;
+        t_ball.theta += (goal - t_ball.theta) * (fdt >= (float)PUP_BALL_END_S ? 1.0f : fdt / (float)PUP_BALL_END_S);
+        t_ball.spin = 0;
+        if (__builtin_fabsf(goal - t_ball.theta) < 0.03f || t - t_ball.end_t >= PUP_BALL_END_MAX) {
+            pup_ball_forget();
+            return 0;
+        }
+    }
+    float gp[3] = {m[3], m[7] + t_pup.lift, m[11]}, out[12];
+    pup_ball_place(t_rd.wp, s, pb, girth, mid, t_ball.f, t_ball.theta, gp, n, out);
+    pup_place(c, proc, out, 0.0f);
+    t_pup.ball = t_ball.on, t_pup.ball_r = t_ball.r, t_pup.ball_spin = t_ball.spin, t_pup.ball_angle = t_ball.theta;
+    return 1;
+}
+
 // Each frame while live: place it at Link, pick and play its clip. Returns 1 when it mirrors Link now.
 static int pup_live(struct Cpu *c, uint64_t player, const SelfState *self, double t) {
     uint64_t proc = t_pup.proc;
@@ -1000,9 +1732,12 @@ static int pup_live(struct Cpu *c, uint64_t player, const SelfState *self, doubl
         snprintf(t_pup.why, sizeof t_pup.why, "Link's place can't be read");
         return 0;
     }
+    float at[3] = {m[3], m[7], m[11]};
+    pup_vel_sample(at, t);  // (0.9.2: his velocity: the ground's slope, the ball)
     // 0.9.1: his ragdoll: followed (his pose) or its lying clip, placed on the ground under him; else at his place
+    // (0.9.2: or rolled, Daruk's sprint ball: below, once its clip is picked)
     int rd = pup_rd_tick(c, player, proc, self, m, t);
-    if (rd == RD_NONE) pup_place(c, proc, m, t_pup.lift);
+    if (rd != RD_NONE && t_ball.on) pup_ball_forget();
     // Link's speed from his own place (exact: no network)
     anim_sample(&t_pup_anim, m[3], m[11], t);
     int autoc = anim_auto_step(&t_pup_anim, t, -1.0f);
@@ -1010,6 +1745,7 @@ static int pup_live(struct Cpu *c, uint64_t player, const SelfState *self, doubl
     uint64_t holder = rd64(proc + ACTOR_AS);
     t_pup.as_ok = holder && rd64(holder + AS_OWNER) == proc && *(volatile const int32_t *)(uintptr_t)(holder + AS_SLOTS) > 0;
     if (!t_pup.as_ok) {
+        if (rd == RD_NONE) pup_place(c, proc, m, t_pup.lift);
         snprintf(t_pup.why, sizeof t_pup.why, "%s has no animations yet", t_pup.name);
         return 0;
     }
@@ -1021,6 +1757,10 @@ static int pup_live(struct Cpu *c, uint64_t player, const SelfState *self, doubl
     }
     const char *pick = rd == RD_CLIP ? pup_rd_clip(&t_pup_missing, autoc)
                                      : pup_pick(t_pup.link_anim, t_pup.speed, autoc, &t_pup_sprint, &t_pup_missing);
+    // 0.9.2: Daruk's sprint ball rolls (and keeps its clip while it comes back upright)
+    int sprinting = rd == RD_NONE && pick && !strcmp(pick, "RunGear2");
+    if (rd == RD_NONE && pup_ball_tick(c, player, proc, m, sprinting, t)) pick = "RunGear2";
+    else if (rd == RD_NONE) pup_place(c, proc, m, t_pup.lift);
     if (!pick) {
         snprintf(t_pup.why, sizeof t_pup.why, "%s has no clip for Link's %s", t_pup.name, t_pup.link_anim);
         copy_name(t_pup.as_want, "");
@@ -1082,6 +1822,34 @@ static int pup_pack_there(const char *actor) {
     return GetFileAttributesA(path) != 0xffffffffu;
 }
 
+// 0.9.2: why Link shows now, from the game's own states (PB_*; PB_FREE: he is free): no world (a load), an event
+// running (a cutscene, a talk: the event manager's field, trusted once it was seen 0), or no body of his own (his
+// physics' position chain is gone: a load, riding). No longer his real position's 1 m check against the player
+// info's copy (botw_player_real_pos): sliding fast down a hill the copy lags more than 1 m, and Link showed for 0.4 s
+// (2026-11-13). That gap is only measured now (real_gap, gap_frames: frames the old check would have shown Link).
+static int pup_busy_real(uint64_t pi, uint64_t player, double t) {
+    (void)pi;
+    float copy[3];
+    if (!botw_player_pos(api, copy)) return PB_WORLD;
+    uint64_t mgr = self_u64(PUP_EVENT_MGR, t);
+    int ev = mgr && mem_ok(mgr + PUP_EVENT_RUNNING, 8, t) ? rd64(mgr + PUP_EVENT_RUNNING) != 0 : -1;
+    if (ev == 0) t_pup_ev_zero = 1;
+    t_pup.event = ev < 0 ? -1 : !t_pup_ev_zero ? -2 : ev;
+    if (ev == 1 && t_pup_ev_zero) return PB_EVENT;
+    uint64_t p = player ? self_u64(player + BOTW_ACTOR_PHYSICS, t) : 0;
+    p = p ? self_u64(p + BOTW_POS_STEP_A, t) : 0;
+    p = p ? self_u64(p + BOTW_POS_STEP_B, t) : 0;
+    if (!p || !mem_ok(p + BOTW_POS_XYZ, 12, t)) return PB_BODY;
+    float dx = rdf(p + BOTW_POS_XYZ) - copy[0], dz = rdf(p + BOTW_POS_XYZ + 8) - copy[2];
+    float gap = __builtin_sqrtf(dx * dx + dz * dz);
+    if (gap == gap && gap < 1e4f) {
+        t_pup.real_gap = gap;
+        if (gap > t_pup.real_gap_max) t_pup.real_gap_max = gap;
+        if (dx > 1.0f || dx < -1.0f || dz > 1.0f || dz < -1.0f) t_pup.gap_frames++;
+    }
+    return PB_FREE;
+}
+
 static void pup_tick(struct Cpu *c, uint64_t pi, uint64_t player, double t) {
     PupReq rq;
     lock();
@@ -1096,10 +1864,13 @@ static void pup_tick(struct Cpu *c, uint64_t pi, uint64_t player, double t) {
         if (!strcmp(rq.map_id[i], id)) actor = rq.map_actor[i];
     t_pup.lift = rq.lift;
     t_pup_rd_mode = rq.rd_mode, t_pup_girth = rq.girth;
+    t_pup_limp = rq.limp_set ? rq.limp : PUP_LIMP, t_pup_ball_off = rq.ball_off;
     if (strcmp(id, t_pup.id) || (actor && strcmp(actor, t_pup.actor)) || (!actor && t_pup.state != PS_OFF) ||
         (rq.retry_seq != t_pup_retry_seq && t_pup.state == PS_FAILED)) {  // a new pick: start over
         t_pup_retry_seq = rq.retry_seq;
         if (t_pup.state != PS_OFF) pup_remove(c, player, t);
+        pup_anim_forget();  // (0.9.2: nothing of the last pick's ragdoll or ball is said for this one)
+        t_pup.real_gap_max = 0, t_pup.gap_frames = 0;
         memset(t_pup.id, 0, sizeof t_pup.id);
         memcpy(t_pup.id, id, strlen(id));
         t_pup.name[0] = t_pup.playas[0] = t_pup.actor[0] = t_pup.why[0] = 0, t_pup.tries = 0;
@@ -1160,11 +1931,21 @@ static void pup_tick(struct Cpu *c, uint64_t pi, uint64_t player, double t) {
         break;
     }
     // Who is drawn: the puppet while it mirrors Link and he is free (settled), else Link. The pause menu keeps it.
+    // 0.9.2: "not free" is one of the game's own states (pup_busy_real), held PUP_BUSY_S first: a fast slide's frame of
+    // doubt no longer shows Link for 0.4 s.
     if (t_pup.state == PS_LIVE && player) {
-        int paused = g_pup_paused();
-        if (!g_pup_free()) {
+        int paused = g_pup_paused(), busy = g_pup_busy(pi, player, t);
+        // Dying starts the Game Over event 0.1-0.2 s into DeadRagdoll: keep the costume while it follows his ragdoll
+        // (it showed Link for the whole death in the round-3 game check).
+        if (busy == PB_EVENT && t_pup.rd != RD_NONE) busy = PB_FREE;
+        if (busy && !t_pup_busy_since) t_pup_busy_since = t;
+        if (!busy) t_pup_busy_since = 0;
+        t_pup.busy = busy && t - t_pup_busy_since >= PUP_BUSY_S ? busy : PB_FREE;
+        if (t_pup.busy) {
             t_pup_free_since = 0;
-            if (!*t_pup.why) snprintf(t_pup.why, sizeof t_pup.why, "loading, a cutscene or riding: Link shows");
+            if (!*t_pup.why)
+                snprintf(t_pup.why, sizeof t_pup.why, "%s: Link shows",
+                         PB_WHY[t_pup.busy >= PB_FREE && t_pup.busy <= PB_BODY ? t_pup.busy : PB_BODY]);
             mirror = 0;
         } else if (!t_pup_free_since) {
             t_pup_free_since = t;
@@ -1290,6 +2071,25 @@ static void cmd_puppet(int argc, char **argv, SwModReply *r) {
         api->reply_num(r, "girth", v);
         return;
     }
+    if (argc == 4 && !strcmp(argv[2], "limp")) {  // 0.9.2: how loosely the limbs swing in a ragdoll (0: his exactly)
+        float v;
+        if (!parse_float(argv[3], &v) || v < 0.0f || v > 1.0f) {
+            api->reply_fail(r, "usage: ghost puppet limp <0 to 1, %.1f by default>", PUP_LIMP);
+            return;
+        }
+        lock();
+        g_pup_req.limp = v, g_pup_req.limp_set = 1;
+        unlock();
+        api->reply_num(r, "limp", v);
+        return;
+    }
+    if (argc == 4 && !strcmp(argv[2], "ball") && (!strcmp(argv[3], "on") || !strcmp(argv[3], "off"))) {  // 0.9.2
+        lock();
+        g_pup_req.ball_off = argv[3][1] == 'f';
+        unlock();
+        api->reply_str(r, "ball", argv[3]);
+        return;
+    }
     if (argc == 4 && !strcmp(argv[2], "map")) {  // id=Actor,id=Actor (only the ids above; "-" clears)
         PupReq tmp;
         memset(&tmp, 0, sizeof tmp);
@@ -1331,7 +2131,7 @@ static void cmd_puppet(int argc, char **argv, SwModReply *r) {
     }
     if (argc != 2) {
         api->reply_fail(r, "usage: ghost puppet [off | on | retry | lift m | ragdoll pose|clip|off | girth x | "
-                           "map id=Actor,... | -]");
+                           "limp x | ball on|off | map id=Actor,... | -]");
         return;
     }
     PupStatus p;
@@ -1379,6 +2179,24 @@ static void cmd_puppet(int argc, char **argv, SwModReply *r) {
     reply_hex(r, "ragdoll_flags", p.rd_flags);
     api->reply_int(r, "ragdolls", p.rd_count);
     api->reply_int(r, "ragdoll_frames", p.rd_frames);
+    // 0.9.2
+    api->reply_str(r, "ragdoll_anim", p.rd_anim);
+    api->reply_int(r, "ragdoll_after_writes", __atomic_load_n(&g_pup_ov_writes, __ATOMIC_RELAXED));
+    api->reply_bool(r, "ragdoll_after_step", g_orig_unit_step != 0);
+    api->reply_str(r, "ragdoll_rest", p.rd_rest == 3 ? "both" : p.rd_rest == 1 ? "link" : p.rd_rest == 2 ? "costume" : "");
+    api->reply_num(r, "ragdoll_up", p.rd_up);
+    api->reply_num(r, "ragdoll_want", p.rd_want);
+    api->reply_num(r, "limp", q.limp_set ? q.limp : PUP_LIMP);
+    api->reply_str(r, "busy", PB_NAMES[p.busy >= PB_FREE && p.busy <= PB_BODY ? p.busy : 0]);
+    api->reply_int(r, "event", p.event);
+    api->reply_num(r, "real_gap", p.real_gap);
+    api->reply_num(r, "real_gap_max", p.real_gap_max);
+    api->reply_int(r, "gap_frames", p.gap_frames);
+    api->reply_str(r, "ball", q.ball_off ? "off" : p.ball == 1 ? "rolling" : p.ball == 2 ? "upright" : "no");
+    api->reply_num(r, "ball_radius", p.ball_r);
+    api->reply_num(r, "ball_spin", p.ball_spin);
+    api->reply_num(r, "ball_angle", p.ball_angle);
+    api->reply_int(r, "balls", p.balls);
     char line[300];
     pup_sentence(&p, NULL, line, sizeof line);
     api->reply_text(r, "puppet %s%s%s: %s", PS_NAMES[p.state >= 0 && p.state <= PS_FAILED ? p.state : 0],

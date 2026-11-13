@@ -12,6 +12,14 @@ are tested with made-up data only. The [in-game check](#in-game-check) has the d
 
 ## Use it
 
+**In Breathalyzer Plus:** Home > Multiplayer > Who am I > **Build the characters** (once, from your own game files:
+the bundled Characters recipe, `charsel.py build --add`, which builds into a temp folder and puts the mod in your
+mod list ON, with `assets/characters/mod.toml`: `part_of` Ghost multiplayer, so it is used only while that is on).
+Then press a character: that is your pick. Each PC shows the others from its own built characters, so every player
+builds them; Plus doesn't build the Link body yet, so Link (and anyone not built on a PC) is the stand-in Sheikah
+figure there. The page marks Zelda, Urbosa, Daruk, Revali and Mipha **Not tried yet** until the in-game check below
+passes (`mp_page.NOT_TRIED`). The steps below are the same by hand.
+
 1. **Build the characters once** (each PC builds its own, from its own game files):
 
    ```
@@ -267,6 +275,45 @@ about 2 m wide, Link's is 0.4 m, and the costume was standing at Link's place wh
 Not checked in the game yet [G], all of it: that the bit and the animation switch work this way in a running game,
 one frame of lag behind Link's pose, how the ground fit looks on a hillside, and whether the death screen counts as
 "no real position" (then Link shows, as in a cutscene).
+
+**Round 3 (2026-11-13, after the user played Daruk; still ghost 0.9.1, the 0.9.2 number waits for the in-game check
+tool).** He said: "he just rolled around like a physics-less ball", then "the bomb ragdoll just makes him walk, I can
+see him walking while falling through a hill".
+
+- **Why the pose never showed:** the game puts a unit's clip into its bone locals before the unit's own step
+  (`0x7001051914`: the unit's animation list, then unit `vf_79` `0x7000f969ac`, then its world matrices) [S]. These
+  costumes' clips don't go through the `+0x188` animation at all: in the user's game, Paya's and the Hylian's units
+  have none there, yet they play Wait. So pausing paused nothing, the clip overwrote the pose, and the costume showed
+  its last clip (a walk, or Daruk's rolling ball) placed at Link's tumbling matrix. Now every posed unit gets the whole
+  pose again right after its own step, before its world matrices are made (`vf_79` wrapped with `hle_override`, all
+  bones). No clip can show. Zelda's animation of another class needs nothing more.
+- **The walk on the hill:** after a tumble on a steep hill Link gets up into `Slide`, `SlideBrake` and `SlideLand`.
+  No pack has these, so the costume walked by his speed at his feet, half in the hill. The pose is now followed
+  through every lying, sliding and knock-down clip (`Slide...`, `DamageL...`, `LandDamage...`, `SwimDead`). The ground
+  takes the slope of his motion while he moves, so the costume stays over the hill. Standing, its feet are on the
+  ground and the rest of it is at most 0.15 m under it. He is "up" only when standing.
+- **The retarget:** his turn from his own rest is put on the costume's own rest (each skeleton's rest read from its
+  resource), and the bones not named as his go to their rest (hair, beard, cloth). Daruk's 21 main bones rest exactly
+  as Link's (measured from the model files), so his body was already turned right. The face bones were 10-53 degrees
+  off, Zora's ears 112, and the monsters' necks 40-82.
+- **Loose limbs:** each arm and leg swings behind the body's motion: a damped spring, at most 52 degrees off
+  (`ghost puppet limp 0..1`, 0.5 by default, 0 = exactly Link's pose).
+- **Daruk's sprint ball rolls:** his sprint clip is a still curled pose, and the game rolls the body itself. While it
+  plays, the costume turns about the axis across his motion at his speed divided by the ball's radius (measured each
+  frame from its body boxes as the clip poses them). Its lowest point stays on the ground (the slope comes from his
+  motion), it faces the way he goes, the spin starts and stops gently, and it comes back upright before its next clip
+  (`ghost puppet ball off|on`).
+- **Link no longer flashes on a fast slide:** he shows only for the game's own states (no world, an event running,
+  no body of his own), each held 0.15 s. The old 1 m check of his real position against the player info's copy is
+  only measured now (`real_gap`, `gap_frames`).
+- **A ragdoll of its own isn't possible:** no Goron or Champion pack has one (`Physics/Ragdoll/*.hkrg`). Only Link's
+  pack and the monsters' have one (Bokoblin, Moblin, Lizalfos, Lynel, Hinox), each for its own skeleton.
+- `ghost puppet` also answers `ragdoll_anim` (how each posed unit is held), `ragdoll_after_step`,
+  `ragdoll_after_writes`, `ragdoll_rest`, `ragdoll_up`, `ragdoll_want`, `limp`, `busy`, `event`, `real_gap`,
+  `real_gap_max`, `gap_frames`, `ball` (no, rolling, upright, off), `ball_radius`, `ball_spin`, `ball_angle` and
+  `balls`. Selftest rows: `rd_detect_slides`, `rd_rest_retarget`, `rd_rest_refused`, `rd_motion_slope`, `rd_limp`,
+  `ball_shape_place`, `rd_after_step`, `rd_slide_followed`, `ball_rolls`, `rd_why_cleared`, `short_doubt_keeps`.
+- Not checked in the game yet [G]: all of round 3.
 
 **Big bodies and knockback (designed, not built) [G].** A big body (Daruk, the Moblin) could shrug off small knocks
 (a bomb, a small hit) and still take the damage. Big hits (a Guardian beam, a big explosion, a Lynel) and death would

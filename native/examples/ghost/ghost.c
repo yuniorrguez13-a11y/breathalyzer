@@ -3583,6 +3583,10 @@ SWMOD_EXPORT int swmod_init(const SwModApi *a) {
     if (g_orig_weapon_calc) api->hle_override(WEAPON_CALC, weapon_calc_wrapper, "ghost_weapon_calc");
     else api->log("ghost: no recompiled function at %#llx: the ghost's items are drawn at an NPC's scale",
                   (unsigned long long)WEAPON_CALC);
+    g_orig_unit_step = api->dispatch_lookup(UNIT_ANIM_STEP);  // (0.9.2: the costume's ragdoll pose after its clip)
+    if (g_orig_unit_step) api->hle_override(UNIT_ANIM_STEP, unit_step_wrapper, "ghost_unit_step");
+    else api->log("ghost: no recompiled function at %#llx: a costume's ragdoll pose is written once a frame only",
+                  (unsigned long long)UNIT_ANIM_STEP);
     api->control_register(commands, (int)(sizeof commands / sizeof *commands));
     api->log("ghost: ready (frame job %#llx wrapped)", (unsigned long long)FRAME_JOB);
     return 0;

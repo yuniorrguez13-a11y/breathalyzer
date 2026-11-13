@@ -102,6 +102,20 @@ class GhostNative(unittest.TestCase):
                            "bad_lists_refused", "bad_words_refused", "report", "client_running_says_soon",
                            "looks_seen_clears_old_word", "looks_bad_seen_refused", "client_list_fits"])
 
+    def test_costume_ragdoll_and_ball(self):
+        """0.9.2 (puppet.c, docs/charsel.md "Ragdoll", round 3): the slide he gets up into on a hill, the big knock-back
+        and a hard landing are followed like the ragdoll; his turn from his rest goes onto the costume's own rest (and
+        a resource with no usable rest is refused); the ground's slope comes from his motion; the limbs swing loosely,
+        never more than PUP_LIMP_MAX, and settle; the ball's shape and place keep its lowest point on the ground. In the
+        made-up world: the pose is written again right after the game's own unit step, over the clip (a unit with no
+        animation, one of another class), the slide is followed over the hill, Daruk's sprint ball rolls at speed /
+        radius and comes back upright, a short state of doubt doesn't show Link, and no why is left for another pick."""
+        self.group("puppet", ["rd_detect", "rd_detect_slides", "rd_pose", "rd_lift", "rd_rest_retarget", "rd_rest_refused",
+                              "rd_motion_slope", "rd_limp", "ball_shape_place"])
+        if ("puppet", "rd_world") not in self.rows:  # (the made-up world ran)
+            self.group("puppet", ["short_doubt_keeps", "rd_follow", "rd_getup", "rd_after_step", "rd_slide_followed",
+                                  "ball_rolls", "rd_why_cleared"])
+
     def test_nothing_else_failed(self):
         self.assertEqual(self.fails, 0, self.report)
 
