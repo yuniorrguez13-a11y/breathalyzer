@@ -25,8 +25,8 @@ or router (home network only: there is no server of ours anywhere; the host's PC
    Daruk, Revali, Mipha, a Bokoblin or a Moblin. **Each PC shows the others from its own built characters:** press
    **Build the characters** once on every PC (a few minutes, from your own game files; nothing is downloaded). Then
    you see your friends as who they picked, and they see your pick if they built them too; anyone else is a stand-in
-   figure. Link is a stand-in figure for now (Breathalyzer doesn't build the Link body yet). Zelda, Urbosa, Daruk,
-   Revali and Mipha say **Not tried yet**: rebuilt after a fix, not yet seen in the game.
+   figure. Link is a stand-in figure for now (Breathalyzer doesn't build the Link body yet). All 9 characters load in
+   the game.
 3. **Host** (one of you): press **Host**. The first time you are asked for **your name** (everyone on your home
    network sees it: your world is called by it). Breathalyzer opens your world on your PC. The first time, it waits
    at **Your world is open**: Windows asks whether Python may use the network, press **Allow**; your Wi-Fi must be set

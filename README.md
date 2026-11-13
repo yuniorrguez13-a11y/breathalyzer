@@ -97,7 +97,7 @@ the path); a listed path skips every check.
 | Folder | What's in it |
 |---|---|
 | `docs/` | Plan, mod compatibility, how-tos for each tool, and the [game addresses](docs/addresses.md) the mods and tools use (1.9.0) |
-| `native/` | The native mod host, its mod API header (`swmod.h`), the [game basics](docs/game-basics.md) header (`botw.h`) and the example mods (hello, stamina_hook, ghost, basics_show_pos, basics_inf_stamina, basics_teleport_up, settings_demo), and the recipes `tools/quality.py` builds its performance mods from (perf_effects, perf_shadows) |
+| `native/` | The native mod host, its mod API header (`swmod.h`), the [game basics](docs/game-basics.md) header (`botw.h`) and the example mods (hello, stamina_hook, ghost, basics_show_pos, basics_inf_stamina, basics_teleport_up, settings_demo, emotes), and the recipes `tools/quality.py` builds its performance mods from (perf_effects, perf_shadows) |
 | `tools/` | Python tools (standard library only; Pillow, when installed, adds JPG and WEBP mod pictures) |
 | `tests/` | Tests built from dummy files |
 | `site/` | The project's web page: static `index.html`, CSS and a small script, no trackers (design: [site/DESIGN.md](site/DESIGN.md)) |

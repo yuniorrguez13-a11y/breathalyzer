@@ -595,13 +595,13 @@ class Small(Temp):
         self.assertEqual(len(chars), 11)                                 # (9 characters, Link and Linkle)
         self.assertEqual((chars["link"]["state"], chars["hylian"]["state"], chars["zelda"]["state"],
                           chars["goron"]["state"], chars["linkle"]["state"]),
-                         ("Stand-in", "Ready", "Not tried yet", "Build first", "Needs a mod"))
+                         ("Stand-in", "Ready", "Ready", "Build first", "Needs a mod"))
         self.assertEqual(mpp.characters(lib, link_body=True)[0]["state"], "Ready")   # (the Link body in the list)
         self.assertEqual(chars["goron"]["name"], "Daruk")
         self.assertEqual(mpp.characters(lib, on=False)[2]["state"], "Build first")   # (turned off: not in the game)
         for c in chars.values():                                         # (player words, no developer markers)
             self.assertNotRegex(c["looks"], r"\[[A-Z]\]|armor actors|MB\b")
-        self.assertEqual(mpp.NOT_TRIED, {"zelda", "gerudo", "goron", "rito", "zora"})
+        self.assertEqual(mpp.NOT_TRIED, frozenset())
 
     def test_build_reason(self):
         self.assertEqual(mpp.build_reason([r"charsel: Z:\SW\extracted\romfs isn't the game's extracted romfs (no "

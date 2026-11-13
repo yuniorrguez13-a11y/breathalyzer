@@ -78,7 +78,7 @@ NAME_DEFAULT = "Player"    # never the Windows account name: the world's name go
 
 LINK_BODY_ID = "botw-mod-loader.ghost-link-body"   # (tools/mp/ghost_link_pack.py: the Link body; Plus doesn't build it)
 # Built, but not yet seen in the game since the 2026-11-13 fix (docs/charsel.md "Status"): the page says so
-NOT_TRIED = frozenset({"zelda", "gerudo", "goron", "rito", "zora"})
+NOT_TRIED: frozenset = frozenset()  # all 9 spawn and play-as works in the game (commits 92c0d2f, 8de5ed9, b931c33)
 # What each looks like to a friend, in plain words (charsel.Recipe.looks has the developer's notes)
 LOOKS = {
     "link": "Link: a stand-in figure for now (Breathalyzer doesn't build the Link body yet).",
