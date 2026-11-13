@@ -1,13 +1,15 @@
 # Emotes
 
-Link can dance, wave, give a thumbs up or down, and flop over like a ragdoll. 24 emotes on 3 pages, plus a ragdoll
-toggle. A mod by giruka.
+Link can dance, wave, give a thumbs up or down, and go flying like a ragdoll. 24 emotes on 3 pages, plus the
+ragdoll. A mod by giruka.
 
 **Status:** experimental, **not working in the game yet**. The animations are built and checked offline (every pose,
 and a read-back of the file). In the game (Game check 2026-11-13, round 2) the emote now stays on Link's body slot for
 the whole clip and moving cancels it, but on screen Link still stood idle. The cause is found (the emote went on his
-legs only, see How it works) and a fix is built, not yet tried in the game. The Emotes mod starts **off**, because it
-changes a game file (Link's animation list).
+legs only, see How it works) and a fix is built, not yet tried in the game. The ragdoll was only a lying pose (it
+looked like a crouch); version 0.2.0 makes it a real ragdoll (Link is thrown forward and tumbles), built from a
+study of the game's code, not yet tried in the game. The Emotes mod starts **off**, because it changes a game file
+(Link's animation list).
 
 ## Turn it on
 
@@ -35,16 +37,20 @@ keeps both.
 | Console: `emote` | the numbered list |
 | Console: `emote floss`, `emote 9`, `emote 67`, `emote thrust` | play one (by name, number, nickname or the start of its name) |
 | Console: `emote stop` | stop; moving, jumping or attacking stops it too |
-| Console: `emote ragdoll`, `emote ragdoll on` / `off` | the ragdoll on and off |
+| Console: `emote ragdoll`, `emote ragdoll on` / `off` | the ragdoll (`off`: get up sooner) |
 | Mods page: **Emote keys** | choose which emote each number key plays |
 | Mods page: **Play an emote** | press Play, close the menu, and Link does it |
 
 - Link has to **stand still** with nothing in his hands to start one, and not during a talk or a cutscene. Walk,
   jump or attack and he stops. Press the same key again to stop.
 - Short emotes (wave, thumbs up...) go back to standing by themselves. Dances keep going until you move.
-- **Ragdoll:** Link flops flat (a lying-down pose) until you press 0 again (or move). The game's real tumble physics
-  is built in, but it stays off until it has been tried in the game (developers: `emotedbg rdphys on`; only from
-  standing still).
+- **Ragdoll (key 0):** Link is thrown forward, the way he faces, about 3 m, and lands limp on the ground, tumbling
+  like after a bomb blast. No hearts are lost. He gets up by himself after a moment; press 0 again to get up sooner.
+  Link has to stand still on the ground (not riding, swimming or in a cutscene); a weapon in his hand is fine. One
+  ragdoll every 2 seconds. Watch out near cliffs and water: the game can't tell the mod where an edge is, and the
+  tumble is the game's own, so a fall off a cliff is a real fall.
+- Other players see a lying-down pose while you ragdoll. If the real ragdoll can't start (another game version, say),
+  Link lies down in that pose instead.
 - If the animations aren't built, the wave, thumbs up, photo pose and victory use the game's own moves; the others
   say "the emote animations are missing: turn on Emotes (animations) in the launcher, then Deploy".
 
@@ -92,8 +98,8 @@ named by its name.
 | 7 | Snack time | eat, apple | a hearty bite (game) |
 | 8 | Victory | cheer, yay | his cooking celebration, with his voice (game) |
 
-**Ragdoll** (key 0, `emote ragdoll`, nicknames flop, limp): Link flops flat (a pose) and stays down until you press
-again.
+**Ragdoll** (key 0, `emote ragdoll`, nicknames flop, limp): Link is thrown forward and ragdolls to the ground, then
+gets up by himself (press again to get up sooner). Other players see a lying-down pose.
 
 ## Make your own emote
 
@@ -167,7 +173,25 @@ nothing that can't be shared goes in `tools/emotes/`.
   body play (`0x7000cc7edc`, as the game plays Wait or Move) only while Link is in `PlayerWait`, lets go when the game
   takes the body slot back, and plays `Wait` when a one-shot ends. `emote state` answers the fields multiplayer will
   use. Developer checks: `emotedbg slot`, `emotedbg play <set>`, `emotedbg upper <set>|-`, `emotedbg path
-  body|generic`, `emotedbg ai`, `emotedbg rd`, `emotedbg mask off|calc|always`, `emotedbg rdphys on|off`.
+  body|generic`, `emotedbg ai`, `emotedbg rd`, `emotedbg mask off|calc|always`, `emotedbg ragdoll throw|slip|pose`,
+  `emotedbg throw [speed height push roll]`.
+- **The ragdoll (0.2.0):** the game's own reaction to a blast, `PlayerLaunch` (the `PlayerNormal` child named
+  "uchiage", launch), entered the way the game's own message code enters it: `0x7000cae770(PlayerNormal, key, params)`
+  (the key is the game's own text at `0x7001656008`; the child is entered at once). Its enter `0x7000c8279c` reads its
+  settings through pointers in the action: `+0x20` InitSpeed (metres per frame), `+0x28` JumpHeight, `+0x30`
+  AddLinearImpulse, `+0x38` AddRollImpulse, `+0x48` Damage (the player's own `Player_Link.baiprog`: 1.0, 10, 50, 30,
+  8 = two hearts) and `+0x50` BasePos, the spot he flies away from (the direction from Link `+0x1770`/`+0x1778`, his
+  position). For the switch call only, the mod points those at its own arc (0.15 = 4.5 m/s, 1 m up, push 20 as a big
+  hit's `PlayerLargeDamage`, roll 30), a zero damage, and a spot 10 m behind Link (his facing: his matrix's z axis,
+  actor `+0x398`); then the game's pointers go back. After `NoRagdollTime` (12 frames) the game itself switches to its
+  slip-and-tumble ragdoll `PlayerSlippingDown` with the push along the flight and the roll tipping him head first
+  (`0x7000cabdfc` -> `0x7000cae8e0` -> `0x70011e778c`), and stands him up when the ragdoll's still timers reach their
+  limits. The slip-fall's own speed damage points at the zero until he is up. A second press copies the limits into
+  the timers (manager `*(Link+0x1870)` `+0x138`/`+0x13c` <- `+0x1dc`/`+0x1e0`). `emotedbg rd` answers the state
+  (`th`: asked, flying, down), the game's launch values, the arc, the direction, the cooldown and why the pose was
+  used instead. `emotedbg ragdoll slip` is the first physics try (the slip-fall in place, no push), `pose` the clip
+  only; `emotedbg throw 0.2 1.5` changes the arc. Not tried in the game yet: the flight, the landing pose, the get-up
+  press.
 - **Why the model stood idle (round 2):** Link's model has two skeletal animation targets (`Player_Link.bmodellist`
   `AnmTarget_0` and `_1`): slot 0 of his animation holder moves the lower body, slot 1 the upper body (from `Spine_1`
   down, without the face). His body play puts a set on slot 0 and flags him (`+0xc48` bit `0x1000`); later that
@@ -181,7 +205,9 @@ nothing that can't be shared goes in `tools/emotes/`.
   mod also wraps that calc: while an emote plays, the slot's name reads `Wait` during that one call, and the emote's
   own name again right after. Everything else (the mod, multiplayer) sees the emote's name.
 - Link's AI: his `RootAi` is at Link `+0x558`; below it `PlayerRoot`, then `PlayerNormal`, whose current child is the
-  action (`PlayerWait`, `PlayerMove`...).
+  action (`PlayerWait`, `PlayerMove`...). An AI node's current child index is its u16 at `+0x1c` (the game's
+  getCurrentChild `0x70015377d0`); `+0x1e` is the one before it (0.1.0 read `+0x1e` by mistake). `PlayerNormal` has
+  about 170 children (0.1.0 looked at the first 64 only, so it never found the slip-fall).
 - Tests: `python -m unittest tests.test_emote_build` (the math, the data, the list merge, a full build with your
   files, and the DLL's own self-test).
 - Next: the emote wheel (hold a button, needs the in-game overlay), controller play, and emotes your friends see in

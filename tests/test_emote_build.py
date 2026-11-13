@@ -433,7 +433,7 @@ class Native(unittest.TestCase):
                           "moving_refused"])
 
     def test_machine(self):
-        self.group("ai", ["found", "scan_fallback", "event_above_root"])
+        self.group("ai", ["found", "scan_fallback", "event_above_root", "current_is_1c"])
         self.group("machine", ["start", "playing", "finished_then_wait", "refused_moving", "loop_playing",
                                "loop_keeps", "game_took_over", "stop", "spam_guard", "community",
                                "load_drops_request"])
@@ -455,8 +455,13 @@ class Native(unittest.TestCase):
         self.group("names", ["after_same_tick", "slot0_reads_ours", "interned", "kept_ptr_read"])
 
     def test_ragdoll(self):
-        self.group("ragdoll", ["pose_on", "pose_off", "phys_not_walking", "phys_not_in_event", "phys_on",
-                               "stays_down", "off_stops_writes", "damage_restored", "load_forgets"])
+        # the real ragdoll: the game's launch (PlayerLaunch) entered with our arc, aimed forward, no damage; the pose
+        # for A/B and as the fallback
+        self.group("ragdoll", ["pose_on", "pose_off", "throw_not_walking", "throw_not_in_event", "throw_on",
+                               "weapon_in_hand_ok", "throw_arc_no_damage", "throw_forward", "throw_pointers_back",
+                               "state_shows_pose", "throw_down_no_damage", "no_hold", "getup_press", "up_restores",
+                               "cooldown", "after_cooldown", "not_taken_pose", "exit_restores", "no_launch_pose",
+                               "bad_settings_pose", "slip_mode", "slip_up_restores", "load_forgets"])
 
     def test_state(self):
         self.group("state", ["fields", "no_id_at_boot"])

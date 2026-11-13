@@ -1,11 +1,14 @@
 // Self-test of emotes.c without the game (tests/test_emote_build.py builds and runs it with Savage Wind's zig).
 //
 // It includes emotes.c and drives tick() against a made-up Link: a fake guest_call answers the game calls (play a
-// set by name, what slot 0 plays, finished, the ragdoll switch) from a list of set names the made-up Link has; a
-// made-up AI tree (RootAi at Link +0x558, PlayerRoot, PlayerNormal, its Wait / Move / slip-fall children), equipment and
-// ragdoll manager live in one block (W). The memory check's window is set to that block only, as in the game: the
-// DLL's own set names lie outside it. The fake play call points slot 0's name at the made-up game's own text of that set
-// (as Link's holder keeps the animation list's name); with W.keep_ptr it keeps the caller's char* instead. Each frame
+// set by name, what slot 0 plays, finished, the ragdoll switches) from a list of set names the made-up Link has; a
+// made-up AI tree (RootAi at Link +0x558, PlayerRoot, PlayerNormal, its Wait / Move / slip-fall / launch children),
+// the launch's parameters (the player's AI data: 1.0 10 50 30 8 and BasePos), the game's launch key, Link's matrix,
+// equipment and ragdoll manager live in one block (W). Its child switch "enters" the launch the way the game's does:
+// it reads the parameters through the action's pointers at that moment. The memory check's window is set to that
+// block only, as in the game: the DLL's own set names lie outside it. The fake play call points slot 0's name at
+// the made-up game's own text of that set (as Link's holder keeps the animation list's name); with W.keep_ptr it
+// keeps the caller's char* instead. Each frame
 // the made-up AI runs PlayerWait's calc (through the DLL's wrapper) while PlayerWait is current all the way down, and
 // that calc puts Wait back whenever slot 0's text isn't Wait (the game's standing code 0x7000ce0c44, the reason the
 // Game check saw Wait at once); with W.revert Link's own update puts Wait back too. No game code, no game data.
@@ -39,7 +42,18 @@ typedef struct {
     _Alignas(16) uint8_t link[0x2700];
     _Alignas(16) uint8_t holder[0x100];
     _Alignas(16) uint8_t rootai[0x40], root[0x40], normal[0x40], wait[0x40], move[0x40], slip[0x40], mgr[0x200];
-    _Alignas(16) uint64_t rootai_kids[1], root_kids[1], normal_kids[3];
+    _Alignas(16) uint8_t launch[0x60];
+    _Alignas(16) uint64_t rootai_kids[1], root_kids[1], normal_kids[4];
+    // the launch's parameters in the made-up AI data, and its BasePos storage
+    float la_speed, la_height, la_lin, la_roll;
+    int32_t la_damage;
+    _Alignas(16) float la_base[4];
+    char key[16];        // the game's own launch key ('uchiage', UTF-8)
+    int change_broken;   // the child switch does nothing
+    // what the launch's enter read (the made-up game: through its pointers, during the switch)
+    int entered;
+    float seen_speed, seen_height, seen_lin, seen_roll, seen_dir[2];
+    int32_t seen_damage;
     _Alignas(16) uint8_t item[0x60];     // a link data block for an item in the equipment's slot 0
     _Alignas(16) uint8_t other[0x2700];  // a second Link (a load)
     int32_t damage;      // the slip-fall's own damage value
@@ -70,13 +84,15 @@ typedef struct {
 static World W;
 static double g_now;
 static float g_pos[3];
-static int calls_play, calls_rd, calls_generic, calls_upper, calls_stop_upper;
+static int calls_play, calls_rd, calls_generic, calls_upper, calls_stop_upper, calls_change;
+static uint64_t last_change_ai, last_change_key;
 static char last_play[32];
 static uint64_t last_keep;
 static float last_morph;
 static uint64_t last_actor;  // x0 of the last body play (Link's own play takes Link)
 
 static void w64(void *base, size_t off, uint64_t v) { memcpy((uint8_t *)base + off, &v, 8); }
+static void wf(void *base, size_t off, float v) { memcpy((uint8_t *)base + off, &v, 4); }
 static uint64_t r64(const void *base, size_t off) {
     uint64_t v;
     memcpy(&v, (const uint8_t *)base + off, 8);
@@ -114,23 +130,41 @@ static void world_init(int ai) {
     w64(W.wait, 0, VT_WAIT);
     w64(W.move, 0, VT_MOVE);
     w64(W.slip, 0, VT_SLIP);
-    uint8_t *nodes[] = {W.rootai, W.root, W.normal, W.wait, W.move, W.slip};
-    for (int i = 0; i < 6; i++) w64(nodes[i], AI_ACTOR, P(W.link));
+    w64(W.launch, 0, VT_LAUNCH);
+    uint8_t *nodes[] = {W.rootai, W.root, W.normal, W.wait, W.move, W.slip, W.launch};
+    for (int i = 0; i < 7; i++) w64(nodes[i], AI_ACTOR, P(W.link));
     W.damage = 1;
     w64(W.slip, SLIP_DAMAGE, P(&W.damage));
+    W.la_speed = 1.0f, W.la_height = 10.0f, W.la_lin = 50.0f, W.la_roll = 30.0f, W.la_damage = 8;
+    w64(W.launch, LA_SPEED, P(&W.la_speed));
+    w64(W.launch, LA_HEIGHT, P(&W.la_height));
+    w64(W.launch, LA_LIN, P(&W.la_lin));
+    w64(W.launch, LA_ROLL, P(&W.la_roll));
+    w64(W.launch, LA_DAMAGE, P(&W.la_damage));
+    w64(W.launch, LA_BASE, P(W.la_base));
+    memcpy(W.key, LAUNCH_KEY_TEXT, sizeof LAUNCH_KEY_TEXT);
     W.rootai_kids[0] = P(W.root);
     W.root_kids[0] = P(W.normal);
     W.normal_kids[0] = P(W.wait), W.normal_kids[1] = P(W.move), W.normal_kids[2] = P(W.slip);
-    uint32_t one = 1, three = 3;
+    W.normal_kids[3] = P(W.launch);
+    uint32_t one = 1, four = 4;
     memcpy(W.rootai + AI_NCHILD, &one, 4);
     w64(W.rootai, AI_CHILDREN, P(W.rootai_kids));
     memcpy(W.root + AI_NCHILD, &one, 4);
     w64(W.root, AI_CHILDREN, P(W.root_kids));
-    memcpy(W.normal + AI_NCHILD, &three, 4);
+    memcpy(W.normal + AI_NCHILD, &four, 4);
     w64(W.normal, AI_CHILDREN, P(W.normal_kids));
     set_child(W.rootai, 0);
     set_child(W.root, 0);
     set_child(W.normal, 0);  // standing (PlayerWait)
+    // Link faces +x at (10, 5, 20); the launch's own copy of his x z (+0x1770 / +0x1778) is 10 cm off
+    wf(W.link, LINK_MTX + 0x00, 0.0f), wf(W.link, LINK_MTX + 0x08, 1.0f), wf(W.link, LINK_MTX + 0x0c, 10.0f);
+    wf(W.link, LINK_MTX + 0x14, 1.0f), wf(W.link, LINK_MTX + 0x1c, 5.0f);
+    wf(W.link, LINK_MTX + 0x20, -1.0f), wf(W.link, LINK_MTX + 0x28, 0.0f), wf(W.link, LINK_MTX + 0x2c, 20.0f);
+    wf(W.link, LINK_LAUNCH_POS, 10.1f), wf(W.link, LINK_LAUNCH_POS + 4, 5.0f), wf(W.link, LINK_LAUNCH_POS + 8, 20.0f);
+    uint32_t lim1 = 90, lim2 = 300;
+    memcpy(W.mgr + RD_LIMIT, &lim1, 4);
+    memcpy(W.mgr + RD_LIMIT2, &lim2, 4);
     if (ai == 1) w64(W.link, LINK_ROOT_AI, P(W.rootai));
     if (ai == 2) w64(W.link, 0x100, P(W.root));
     W.cur_obj.str = wname("Wait");
@@ -141,6 +175,7 @@ static void world_init(int ai) {
     w64(W.link, ACTOR_EQUIP, EQUIP_VPTR);
     w64(W.link, ACTOR_EQUIP + EQUIP_OWNER, P(W.link));
     g_guest_lo = P(&W), g_guest_hi = P(&W) + sizeof W;  // the "game's memory": only the made-up game
+    g_launch_key = P(W.key);
     memset(g_mem, 0, sizeof g_mem);
     g_mask_name = P(W.wait_text);
     g_mask_mode = MASK_CALC;
@@ -210,6 +245,27 @@ static void fake_call(struct Cpu *c, uint64_t addr) {
         calls_rd++;
         if (r->x[0] == P(W.normal)) set_child(W.normal, 2);
         r->x[0] = 0;
+    } else if (addr == CHANGE_CHILD) {
+        // the game's child switch by key: the launch is entered at once and its enter reads its parameters through
+        // the action's pointers (0x7000c8279c), the flight direction from BasePos to Link's +0x1770 / +0x1778
+        calls_change++;
+        last_change_ai = r->x[0], last_change_key = r->x[1];
+        if (!W.change_broken && r->x[0] == P(W.normal) && r->x[1] == P(W.key) && !r->x[2]) {
+            const float *base = (const float *)(uintptr_t)r64(W.launch, LA_BASE);
+            W.seen_speed = *(const float *)(uintptr_t)r64(W.launch, LA_SPEED);
+            W.seen_height = *(const float *)(uintptr_t)r64(W.launch, LA_HEIGHT);
+            W.seen_lin = *(const float *)(uintptr_t)r64(W.launch, LA_LIN);
+            W.seen_roll = *(const float *)(uintptr_t)r64(W.launch, LA_ROLL);
+            W.seen_damage = *(const int32_t *)(uintptr_t)r64(W.launch, LA_DAMAGE);
+            float lx, lz;
+            memcpy(&lx, W.link + LINK_LAUNCH_POS, 4);
+            memcpy(&lz, W.link + LINK_LAUNCH_POS + 8, 4);
+            float dx = lx - base[0], dz = lz - base[2], n = __builtin_sqrtf(dx * dx + dz * dz);
+            W.seen_dir[0] = n > 0 ? dx / n : 0, W.seen_dir[1] = n > 0 ? dz / n : 0;
+            W.entered++;
+            set_child(W.normal, 3);
+        }
+        r->x[0] = 0;
     }
 }
 static void fake_log(const char *fmt, ...) { (void)fmt; }
@@ -263,7 +319,10 @@ static void reset_mod(void) {
     t_link = 0;
     forget();
     t_last_start = -1e9;
-    t_rd_phys = 0;
+    g_rd_mode = RD_THROW;
+    g_arc = (ThrowArc){THROW_SPEED, THROW_HEIGHT, THROW_LIN, THROW_ROLL};
+    t_rd_why[0] = 0;
+    t_throws = 0;
     memset(&g_req, 0, sizeof g_req);
     memset(&g_snap, 0, sizeof g_snap);
     g_snap.index = -1;
@@ -271,7 +330,8 @@ static void reset_mod(void) {
     t_orphan_sent = 0;
     t_pw_calls = t_pw_masked = t_pw_took = 0;
     t_pw_took_name[0] = 0;
-    calls_play = calls_rd = calls_generic = calls_upper = calls_stop_upper = 0;
+    calls_play = calls_rd = calls_generic = calls_upper = calls_stop_upper = calls_change = 0;
+    last_change_ai = last_change_key = 0;
     last_actor = 0;
     g_play_path = PATH_BODY;
     last_play[0] = 0;
@@ -497,60 +557,199 @@ SWMOD_EXPORT int emotes_selftest(char *out, int cap) {
     request(REQ_STOP, -1, 0);
     step();
 
-    // ---- ragdoll: the pose (physics off)
-    g_now += 1.0;
+    // ---- ragdoll: the pose (developer A/B; what other players see)
+    world_init(1);
+    reset_mod();
+    g_now += 5.0;
+    for (int i = 0; i < 3; i++) step();
+    g_rd_mode = RD_POSE;
     request(REQ_TOGGLE, ragdoll_index(), 0);
     step();
     step();
-    check("ragdoll", "pose_on", !strcmp(cur(), "ZEmote_ragdoll") && g_snap.ragdoll == 1 && calls_rd == 0, "");
+    check("ragdoll", "pose_on", !strcmp(cur(), "ZEmote_ragdoll") && g_snap.ragdoll == 1 && calls_rd == 0 &&
+                                    calls_change == 0, "");
     g_now += 1.0;
     request(REQ_TOGGLE, ragdoll_index(), 0);
     step();
     check("ragdoll", "pose_off", t_state == ST_IDLE && !strcmp(last_play, "Wait"), last_play);
+    g_rd_mode = RD_THROW;
 
-    // ---- ragdoll: the physics (developer switch)
-    g_now += 1.0;
-    t_rd_phys = 1;
+    // ---- ragdoll: the throw (the default): the game's launch, our arc, aimed forward, no damage
     game_plays("Wait");
     set_child(W.normal, 1);  // walking: refused
     for (int i = 0; i < 20; i++) step();
+    g_now += 1.0;
     request(REQ_TOGGLE, ragdoll_index(), 0);
     step();
-    check("ragdoll", "phys_not_walking", calls_rd == 0 && t_state == ST_IDLE, g_snap.why);
+    snprintf(d, sizeof d, "changes %d ragdoll %d why '%s'", calls_change, g_snap.ragdoll, g_snap.why);
+    check("ragdoll", "throw_not_walking", calls_change == 0 && g_snap.ragdoll == 0 && strstr(g_snap.why, "stand") != 0,
+          d);
     set_child(W.normal, 0);
     set_child(W.root, 0xffff);  // an event: PlayerNormal isn't the root's child
     for (int i = 0; i < 20; i++) step();
     g_now += 1.0;
     request(REQ_TOGGLE, ragdoll_index(), 0);
     step();
-    check("ragdoll", "phys_not_in_event", calls_rd == 0, g_snap.why);
+    check("ragdoll", "throw_not_in_event", calls_change == 0 && calls_rd == 0 && g_snap.ragdoll == 0, g_snap.why);
     set_child(W.root, 0);
+    hold_weapon(1);  // a weapon in hand doesn't stop the real ragdoll (the game's blows come with weapons out)
     for (int i = 0; i < 20; i++) step();
     g_now += 1.0;
     request(REQ_TOGGLE, ragdoll_index(), 0);
     step();
-    snprintf(d, sizeof d, "calls %d damage ptr ok %d", calls_rd,
-             r64(W.slip, SLIP_DAMAGE) == P(&g_zero_damage));
-    check("ragdoll", "phys_on", calls_rd == 1 && r64(W.slip, SLIP_DAMAGE) == P(&g_zero_damage), d);
+    snprintf(d, sizeof d, "changes %d ai_ok %d key_ok %d entered %d th %d ragdoll %d why '%s' rd '%s'", calls_change,
+             last_change_ai == P(W.normal), last_change_key == P(W.key), W.entered, t_th, g_snap.ragdoll, g_snap.why,
+             t_rd_why);
+    check("ragdoll", "throw_on", calls_change == 1 && last_change_ai == P(W.normal) && last_change_key == P(W.key) &&
+                                     W.entered == 1 && t_th == TH_FLYING && g_snap.ragdoll == 2, d);
+    check("ragdoll", "weapon_in_hand_ok", calls_change == 1, g_snap.why);
+    hold_weapon(0);
+    drop_weapon();
+    snprintf(d, sizeof d, "speed %.2f height %.2f push %.1f roll %.1f damage %d", (double)W.seen_speed,
+             (double)W.seen_height, (double)W.seen_lin, (double)W.seen_roll, W.seen_damage);
+    check("ragdoll", "throw_arc_no_damage", W.seen_speed == THROW_SPEED && W.seen_height == THROW_HEIGHT &&
+                                                W.seen_lin == THROW_LIN && W.seen_roll == THROW_ROLL &&
+                                                W.seen_damage == 0, d);
+    snprintf(d, sizeof d, "dir %.3f %.3f (Link faces +x)", (double)W.seen_dir[0], (double)W.seen_dir[1]);
+    check("ragdoll", "throw_forward", W.seen_dir[0] > 0.999f && __builtin_fabsf(W.seen_dir[1]) < 0.01f, d);
+    int game_ptrs = r64(W.launch, LA_SPEED) == P(&W.la_speed) && r64(W.launch, LA_HEIGHT) == P(&W.la_height) &&
+                    r64(W.launch, LA_LIN) == P(&W.la_lin) && r64(W.launch, LA_ROLL) == P(&W.la_roll) &&
+                    r64(W.launch, LA_DAMAGE) == P(&W.la_damage) && r64(W.launch, LA_BASE) == P(W.la_base);
+    check("ragdoll", "throw_pointers_back", game_ptrs && !t_th_launch && r64(W.slip, SLIP_DAMAGE) == P(&g_zero_damage),
+          "the launch's at once, the slip-fall's damage stays zero");
+    {
+        char e0[] = "emote", e1[] = "state";
+        char *ev[] = {e0, e1};
+        g_reply[0] = 0;
+        cmd_emote(2, ev, 0);
+        char act[32];
+        emotes_active(act, sizeof act);
+        check("ragdoll", "state_shows_pose", strstr(g_reply, "id=ragdoll;") && strstr(g_reply, "ragdoll=2;") &&
+                                                 strstr(g_reply, "loop=true;") && !strcmp(act, "ragdoll"), g_reply);
+    }
+    set_child(W.normal, 2);  // the game: the launch ended, its ragdoll (the slip-fall) now
+    step();
+    check("ragdoll", "throw_down_no_damage", t_th == TH_DOWN && r64(W.slip, SLIP_DAMAGE) == P(&g_zero_damage) &&
+                                                 g_snap.ragdoll == 2, "");
     uint32_t seven = 7;
     memcpy(W.mgr + RD_STILL, &seven, 4);
     memcpy(W.mgr + RD_STILL2, &seven, 4);
     step();
-    check("ragdoll", "stays_down", *(uint32_t *)(W.mgr + RD_STILL) == 0 && *(uint32_t *)(W.mgr + RD_STILL2) == 0, "");
-    g_now += 1.0;
-    request(REQ_TOGGLE, ragdoll_index(), 0);
+    check("ragdoll", "no_hold", *(uint32_t *)(W.mgr + RD_STILL) == 7, "the game's own timers: he gets up by himself");
+    g_now += 0.5;
+    request(REQ_TOGGLE, ragdoll_index(), 0);  // pressed again while down: up sooner
     step();
-    memcpy(W.mgr + RD_STILL, &seven, 4);
     step();
-    check("ragdoll", "off_stops_writes", *(uint32_t *)(W.mgr + RD_STILL) == 7 &&
-                                             r64(W.slip, SLIP_DAMAGE) == P(&g_zero_damage), "still down: kept");
+    snprintf(d, sizeof d, "getup %d still %u %u changes %d", t_th_getup, *(uint32_t *)(W.mgr + RD_STILL),
+             *(uint32_t *)(W.mgr + RD_STILL2), calls_change);
+    check("ragdoll", "getup_press", t_th_getup && *(uint32_t *)(W.mgr + RD_STILL) == 90 &&
+                                        *(uint32_t *)(W.mgr + RD_STILL2) == 300 && calls_change == 1, d);
     set_child(W.normal, 0);  // the game stood him up
     step();
-    check("ragdoll", "damage_restored", r64(W.slip, SLIP_DAMAGE) == P(&W.damage), "");
-    // a load while down: forget, write nothing to the old Link
-    g_now += 1.0;
+    check("ragdoll", "up_restores", t_th == TH_NONE && r64(W.slip, SLIP_DAMAGE) == P(&W.damage) && game_ptrs &&
+                                        g_snap.ragdoll == 0 && !t_th_getup, "");
+    for (int i = 0; i < 20; i++) step();
     request(REQ_TOGGLE, ragdoll_index(), 0);
     step();
+    check("ragdoll", "cooldown", calls_change == 1 && strstr(g_snap.why, "too soon") != 0, g_snap.why);
+    g_now += 2.0;
+    for (int i = 0; i < 3; i++) step();
+    request(REQ_TOGGLE, ragdoll_index(), 0);
+    step();
+    check("ragdoll", "after_cooldown", calls_change == 2 && t_th == TH_FLYING, g_snap.why);
+    set_child(W.normal, 0);
+    step();
+
+    // the game doesn't switch: everything back after a few ticks, the pose instead
+    g_now += 3.0;
+    for (int i = 0; i < 20; i++) step();  // (standing still again for a moment)
+    W.change_broken = 1;
+    request(REQ_TOGGLE, ragdoll_index(), 0);
+    step();
+    int ours_then = r64(W.launch, LA_DAMAGE) == P(&g_zero_damage) && r64(W.launch, LA_BASE) == P(g_th_base);
+    for (int i = 0; i < VERIFY_TICKS; i++) step();
+    game_ptrs = r64(W.launch, LA_SPEED) == P(&W.la_speed) && r64(W.launch, LA_DAMAGE) == P(&W.la_damage) &&
+                r64(W.launch, LA_BASE) == P(W.la_base);
+    snprintf(d, sizeof d, "ours_then %d th %d last %s rd '%s'", ours_then, t_th, last_play, t_rd_why);
+    check("ragdoll", "not_taken_pose", ours_then && t_th == TH_NONE && game_ptrs &&
+                                           r64(W.slip, SLIP_DAMAGE) == P(&W.damage) &&
+                                           !strcmp(last_play, "ZEmote_ragdoll") && strstr(t_rd_why, "didn't switch"), d);
+    request(REQ_STOP, -1, 0);
+    step();
+    game_plays("Wait");
+    // unloaded mid-switch: swmod_exit puts the game's pointers back
+    g_now += 1.0;
+    for (int i = 0; i < 3; i++) step();
+    request(REQ_TOGGLE, ragdoll_index(), 0);
+    step();
+    ours_then = r64(W.launch, LA_SPEED) == P(&g_arc.speed) && r64(W.slip, SLIP_DAMAGE) == P(&g_zero_damage);
+    swmod_exit(&g_api);
+    game_ptrs = r64(W.launch, LA_SPEED) == P(&W.la_speed) && r64(W.launch, LA_DAMAGE) == P(&W.la_damage) &&
+                r64(W.launch, LA_BASE) == P(W.la_base);
+    check("ragdoll", "exit_restores", ours_then && game_ptrs && r64(W.slip, SLIP_DAMAGE) == P(&W.damage) &&
+                                          t_th == TH_NONE, "");
+    W.change_broken = 0;
+    // no launch under Normal (another game version): the pose, and why
+    uint32_t three = 3, four = 4;
+    memcpy(W.normal + AI_NCHILD, &three, 4);
+    g_now += 1.0;
+    for (int i = 0; i < 3; i++) step();
+    int ch0 = calls_change;
+    request(REQ_TOGGLE, ragdoll_index(), 0);
+    step();
+    step();
+    snprintf(d, sizeof d, "changes %d slot0 '%s' rd '%s'", calls_change - ch0, cur(), t_rd_why);
+    check("ragdoll", "no_launch_pose", calls_change == ch0 && !strcmp(cur(), "ZEmote_ragdoll") &&
+                                           strstr(t_rd_why, "isn't under") != 0 &&
+                                           r64(W.slip, SLIP_DAMAGE) == P(&W.damage), d);
+    request(REQ_STOP, -1, 0);
+    step();
+    memcpy(W.normal + AI_NCHILD, &four, 4);
+    // its settings unreadable or odd: the pose
+    w64(W.launch, LA_DAMAGE, 0);
+    g_now += 1.0;
+    for (int i = 0; i < 3; i++) step();
+    request(REQ_TOGGLE, ragdoll_index(), 0);
+    step();
+    step();
+    int bad1 = calls_change == ch0 && !strcmp(cur(), "ZEmote_ragdoll") && strstr(t_rd_why, "can't be read") != 0;
+    request(REQ_STOP, -1, 0);
+    step();
+    w64(W.launch, LA_DAMAGE, P(&W.la_damage));
+    W.la_height = 1e9f;
+    g_now += 1.0;
+    for (int i = 0; i < 3; i++) step();
+    request(REQ_TOGGLE, ragdoll_index(), 0);
+    step();
+    step();
+    snprintf(d, sizeof d, "unreadable %d rd '%s'", bad1, t_rd_why);
+    check("ragdoll", "bad_settings_pose", bad1 && calls_change == ch0 && !strcmp(cur(), "ZEmote_ragdoll") &&
+                                              strstr(t_rd_why, "look wrong") != 0 &&
+                                              r64(W.launch, LA_HEIGHT) == P(&W.la_height), d);
+    request(REQ_STOP, -1, 0);
+    step();
+    W.la_height = 10.0f;
+    // the developer slip mode: the slip-and-fall in place (0x7000cae8e0), no damage, up by himself
+    g_rd_mode = RD_SLIP;
+    g_now += 1.0;
+    for (int i = 0; i < 20; i++) step();
+    request(REQ_TOGGLE, ragdoll_index(), 0);
+    step();
+    snprintf(d, sizeof d, "rd calls %d th %d changes %d", calls_rd, t_th, calls_change - ch0);
+    check("ragdoll", "slip_mode", calls_rd == 1 && t_th == TH_DOWN && calls_change == ch0 &&
+                                      r64(W.slip, SLIP_DAMAGE) == P(&g_zero_damage), d);
+    set_child(W.normal, 0);
+    step();
+    check("ragdoll", "slip_up_restores", t_th == TH_NONE && r64(W.slip, SLIP_DAMAGE) == P(&W.damage), "");
+    g_rd_mode = RD_THROW;
+    // a load while down: forget, write nothing to the old Link
+    g_now += 3.0;
+    for (int i = 0; i < 20; i++) step();
+    request(REQ_TOGGLE, ragdoll_index(), 0);
+    step();
+    set_child(W.normal, 2);
+    step();
+    int down_then = t_th == TH_DOWN;
     memcpy(W.other, W.link, sizeof W.other);
     w64(W.other, 0x100, 0);
     w64(W.holder, AS_OWNER, P(W.other));
@@ -559,9 +758,10 @@ SWMOD_EXPORT int emotes_selftest(char *out, int cap) {
     before = calls_play;
     g_regs.x[0] = P(W.other);
     tick(cpu(), P(W.other));
-    check("ragdoll", "load_forgets", t_rd_child == 0 && *(uint32_t *)(W.mgr + RD_STILL) == 7, "");
+    check("ragdoll", "load_forgets", down_then && t_th == TH_NONE && t_rd_child == 0 &&
+                                         r64(W.slip, SLIP_DAMAGE) == P(&g_zero_damage) &&
+                                         *(uint32_t *)(W.mgr + RD_STILL) == 7, "");
     check("machine", "load_drops_request", calls_play == before && g_req.kind == REQ_NONE, "");
-    t_rd_phys = 0;
 
     // ---- refused: in an event (the root's child isn't PlayerNormal), weapon in hand
     world_init(1);
@@ -723,6 +923,15 @@ SWMOD_EXPORT int emotes_selftest(char *out, int cap) {
     step();
     set_child(W.rootai, 0xffff);
     check("ai", "event_above_root", ai_now() == 0, "");
+    // the current child is +0x1c; +0x1e is the one before it (the game's switch 0x700153751c leaves it there)
+    world_init(1);
+    reset_mod();
+    step();
+    {
+        uint16_t prev = 1;  // Move, before
+        memcpy(W.normal + 0x1e, &prev, 2);
+    }
+    check("ai", "current_is_1c", ai_now() == VT_WAIT && normal_child() == VT_WAIT, "");
 
     // ---- the play path (Game check r2: slot 0 held our set, the model stood idle): Link's own body play flags him,
     // so his animation step puts the set on slot 1 sub 0 (the upper body) too; the generic play didn't

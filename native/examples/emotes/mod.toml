@@ -1,4 +1,4 @@
-# emotes: Link's emotes and a ragdoll toggle (docs/emotes.md), by giruka. Experimental: not yet run in the game.
+# emotes: Link's emotes and a ragdoll (docs/emotes.md), by giruka. Experimental: not yet run in the game.
 # Install it with the mod manager (docs/mod-manager.md):
 #   python tools/build_native.py build
 #   python tools/modman.py add native/examples/emotes
@@ -11,7 +11,7 @@
 [mod]
 id = "botw-mod-loader.emotes"
 name = "Emotes"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["giruka"]
 description = "Dances, thumbs up and down, and a ragdoll for Link: keys 5 to 0, the console command emote, or the Play page. Changes a game file (Link's animation list), so it starts off."
 game_versions = ["1.9.0"]   # it calls game functions by their 1.9.0 addresses
@@ -42,7 +42,7 @@ applies = "live"
 key = "ragdoll"
 type = "toggle"
 label = "Allow ragdoll"
-description = "The ragdoll key and emote ragdoll make Link flop down until you press again."
+description = "Key 0 and emote ragdoll throw Link forward, limp, to the ground. He gets up."
 default = true
 applies = "live"
 
@@ -478,6 +478,6 @@ key = "play_ragdoll"
 type = "button"
 label = "Ragdoll"
 button = "Play"
-description = "Link flops flat (pose). Press again to get up."
+description = "Link is thrown forward and ragdolls to the ground, then gets up."
 page = "play"
 # ---- end of generated settings

@@ -1,7 +1,7 @@
 {
   "id": "ragdoll", "name": "Ragdoll", "aliases": ["flop", "limp", "rag doll"],
   "page": "special", "slot": 0, "by": "giruka",
-  "about": "Link flops flat (a lying-down pose); press again to get up. The same pose is what other players see. (The game's own slip-and-fall tumble is a developer test for now.)",
-  "button_text": "Link flops flat (pose). Press again to get up.",
+  "about": "Link is thrown forward and lands limp on the ground (the game's own ragdoll), then gets up by himself; press again to get up sooner. No hearts lost. Other players see a lying-down pose.",
+  "button_text": "Link is thrown forward and ragdolls to the ground, then gets up.",
   "kind": "game_clip", "clip": "Rolldown_U", "loop": true, "face": "none", "morph": 8
 }
