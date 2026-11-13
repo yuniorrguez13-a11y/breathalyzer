@@ -2362,6 +2362,158 @@ def _playas_cmd(args) -> int:
     return 0
 
 
+# Each body's flesh around its main bones, for the live costume's ragdoll (ghost mod 0.9.1, puppet.c, docs/charsel.md
+# "Ragdoll"): per bone, the box its vertices fill in that bone's own frame at rest (cm: x-, x+, y-, y+, z-, z+). A vertex
+# counts for its heaviest bone, or the nearest of these above it (a hand for the wrist, the skirt for the hips).
+# The DLL turns the boxes with the bones each frame to find the body's lowest point, so a big body (Daruk: a torso
+# about 2 m wide) lies ON the ground instead of through it. `charsel bodies` writes them from your own game files.
+BODY_BONES = ("Skl_Root", "Spine_1", "Spine_2", "Head", "Arm_1_L", "Arm_2_L", "Wrist_L", "Arm_1_R", "Arm_2_R", "Wrist_R",
+              "Leg_1_L", "Leg_2_L", "Ankle_L", "Leg_1_R", "Leg_2_R", "Ankle_R")
+BODY_HEADER = REPO / "native" / "examples" / "ghost" / "pup_bodies.h"
+BODY_TRIM = 0.02           # each side drops the outermost 2 % of a bone's vertices (a stray strap or effect)
+EULER_ROT = 0x1000         # FSKL flags: rotations are Euler XYZ (the bone math here)
+
+
+def _attr_values(fmt: int, raw: bytes, off: int) -> list[float]:
+    """The components of one vertex attribute (nn::gfx format) as numbers."""
+    import struct
+    from wiiu_model import formats
+    typ, out = fmt & 0xFF, []
+    for size in formats.attr_component_sizes(fmt):
+        b = raw[off:off + size]
+        off += size
+        if typ == 5:
+            out.append(struct.unpack("<f" if size == 4 else "<e", b)[0])
+        elif typ == 1:
+            out.append(int.from_bytes(b, "little") / ((1 << (8 * size)) - 1))
+        elif typ == 2:
+            out.append(max(-1.0, int.from_bytes(b, "little", signed=True) / ((1 << (8 * size - 1)) - 1)))
+        else:
+            out.append(int.from_bytes(b, "little", signed=typ == 4))
+    return out
+
+
+def body_boxes(model, trim: float = BODY_TRIM) -> dict[str, list[int]]:
+    """{bone: [x-, x+, y-, y+, z-, z+] in cm} for the BODY_BONES a model has (made-up or the game's)."""
+    sk = model.skeleton
+    if not sk.flags & EULER_ROT:
+        raise CharselError("the skeleton's turns aren't Euler (not read here)")
+    worlds = _worlds(sk.bones)
+    index = {b.name: i for i, b in enumerate(sk.bones)}
+    inv = {n: _inv(worlds[index[n]]) for n in BODY_BONES if n in index}
+    pts: dict[str, list] = {n: [] for n in inv}
+
+    def apply(m, p):
+        return [sum(m[r][k] * p[k] for k in range(3)) + m[r][3] for r in range(3)]
+
+    for sh in model.shapes:
+        vb = model.vertex_buffers[sh.vertex_buffer]
+        at = {a.name: a for a in vb.attributes}
+        if "_p0" not in at:
+            continue
+
+        def get(name, v):
+            a = at[name]
+            return _attr_values(a.format, vb.buffers[a.buffer], v * vb.strides[a.buffer] + a.offset)
+
+        for v in range(vb.vertex_count):
+            p = get("_p0", v)[:3]
+            if sh.skin_count == 0:        # (rigid shape: on its bone, in that bone's frame)
+                bone = sh.bone
+                p = apply(worlds[bone], p)
+            else:
+                ii = get("_i0", v)[:sh.skin_count]
+                ww = get("_w0", v) if "_w0" in at else [1.0]
+                k = max(range(len(ii)), key=lambda j: ww[j] if j < len(ww) else 0.0)
+                bone = sk.matrix_to_bone[int(ii[k])]
+                if sh.skin_count == 1:    # (one bone each: in that bone's frame, as the game stores it)
+                    p = apply(worlds[bone], p)
+            b = bone
+            while b >= 0 and sk.bones[b].name not in inv:
+                b = sk.bones[b].parent
+            if b >= 0:
+                pts[sk.bones[b].name].append(apply(inv[sk.bones[b].name], p))
+    out = {}
+    for name, ps in pts.items():
+        if not ps:
+            continue
+        box = []
+        for ax in range(3):
+            vals = sorted(q[ax] for q in ps)
+            lo, hi = vals[int(trim * (len(vals) - 1))], vals[int((1 - trim) * (len(vals) - 1))]
+            box += [round(min(lo, 0.0) * 100), round(max(hi, 0.0) * 100)]
+        out[name] = box
+    return out
+
+
+def body_model(romfs: Path, cid: str) -> tuple[str, str] | None:
+    """(model file, model name) a character is drawn with: Link's own for link, the donor's for a pack; None for a
+    body put together from Mii-style parts (the Hylian)."""
+    if cid == "link":
+        return "Link", "Link"
+    r = RECIPES[cid]
+    if r.id in PLAYAS_PEOPLE:
+        try:
+            return body_of(romfs, r)
+        except CharselError:
+            return None
+    import aamp
+    from mp import ghost_link_pack as glp
+    donor = glp.read_pack(glp.find_pack(Path(romfs), r.donor))
+    _, lt = glp.link_target(donor, r.donor)
+    ml = donor.get(f"Actor/ModelList/{glp.user(lt, 'ModelUser')}.bmodellist")
+    md = aamp.load(ml).list("ModelData") if ml else None
+    if not (md and md.lists):
+        return None
+    d0 = next(iter(md.lists.values()))
+    folder = d0.object("Base").get_value("Folder")
+    units = d0.list("Unit")
+    unit = next(iter(units.objects.values())).get_value("UnitName") if units and units.objects else folder
+    return (folder, unit) if isinstance(folder, str) and folder else None
+
+
+def bodies_header(boxes: dict[str, dict[str, list[int]]]) -> str:
+    """pup_bodies.h: the C table puppet.c reads ({id: {bone: box}}; link first)."""
+    lines = ["// Made by python tools\\charsel.py bodies from the game's own models (numbers only): each body's flesh around",
+             "// its main bones, the box its vertices fill in the bone's own frame at rest, cm (x-, x+, y-, y+, z-, z+).",
+             "// puppet.c turns them with the bones during a ragdoll to keep the costume's lowest point on the ground.",
+             "// A body with no entry (the Hylian: Mii-style parts) uses Link's, scaled to its spine.",
+             f"#define PUP_NBODY_BONES {len(BODY_BONES)}",
+             "static const char *const PUP_BODY_BONES[PUP_NBODY_BONES] = {"]
+    for k in range(0, len(BODY_BONES), 8):
+        lines.append("    " + ", ".join(f'"{n}"' for n in BODY_BONES[k:k + 8]) + ",")
+    lines += ["};", "typedef struct {", "    const char *id;", "    signed char has[PUP_NBODY_BONES];",
+              "    short box[PUP_NBODY_BONES][6];", "} PupBody;", "static const PupBody PUP_BODIES[] = {"]
+    for cid in sorted(boxes, key=lambda c: (c != "link", c)):
+        b = boxes[cid]
+        has = ", ".join("1" if n in b else "0" for n in BODY_BONES)
+        lines.append(f'    {{"{cid}", {{{has}}}, {{')
+        rows = ["{" + ", ".join(str(v) for v in b.get(n, [0] * 6)) + "}" for n in BODY_BONES]
+        for k in range(0, len(rows), 3):
+            lines.append("        " + ", ".join(rows[k:k + 3]) + ",")
+        lines.append("    }},")
+    lines.append("};")
+    return "\n".join(lines) + "\n"
+
+
+def build_bodies(romfs: Path = DEFAULT_ROMFS, out: Path = BODY_HEADER) -> dict[str, dict[str, list[int]]]:
+    """Measure Link and every pack body from the game's files and write pup_bodies.h. Read-only on the game."""
+    from wiiu_model import nx_model
+    got: dict[str, dict[str, list[int]]] = {}
+    for cid in ["link"] + [c for c, r in RECIPES.items() if r.kind == "pack"]:
+        where = body_model(romfs, cid)
+        data = model_file(romfs, where[0]) if where else None
+        if not data:
+            continue
+        res = nx_model.read(_unyaz(data))
+        model = next((m for m in res.models if m.name == where[1]), res.models[0])
+        got[cid] = body_boxes(model)
+    if "link" not in got:
+        raise CharselError("Link's model isn't in your game files: nothing written")
+    Path(out).write_text(bodies_header(got), encoding="utf-8", newline="\n")
+    return got
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Who am I: character packs and the wheel (docs/charsel.md).")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -2397,10 +2549,19 @@ def main(argv: list[str] | None = None) -> int:
     pa.add_argument("--no-own-moves", action="store_true", help="Link's moves only (no rolling sprint, wings...)")
     pa.add_argument("--retarget", action="store_true",
                     help="fit Link's clips to the body (the game's retarget; hips at the body's height) [G]")
+    bo = sub.add_parser("bodies", help="measure each body's flesh for the costume's ragdoll (writes pup_bodies.h)")
+    bo.add_argument("--romfs", type=Path, default=DEFAULT_ROMFS)
+    bo.add_argument("--out", type=Path, default=BODY_HEADER)
     args = ap.parse_args(argv)
     try:
         if args.cmd == "playas":
             return _playas_cmd(args)
+        if args.cmd == "bodies":
+            got = build_bodies(args.romfs, args.out)
+            for cid, b in got.items():
+                print(f"  {cid:9} {len(b)} bones")
+            print(f"Written: {args.out}. Rebuild the ghost mod: python tools\\build_native.py build")
+            return 0
         if args.cmd == "list":
             _print_list(load_catalog(args.out))
             return 0

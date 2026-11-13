@@ -58,7 +58,7 @@ OVERLAY = REPO / "out" / "ghost-check-overlay"
 SHOTS = REPO / "out" / "shots" / "ghostcheck"
 RESULTS = REPO / "out" / "research" / "ghost-ingame-results.txt"
 RELAY_PORT = 7790          # (not the usual 7788, so a relay you run for play doesn't clash)
-WANT_VERSION = "0.9.0"
+WANT_VERSION = "0.9.1"
 SHAPE = (2, 2, 1, 3, 1)
 LINK_NAMES = ("Wait", "Walk", "Run", "RunGear2", "CutS1", "CutSF", "Jump", "ParashawlGlide", "ClimbMove", "SwimMove")
 # The bot's names for R1 (NAME@m/s:seconds): stand, walk, run, three attacks, a jump, a glide, a climb, stand

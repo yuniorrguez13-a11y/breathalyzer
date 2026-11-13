@@ -222,6 +222,63 @@ How it works:
 Not checked in the game yet [G]: moving, climbing, gliding and swimming with a live puppet, whether the game shows
 Link again by itself (`rehides`), his shadow, one frame of lag, the puppet's hip height.
 
+### Ragdoll
+
+**Ghost mod 0.9.1.** When Link ragdolls (a bomb, a Guardian beam, a big hit, a tumble down a steep slope, his death),
+the costume falls with him and lies on the ground, not through it. It never skips the ragdoll. Seen in the game
+(2026-11-13): a bomb threw Link as Daruk down a hillside, and most of Daruk went through the ground. Daruk's torso is
+about 2 m wide, Link's is 0.4 m, and the costume was standing at Link's place while he lay down.
+
+- **Detected** by Link's ragdoll manager (`*(Link+0x1870)`): bit 13 (`0x2000`) of its flags at `+0x110` is set while
+  the ragdoll runs. The ragdoll's start (`0x70011e704c`) sets it, its end (`0x70011e56ac`) clears it, and the game's own
+  starts (`0x70011e7880`, `0x70011e7908`) read it as "already on" [S]. Every ragdoll goes through that start: the slip
+  and tumble (`PlayerSlippingDown`, which a blast or Guardian hit switches to after `PlayerSuperBlow` or
+  `PlayerLaunch`), the death ragdoll (`PlayerDead`) and lava (`PlayerHell`). A second source, in case the offset is
+  wrong in this game version: Link's clip is `SlippingDown...`, `Dead...`, `DeadRagdoll` or `Rolldown...`.
+- **His pose, bone by bone:** the costume's animation is paused with the game's own switch (bit 3 of byte `+0x34` of
+  each model unit's animation at unit `+0x188`; the game clears that bit itself to pose a model by hand, at
+  `0x7000596438` [S]). Then every frame each of its bones with one of Link's names (Daruk: 94 of 144) gets that bone's
+  turn from Link's skeleton, its world matrices, the pose the physics made. The bone keeps its own length, the
+  character's own bones (belly, beard, wings) follow their parents, and its hips go where Link's are. That is what a
+  Link clip of that exact pose would do. The new bone transforms are written as the game's own set-local writes them
+  (unit `vf_9`, `0x7000f95fa8`: the skeleton's locals at `+0x18`, 0x60 bytes a bone).
+- **On the ground:** a ground plane is fitted under Link's own body, through the lowest corner of each of his body
+  boxes. Then the costume is raised (or lowered, for a thinner body like Mipha) until its lowest box corner lies on it.
+  It goes up at once and comes down gently (0.2 s). The body boxes are each body's flesh around 16 main bones, in the
+  bone's own frame, measured from the game's own models by `python tools\charsel.py bodies` and written to
+  `native/examples/ghost/pup_bodies.h` (numbers only). The Hylian is made of Mii-style parts, so it uses Link's boxes
+  scaled to its spine.
+- **Getting up:** the pose is followed until Link is up again (spine within 35 degrees of straight up, hips 0.65 m
+  over the ground, 4 s at most). Then the costume's animation runs again and it plays its clip for what Link does.
+- **If his pose can't be followed** (a skeleton or the animation can't be read, or fewer than 8 bones have Link's
+  names), the costume plays its own lying clip (`Dead`) on that ground, under Link's hips, and says why
+  (`ragdoll_why`).
+- Developer mode: `ghost puppet ragdoll pose|clip|off` (pose by default; off is the 0.9.0 way: its clips at his
+  place), `ghost puppet girth <x>` (the body boxes times x, 0.3 to 3, if it floats or sinks). `ghost puppet` answers
+  `ragdoll` (no, pose, clip), `ragdoll_src` (flag, anim, getup), `ragdoll_bones`, `ragdoll_lift`, `ragdoll_flags`,
+  `ragdoll_mgr`, `ragdolls`, `ragdoll_why`.
+- This is the live costume (`iam daruk`). The restart way (`charsel playas daruk`) has Daruk's body on Link's own
+  skeleton. There the game's physics moves the body directly, Link-sized, so it can still sink [G]. To see Daruk
+  ragdoll properly, use the live costume.
+- Tests without the game: the ghost selftest (`rd_*` rows: detection, the pose on made-up skeletons, the ground on
+  flat and sloped bodies, the lift, getting up, the clip, `ragdoll off`, removal mid-ragdoll) and
+  `tests/test_charsel_puppet.py` (the body boxes for every body, `body_boxes` on a made-up model).
+
+Not checked in the game yet [G], all of it: that the bit and the animation switch work this way in a running game,
+one frame of lag behind Link's pose, how the ground fit looks on a hillside, and whether the death screen counts as
+"no real position" (then Link shows, as in a cutscene).
+
+**Big bodies and knockback (designed, not built) [G].** A big body (Daruk, the Moblin) could shrug off small knocks
+(a bomb, a small hit) and still take the damage. Big hits (a Guardian beam, a big explosion, a Lynel) and death would
+still ragdoll. The game decides the knock-back before any ragdoll. The damage reaction picks the blow action
+(`PlayerSuperBlow`, `PlayerLaunch`, and `PlayerBarrierBlow` for barriers). That action flies Link and then, after
+`NoRagdollTime` (10 or 12 frames in `Player_Link.baiprog`), switches to the slip and tumble through `0x7000cae8e0`
+-> `0x70011e778c`. Skipping only the ragdoll still leaves the blow's flight, and the emotes study warns that driving
+the ragdoll by hand splits the body from Link's capsule. So the hook has to sit where the damage reaction is chosen,
+with the hit's strength known there. That place isn't found yet. The emotes mod also wraps Link's update
+(`0x7000cd1ee8`, only the first wrap runs). So nothing is hooked: size-based knockback waits for a study of the
+damage reaction and for modhost to chain wraps.
+
 ## Play as, at the next start (the restart way)
 
 The fallback when the live way can't show a character: the character's body becomes **your own Link's** model, the

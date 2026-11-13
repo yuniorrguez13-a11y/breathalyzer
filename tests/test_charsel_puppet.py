@@ -8,6 +8,10 @@
   Link hidden with the game's model show/hide and hidden again when the game shows him by itself, the puppet at
   Link's place, Link's items to the puppet only without a friend's ghost, a stage change, `iam link`, `iam self off`,
   and a pack the game refuses (given up after 5 tries, "Restart the game to play as Daruk").
+- 0.9.1 ragdoll: Link's ragdoll manager's bit (or a ragdoll clip) -> the puppet's animation paused and its bones
+  turned as Link's (its own lengths, its extra bones following), raised so its body boxes lie on the ground fitted
+  under Link; up again -> its animation and clip back; `ghost puppet ragdoll clip|off`. The body boxes
+  (pup_bodies.h, charsel.py bodies) cover Link and every pack body, and body_boxes reads a made-up model right.
 """
 
 import re
@@ -59,9 +63,54 @@ class Table(unittest.TestCase):
     def test_versions(self):
         toml = (GHOST / "mod.toml").read_text(encoding="utf-8")
         ver = re.search(r'^version = "([^"]+)"', toml, re.M)[1]
-        self.assertEqual(ver, "0.9.0")
+        self.assertEqual(ver, "0.9.1")
         self.assertIn(f'#define GHOST_VERSION "{ver}"', (GHOST / "ghost.c").read_text(encoding="utf-8"))
         self.assertIn('#include "puppet.c"', (GHOST / "ghost.c").read_text(encoding="utf-8"))
+
+    def test_body_boxes_cover_every_pack_body(self):
+        text = (GHOST / "pup_bodies.h").read_text(encoding="utf-8")
+        bones = re.findall(r'"([A-Za-z_0-9]+)"', text.split("PUP_BODY_BONES[PUP_NBODY_BONES] = {", 1)[1].split("};", 1)[0])
+        self.assertEqual(tuple(bones), charsel.BODY_BONES)
+        block = text.split("PUP_BODIES[] = {", 1)[1]
+        ids = re.findall(r'\{"([a-z]+)", \{', block)
+        self.assertEqual(ids[0], "link")      # (puppet.c's fallback is the first entry)
+        packs = {r.id for r in charsel.RECIPES.values() if r.kind == "pack"}
+        self.assertEqual(set(ids) - {"link"}, packs - {"hylian"})   # (the Hylian: Mii-style parts, Link's boxes)
+        for box in re.findall(r"\{(-?\d+), (-?\d+), (-?\d+), (-?\d+), (-?\d+), (-?\d+)\}", block):
+            lo_hi = [int(v) for v in box]
+            for k in range(0, 6, 2):
+                self.assertLessEqual(lo_hi[k], 0)
+                self.assertGreaterEqual(lo_hi[k + 1], 0)
+                self.assertLess(lo_hi[k + 1] - lo_hi[k], 400)   # (cm: no box over 4 m)
+
+    def test_body_boxes_of_a_made_up_model(self):
+        import struct
+        import types
+        from wiiu_model.neutral import Attribute, Bone, Skeleton, VertexBuffer
+        euler = charsel.EULER_ROT
+        bones = [Bone("Root", -1, -1, -1, 0xFFFF, 0, (1.0, 1.0, 1.0), (0.0, 0.0, 0.0, 1.0), (0.0, 0.0, 0.0)),
+                 Bone("Skl_Root", 0, 0, -1, 0xFFFF, 0, (1.0, 1.0, 1.0), (0.0, 0.0, 0.0, 1.0), (0.0, 1.0, 0.0)),
+                 Bone("Spine_1", 1, 1, -1, 0xFFFF, 0, (1.0, 1.0, 1.0), (0.0, 0.0, 1.5707963, 1.0), (0.0, 0.2, 0.0)),
+                 Bone("Belly", 2, 2, -1, 0xFFFF, 0, (1.0, 1.0, 1.0), (0.0, 0.0, 0.0, 1.0), (0.0, 0.0, 0.3))]
+        sk = Skeleton(euler, bones, [1, 2, 3], 3, 0, b"\0" * 48 * 3)
+        # vertices in model space, each on one bone (index into the matrix list, weight 1): two on Skl_Root, one on
+        # Spine_1 (turned 90 degrees about z: its own x is the model's y) and one on Belly (counts for Spine_1)
+        verts = [((0.3, 1.0, 0.0), 0), ((-0.2, 0.9, 0.1), 0), ((0.0, 1.6, 0.0), 1), ((0.0, 1.2, 0.5), 2)]
+        pos = b"".join(struct.pack("<3f", *p) for p, _ in verts)
+        idx = b"".join(struct.pack("<2B", i, 0) for _, i in verts)
+        wgt = b"".join(struct.pack("<2B", 255, 0) for _ in verts)
+        vb = VertexBuffer(4, 2, [Attribute("_p0", (0x18 << 8) | 5, 0, 0), Attribute("_i0", (0x09 << 8) | 3, 0, 1),
+                                  Attribute("_w0", (0x09 << 8) | 1, 0, 2)], [12, 2, 2], [pos, idx, wgt])
+        shape = types.SimpleNamespace(vertex_buffer=0, skin_count=2, bone=0)
+        model = types.SimpleNamespace(skeleton=sk, shapes=[shape], vertex_buffers=[vb])
+        got = charsel.body_boxes(model, trim=0.0)
+        self.assertEqual(got["Skl_Root"], [-20, 30, -10, 0, 0, 10])
+        # Spine_1 sits at y 1.2, turned: model y = its x; the Spine_1 vertex 0.4 up (x+ 40), Belly's 0.5 forward
+        self.assertEqual(got["Spine_1"], [0, 40, 0, 0, 0, 50])
+        self.assertNotIn("Head", got)
+        with self.assertRaises(charsel.CharselError):
+            charsel.body_boxes(types.SimpleNamespace(skeleton=Skeleton(0, bones, [], 0, 0, b""), shapes=[],
+                                                     vertex_buffers=[]))
 
     def test_hint_words(self):
         self.assertIn("Restart the game to play as Daruk", charsel.playas_hint("goron"))
@@ -103,6 +152,10 @@ class Selftest(unittest.TestCase):
                  "no_tick_says_why"]
         if ("puppet", "world") in self.rows:      # (the made-up globals' page was taken: the pure part only)
             names = names[:5]
+        # 0.9.1: the costume falls with Link's ragdoll (his pose, on the ground), pure and in the made-up world
+        names += ["rd_detect", "rd_order_refuses_loop", "rd_pose", "rd_ground", "rd_lift", "rd_upright", "rd_bodies"]
+        if ("puppet", "rd_world") not in self.rows:
+            names += ["rd_follow", "rd_getup", "rd_clip_and_off", "rd_removed"]
         for name in names:
             with self.subTest(check=name):
                 status, detail = self.rows.get(("puppet", name), ("MISSING", "not run"))

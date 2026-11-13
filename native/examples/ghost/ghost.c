@@ -77,10 +77,12 @@
 //   ghost give <actor> [dx dy dz]        spawn an actor near Link for him to take (tests; never the ghost's items)
 //   ghost looks <list> [current]         (0.8.0) the characters `iam` takes, from tools/mp/client.py (iam.c)
 //   ghost puppet [off|on|retry|lift m|map id=Actor,...]  (0.9.0) the self puppet (puppet.c): its state, or a change
+//   ghost puppet ragdoll pose|clip|off | girth x  (0.9.1) how it falls with Link's ragdoll (puppet.c)
 //   iam [name | next | back | self on|off]  (0.8.0, player safe) Who am I: who your friends see you as (iam.c);
 //                                        0.9.0: and who you see yourself as, live (puppet.c)
 // 0.9.0 (puppet.c): your own pick on your own screen, live: Link hidden with the game's own model show/hide, a
 //   "self puppet" of the character (its pack) kept at Link every frame, playing the character's clip for what he does.
+// 0.9.1 (puppet.c): while Link ragdolls the puppet follows his pose bone by bone and lies on the ground, not through it.
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,7 +90,7 @@
 #include "swmod.h"
 #include "botw.h"  // (only BOTW_ADDR_MAIN and BOTW_ADDR_GUEST_END: the guest window for `ghost self`'s pointer check)
 
-#define GHOST_VERSION "0.9.0"  // (the same as mod.toml)
+#define GHOST_VERSION "0.9.1"  // (the same as mod.toml)
 
 // ---- Win32 / C runtime (declared here: the zig that ships with Savage Wind has no windows.h or stdio.h)
 __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
