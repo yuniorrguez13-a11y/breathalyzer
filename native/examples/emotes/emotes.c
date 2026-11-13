@@ -20,7 +20,8 @@
 //     with a hint.
 //
 // Game addresses (1.9.0, docs/addresses.md and out/research/emotes-play.md): Link's update 0x7000cd1ee8 (wrapped with
-// hle_override), play an animation set by name 0x700151e42c (as the ghost uses it), what slot 0 plays 0x70014a0040,
+// hle_override), Link's own body play 0x7000cc7edc (see below; the ghost's generic 0x700151e42c only for A/B and the
+// frame-job test), what slot 0 plays 0x70014a0040,
 // finished 0x70014a009c, the alive-ragdoll switch 0x7000cae8e0. Every pointer is checked (VirtualQuery) before it is
 // read; a load (Link's pointer changes) forgets everything without writing.
 //
@@ -33,6 +34,17 @@
 // during PlayerWait's calc only (hle_override of 0x7000c9d0bc: it is called only through its vtable) and ours again right
 // after: the standing code leaves slot 0 alone, everyone else (us, multiplayer) reads our name. Developer switch
 // `emotedbg mask off|calc|always` (always: Wait the whole emote, for a replay found elsewhere).
+//
+// Why the model still stood idle (Game check r2: slot 0 held our set for the whole clip, the screen showed Wait;
+// static study 2026-11-13, out/research/emotes-handoff.md): Link's model has two skeletal animation targets
+// (Player_Link.bmodellist AnmTarget_0 and _1, the holder's slots 0 and 1). Slot 0 moves the lower body (everything
+// but Spine_1 and below), slot 1 the upper body (Spine_1 and below but the face). The game plays a body set with his
+// own body play 0x7000cc7edc: slot 0 sub 0, plus the flag Link +0xc48 bit 0x1000 and the morph at +0x2104; his
+// animation step (his vtable +0x390, 0x7000ccc7f0, called each frame before the holder's update) then plays the same
+// set on slot 1 sub 0 and syncs it with slot 0. The generic play 0x700151e42c (the ghost's: its puppets have one
+// target) sets no flag, so the upper body kept Wait: the clip ran (it ended on time) on the legs only. So Link's sets
+// go through his own body play (`emotedbg path generic` brings the old call back, for A/B). Upper-body sets (talks,
+// TalkHello) the game plays with 0x7000cc80c8 on slot 1 sub 1 and stops with 0x7000cc8224 (`emotedbg upper`).
 //
 // The game-thread code (tick, PlayerWait's calc) and the commands (frame thread) share only g_req / g_snap under a spin
 // lock.
@@ -70,6 +82,18 @@ __declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char
 #define LINK_UPDATE 0x7000cd1ee8ull      // Link's per-frame update (x0 = Link); one pointer to it, no direct calls
 #define PLAYER_VPTR 0x7001cd7bb8ull      // Link's actor class
 #define AS_PLAY 0x700151e42cull          // (action, name, keep_if_same, slot, sub; s0 morph): reads only action+8
+#define LINK_PLAY_BODY 0x7000cc7edcull   // (Link, name, force; s0 morph): Link's own body play (slot 0 sub 0 + the
+                                         // flag that makes his animation step copy the set to slot 1, the upper body)
+#define LINK_PLAY_UPPER 0x7000cc80c8ull  // (Link, name, force; s0 morph): his upper-body play (slot 1 sub 1, weights)
+#define LINK_STOP_UPPER 0x7000cc8224ull  // (Link, 1): stops slot 1 sub 1, the upper body follows the body set again
+#define AS_SLOTS 0xb8                    // holder: slot count (s32); slots at +0xc0, 0x50 bytes each
+#define AS_SLOT_ARRAY 0xc0
+#define AS_SLOT_SIZE 0x50
+#define AS_SLOT_NSUB 0x20                // slot: sub count (s32); subs at +0x28, 0x98 bytes each
+#define AS_SLOT_SUBS 0x28
+#define AS_SUB_SIZE 0x98
+#define AS_SUB_WEIGHT 0x10               // sub: blend weight (float)
+#define AS_SUB_PLAYING 0x18              // sub: its running set (0: none)
 #define AS_CURRENT 0x70014a0040ull       // (holder, slot, sub) -> string object of the playing set (char* at +8)
 #define AS_FINISHED 0x70014a009cull      // (holder, slot, sub) -> 1 when a one-shot ended (also: no such slot)
 #define ACTOR_AS 0x560                   // actor: animation holder
@@ -122,6 +146,11 @@ static SwModGuestFn g_pw_orig;           // PlayerWait's calc (the game's)
 enum { MASK_OFF, MASK_CALC, MASK_ALWAYS };
 static int g_mask_mode = MASK_CALC;
 static uint64_t g_mask_name;             // the "Wait" text the name pointer shows then (the game's own; set at init)
+
+// how a set goes on Link: PATH_BODY = his own body play (both skeletal targets: what shows), PATH_GENERIC = the
+// generic play on slot 0 only (the legs only: the r2 Game check; developer A/B: emotedbg path)
+enum { PATH_BODY, PATH_GENERIC };
+static int g_play_path = PATH_BODY;
 
 // ------------------------------------------------------------------ time, memory, game calls
 static int64_t g_qpf;
@@ -260,7 +289,7 @@ static void lock(void) {
 }
 static void unlock(void) { __atomic_store_n(&g_lock, 0, __ATOMIC_RELEASE); }
 
-enum { REQ_NONE, REQ_PLAY, REQ_STOP, REQ_RAGDOLL_ON, REQ_RAGDOLL_OFF, REQ_DBG_PLAY, REQ_TOGGLE };
+enum { REQ_NONE, REQ_PLAY, REQ_STOP, REQ_RAGDOLL_ON, REQ_RAGDOLL_OFF, REQ_DBG_PLAY, REQ_TOGGLE, REQ_DBG_UPPER };
 typedef struct {
     int kind;
     int index;           // emote index, or -1 with name set (a community id or a debug set)
@@ -305,6 +334,11 @@ typedef struct {         // what the tick knows, copied for the commands
     int ai_child_wait, ai_child_move, ai_child_slip;
     uint32_t rd_still, rd_still2, rd_limit, rd_limit2;
     int rd_have_mgr;
+    char body1[32];      // slot 1 sub 0: the body set on the upper body (should follow slot 0)
+    char upper[32];      // slot 1 sub 1: an upper-body set (talk, bow...), "" none
+    float w00, w10, w11; // blend weights: slot 0 sub 0, slot 1 sub 0, slot 1 sub 1 (-1: unreadable)
+    int upper_playing;   // slot 1 sub 1 has a running set (then the game gives slot 1 sub 0 weight 0)
+    char dbg_upper[32];  // developer: the set `emotedbg upper` played (until it ended or was stopped)
 } Snap;
 static Snap g_snap;
 
@@ -341,6 +375,8 @@ static int t_ours_ticks;         // ticks slot 0 showed our set since the start
 static int t_call_works = -1;    // -1 unknown, 1 a play of ours took (seen in the same tick)
 static int t_hold;               // developer: emotedbg hold on
 static int t_replays;
+static char t_dbg_upper[32];     // developer: the upper-body set `emotedbg upper` played ("" none)
+static int t_dbg_upper_ticks;
 #define TRACE_TICKS 10
 static int t_trace_left, t_trace_n;
 static char t_pre[32];
@@ -396,6 +432,30 @@ static uint64_t holder_of(uint64_t link) {
     return h && rd64(h + AS_OWNER) == link ? h : 0;
 }
 
+// Sub `sub` of slot `slot` of the holder (0 when there is none or it can't be read). Reads only memory.
+static uint64_t sub_at(uint64_t holder, int slot, int sub) {
+    if (!holder) return 0;
+    int32_t ns = (int32_t)rd32(holder + AS_SLOTS);
+    if (slot < 0 || slot >= ns || ns > 16) return 0;
+    uint64_t sp = rd64(holder + AS_SLOT_ARRAY);
+    if (!sp) return 0;
+    sp += (uint64_t)slot * AS_SLOT_SIZE;
+    int32_t nb = (int32_t)rd32(sp + AS_SLOT_NSUB);
+    if (sub < 0 || sub >= nb || nb > 16) return 0;
+    uint64_t subs = rd64(sp + AS_SLOT_SUBS);
+    return subs ? subs + (uint64_t)sub * AS_SUB_SIZE : 0;
+}
+// its blend weight (-1: unreadable) and whether a set runs on it (developer view: emotedbg slot)
+static void sub_view(uint64_t holder, int slot, int sub, float *w, int *playing) {
+    uint64_t s = sub_at(holder, slot, sub);
+    *w = -1.0f;
+    if (playing) *playing = 0;
+    if (!s || !mem_ok(s, AS_SUB_SIZE)) return;
+    uint32_t wb = rd32(s + AS_SUB_WEIGHT);
+    memcpy(w, &wb, 4);
+    if (playing) *playing = rd64(s + AS_SUB_PLAYING) != 0;
+}
+
 // The text at p when it is readable memory anywhere in this process (another mod's name), else "".
 static void rd_text_any(uint64_t p, char *out, size_t cap) {
     out[0] = 0;
@@ -442,6 +502,11 @@ static void slot0_read_at(struct Cpu *c, uint64_t holder, char out[32], int *ptr
 }
 static void slot0_read(struct Cpu *c, uint64_t holder, char out[32], int *ptr_ours) {
     slot0_read_at(c, holder, out, ptr_ours, 0, 0);
+}
+// What another slot / sub plays (1 0: the body set on the upper body, 1 1: an upper-body set), "" none
+static void slot_read(struct Cpu *c, uint64_t holder, int slot, int sub, char out[32]) {
+    uint64_t s = gcall(c, AS_CURRENT, holder, (uint64_t)slot, (uint64_t)sub, 0, 0);
+    name_text(s ? rd64(s + STR_PTR) : 0, out);
 }
 // ... and whether it is ours: a ZEmote_ set, or the set we asked for while one runs (a fallback game set), or (mask
 // always) our set under the name Wait
@@ -504,17 +569,24 @@ static void pw_calc(struct Cpu *c) {
     }
 }
 
-// Play a set on Link's slot 0, exactly as the ghost does (keep_if_same 1, slot 0, sub 0, x5 = x6 = 0; keep 0 only for
-// the Wait probe, which must replace the game's own Wait). name must be interned. Then reads slot 0 back in the same tick (into g_snap.after): our name there = the call took.
+// Play a set on Link's body as the game plays his own (Wait, Move, Get...): his body play 0x7000cc7edc (x0 Link, x1 the
+// name, w2 force = !keep: keep skips a set that already plays, as the game's own name compare; s0 morph, -1 = the
+// set's). It plays slot 0 sub 0 (the lower body), sets its weight, and flags Link so his animation step puts the same
+// set on slot 1 sub 0 (the upper body) later this frame. (PATH_GENERIC: the ghost's generic call, slot 0 only.)
+// name must be interned. Then reads slot 0 back in the same tick (into g_snap.after): our name there = the call took.
 // It also notes where slot 0's name pointer lives and its value while a set of ours (not Wait) plays (t_name_at /
 // t_our_name: PlayerWait's calc shows it as Wait).
 static int t_after_ours;
 static void as_play(struct Cpu *c, uint64_t link, uint64_t holder, const char *name, int keep, float morph) {
     if (!name) return;
     unmask();  // (the game's keep_if_same compares the real name)
-    g_fake_action[0] = 0, g_fake_action[1] = link;
     swmod_set_s(c, 0, morph);
-    gcall(c, AS_PLAY, P(g_fake_action), P(name), (uint64_t)keep, 0, 0);
+    if (__atomic_load_n(&g_play_path, __ATOMIC_ACQUIRE) == PATH_GENERIC) {
+        g_fake_action[0] = 0, g_fake_action[1] = link;
+        gcall(c, AS_PLAY, P(g_fake_action), P(name), (uint64_t)keep, 0, 0);
+    } else {
+        gcall(c, LINK_PLAY_BODY, link, P(name), keep ? 0 : 1, 0, 0);
+    }
     char now[32];
     int ptr = 0;
     uint64_t at = 0, raw = 0;
@@ -696,6 +768,7 @@ static const char *start_blocker(uint64_t link, const char *slot0, int slot0_our
 
 static void forget(void) {  // a new Link (a load): nothing we knew is valid; nothing is written
     t_state = ST_IDLE, t_index = -1, t_set[0] = 0;
+    t_dbg_upper[0] = 0;
     t_ai_scanned = 0, t_ai_root = t_ai_normal = 0, t_ai_len = 0;
     t_name_at = t_our_name = 0, t_masked = 0;
     t_pw_ran = 0, t_pw_frames = 0, t_pw_ever = 0, t_pw_action = 0;
@@ -976,15 +1049,52 @@ static void tick(struct Cpu *c, uint64_t link) {
         if (!ok) set_why("too many different animation names asked for: restart the game");
         break;
     }
+    case REQ_DBG_UPPER:  // developer control: an upper-body set the game's own way (TalkHello as in a talk), or "-"
+        if (!rq.name[0] || !strcmp(rq.name, "-")) {
+            if (t_dbg_upper[0]) gcall(c, LINK_STOP_UPPER, link, 1, 0, 0, 0);
+            t_dbg_upper[0] = 0;
+        } else {
+            const char *nm = intern(rq.name);
+            if (!nm) {
+                set_why("too many different animation names asked for: restart the game");
+                break;
+            }
+            swmod_set_s(c, 0, -1.0f);
+            gcall(c, LINK_PLAY_UPPER, link, P(nm), 1, 0, 0);
+            memcpy(t_dbg_upper, nm, strlen(nm) + 1);
+            t_dbg_upper_ticks = 0;
+        }
+        break;
     default:
         break;
+    }
+
+    // developer upper-body set: stop it the game's way once it ended (or let go if the game played another)
+    char body1[32], upper[32];
+    float w00, w10, w11;
+    int upper_playing;
+    slot_read(c, holder, 1, 0, body1);
+    slot_read(c, holder, 1, 1, upper);
+    sub_view(holder, 0, 0, &w00, 0);
+    sub_view(holder, 1, 0, &w10, 0);
+    sub_view(holder, 1, 1, &w11, &upper_playing);
+    if (t_dbg_upper[0] && ++t_dbg_upper_ticks > 2) {
+        if (strcmp(upper, t_dbg_upper)) {
+            t_dbg_upper[0] = 0;
+        } else if (gcall(c, AS_FINISHED, holder, 1, 1, 0, 0) & 1) {
+            gcall(c, LINK_STOP_UPPER, link, 1, 0, 0, 0);
+            t_dbg_upper[0] = 0;
+        }
     }
 
     // slot 0's name: nothing of ours plays any more -> let go; (mask always) ours plays -> show it as Wait
     if (t_state == ST_IDLE) {
         unmask();
         t_name_at = t_our_name = 0;
-    } else if (g_mask_mode == MASK_ALWAYS && !t_masked && g_mask_name && t_name_at && rd64(t_name_at) == t_our_name) {
+    } else if (g_mask_mode == MASK_ALWAYS && t_state == ST_PLAYING && !t_masked && g_mask_name && t_name_at &&
+               rd64(t_name_at) == t_our_name) {  // (not in the play's own frame: Link's animation step copies the
+                                                 // name it reads then to the upper body; link_update masks before
+                                                 // his update from the next frame on)
         t_masked = wr64(t_name_at, g_mask_name);
     }
 
@@ -1015,6 +1125,11 @@ static void tick(struct Cpu *c, uint64_t link) {
     g_snap.pw_calls = t_pw_calls, g_snap.pw_masked = t_pw_masked, g_snap.pw_took = t_pw_took;
     memcpy(g_snap.pw_took_name, t_pw_took_name, sizeof g_snap.pw_took_name);
     g_snap.masked = t_masked;
+    memcpy(g_snap.body1, body1, sizeof body1);
+    memcpy(g_snap.upper, upper, sizeof upper);
+    g_snap.w00 = w00, g_snap.w10 = w10, g_snap.w11 = w11;
+    g_snap.upper_playing = upper_playing;
+    memcpy(g_snap.dbg_upper, t_dbg_upper, sizeof t_dbg_upper);
     g_snap.ai_found = t_ai_normal != 0;
     g_snap.ai_len = t_ai_len;
     uint64_t vt = ai_now();
@@ -1034,6 +1149,11 @@ static void link_update(struct Cpu *c) {
     uint64_t x[31], sp, pc, nzcv;
     SwModVReg v[32];
     t_pre[0] = 0;
+    // (mask always) from the frame after the play on, Link's update sees Wait too (in the play's own frame his
+    // animation step must still read our name, to put the set on the upper body)
+    if (__atomic_load_n(&g_mask_mode, __ATOMIC_ACQUIRE) == MASK_ALWAYS && link == t_link && t_state != ST_IDLE &&
+        !t_masked && g_mask_name && t_name_at && rd64(t_name_at) == t_our_name)
+        t_masked = wr64(t_name_at, g_mask_name);
     if (t_trace_left > 0 && link == t_link && rd64(link) == PLAYER_VPTR) {  // developer trace: slot 0 before
         uint64_t holder = holder_of(link);
         sp = r->sp, pc = r->pc, nzcv = r->nzcv;
@@ -1210,6 +1330,25 @@ static void cmd_emotedbg(int argc, char **argv, SwModReply *r) {
         api->reply_int(r, "pw_masked", s.pw_masked);
         api->reply_int(r, "pw_took", s.pw_took);
         api->reply_str(r, "pw_took_name", s.pw_took_name);
+        api->reply_str(r, "path", __atomic_load_n(&g_play_path, __ATOMIC_ACQUIRE) == PATH_GENERIC ? "generic" : "body");
+        api->reply_str(r, "body1", s.body1);
+        api->reply_str(r, "upper", s.upper);
+        api->reply_bool(r, "upper_playing", s.upper_playing != 0);
+        api->reply_num(r, "w00", s.w00);
+        api->reply_num(r, "w10", s.w10);
+        api->reply_num(r, "w11", s.w11);
+        api->reply_str(r, "dbg_upper", s.dbg_upper);
+    } else if (!strcmp(what, "path") && argc > 2) {
+        int p = !strcmp(argv[2], "body") ? PATH_BODY : !strcmp(argv[2], "generic") ? PATH_GENERIC : -1;
+        if (p < 0) {
+            api->reply_fail(r, "emotedbg path body|generic");
+            return;
+        }
+        __atomic_store_n(&g_play_path, p, __ATOMIC_RELEASE);
+        api->reply_text(r, "Play path %s.", argv[2]);
+    } else if (!strcmp(what, "upper") && argc > 2) {
+        request(REQ_DBG_UPPER, -1, argv[2]);
+        api->reply_text(r, "Asked for %s on the upper body.", argv[2]);
     } else if (!strcmp(what, "mask") && argc > 2) {
         int m = !strcmp(argv[2], "off") ? MASK_OFF : !strcmp(argv[2], "calc") ? MASK_CALC
                 : !strcmp(argv[2], "always") ? MASK_ALWAYS : -1;
@@ -1252,14 +1391,15 @@ static void cmd_emotedbg(int argc, char **argv, SwModReply *r) {
         __atomic_store_n(&t_rd_phys, !strcmp(argv[2], "on"), __ATOMIC_RELEASE);
         api->reply_text(r, "Physics ragdoll %s.", t_rd_phys ? "on (developer test)" : "off");
     } else {
-        api->reply_fail(r, "emotedbg slot | play <set> | ai | rd | mask off|calc|always | hold on|off | rdphys on|off");
+        api->reply_fail(r, "emotedbg slot | play <set> | upper <set>|- | path body|generic | ai | rd | "
+                           "mask off|calc|always | hold on|off | rdphys on|off");
     }
 }
 
 static const SwModCommand COMMANDS[] = {
     {"emote", "[name|number|stop|ragdoll [on|off]|state]", "Link does an emote (the list: emote)", cmd_emote,
      SWMOD_CMD_PLAYER},
-    {"emotedbg", "slot|play <set>|ai|rd|mask off|calc|always|hold on|off|rdphys on|off",
+    {"emotedbg", "slot|play <set>|upper <set>|-|path body|generic|ai|rd|mask off|calc|always|hold on|off|rdphys on|off",
      "Emotes mod: developer checks", cmd_emotedbg, 0},
 };
 

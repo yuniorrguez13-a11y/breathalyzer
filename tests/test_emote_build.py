@@ -13,9 +13,11 @@ Without game files (a made-up skeleton with Link's bone names, in memory):
 - .bas: reads back (TypeIndex 67, FileName, Morph, the face event); a preview PNG is written.
 
 With the user's files (skipped when they are missing): a full build to a temp folder (every pose check, read back
-within 0.15 degrees) and the merge with The Linkle Mod's real log.
+within 0.15 degrees; the game clips copied into our archive unchanged, daruk_flex's a real clip) and the merge with
+The Linkle Mod's real log.
 
-Native: native/examples/emotes/selftest/emotes_selftest.c built with Savage Wind's zig (skipped without it).
+Native: native/examples/emotes/selftest/emotes_selftest.c built with Savage Wind's zig (skipped without it); it also
+checks that sets go on Link through his own body play (the upper body follows) and the `emotedbg upper` control.
 """
 import ctypes
 import math
@@ -339,7 +341,8 @@ class WithGameFiles(unittest.TestCase):
 
     def test_built(self):
         b = self.built
-        self.assertEqual(b.clips, sum(1 for d in self.emotes if d["kind"] == "keys"))
+        self.assertEqual(b.clips, sum(1 for d in self.emotes if d["kind"] in ("keys", "game_clip")))
+        self.assertEqual(b.copied, {d["id"]: d["clip"] for d in self.emotes if d["kind"] == "game_clip"})
         self.assertEqual(b.sets, len(self.emotes))
         self.assertLessEqual(b.readback_deg, eb.READBACK_DEG)
         for name in ("mod.toml", "info.json", "emotes.json", "logs/aslist.aamp", "logs/rstb.json",
@@ -354,6 +357,27 @@ class WithGameFiles(unittest.TestCase):
         self.assertEqual(names, sorted(f"Actor/AS/{eb.BAS_PREFIX}{d['id']}.bas" for d in self.emotes))
         wave = eb.read_bas(tb.child(eb.PLAYER_PACK).child(f"Actor/AS/{eb.BAS_PREFIX}wave.bas").raw)
         self.assertEqual((wave["TypeIndex"], wave["FileName"]), (67, "SwEmote_wave"))
+
+    def test_game_clips_are_copied(self):
+        # Game check r2: The Linkle Mod's Player_Animation has a 1-frame empty Random_Nml_Wait_Kinnikujiman, so a set
+        # naming the game clip ended at once. Our archive carries a copy of the player's own clip under our name.
+        from wiiu_model import nx_model
+        with open(os.path.join(self.built.folder, eb.BASE_TID, "romfs", "Pack", "TitleBG.pack"), "rb") as f:
+            tb = bnp.Blob(f.read())
+        ours = {a.name: a for a in nx_model.read(tb.child(f"Model/{eb.ARCHIVE}.sbfres").raw).skel_anims}
+        game = {a.name: a for a in self.game.anims().skel_anims}
+        for d in self.emotes:
+            if d["kind"] != "game_clip":
+                continue
+            with self.subTest(emote=d["id"]):
+                bas = eb.read_bas(tb.child(eb.PLAYER_PACK).child(f"Actor/AS/{eb.BAS_PREFIX}{d['id']}.bas").raw)
+                self.assertEqual(bas["FileName"], eb.CLIP_PREFIX + d["id"])
+                a, g = ours[eb.CLIP_PREFIX + d["id"]], game[d["clip"]]
+                self.assertEqual((a.head, a.bone_anims), (g.head, g.bone_anims))
+        flex = struct.unpack_from("<i", ours[eb.CLIP_PREFIX + "daruk_flex"].head, 4)[0]
+        self.assertGreater(flex, 1, "daruk_flex must be the real clip, not a 1-frame stand-in")
+        rec = {s["id"]: s for s in self.built.record["sets"]}
+        self.assertEqual(rec["daruk_flex"]["from_clip"], "Random_Nml_Wait_Kinnikujiman")
 
     @unittest.skipUnless(LINKLE_LOG.is_file(), "The Linkle Mod's log isn't in out/emotes-lib")
     def test_merge_with_linkle(self):
@@ -419,6 +443,12 @@ class Native(unittest.TestCase):
         self.group("noai", ["after_load_refused", "standing_starts", "moving_refused", "event_refused",
                             "lift_refused"])
         self.group("guard", ["event_refused", "weapon_refused", "weapon_on_back_ok"])
+
+    def test_path(self):
+        # Game check r2: slot 0 held our set but the model stood idle. Link's own body play flags him so his animation
+        # step puts the set on slot 1 sub 0 (the upper body); the generic play (A/B) leaves the upper body on Wait
+        self.group("path", ["body_play", "upper_body_seen", "wait_on_both", "generic_legs_only", "upper_dbg_plays",
+                            "upper_dbg_runs", "upper_dbg_stops", "upper_dbg_stop_cmd"])
 
     def test_names(self):
         # the game keeps our char*: slot 0 must read back names that live outside the game's memory

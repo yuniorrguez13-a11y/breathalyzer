@@ -12,7 +12,18 @@ Link's emotes and a ragdoll toggle: docs/emotes.md has the list, the keys and ho
 
 Game check 2026-11-13: the play call takes (same frame), but the game put Wait back before the next frame. Found
 statically: Link's standing action (PlayerWait, calc `0x7000c9d0bc`) runs his standing animation code
-`0x7000ce0c44`, which plays Wait whenever slot 0's name isn't Wait. The fix (not yet checked in the game): during that
-calc only, slot 0's name pointer shows the game's own "Wait"; ours again right after. The animations it plays come
-from `python tools/emote_build.py build`. Developer checks: `emotedbg slot` (after / trace / pw_*), `emotedbg mask
-off|calc|always`, `emotedbg hold on`, `emotedbg jobplay <emote>` (needs EMOTES_DEV_FRAMEJOB=1 at game start).
+`0x7000ce0c44`, which plays Wait whenever slot 0's name isn't Wait. The fix (checked in the game, r2: slot 0 keeps our
+set for the whole clip): during that calc only, slot 0's name pointer shows the game's own "Wait"; ours again right
+after.
+
+Game check r2: slot 0 held the emote, but the model stood idle. Found statically (r3, not yet checked in the game):
+Link's model has two skeletal targets, slot 0 = lower body and slot 1 = upper body. His own body play `0x7000cc7edc`
+flags him so his animation step (`0x7000ccc7f0`, his vtable +0x390) copies the set to slot 1 sub 0; the generic play
+`0x700151e42c` didn't, so the emote ran on the legs only. Sets now go through his own body play. Game clips are copied
+into our archive (The Linkle Mod's Player_Animation has 1-frame stand-ins for the random idles).
+
+The animations it plays come from `python tools/emote_build.py build`. Developer checks: `emotedbg slot` (after /
+trace / pw_* / body1, upper, w00, w10, w11: what the upper body plays and the blend weights), `emotedbg path
+body|generic` (A/B of the play call), `emotedbg upper <set>|-` (an upper-body set the game's own way, as TalkHello in
+a talk; stopped when it ends), `emotedbg mask off|calc|always`, `emotedbg hold on`, `emotedbg jobplay <emote>` (needs
+EMOTES_DEV_FRAMEJOB=1 at game start).

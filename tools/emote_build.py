@@ -1687,6 +1687,7 @@ def mod_toml_text(current: str, emotes: list[dict]) -> str:
 class Built:
     folder: str
     clips: int = 0
+    copied: dict = field(default_factory=dict)   # emote id -> the game clip copied into our archive for it
     sets: int = 0
     archive_size: int = 0
     readback_deg: float = 0.0
@@ -1798,10 +1799,20 @@ def build_package(game: Game, emotes: list[dict], out: str, *, log=None, strict:
     _log(log, "Writing the animation archive...")
     datas = [build_clip(prep.skel, prep.template, clips[d["id"]], CLIP_PREFIX + d["id"]) for d in emotes
              if d["kind"] == "keys"]
+    # game clips: a copy from the player's own Player_Animation goes into our archive under our name, so the emote
+    # doesn't depend on what another mod puts in Player_Animation (The Linkle Mod's has 1-frame empty stand-ins for
+    # Random_Nml_Wait_Kinnikujiman and the other random idles: daruk_flex ended at once in the Game check r2)
+    copies: dict[str, object] = {}
     for d in emotes:
-        if d["kind"] == "keys" and CLIP_PREFIX + d["id"] in game_clips:
+        if d["kind"] == "game_clip":
+            a = game_clips.get(d["clip"])
+            if a is None:
+                raise EmoteError(f"{d['id']}: your game has no clip {d['clip']}")
+            copies[d["id"]] = a
+    for d in emotes:
+        if d["kind"] in ("keys", "game_clip") and CLIP_PREFIX + d["id"] in game_clips:
             raise EmoteError(f"Your game already has a clip called {CLIP_PREFIX}{d['id']}")
-    anims = [to_skel_anim(cd) for cd in datas]
+    anims = [to_skel_anim(cd) for cd in datas] + [copy_clip(a, CLIP_PREFIX + eid) for eid, a in copies.items()]
     rf = ResFile(ARCHIVE, [res.models[0]], anims, [], [], dict(res.extra))
     data = nx_model.write(rf)
     bad = checks.switch_model_problems(data)
@@ -1810,8 +1821,12 @@ def build_package(game: Game, emotes: list[dict], out: str, *, log=None, strict:
     worst = readback(prep.skel, data, datas)
     if worst > READBACK_DEG:
         raise EmoteError(f"the archive reads back {worst:.3f} degrees off (at most {READBACK_DEG})")
+    bad = copies_problems(data, {CLIP_PREFIX + eid: a for eid, a in copies.items()})
+    if bad:
+        raise EmoteError("the copied game clips read back changed: " + "; ".join(bad[:3]))
     built.readback_deg = worst
-    built.clips = len(datas)
+    built.clips = len(anims)
+    built.copied = {eid: a.name for eid, a in copies.items()}
     built.archive_size = len(data)
     pa = game.anim_blob()
     yz = ukmm.yaz0(data, pa.align)
@@ -1829,10 +1844,8 @@ def build_package(game: Game, emotes: list[dict], out: str, *, log=None, strict:
             face = face_value(d)
             bas = make_bas(clip_name, d.get("morph", 6), face)
         elif d["kind"] == "game_clip":
-            a = game_clips.get(d["clip"])
-            if a is None:
-                raise EmoteError(f"{eid}: your game has no clip {d['clip']}")
-            clip_name = d["clip"]
+            a = copies[eid]
+            clip_name = CLIP_PREFIX + eid   # (our copy of d["clip"])
             frames = struct.unpack_from("<i", a.head, 4)[0]
             face = face_value(d)
             bas = make_bas(clip_name, d.get("morph", 6), face)
@@ -1844,6 +1857,7 @@ def build_package(game: Game, emotes: list[dict], out: str, *, log=None, strict:
             bas = src
         bas_files[f"Actor/AS/{BAS_PREFIX}{eid}.bas"] = bas
         record_sets.append({"id": eid, "name": d["name"], "set": SET_PREFIX + eid, "clip": clip_name,
+                            **({"from_clip": d["clip"]} if d["kind"] == "game_clip" else {}),
                             "frames": frames, "loop": d["loop"], "kind": d["kind"], "page": d["page"],
                             "slot": d.get("slot", 0), "aliases": d.get("aliases", []), "face": face,
                             "fallback": d.get("fallback", ""), "bas_bytes": len(bas)})
@@ -1894,9 +1908,32 @@ def build_package(game: Game, emotes: list[dict], out: str, *, log=None, strict:
         "# Emote animations: built on this PC by tools/emote_build.py from the player's own game files.", "",
         f"- archive {ARCHIVE}: {built.clips} clips, {len(data)} bytes ({len(yz)} with Yaz0), read back within "
         f"{worst:.3f} degrees",
+        *(["- copied from your Player_Animation: " + ", ".join(f"{a} as {CLIP_PREFIX}{e}" for e, a in
+                                                               built.copied.items())] if built.copied else []),
         f"- sets: {built.sets} ({', '.join(SET_PREFIX + d['id'] for d in emotes)})",
         *[f"- note: {n}" for n in built.notes], ""]))
     return built
+
+
+def copy_clip(a, name: str):
+    """A game clip (tools/wiiu_model's SkelAnim from the player's Player_Animation) under our name: the same keys."""
+    import dataclasses
+    return dataclasses.replace(a, name=name, path="", bind_indices=[0xFFFF] * len(a.bone_anims),
+                               user_data=list(a.user_data), extra={})
+
+
+def copies_problems(data: bytes, want: dict) -> list[str]:
+    """The copied clips in the written archive differ from their game clips (head, bones, curves, user data)."""
+    from wiiu_model import nx_model
+    back = {a.name: a for a in nx_model.read(data).skel_anims}
+    out = []
+    for name, src in want.items():
+        a = back.get(name)
+        if a is None:
+            out.append(f"{name} is missing")
+        elif a.head != src.head or a.bone_anims != src.bone_anims or a.user_data != src.user_data:
+            out.append(f"{name} differs from {src.name}")
+    return out
 
 
 def readback(skel: Skeleton, data: bytes, datas: list[ClipData]) -> float:

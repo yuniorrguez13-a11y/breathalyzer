@@ -58,14 +58,23 @@ typedef struct {
     const char *pw_plays;  // PlayerWait's calc plays this set of its own (cold, out of breath...)
     int pw_saw_wait;     // PlayerWait's calc read Wait while a set of ours played
     const char *lacks[4];  // set names the made-up Link doesn't have
+    // the upper body (slot 1): sub 0 gets the body set from Link's animation step when his body play flagged it (the
+    // game: Link +0xc48 bit 0x1000, his vtable +0x390); sub 1 holds an upper-body set (talks)
+    int body_flag;
+    struct {
+        uint64_t vptr;
+        const char *str;
+    } body1_obj, upper_obj, none_obj;
+    int upper_finished;
 } World;
 static World W;
 static double g_now;
 static float g_pos[3];
-static int calls_play, calls_rd;
+static int calls_play, calls_rd, calls_generic, calls_upper, calls_stop_upper;
 static char last_play[32];
 static uint64_t last_keep;
 static float last_morph;
+static uint64_t last_actor;  // x0 of the last body play (Link's own play takes Link)
 
 static void w64(void *base, size_t off, uint64_t v) { memcpy((uint8_t *)base + off, &v, 8); }
 static uint64_t r64(const void *base, size_t off) {
@@ -125,6 +134,8 @@ static void world_init(int ai) {
     if (ai == 1) w64(W.link, LINK_ROOT_AI, P(W.rootai));
     if (ai == 2) w64(W.link, 0x100, P(W.root));
     W.cur_obj.str = wname("Wait");
+    W.body1_obj.str = W.cur_obj.str;
+    W.upper_obj.str = W.none_obj.str = "";
     memcpy(W.wait_text, "Wait", 5);
     W.stand_replay = 1;
     w64(W.link, ACTOR_EQUIP, EQUIP_VPTR);
@@ -134,10 +145,11 @@ static void world_init(int ai) {
     g_mask_name = P(W.wait_text);
     g_mask_mode = MASK_CALC;
 }
-// the made-up game plays one of its own sets (its list's text)
+// the made-up game plays one of its own sets (its list's text), with Link's own body play
 static void game_plays(const char *name) {
     W.cur_obj.str = wname(name);
     W.finished = 0;
+    W.body_flag = 1;
 }
 static const char *cur(void) { return W.cur_obj.str; }
 // something in the equipment's slot 0: in Link's hand (back byte 0) or on his back
@@ -160,21 +172,40 @@ static int lacks(const char *name) {
 // the fake game calls
 static void fake_call(struct Cpu *c, uint64_t addr) {
     SwModRegs *r = SWMOD_REGS(c);
-    if (addr == AS_PLAY) {
+    if (addr == AS_PLAY || addr == LINK_PLAY_BODY) {
+        // AS_PLAY (action, name, keep, slot, sub): slot 0 only. LINK_PLAY_BODY (Link, name, force): slot 0 and the
+        // flag for the animation step (slot 1 sub 0 follows); keep = !force, the same name compare
         const char *name = (const char *)(uintptr_t)r->x[1];
+        int body = addr == LINK_PLAY_BODY;
+        int keep = body ? !(r->x[2] & 1) : r->x[2] != 0;
         calls_play++;
+        if (!body) calls_generic++;
         snprintf(last_play, sizeof last_play, "%s", name);
-        last_keep = r->x[2];
+        last_keep = (uint64_t)keep;
         last_morph = swmod_get_s(c, 0);
-        if (!W.broken && !lacks(name) && !(r->x[2] && !strcmp(W.cur_obj.str, name))) {
+        last_actor = body ? r->x[0] : r64((const void *)(uintptr_t)r->x[0], 8);
+        if (!W.broken && !lacks(name) && !(keep && !strcmp(W.cur_obj.str, name)) &&
+            (!body || r->x[0] == P(W.link))) {
             W.cur_obj.str = W.keep_ptr ? name : wname(name);
             W.finished = 0;
+            if (body) W.body_flag = 1;
         }
         r->x[0] = 0;
+    } else if (addr == LINK_PLAY_UPPER) {
+        const char *name = (const char *)(uintptr_t)r->x[1];
+        calls_upper++;
+        if (r->x[0] == P(W.link) && !lacks(name)) W.upper_obj.str = wname(name), W.upper_finished = 0;
+        r->x[0] = 0;
+    } else if (addr == LINK_STOP_UPPER) {
+        calls_stop_upper++;
+        if (r->x[0] == P(W.link)) W.upper_obj.str = "";
+        r->x[0] = 0;
     } else if (addr == AS_CURRENT) {
-        r->x[0] = P(&W.cur_obj);
+        r->x[0] = r->x[1] == 0 && r->x[2] == 0 ? P(&W.cur_obj)
+                  : r->x[1] == 1 && r->x[2] == 0 ? P(&W.body1_obj)
+                  : r->x[1] == 1 && r->x[2] == 1 ? P(&W.upper_obj) : P(&W.none_obj);
     } else if (addr == AS_FINISHED) {
-        r->x[0] = (uint64_t)W.finished;
+        r->x[0] = r->x[1] == 1 && r->x[2] == 1 ? (uint64_t)W.upper_finished : (uint64_t)W.finished;
     } else if (addr == RAGDOLL_ON) {
         calls_rd++;
         if (r->x[0] == P(W.normal)) set_child(W.normal, 2);
@@ -240,7 +271,9 @@ static void reset_mod(void) {
     t_orphan_sent = 0;
     t_pw_calls = t_pw_masked = t_pw_took = 0;
     t_pw_took_name[0] = 0;
-    calls_play = calls_rd = 0;
+    calls_play = calls_rd = calls_generic = calls_upper = calls_stop_upper = 0;
+    last_actor = 0;
+    g_play_path = PATH_BODY;
     last_play[0] = 0;
     g_pos[0] = g_pos[1] = g_pos[2] = 0;
 }
@@ -266,6 +299,12 @@ static void step(void) {  // one frame of the made-up game: Link's AI, then his 
     g_regs.x[0] = P(W.link);
     g_orig = fake_link_update;
     link_update(cpu());
+    // Link's animation step (the game: his vtable +0x390, later in the frame): a flagged body play goes on slot 1 sub 0
+    // too, by slot 0's name as it reads now
+    if (W.body_flag) {
+        W.body_flag = 0;
+        W.body1_obj.str = W.cur_obj.str;
+    }
 }
 static int idx(const char *id) { return find_emote(id); }
 
@@ -684,6 +723,60 @@ SWMOD_EXPORT int emotes_selftest(char *out, int cap) {
     step();
     set_child(W.rootai, 0xffff);
     check("ai", "event_above_root", ai_now() == 0, "");
+
+    // ---- the play path (Game check r2: slot 0 held our set, the model stood idle): Link's own body play flags him,
+    // so his animation step puts the set on slot 1 sub 0 (the upper body) too; the generic play didn't
+    world_init(1);
+    reset_mod();
+    g_now += 5.0;
+    for (int i = 0; i < 3; i++) step();
+    request(REQ_PLAY, idx("wave"), 0);
+    step();
+    snprintf(d, sizeof d, "generic %d actor_is_link %d keep %llu slot0 '%s' body1 '%s'", calls_generic,
+             last_actor == P(W.link), (unsigned long long)last_keep, cur(), W.body1_obj.str);
+    check("path", "body_play", calls_generic == 0 && last_actor == P(W.link) && last_keep == 1 &&
+                                   !strcmp(cur(), "ZEmote_wave") && !strcmp(W.body1_obj.str, "ZEmote_wave"), d);
+    step();
+    snprintf(d, sizeof d, "body1 '%s' upper '%s'", g_snap.body1, g_snap.upper);
+    check("path", "upper_body_seen", t_state == ST_PLAYING && !strcmp(g_snap.body1, "ZEmote_wave") && !g_snap.upper[0],
+          d);
+    W.finished = 1;
+    step();
+    snprintf(d, sizeof d, "slot0 '%s' body1 '%s'", cur(), W.body1_obj.str);
+    check("path", "wait_on_both", t_state == ST_IDLE && !strcmp(cur(), "Wait") && !strcmp(W.body1_obj.str, "Wait"), d);
+    // A/B (emotedbg path generic): the r2 call, slot 0 only: the upper body stays on Wait
+    g_play_path = PATH_GENERIC;
+    g_now += 1.0;
+    request(REQ_PLAY, idx("floss"), 0);
+    step();
+    step();
+    snprintf(d, sizeof d, "generic %d slot0 '%s' body1 '%s'", calls_generic, cur(), W.body1_obj.str);
+    check("path", "generic_legs_only", calls_generic == 1 && t_state == ST_PLAYING && !strcmp(cur(), "ZEmote_floss") &&
+                                           !strcmp(W.body1_obj.str, "Wait"), d);
+    request(REQ_STOP, -1, 0);
+    step();
+    g_play_path = PATH_BODY;
+    // the developer control: an upper-body set the game's own way (TalkHello as in a talk), stopped when it ends
+    for (int i = 0; i < 3; i++) step();
+    request(REQ_DBG_UPPER, -1, "TalkHello");
+    step();
+    snprintf(d, sizeof d, "upper calls %d '%s' dbg '%s'", calls_upper, W.upper_obj.str, t_dbg_upper);
+    check("path", "upper_dbg_plays", calls_upper == 1 && !strcmp(W.upper_obj.str, "TalkHello") &&
+                                         !strcmp(t_dbg_upper, "TalkHello") && !strcmp(cur(), "Wait"), d);
+    for (int i = 0; i < 4; i++) step();
+    snprintf(d, sizeof d, "stops %d dbg '%s' snap '%s'", calls_stop_upper, t_dbg_upper, g_snap.upper);
+    check("path", "upper_dbg_runs", calls_stop_upper == 0 && !strcmp(t_dbg_upper, "TalkHello") &&
+                                        !strcmp(g_snap.upper, "TalkHello"), d);
+    W.upper_finished = 1;
+    step();
+    snprintf(d, sizeof d, "stops %d upper '%s' dbg '%s'", calls_stop_upper, W.upper_obj.str, t_dbg_upper);
+    check("path", "upper_dbg_stops", calls_stop_upper == 1 && !W.upper_obj.str[0] && !t_dbg_upper[0], d);
+    request(REQ_DBG_UPPER, -1, "TalkYes");
+    step();
+    request(REQ_DBG_UPPER, -1, "-");
+    step();
+    snprintf(d, sizeof d, "stops %d upper '%s'", calls_stop_upper, W.upper_obj.str);
+    check("path", "upper_dbg_stop_cmd", calls_stop_upper == 2 && !W.upper_obj.str[0] && !t_dbg_upper[0], d);
 
     // ---- emote state (for multiplayer): nothing played yet = no id
     world_init(1);

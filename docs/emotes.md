@@ -4,10 +4,10 @@ Link can dance, wave, give a thumbs up or down, and flop over like a ragdoll. 24
 toggle. A mod by giruka.
 
 **Status:** experimental, **not working in the game yet**. The animations are built and checked offline (every pose,
-and a read-back of the file), and the game takes the play call (the set shows on Link's body slot in the same frame,
-also for the game's own sets), but the game put Link's standing animation back before the next frame (Game check
-2026-11-13). The cause is found (Link's own standing code, see How it works) and a fix is built, not yet tried in the
-game. The Emotes mod starts **off**, because it changes a game file (Link's animation list).
+and a read-back of the file). In the game (Game check 2026-11-13, round 2) the emote now stays on Link's body slot for
+the whole clip and moving cancels it, but on screen Link still stood idle. The cause is found (the emote went on his
+legs only, see How it works) and a fix is built, not yet tried in the game. The Emotes mod starts **off**, because it
+changes a game file (Link's animation list).
 
 ## Turn it on
 
@@ -160,11 +160,21 @@ nothing that can't be shared goes in `tools/emotes/`.
   `tools/wiiu_model`, one animation set `Player_ZEmote_<id>.bas` per emote, the list log `logs/aslist.aamp` (names
   `ZEmote_<id>`, sorted after the game's last name, so the game's binary search finds them) and `logs/rstb.json`, and
   an `emotes.json` record of what it built. Nothing from the game is in the repo.
-- `native/examples/emotes/emotes.c` wraps Link's own per-frame update (`0x7000cd1ee8`), plays the set by name
-  (`0x700151e42c`, slot 0) only while Link is in `PlayerWait`, lets go when the game takes the body slot back, and
-  plays `Wait` when a one-shot ends. `emote state` answers the fields multiplayer will use. Developer checks:
-  `emotedbg slot`, `emotedbg play <set>`, `emotedbg ai`, `emotedbg rd`, `emotedbg mask off|calc|always`,
-  `emotedbg rdphys on|off`.
+- Game clips (`kind: game_clip`, such as the flex) are copied from your own `Player_Animation` into our archive under
+  our name (`SwEmote_<id>`). Another mod may replace `Player_Animation`: The Linkle Mod's has 1-frame empty stand-ins
+  for the random idles (`Random_Nml_Wait_Kinnikujiman` and two more), so a set naming the game's clip ended at once.
+- `native/examples/emotes/emotes.c` wraps Link's own per-frame update (`0x7000cd1ee8`), plays the set with Link's own
+  body play (`0x7000cc7edc`, as the game plays Wait or Move) only while Link is in `PlayerWait`, lets go when the game
+  takes the body slot back, and plays `Wait` when a one-shot ends. `emote state` answers the fields multiplayer will
+  use. Developer checks: `emotedbg slot`, `emotedbg play <set>`, `emotedbg upper <set>|-`, `emotedbg path
+  body|generic`, `emotedbg ai`, `emotedbg rd`, `emotedbg mask off|calc|always`, `emotedbg rdphys on|off`.
+- **Why the model stood idle (round 2):** Link's model has two skeletal animation targets (`Player_Link.bmodellist`
+  `AnmTarget_0` and `_1`): slot 0 of his animation holder moves the lower body, slot 1 the upper body (from `Spine_1`
+  down, without the face). His body play puts a set on slot 0 and flags him (`+0xc48` bit `0x1000`); later that
+  frame his animation step (`0x7000ccc7f0`) puts the same set on slot 1 too. The generic play the ghost uses (its
+  puppets have one target) sets no flag, so the emote ran on the legs only (it even ended on time) while the upper
+  body kept standing. Upper-body sets such as `TalkHello` the game plays on slot 1's second layer (`0x7000cc80c8`)
+  and stops with `0x7000cc8224`; `emotedbg upper` plays one that way, as a control.
 - **Why the game put Wait back:** while Link stands, his action `PlayerWait` runs each frame (calc `0x7000c9d0bc`,
   before his update). Its walk/run code runs his standing animation code `0x7000ce0c44`, and that plays `Wait` on the
   body slot whenever the slot's name isn't `Wait` (or one of the game's own standing sets: out of breath, cold...). The
