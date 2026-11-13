@@ -2,11 +2,13 @@
 //
 // It includes emotes.c and drives tick() against a made-up Link: a fake guest_call answers the game calls (play a
 // set by name, what slot 0 plays, finished, the ragdoll switch) from a list of set names the made-up Link has; a
-// made-up AI tree (root, PlayerNormal, its Wait / Move / slip-fall children), equipment and ragdoll manager live in
-// one block (W). The memory check's window is set to that block only, as in the game: the DLL's own set names lie
-// outside it. The fake play call copies the name into the made-up game's own buffer (as Link's holder did in the Game
-// check); with W.keep_ptr it keeps the caller's char* instead, and with W.revert the made-up game puts Wait back on
-// the next frame (as the Game check saw). No game code, no game data.
+// made-up AI tree (RootAi at Link +0x558, PlayerRoot, PlayerNormal, its Wait / Move / slip-fall children), equipment and
+// ragdoll manager live in one block (W). The memory check's window is set to that block only, as in the game: the
+// DLL's own set names lie outside it. The fake play call points slot 0's name at the made-up game's own text of that set
+// (as Link's holder keeps the animation list's name); with W.keep_ptr it keeps the caller's char* instead. Each frame
+// the made-up AI runs PlayerWait's calc (through the DLL's wrapper) while PlayerWait is current all the way down, and
+// that calc puts Wait back whenever slot 0's text isn't Wait (the game's standing code 0x7000ce0c44, the reason the
+// Game check saw Wait at once); with W.revert Link's own update puts Wait back too. No game code, no game data.
 //
 // emotes_selftest(out, cap) writes one line per check ("<group> <check> PASS|FAIL <detail>") and returns the number
 // of failed checks.
@@ -36,20 +38,25 @@ static void check(const char *group, const char *name, int ok, const char *detai
 typedef struct {
     _Alignas(16) uint8_t link[0x2700];
     _Alignas(16) uint8_t holder[0x100];
-    _Alignas(16) uint8_t root[0x40], normal[0x40], wait[0x40], move[0x40], slip[0x40], mgr[0x200];
-    _Alignas(16) uint64_t root_kids[1], normal_kids[3];
+    _Alignas(16) uint8_t rootai[0x40], root[0x40], normal[0x40], wait[0x40], move[0x40], slip[0x40], mgr[0x200];
+    _Alignas(16) uint64_t rootai_kids[1], root_kids[1], normal_kids[3];
     _Alignas(16) uint8_t item[0x60];     // a link data block for an item in the equipment's slot 0
     _Alignas(16) uint8_t other[0x2700];  // a second Link (a load)
     int32_t damage;      // the slip-fall's own damage value
-    char current[32];    // the game's own name buffer for what the made-up game plays
+    char names[24][32];  // the made-up animation list's own texts (one stable pointer per set name)
+    char wait_text[8];   // the game's own "Wait" in its code (the mask points here)
     struct {
         uint64_t vptr;
-        const char *str;  // the playing set's name: the game's buffer, or the char* a caller passed
+        const char *str;  // the playing set's name: the list's text, or the char* a caller passed
     } cur_obj;
     int finished;
     int broken;          // the play call does nothing at all
-    int keep_ptr;        // the play call keeps the caller's char* (else: copies the name)
+    int keep_ptr;        // the play call keeps the caller's char* (else: the list's text)
     int revert;          // the made-up Link's update puts Wait back each frame
+    int no_pw;           // the made-up AI doesn't run PlayerWait's calc (the first try's world)
+    int stand_replay;    // PlayerWait's calc puts Wait back when slot 0's text isn't Wait (the game: 1)
+    const char *pw_plays;  // PlayerWait's calc plays this set of its own (cold, out of breath...)
+    int pw_saw_wait;     // PlayerWait's calc read Wait while a set of ours played
     const char *lacks[4];  // set names the made-up Link doesn't have
 } World;
 static World W;
@@ -67,42 +74,69 @@ static uint64_t r64(const void *base, size_t off) {
     return v;
 }
 static void set_child(void *node, uint16_t i) { memcpy((uint8_t *)node + AI_CUR, &i, 2); }
+static uint16_t child_of(const void *node) {
+    uint16_t i;
+    memcpy(&i, (const uint8_t *)node + AI_CUR, 2);
+    return i;
+}
+// the made-up animation list's text of a set name (stable: one per name, as the game's list)
+static const char *wname(const char *name) {
+    for (int i = 0; i < 24; i++) {
+        if (!W.names[i][0]) {
+            snprintf(W.names[i], sizeof W.names[i], "%s", name);
+            return W.names[i];
+        }
+        if (!strcmp(W.names[i], name)) return W.names[i];
+    }
+    return W.names[23];
+}
 
-static void world_init(int with_ai) {
+// ai: 1 = the game's layout (Link +0x558 RootAi -> PlayerRoot -> PlayerNormal), 2 = PlayerRoot at Link +0x100 (the
+// first try's scan), 0 = nothing the DLL can find (the made-up AI still runs)
+static void world_init(int ai) {
     memset(&W, 0, sizeof W);
     w64(W.link, 0, PLAYER_VPTR);
     w64(W.link, ACTOR_AS, P(W.holder));
     w64(W.holder, AS_OWNER, P(W.link));
     w64(W.link, LINK_RAGDOLL_MGR, P(W.mgr));
+    w64(W.rootai, 0, VT_ROOTAI);
     w64(W.root, 0, VT_ROOT);
     w64(W.normal, 0, VT_NORMAL);
-    w64(W.normal, AI_ACTOR, P(W.link));
     w64(W.wait, 0, VT_WAIT);
     w64(W.move, 0, VT_MOVE);
     w64(W.slip, 0, VT_SLIP);
+    uint8_t *nodes[] = {W.rootai, W.root, W.normal, W.wait, W.move, W.slip};
+    for (int i = 0; i < 6; i++) w64(nodes[i], AI_ACTOR, P(W.link));
     W.damage = 1;
     w64(W.slip, SLIP_DAMAGE, P(&W.damage));
+    W.rootai_kids[0] = P(W.root);
     W.root_kids[0] = P(W.normal);
     W.normal_kids[0] = P(W.wait), W.normal_kids[1] = P(W.move), W.normal_kids[2] = P(W.slip);
     uint32_t one = 1, three = 3;
+    memcpy(W.rootai + AI_NCHILD, &one, 4);
+    w64(W.rootai, AI_CHILDREN, P(W.rootai_kids));
     memcpy(W.root + AI_NCHILD, &one, 4);
     w64(W.root, AI_CHILDREN, P(W.root_kids));
     memcpy(W.normal + AI_NCHILD, &three, 4);
     w64(W.normal, AI_CHILDREN, P(W.normal_kids));
+    set_child(W.rootai, 0);
     set_child(W.root, 0);
     set_child(W.normal, 0);  // standing (PlayerWait)
-    if (with_ai) w64(W.link, 0x100, P(W.root));
-    memcpy(W.current, "Wait", 5);
-    W.cur_obj.str = W.current;
+    if (ai == 1) w64(W.link, LINK_ROOT_AI, P(W.rootai));
+    if (ai == 2) w64(W.link, 0x100, P(W.root));
+    W.cur_obj.str = wname("Wait");
+    memcpy(W.wait_text, "Wait", 5);
+    W.stand_replay = 1;
     w64(W.link, ACTOR_EQUIP, EQUIP_VPTR);
     w64(W.link, ACTOR_EQUIP + EQUIP_OWNER, P(W.link));
     g_guest_lo = P(&W), g_guest_hi = P(&W) + sizeof W;  // the "game's memory": only the made-up game
     memset(g_mem, 0, sizeof g_mem);
+    g_mask_name = P(W.wait_text);
+    g_mask_mode = MASK_CALC;
 }
-// the made-up game plays one of its own sets (its own name buffer)
+// the made-up game plays one of its own sets (its list's text)
 static void game_plays(const char *name) {
-    snprintf(W.current, sizeof W.current, "%s", name);
-    W.cur_obj.str = W.current;
+    W.cur_obj.str = wname(name);
     W.finished = 0;
 }
 static const char *cur(void) { return W.cur_obj.str; }
@@ -133,12 +167,7 @@ static void fake_call(struct Cpu *c, uint64_t addr) {
         last_keep = r->x[2];
         last_morph = swmod_get_s(c, 0);
         if (!W.broken && !lacks(name) && !(r->x[2] && !strcmp(W.cur_obj.str, name))) {
-            if (W.keep_ptr) {
-                W.cur_obj.str = name;
-            } else {
-                snprintf(W.current, sizeof W.current, "%s", name);
-                W.cur_obj.str = W.current;
-            }
+            W.cur_obj.str = W.keep_ptr ? name : wname(name);
             W.finished = 0;
         }
         r->x[0] = 0;
@@ -209,17 +238,31 @@ static void reset_mod(void) {
     g_snap.index = -1;
     t_call_works = -1;
     t_orphan_sent = 0;
+    t_pw_calls = t_pw_masked = t_pw_took = 0;
+    t_pw_took_name[0] = 0;
     calls_play = calls_rd = 0;
     last_play[0] = 0;
     g_pos[0] = g_pos[1] = g_pos[2] = 0;
 }
-static SwModGuestFn g_link_update_fake;
 static void fake_link_update(struct Cpu *c) {  // the made-up Link's own update
     (void)c;
     if (W.revert && strcmp(W.cur_obj.str, "Wait")) game_plays("Wait");
 }
-static void step(void) {  // one frame of the made-up game: Link's update (through our wrapper)
+// the made-up PlayerWait calc: the game's standing animation code (0x7000ce0c44) compares slot 0's text with Wait
+static void fake_pw_calc(struct Cpu *c) {
+    (void)c;
+    int is_wait = !strcmp(W.cur_obj.str, "Wait");
+    if (is_wait && W.cur_obj.str == W.wait_text) W.pw_saw_wait = 1;  // (our set, shown as Wait)
+    if (W.pw_plays) game_plays(W.pw_plays);
+    else if (W.stand_replay && !is_wait) game_plays("Wait");
+}
+static void step(void) {  // one frame of the made-up game: Link's AI, then his update (through our wrappers)
     g_now += 1.0 / 30.0;
+    if (!W.no_pw && !child_of(W.rootai) && !child_of(W.root) && !child_of(W.normal)) {
+        g_regs.x[0] = P(W.wait);
+        g_pw_orig = fake_pw_calc;
+        pw_calc(cpu());
+    }
     g_regs.x[0] = P(W.link);
     g_orig = fake_link_update;
     link_update(cpu());
@@ -262,7 +305,10 @@ SWMOD_EXPORT int emotes_selftest(char *out, int cap) {
     reset_mod();
     g_now = 10.0;
     step();
-    check("ai", "found", t_ai_normal == P(W.normal) && g_snap.ai_off == 0x100, "");
+    snprintf(d, sizeof d, "normal %d off 0x%llx levels %d", t_ai_normal == P(W.normal),
+             (unsigned long long)g_snap.ai_off, t_ai_len);
+    check("ai", "found", t_ai_normal == P(W.normal) && g_snap.ai_off == LINK_ROOT_AI && t_ai_len == 3 &&
+                             ai_now() == VT_WAIT, d);
     request(REQ_PLAY, idx("wave"), 0);
     step();
     snprintf(d, sizeof d, "play %s keep %llu morph %.1f", last_play, (unsigned long long)last_keep, last_morph);
@@ -376,7 +422,8 @@ SWMOD_EXPORT int emotes_selftest(char *out, int cap) {
     snprintf(d, sizeof d, "state %d why '%s'", t_state, g_snap.why);
     check("missing", "refused", t_state == ST_IDLE && strstr(g_snap.why, "animations are missing") != 0, d);
     check("missing", "why_whole", strstr(g_snap.why, "then Deploy") != 0, d);
-    // it shows up late (we gave up): back to Wait, once
+    // it shows up late (we gave up): back to Wait, once (the made-up AI isn't in PlayerWait: its calc would do it)
+    W.no_pw = 1;
     W.lacks[0] = W.lacks[1] = 0;
     game_plays("ZEmote_clap");
     step();
@@ -398,6 +445,7 @@ SWMOD_EXPORT int emotes_selftest(char *out, int cap) {
     snprintf(d, sizeof d, "why '%s' works %d", g_snap.why, g_snap.call_works);
     check("missing", "call_fails", strstr(g_snap.why, "didn't take") != 0 && g_snap.call_works != 1, d);
     W.broken = 0;
+    W.no_pw = 0;
     t_call_works = 1;
     game_plays("Wait");
 
@@ -499,8 +547,9 @@ SWMOD_EXPORT int emotes_selftest(char *out, int cap) {
     check("guard", "weapon_on_back_ok", calls_play == before + 1, g_snap.why);
     drop_weapon();
 
-    // ---- no AI found: the body slot and speed decide
+    // ---- no AI found, no PlayerWait calc seen: the body slot and speed decide
     world_init(0);
+    W.no_pw = 1;
     reset_mod();
     g_now += 5.0;
     step();
@@ -544,6 +593,97 @@ SWMOD_EXPORT int emotes_selftest(char *out, int cap) {
     g_pos[1] += 0.1f;
     step();
     check("noai", "lift_refused", calls_play == before, g_snap.why);
+
+    // ---- PlayerWait's calc: the game's standing code puts Wait back; the mask keeps our set (the fix)
+    world_init(1);
+    reset_mod();
+    g_now += 5.0;
+    for (int i = 0; i < 3; i++) step();
+    request(REQ_PLAY, idx("wave"), 0);
+    step();
+    for (int i = 0; i < 6; i++) step();
+    snprintf(d, sizeof d, "state %d slot0 '%s' masked %lld took %lld saw_wait %d trace '%s'", t_state, cur(),
+             (long long)t_pw_masked, (long long)t_pw_took, W.pw_saw_wait, g_snap.trace);
+    check("pw", "replay_blocked", t_state == ST_PLAYING && !strcmp(cur(), "ZEmote_wave") && t_pw_masked >= 5 &&
+                                      t_pw_took == 0 && W.pw_saw_wait && strstr(g_snap.trace, "ZEmote_wave>ZEmote_wave"),
+          d);
+    check("pw", "name_restored", W.cur_obj.str == wname("ZEmote_wave") && !t_masked && !g_snap.masked, "");
+    W.finished = 1;
+    step();
+    check("pw", "finish_releases", t_state == ST_IDLE && !strcmp(last_play, "Wait") && !t_name_at &&
+                                       W.cur_obj.str == wname("Wait"), last_play);
+    // the game plays a standing set of its own during that calc (cold, out of breath...): it wins, untouched
+    g_now += 1.0;
+    request(REQ_PLAY, idx("clap"), 0);
+    step();
+    step();  // playing
+    W.pw_plays = "StaminaOut";
+    int before_pw = calls_play;
+    step();
+    W.pw_plays = 0;
+    snprintf(d, sizeof d, "state %d slot0 '%s' took %lld '%s'", t_state, cur(), (long long)t_pw_took, t_pw_took_name);
+    check("pw", "game_set_in_calc_wins", t_state == ST_IDLE && !strcmp(cur(), "StaminaOut") && calls_play == before_pw &&
+                                             t_pw_took == 1 && !strcmp(t_pw_took_name, "StaminaOut"), d);
+    // mask off (developer A/B): the standing code puts Wait back inside PlayerWait's calc, and it is counted
+    game_plays("Wait");
+    for (int i = 0; i < 3; i++) step();
+    g_mask_mode = MASK_OFF;
+    g_now += 1.0;
+    request(REQ_PLAY, idx("floss"), 0);
+    for (int i = 0; i < VERIFY_TICKS + 2; i++) step();
+    snprintf(d, sizeof d, "state %d took %lld '%s' why '%s'", t_state, (long long)t_pw_took, t_pw_took_name, g_snap.why);
+    check("pw", "took_when_off", t_state == ST_IDLE && t_pw_took == 2 && !strcmp(t_pw_took_name, "Wait") &&
+                                     strstr(g_snap.why, "back to standing") != 0, d);
+    // mask always: Wait the whole emote, also against a replay outside PlayerWait's calc (Link's update here)
+    g_mask_mode = MASK_ALWAYS;
+    W.revert = 1;
+    g_now += 1.0;
+    request(REQ_PLAY, idx("floss"), 0);
+    for (int i = 0; i < 10; i++) step();
+    snprintf(d, sizeof d, "state %d masked %d str_is_mask %d slot0 '%s'", t_state, g_snap.masked,
+             W.cur_obj.str == W.wait_text, g_snap.slot0);
+    check("pw", "always_mode", t_state == ST_PLAYING && g_snap.masked && W.cur_obj.str == W.wait_text &&
+                                   !strcmp(g_snap.slot0, "ZEmote_floss"), d);
+    request(REQ_STOP, -1, 0);
+    step();
+    snprintf(d, sizeof d, "state %d last %s slot0 '%s' str_is_mask %d", t_state, last_play, cur(),
+             W.cur_obj.str == W.wait_text);
+    check("pw", "always_stop_unmasks", t_state == ST_IDLE && !strcmp(last_play, "Wait") && !t_masked &&
+                                           W.cur_obj.str == wname("Wait"), d);
+    W.revert = 0;
+    g_mask_mode = MASK_CALC;
+    // no AI tree found, but PlayerWait's calc runs: it alone says Link stands (and refuses while it doesn't run)
+    world_init(0);
+    reset_mod();
+    g_now += 5.0;
+    for (int i = 0; i < 3; i++) step();
+    request(REQ_PLAY, idx("robot"), 0);
+    step();
+    snprintf(d, sizeof d, "last %s ai %d pw_frames %d why '%s'", last_play, t_ai_normal != 0, t_pw_frames, g_snap.why);
+    check("pw", "standing_from_pw", !strcmp(last_play, "ZEmote_robot") && !t_ai_normal, d);
+    request(REQ_STOP, -1, 0);
+    step();
+    set_child(W.normal, 1);  // he walks: PlayerWait's calc stops
+    for (int i = 0; i < 3; i++) step();
+    g_now += 1.0;
+    before_pw = calls_play;
+    request(REQ_PLAY, idx("robot"), 0);
+    step();
+    check("pw", "moving_refused", calls_play == before_pw && strstr(g_snap.why, "stand still") != 0, g_snap.why);
+    // the first try's AI layout (PlayerRoot found by scanning Link) still works
+    world_init(2);
+    reset_mod();
+    step();
+    snprintf(d, sizeof d, "normal %d off 0x%llx levels %d", t_ai_normal == P(W.normal),
+             (unsigned long long)g_snap.ai_off, t_ai_len);
+    check("ai", "scan_fallback", t_ai_normal == P(W.normal) && g_snap.ai_off == 0x100 && t_ai_len == 2 &&
+                                     ai_now() == VT_WAIT, d);
+    // an event: the RootAi's current child isn't PlayerRoot
+    world_init(1);
+    reset_mod();
+    step();
+    set_child(W.rootai, 0xffff);
+    check("ai", "event_above_root", ai_now() == 0, "");
 
     // ---- emote state (for multiplayer): nothing played yet = no id
     world_init(1);

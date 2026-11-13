@@ -24,7 +24,18 @@
 // finished 0x70014a009c, the alive-ragdoll switch 0x7000cae8e0. Every pointer is checked (VirtualQuery) before it is
 // read; a load (Link's pointer changes) forgets everything without writing.
 //
-// The game-thread code (tick) and the commands (frame thread) share only g_req / g_snap under a spin lock.
+// Why the game put Wait back at once (static study 2026-11-13, the Game check confirms): each frame, before Link's
+// update, Link's AI (his RootAi, Link +0x558) runs the standing action PlayerWait; its calc 0x7000c9d0bc runs the
+// walk/run code 0x7000cf1610, which (standing: Link +0xcec bit 0, set by PlayerWait's start) runs his standing animation
+// code 0x7000ce0c44. That code plays Wait (0x7000ce1364 -> 0x7000cc7edc, forced) whenever slot 0's name isn't Wait or
+// one of the game's own standing sets (StaminaOut, WaitHotCold, Get...). The holder keeps the set's name as a pointer
+// (the string object AS_CURRENT returns, +8). So while our set plays, that pointer shows the game's own "Wait" text
+// during PlayerWait's calc only (hle_override of 0x7000c9d0bc: it is called only through its vtable) and ours again right
+// after: the standing code leaves slot 0 alone, everyone else (us, multiplayer) reads our name. Developer switch
+// `emotedbg mask off|calc|always` (always: Wait the whole emote, for a replay found elsewhere).
+//
+// The game-thread code (tick, PlayerWait's calc) and the commands (frame thread) share only g_req / g_snap under a spin
+// lock.
 #include <stdint.h>
 #include <string.h>
 
@@ -74,6 +85,12 @@ __declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char
 #define VT_WAIT 0x7001cd4088ull          // PlayerWait
 #define VT_MOVE 0x7001ccfff8ull          // PlayerMove
 #define VT_SLIP 0x7001d31628ull          // PlayerSlippingDown (the alive ragdoll)
+#define VT_ROOTAI 0x7001d1dec0ull        // RootAi: the top of an actor's AI tree (Link's: PlayerRoot below it)
+#define LINK_ROOT_AI 0x558               // actor: its RootAi (the actor's calc calls its vf 0xa0 before Link's update)
+#define AI_DEPTH 3                       // RootAi -> PlayerRoot -> PlayerNormal: levels searched below the top
+#define PW_CALC 0x7000c9d0bcull          // PlayerWait's per-frame calc (its vtable +0xf8 only: no direct calls)
+#define WAIT_TEXT 0x7001626a8dull        // the game's own "Wait" (what its standing code compares slot 0 with)
+#define STR_PTR 8                        // a string object (what AS_CURRENT returns): its char*, kept by pointer
 #define SLIP_DAMAGE 0x28                 // slip-fall action: pointer to its damage value
 #define LINK_RAGDOLL_MGR 0x1870          // Link: ragdoll manager
 #define RD_STILL 0x138                   // manager: "still" timer (gets up when it reaches +0x1dc)
@@ -98,6 +115,13 @@ static uint64_t g_guest_lo = BOTW_ADDR_MAIN, g_guest_hi = BOTW_ADDR_GUEST_END;
 
 static const SwModApi *api;
 static SwModGuestFn g_orig;
+static SwModGuestFn g_pw_orig;           // PlayerWait's calc (the game's)
+
+// slot 0's name while our set plays: MASK_CALC = the game's "Wait" during PlayerWait's calc only (the fix),
+// MASK_ALWAYS = Wait for the whole emote, MASK_OFF = untouched (developer checks: emotedbg mask)
+enum { MASK_OFF, MASK_CALC, MASK_ALWAYS };
+static int g_mask_mode = MASK_CALC;
+static uint64_t g_mask_name;             // the "Wait" text the name pointer shows then (the game's own; set at init)
 
 // ------------------------------------------------------------------ time, memory, game calls
 static int64_t g_qpf;
@@ -269,7 +293,14 @@ typedef struct {         // what the tick knows, copied for the commands
     char job_trace[300]; // developer: slot 0 seen by the frame job after a `emotedbg jobplay` (EMOTES_DEV_FRAMEJOB=1)
     int ours_ticks;      // ticks slot 0 showed our set since the last start
     int weapon_out;      // something is in Link's hands (weapon, shield or bow not on his back)
+    int pw_frames;       // ticks in a row PlayerWait's calc ran for this Link (he stands)
+    int64_t pw_calls;    // PlayerWait calc calls seen (Link's)
+    int64_t pw_masked;   // ... that ran with our set shown as Wait and left it (ours again after)
+    int64_t pw_took;     // ... where the game replaced our set during that calc
+    char pw_took_name[32];  // what it played then
+    int masked;          // (mask always) slot 0's name shows Wait now
     int ai_found;
+    int ai_len;          // nodes from the top to PlayerNormal (RootAi, PlayerRoot, PlayerNormal = 3)
     uint64_t ai_off;     // Link + this = the AI root pointer (or its wrapper)
     int ai_child_wait, ai_child_move, ai_child_slip;
     uint32_t rd_still, rd_still2, rd_limit, rd_limit2;
@@ -329,6 +360,17 @@ static uint64_t t_rd_child, t_rd_saved, t_rd_mgr;
 static double t_rd_since;
 static int32_t g_zero_damage;    // the slip-fall's damage value points here while our ragdoll runs (always 0)
 static _Alignas(16) uint64_t g_fake_action[2];  // AS_PLAY's "action": it reads only +8, the actor
+// slot 0's name pointer while a set of ours plays (from our play call; 0 = none): where it lives (AS_CURRENT's string
+// object + 8, in the holder) and its value then (the game's own text of our set's name)
+static uint64_t t_name_at, t_our_name;
+static int t_masked;             // (mask always) that pointer shows g_mask_name now
+// PlayerWait's calc (pw_calc, on the game thread that runs Link's AI just before his update)
+static volatile int t_pw_ran;    // it ran for this Link since the last tick
+static int t_pw_frames;          // ticks in a row it ran
+static int t_pw_ever;            // it ran at least once for this Link (the hook works)
+static uint64_t t_pw_action;     // Link's PlayerWait action
+static int64_t t_pw_calls, t_pw_masked, t_pw_took;
+static char t_pw_took_name[32];
 
 // Every set name we give the game lives in this table for good: the game keeps the char* as the set's name, so a
 // name is never moved or changed, and slot 0 holding a pointer into this table means "a set we played". (25 emotes,
@@ -374,43 +416,112 @@ static void rd_text_any(uint64_t p, char *out, size_t cap) {
     out[0] = 0;
 }
 
-// What slot 0 plays (its name into out). *ptr_ours: its char* is one of ours (intern).
-static void slot0_read(struct Cpu *c, uint64_t holder, char out[32], int *ptr_ours) {
-    uint64_t s = gcall(c, AS_CURRENT, holder, 0, 0, 0, 0);
-    uint64_t p = s ? rd64(s + 8) : 0;
+// The text a set name pointer points at (ours, the game's, or another mod's) into out, else "".
+static void name_text(uint64_t p, char out[32]) {
     out[0] = 0;
-    if (ptr_ours) *ptr_ours = 0;
     if (is_ours(p)) {
         uint64_t row = (p - P(g_names)) / sizeof g_names[0];
         if (p == P(g_names[row])) {
             memcpy(out, g_names[row], 32);
             out[31] = 0;
-            if (ptr_ours) *ptr_ours = 1;
         }
         return;
     }
     if (p >= GUEST_LO && p < GUEST_HI) rd_text(p, out, 32);
     else rd_text_any(p, out, 32);
 }
-// ... and whether it is ours: a ZEmote_ set, or the set we asked for while one runs (a fallback game set)
+// What slot 0 plays (its name into out). *ptr_ours: its char* is one of ours (intern). *at / *raw: where the holder
+// keeps the name's pointer and its value (0 / 0 when nothing is readable).
+static void slot0_read_at(struct Cpu *c, uint64_t holder, char out[32], int *ptr_ours, uint64_t *at, uint64_t *raw) {
+    uint64_t s = gcall(c, AS_CURRENT, holder, 0, 0, 0, 0);
+    uint64_t p = s ? rd64(s + STR_PTR) : 0;
+    if (ptr_ours) *ptr_ours = is_ours(p) && p == P(g_names[(p - P(g_names)) / sizeof g_names[0]]);
+    if (at) *at = p ? s + STR_PTR : 0;
+    if (raw) *raw = p;
+    name_text(p, out);
+}
+static void slot0_read(struct Cpu *c, uint64_t holder, char out[32], int *ptr_ours) {
+    slot0_read_at(c, holder, out, ptr_ours, 0, 0);
+}
+// ... and whether it is ours: a ZEmote_ set, or the set we asked for while one runs (a fallback game set), or (mask
+// always) our set under the name Wait
 static int slot0_name(struct Cpu *c, uint64_t holder, char out[32]) {
-    slot0_read(c, holder, out, 0);
+    uint64_t raw = 0;
+    slot0_read_at(c, holder, out, 0, 0, &raw);
+    if (t_masked && t_state != ST_IDLE && raw && raw == g_mask_name) {
+        memcpy(out, t_set, 32);
+        out[31] = 0;
+        return 1;
+    }
     if (!strncmp(out, EMOTE_SET_PREFIX, sizeof EMOTE_SET_PREFIX - 1)) return 1;
     return t_state != ST_IDLE && out[0] && !strcmp(out, t_set);
 }
 
+// The "Wait" text slot 0's name shows while masked: the game's own (the very pointer its standing code passes), else
+// (main not readable yet at init) ours, from our table: the game compares the text too. Tried again at each load.
+static void pick_mask_name(void) {
+    char w[8];
+    rd_text(WAIT_TEXT, w, sizeof w);
+    if (!strcmp(w, WAIT_NAME)) g_mask_name = WAIT_TEXT;
+    else if (!g_mask_name) g_mask_name = P(intern(WAIT_NAME));
+}
+
+// (mask always) slot 0's name back to ours, if it still shows our Wait
+static void unmask(void) {
+    if (t_masked && t_name_at && g_mask_name && rd64(t_name_at) == g_mask_name) wr64(t_name_at, t_our_name);
+    t_masked = 0;
+}
+
+// PlayerWait's calc: Link stands. Its walk/run code runs his standing animation code, which plays Wait whenever slot
+// 0's name isn't Wait (see the top). While our set plays, the name pointer shows the game's own "Wait" for this call
+// only; afterwards ours again, unless the game played something itself meanwhile (cold, out of breath...: left alone).
+// No game calls here: the registers stay as the game's calc left them.
+static void pw_calc(struct Cpu *c) {
+    uint64_t act = SWMOD_REGS(c)->x[0];
+    uint64_t link = t_link, at = t_name_at, ours = t_our_name;
+    int mine = link && rd64(act) == VT_WAIT && rd64(act + AI_ACTOR) == link;
+    uint64_t before = 0, expect = 0;
+    int masked = 0;
+    if (mine) {
+        t_pw_action = act;
+        t_pw_ran = 1;
+        t_pw_calls++;
+        if (at && ours) {
+            before = rd64(at);
+            expect = t_masked ? g_mask_name : ours;
+            if (before == ours && g_mask_mode != MASK_OFF && g_mask_name) masked = wr64(at, g_mask_name);
+        }
+    }
+    g_pw_orig(c);
+    if (!mine || !at || !ours || !before || before != expect) return;
+    uint64_t after = rd64(at);
+    if (masked && after == g_mask_name) {
+        wr64(at, ours);  // the standing code left slot 0 alone: our name again
+        t_pw_masked++;
+    } else if (after != before && !(masked && after == ours)) {
+        t_pw_took++;     // the game played a set itself during PlayerWait's calc (mask off: its Wait)
+        name_text(after, t_pw_took_name);
+    }
+}
+
 // Play a set on Link's slot 0, exactly as the ghost does (keep_if_same 1, slot 0, sub 0, x5 = x6 = 0; keep 0 only for
 // the Wait probe, which must replace the game's own Wait). name must be interned. Then reads slot 0 back in the same tick (into g_snap.after): our name there = the call took.
+// It also notes where slot 0's name pointer lives and its value while a set of ours (not Wait) plays (t_name_at /
+// t_our_name: PlayerWait's calc shows it as Wait).
 static int t_after_ours;
 static void as_play(struct Cpu *c, uint64_t link, uint64_t holder, const char *name, int keep, float morph) {
     if (!name) return;
+    unmask();  // (the game's keep_if_same compares the real name)
     g_fake_action[0] = 0, g_fake_action[1] = link;
     swmod_set_s(c, 0, morph);
     gcall(c, AS_PLAY, P(g_fake_action), P(name), (uint64_t)keep, 0, 0);
     char now[32];
     int ptr = 0;
-    slot0_read(c, holder, now, &ptr);
+    uint64_t at = 0, raw = 0;
+    slot0_read_at(c, holder, now, &ptr, &at, &raw);
     t_after_ours = !strcmp(now, name);
+    t_name_at = t_our_name = 0;
+    if (t_after_ours && strcmp(name, WAIT_NAME) && at && raw) t_name_at = at, t_our_name = raw;
     lock();
     memcpy(g_snap.after, now, sizeof now);
     g_snap.after_ours = t_after_ours;
@@ -418,7 +529,10 @@ static void as_play(struct Cpu *c, uint64_t link, uint64_t holder, const char *n
     unlock();
 }
 
-// ---- the AI: PlayerRoot found once per load by scanning Link; PlayerNormal is its child
+// ---- the AI: Link's RootAi (Link +0x558) -> PlayerRoot -> PlayerNormal, found once per load (else: a scan of Link
+// for PlayerRoot, the first try's way). Every node's +8 is Link.
+static uint64_t t_ai_path[AI_DEPTH + 1];  // the top ... PlayerNormal
+static int t_ai_len;
 static uint64_t ai_child(uint64_t node, int i) {
     uint32_t n = rd32(node + AI_NCHILD);
     uint64_t arr = rd64(node + AI_CHILDREN);
@@ -437,32 +551,59 @@ static uint64_t ai_find_child(uint64_t node, uint64_t vt) {
     }
     return 0;
 }
+// node (at depth at of the path) or a child below it, down to depth levels, is Link's PlayerNormal: the path is kept
+static int ai_dfs(uint64_t node, uint64_t link, int depth, int at) {
+    if (at > AI_DEPTH) return 0;
+    t_ai_path[at] = node;
+    if (rd64(node) == VT_NORMAL && rd64(node + AI_ACTOR) == link) {
+        t_ai_len = at + 1;
+        return 1;
+    }
+    if (depth <= 0) return 0;
+    uint32_t n = rd32(node + AI_NCHILD);
+    for (uint32_t i = 0; i < n && i < 64; i++) {
+        uint64_t ch = ai_child(node, (int)i);
+        if (heap_obj(ch) && rd64(ch + AI_ACTOR) == link && ai_dfs(ch, link, depth - 1, at + 1)) return 1;
+    }
+    return 0;
+}
 static void ai_scan(uint64_t link) {
     t_ai_scanned = 1;
+    if (g_mask_name != WAIT_TEXT) pick_mask_name();  // (main is surely there once Link is; nothing is masked now)
     t_ai_root = t_ai_normal = 0;
-    for (uint64_t off = 8; off < AI_SCAN; off += 8) {
-        uint64_t p = rd64(link + off);
+    t_ai_len = 0;
+    uint64_t top = 0, off = 0;
+    uint64_t r = rd64(link + LINK_ROOT_AI);
+    if (heap_obj(r) && rd64(r) == VT_ROOTAI && rd64(r + AI_ACTOR) == link && ai_dfs(r, link, AI_DEPTH, 0))
+        top = r, off = LINK_ROOT_AI;
+    for (uint64_t o = 8; !top && o < AI_SCAN; o += 8) {  // (the first try's way: PlayerRoot itself or one wrapper)
+        uint64_t p = rd64(link + o);
         if (!heap_obj(p)) continue;
         uint64_t root = rd64(p) == VT_ROOT ? p : 0;
         if (!root) {
             uint64_t q = rd64(p);
             if (heap_obj(q) && rd64(q) == VT_ROOT) root = q;
         }
-        if (!root) continue;
-        uint64_t normal = ai_find_child(root, VT_NORMAL);
-        if (normal && rd64(normal + AI_ACTOR) == link) {
-            t_ai_root = root, t_ai_normal = normal;
-            g_snap.ai_off = off;
-            if (api && api->log) api->log("emotes: Link's AI found at +0x%llx", (unsigned long long)off);
-            return;
-        }
+        if (root && ai_dfs(root, link, 1, 0)) top = root, off = o;
     }
-    if (api && api->log) api->log("emotes: Link's AI wasn't found (the standing check uses the body slot and speed)");
+    if (!top) {
+        t_ai_len = 0;
+        if (api && api->log)
+            api->log("emotes: Link's AI wasn't found (the standing check uses PlayerWait's calc, else the body slot)");
+        return;
+    }
+    t_ai_root = top, t_ai_normal = t_ai_path[t_ai_len - 1];
+    g_snap.ai_off = off;
+    g_snap.ai_len = t_ai_len;
+    if (api && api->log)
+        api->log("emotes: Link's AI found at +0x%llx (%d levels to PlayerNormal)", (unsigned long long)off, t_ai_len);
 }
-// The class of PlayerNormal's current child, 0 when the AI isn't known or the root's current child isn't PlayerNormal
+// The class of PlayerNormal's current child, 0 when the AI isn't known or a level above isn't on the way to PlayerNormal
 // (an event, riding, swimming...: then Normal's own index is stale and says nothing).
 static uint64_t ai_now(void) {
-    if (!t_ai_normal || ai_current(t_ai_root) != t_ai_normal) return 0;
+    if (!t_ai_normal) return 0;
+    for (int i = 0; i + 1 < t_ai_len; i++)
+        if (ai_current(t_ai_path[i]) != t_ai_path[i + 1]) return 0;
     return rd64(ai_current(t_ai_normal));
 }
 
@@ -539,10 +680,13 @@ static const char *start_blocker(uint64_t link, const char *slot0, int slot0_our
     if (api && botw_paused(api)) return "the game is paused";
     if (t_weapon) return "put your weapon away first";
     int standing_name = !strcmp(slot0, WAIT_NAME) || slot0_ours;
+    int pw = t_pw_frames >= 2;  // PlayerWait's calc ran this frame and the one before: Link stands (no event)
     if (t_ai_normal) {
-        if (ai_now() != VT_WAIT) return "Link has to stand still";
+        uint64_t vt = ai_now();
+        if (vt != VT_WAIT && !(vt == 0 && pw)) return "Link has to stand still";  // (a level above unreadable: trust PW)
         return standing_name ? 0 : "Link has to stand still";
     }
+    if (t_pw_ever) return pw && standing_name ? 0 : "Link has to stand still";  // no AI tree: PlayerWait's calc says
     // no AI found: slot 0, the speed and how long it has looked like that decide
     if (now < t_unsure_until) return "not during a talk or a cutscene";
     if (!standing_name || !t_wait_since || now - t_wait_since < STILL_FOR_S) return "Link has to stand still";
@@ -552,7 +696,9 @@ static const char *start_blocker(uint64_t link, const char *slot0, int slot0_our
 
 static void forget(void) {  // a new Link (a load): nothing we knew is valid; nothing is written
     t_state = ST_IDLE, t_index = -1, t_set[0] = 0;
-    t_ai_scanned = 0, t_ai_root = t_ai_normal = 0;
+    t_ai_scanned = 0, t_ai_root = t_ai_normal = 0, t_ai_len = 0;
+    t_name_at = t_our_name = 0, t_masked = 0;
+    t_pw_ran = 0, t_pw_frames = 0, t_pw_ever = 0, t_pw_action = 0;
     t_rd_child = t_rd_saved = t_rd_mgr = 0, t_rd_on = 0;
     t_last_pos_t = 0, t_speed = 0;
     t_wait_since = t_still_since = 0;
@@ -665,6 +811,13 @@ static void tick(struct Cpu *c, uint64_t link) {
     if (!t_ai_scanned) ai_scan(link);
     uint64_t holder = holder_of(link);
     if (!holder) return;
+    if (__atomic_exchange_n(&t_pw_ran, 0, __ATOMIC_ACQ_REL)) {  // PlayerWait's calc ran (this frame, before us)
+        t_pw_frames++;
+        t_pw_ever = 1;
+    } else {
+        t_pw_frames = 0;
+    }
+    if (t_masked && __atomic_load_n(&g_mask_mode, __ATOMIC_ACQUIRE) != MASK_ALWAYS) unmask();  // (switched)
 
     // speed (fallback standing check; 3D, so lifts and falls count)
     float pos[3];
@@ -715,8 +868,10 @@ static void tick(struct Cpu *c, uint64_t link) {
     } else {
         t_wait_since = 0;
     }
+    uint64_t ai_vt = ai_now();
     int standing = is_wait && t_speed <= STILL_SPEED && __builtin_fabsf(dy) < LEVEL_M &&
-                   (!t_ai_normal || ai_now() == VT_WAIT);
+                   (!t_ai_normal || ai_vt == VT_WAIT || (!ai_vt && t_pw_frames > 0)) &&
+                   (!t_pw_ever || t_pw_frames > 0);
     if (!standing) t_still_since = 0;
     else if (!t_still_since) t_still_since = now;
     rd_tick(link);
@@ -825,6 +980,14 @@ static void tick(struct Cpu *c, uint64_t link) {
         break;
     }
 
+    // slot 0's name: nothing of ours plays any more -> let go; (mask always) ours plays -> show it as Wait
+    if (t_state == ST_IDLE) {
+        unmask();
+        t_name_at = t_our_name = 0;
+    } else if (g_mask_mode == MASK_ALWAYS && !t_masked && g_mask_name && t_name_at && rd64(t_name_at) == t_our_name) {
+        t_masked = wr64(t_name_at, g_mask_name);
+    }
+
     // what the commands see
     lock();
     g_snap.ticks = g_ticks;
@@ -848,7 +1011,12 @@ static void tick(struct Cpu *c, uint64_t link) {
                                   t_trace_post[i]);
     }
     g_snap.weapon_out = t_weapon;
+    g_snap.pw_frames = t_pw_frames;
+    g_snap.pw_calls = t_pw_calls, g_snap.pw_masked = t_pw_masked, g_snap.pw_took = t_pw_took;
+    memcpy(g_snap.pw_took_name, t_pw_took_name, sizeof g_snap.pw_took_name);
+    g_snap.masked = t_masked;
     g_snap.ai_found = t_ai_normal != 0;
+    g_snap.ai_len = t_ai_len;
     uint64_t vt = ai_now();
     g_snap.ai_child_wait = vt == VT_WAIT, g_snap.ai_child_move = vt == VT_MOVE, g_snap.ai_child_slip = vt == VT_SLIP;
     uint64_t mgr = rd64(link + LINK_RAGDOLL_MGR);
@@ -871,7 +1039,7 @@ static void link_update(struct Cpu *c) {
         sp = r->sp, pc = r->pc, nzcv = r->nzcv;
         memcpy(x, r->x, sizeof x);
         memcpy(v, r->v, sizeof v);
-        if (holder) slot0_read(c, holder, t_pre, 0);
+        if (holder) slot0_name(c, holder, t_pre);
         memcpy(r->x, x, sizeof x);
         memcpy(r->v, v, sizeof v);
         r->sp = sp, r->pc = pc, r->nzcv = nzcv;
@@ -1033,12 +1201,32 @@ static void cmd_emotedbg(int argc, char **argv, SwModReply *r) {
         api->reply_bool(r, "weapon_out", s.weapon_out != 0);
         api->reply_bool(r, "can", s.can != 0);
         api->reply_str(r, "why", s.why);
+        static const char *const MASKS[] = {"off", "calc", "always"};
+        api->reply_str(r, "mask", MASKS[__atomic_load_n(&g_mask_mode, __ATOMIC_ACQUIRE) % 3]);
+        api->reply_bool(r, "masked", s.masked != 0);
+        api->reply_bool(r, "pw_hook", g_pw_orig != 0);
+        api->reply_int(r, "pw_frames", s.pw_frames);
+        api->reply_int(r, "pw_calls", s.pw_calls);
+        api->reply_int(r, "pw_masked", s.pw_masked);
+        api->reply_int(r, "pw_took", s.pw_took);
+        api->reply_str(r, "pw_took_name", s.pw_took_name);
+    } else if (!strcmp(what, "mask") && argc > 2) {
+        int m = !strcmp(argv[2], "off") ? MASK_OFF : !strcmp(argv[2], "calc") ? MASK_CALC
+                : !strcmp(argv[2], "always") ? MASK_ALWAYS : -1;
+        if (m < 0) {
+            api->reply_fail(r, "emotedbg mask off|calc|always");
+            return;
+        }
+        __atomic_store_n(&g_mask_mode, m, __ATOMIC_RELEASE);
+        api->reply_text(r, "Mask %s.", argv[2]);
     } else if (!strcmp(what, "play") && argc > 2) {
         request(REQ_DBG_PLAY, -1, argv[2]);
         api->reply_text(r, "Asked for %s.", argv[2]);
     } else if (!strcmp(what, "ai")) {
         api->reply_bool(r, "found", s.ai_found != 0);
         api->reply_int(r, "offset", (int64_t)s.ai_off);
+        api->reply_int(r, "levels", s.ai_len);
+        api->reply_int(r, "pw_frames", s.pw_frames);
         api->reply_bool(r, "wait", s.ai_child_wait != 0);
         api->reply_bool(r, "move", s.ai_child_move != 0);
         api->reply_bool(r, "slip", s.ai_child_slip != 0);
@@ -1064,15 +1252,15 @@ static void cmd_emotedbg(int argc, char **argv, SwModReply *r) {
         __atomic_store_n(&t_rd_phys, !strcmp(argv[2], "on"), __ATOMIC_RELEASE);
         api->reply_text(r, "Physics ragdoll %s.", t_rd_phys ? "on (developer test)" : "off");
     } else {
-        api->reply_fail(r, "emotedbg slot | play <set> | ai | rd | hold on|off | rdphys on|off");
+        api->reply_fail(r, "emotedbg slot | play <set> | ai | rd | mask off|calc|always | hold on|off | rdphys on|off");
     }
 }
 
 static const SwModCommand COMMANDS[] = {
     {"emote", "[name|number|stop|ragdoll [on|off]|state]", "Link does an emote (the list: emote)", cmd_emote,
      SWMOD_CMD_PLAYER},
-    {"emotedbg", "slot|play <set>|ai|rd|hold on|off|rdphys on|off", "Emotes mod: developer checks", cmd_emotedbg,
-     0},
+    {"emotedbg", "slot|play <set>|ai|rd|mask off|calc|always|hold on|off|rdphys on|off",
+     "Emotes mod: developer checks", cmd_emotedbg, 0},
 };
 
 // The emote playing now (its id, "" when none), for other mods (the play-as puppet later). Read only.
@@ -1092,6 +1280,7 @@ SWMOD_EXPORT size_t emotes_active(char *out, size_t cap) {
 SWMOD_EXPORT void swmod_exit(const SwModApi *a) {
     (void)a;
     rd_restore();
+    unmask();
 }
 
 SWMOD_EXPORT int swmod_init(const SwModApi *a) {
@@ -1117,6 +1306,10 @@ SWMOD_EXPORT int swmod_init(const SwModApi *a) {
         return 0;
     }
     a->hle_override(LINK_UPDATE, link_update, "emotes_link_update");
+    pick_mask_name();
+    g_pw_orig = a->dispatch_lookup(PW_CALC);
+    if (g_pw_orig) a->hle_override(PW_CALC, pw_calc, "emotes_playerwait_calc");
+    else a->log("emotes: PlayerWait's calc wasn't found: the game will put Link's standing animation back at once");
     char dev[8];
     if (GetEnvironmentVariableA("EMOTES_DEV_FRAMEJOB", dev, sizeof dev) && dev[0] == '1') {
         g_job_on = botw_on_frame(a, job_fn);

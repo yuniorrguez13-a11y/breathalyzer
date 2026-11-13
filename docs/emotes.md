@@ -5,9 +5,9 @@ toggle. A mod by giruka.
 
 **Status:** experimental, **not working in the game yet**. The animations are built and checked offline (every pose,
 and a read-back of the file), and the game takes the play call (the set shows on Link's body slot in the same frame,
-also for the game's own sets), but the game puts Link's standing animation back before the next frame, so nothing
-shows yet (Game check 2026-11-13; what is next: out/research/emotes-handoff.md). The Emotes mod starts **off**,
-because it changes a game file (Link's animation list).
+also for the game's own sets), but the game put Link's standing animation back before the next frame (Game check
+2026-11-13). The cause is found (Link's own standing code, see How it works) and a fix is built, not yet tried in the
+game. The Emotes mod starts **off**, because it changes a game file (Link's animation list).
 
 ## Turn it on
 
@@ -163,7 +163,15 @@ nothing that can't be shared goes in `tools/emotes/`.
 - `native/examples/emotes/emotes.c` wraps Link's own per-frame update (`0x7000cd1ee8`), plays the set by name
   (`0x700151e42c`, slot 0) only while Link is in `PlayerWait`, lets go when the game takes the body slot back, and
   plays `Wait` when a one-shot ends. `emote state` answers the fields multiplayer will use. Developer checks:
-  `emotedbg slot`, `emotedbg play <set>`, `emotedbg ai`, `emotedbg rd`, `emotedbg rdphys on|off`.
+  `emotedbg slot`, `emotedbg play <set>`, `emotedbg ai`, `emotedbg rd`, `emotedbg mask off|calc|always`,
+  `emotedbg rdphys on|off`.
+- **Why the game put Wait back:** while Link stands, his action `PlayerWait` runs each frame (calc `0x7000c9d0bc`,
+  before his update). Its walk/run code runs his standing animation code `0x7000ce0c44`, and that plays `Wait` on the
+  body slot whenever the slot's name isn't `Wait` (or one of the game's own standing sets: out of breath, cold...). The
+  mod also wraps that calc: while an emote plays, the slot's name reads `Wait` during that one call, and the emote's
+  own name again right after. Everything else (the mod, multiplayer) sees the emote's name.
+- Link's AI: his `RootAi` is at Link `+0x558`; below it `PlayerRoot`, then `PlayerNormal`, whose current child is the
+  action (`PlayerWait`, `PlayerMove`...).
 - Tests: `python -m unittest tests.test_emote_build` (the math, the data, the list merge, a full build with your
   files, and the DLL's own self-test).
 - Next: the emote wheel (hold a button, needs the in-game overlay), controller play, and emotes your friends see in

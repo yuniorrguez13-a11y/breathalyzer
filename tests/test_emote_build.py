@@ -402,8 +402,14 @@ class Native(unittest.TestCase):
     def test_parse(self):
         self.group("parse", ["id", "alias_67", "alias_thrust", "number", "prefix", "community", "two_words"])
 
+    def test_playerwait(self):
+        # the game's standing code (PlayerWait's calc) puts Wait back unless slot 0 reads Wait: the mask keeps ours
+        self.group("pw", ["replay_blocked", "name_restored", "finish_releases", "game_set_in_calc_wins",
+                          "took_when_off", "always_mode", "always_stop_unmasks", "standing_from_pw",
+                          "moving_refused"])
+
     def test_machine(self):
-        self.group("ai", ["found"])
+        self.group("ai", ["found", "scan_fallback", "event_above_root"])
         self.group("machine", ["start", "playing", "finished_then_wait", "refused_moving", "loop_playing",
                                "loop_keeps", "game_took_over", "stop", "spam_guard", "community",
                                "load_drops_request"])
