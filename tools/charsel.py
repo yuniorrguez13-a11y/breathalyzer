@@ -1207,7 +1207,7 @@ def read_back(data: bytes) -> dict:
     slot = links[0].rsplit("/", 1)[1][:-5]
     _, lt = glp.link_target(files, slot)
     users = {k: lt.get_value(k) for k in ("ProfileUser", "ModelUser", "ASUser", "PhysicsUser", "AIProgramUser",
-                                          "UMiiUser", "AnimationInfo")}
+                                          "UMiiUser", "AnimationInfo") + UNTOUCHABLE}
     asl = aamp.load(files[f"Actor/ASList/{users['ASUser']}.baslist"])
     names, clips, missing = [], {}, []
     for o in asl.list("ASDefines").objects.values():
@@ -1229,6 +1229,12 @@ def read_back(data: bytes) -> dict:
         targets = target_types(mlp)
     return {"slot": slot, "users": users, "names": names, "clips": clips, "missing_sets": missing, "adds": adds,
             "folder": folder, "targets": targets, "files": len(files), "unpacked": len(raw), "packed": len(data)}
+
+
+# The actor link's users that would make a ghost or the self puppet something Link can lock on to, talk to or hit
+# (the attention list: lock-on and talk targets; the damage parameters). The template's are Dummy (none), as its
+# physics: check_pack keeps it so (a missing user is none too).
+UNTOUCHABLE = ("AttentionUser", "DamageParamUser")
 
 
 def check_pack(data: bytes, expect_slot: str | None = None) -> list[str]:
@@ -1253,6 +1259,9 @@ def check_pack(data: bytes, expect_slot: str | None = None) -> list[str]:
         bad.append(f"AI program {u['AIProgramUser']}, not the cutscene dummy")
     if u["PhysicsUser"] != "Dummy":
         bad.append(f"physics {u['PhysicsUser']}")
+    for k in UNTOUCHABLE:
+        if u[k] not in (None, "Dummy"):
+            bad.append(f"{k} {u[k]} (it could be locked on, talked to or hit)")
     if u["ProfileUser"] not in ("DemoNPC", "NPC"):
         bad.append(f"profile {u['ProfileUser']}")
     if u["ProfileUser"] != SLOT_PROFILE.get(r["slot"], u["ProfileUser"]):

@@ -1537,18 +1537,26 @@ static void check_puppet(void) {
     g_pp_paused = 0, g_pp_free = 1;
     pup_run("Wait", 0, 0.5);
     check("puppet", "pause_keeps", kept, "link drawn %d shown %d", fm_drawn(&g_pl.fm), t_pup.shown);
-    // Link's sword and shield: copies in the puppet's hands (no friend's ghost); with a friend's ghost wanted: not
+    // Link's sword in his hand, his shield on his back: a copy of the sword in the puppet's hand, nothing on its back
+    // (Link's back items stay hidden with him); the sword put away: no copy; with a friend's ghost wanted: not
     t_status.self.equip_ok = 1;
     snprintf(t_status.self.weapon, 64, "Weapon_Sword_001"), snprintf(t_status.self.shield, 64, "Weapon_Shield_001");
+    t_status.self.back[0] = 0, t_status.self.back[1] = 1, t_status.self.has_rel[1] = 1;
     Requests irq;
     uint64_t holder = pup_items_holder(&g_irq, &irq);
     int to_puppet = holder == g_pp_proc && !strcmp(irq.item_names[0], "Weapon_Sword_001") && irq.items_on;
+    int no_back = !*irq.item_names[1] && !irq.items_back && !irq.items_mask && !irq.item_has_rel[1];
+    t_status.self.back[0] = 1;
+    pup_items_holder(&g_irq, &irq);
+    int sheathed = !*irq.item_names[0] && !*irq.item_names[1];
     t_status.wanted = 1;
     uint64_t holder2 = pup_items_holder(&g_irq, &irq);
     t_status.wanted = 0;
     t_status.self.equip_ok = 0, t_status.self.weapon[0] = t_status.self.shield[0] = 0;
-    check("puppet", "items_to_puppet", to_puppet && holder2 != g_pp_proc, "holder %d, with a friend's ghost %d",
-          holder == g_pp_proc, holder2 == g_pp_proc);
+    t_status.self.back[0] = t_status.self.back[1] = t_status.self.has_rel[1] = 0;
+    check("puppet", "items_to_puppet", to_puppet && no_back && sheathed && holder2 != g_pp_proc,
+          "holder %d, back items %d, sheathed %d, with a friend's ghost %d", holder == g_pp_proc, !no_back, sheathed,
+          holder2 == g_pp_proc);
     // a stage change (a new spawn heap): forgotten without a call, spawned again
     static _Alignas(16) uint8_t heap2[0x40];
     uint64_t holder_obj = rd64(HEAP_HOLDER_PTR), heap1 = rd64(holder_obj + HEAP_OFF);

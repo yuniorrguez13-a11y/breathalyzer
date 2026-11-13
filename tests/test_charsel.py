@@ -315,6 +315,20 @@ class Packs(unittest.TestCase):
         self.assertTrue(any("profile" in b for b in charsel.check_pack(glp.pack_bytes(files)[0])))
         self.assertTrue(charsel.check_pack(b"not a pack"))
 
+    def test_never_locked_on_talked_to_or_hit(self):
+        # (the self puppet and the ghost: no attention list (lock-on, talk) and no damage, as the template's Dummy)
+        def check(**users):
+            t = template_pack()
+            t[f"Actor/ActorLink/{charsel.TEMPLATE}.bxml"] = actor_link(
+                AIProgramUser="DemoDummy", ASUser="MadeUp_AS", ModelUser="MadeUp_Model", **users)
+            files = charsel.make_pack(TEST_RECIPE, charsel.DEMO_SLOTS[0], "DemoNPC", t, donor_pack("Npc_MadeUp"))
+            return charsel.check_pack(glp.pack_bytes(files)[0], charsel.DEMO_SLOTS[0])
+        self.assertEqual(check(AttentionUser="Dummy", DamageParamUser="Dummy"), [])
+        for user, value in (("AttentionUser", "NpcStandard"), ("DamageParamUser", "Npc")):
+            with self.subTest(user=user):
+                bad = check(**{user: value})
+                self.assertTrue(any(user in b and "locked on" in b for b in bad), bad)
+
     def test_model_copy(self):
         files = charsel.make_copy_pack("linkle", charsel.NPC_SLOTS[4], "NPC", template_pack(), pause_pack())
         ml = aamp.load(files["Actor/ModelList/SwChar_linkle.bmodellist"])

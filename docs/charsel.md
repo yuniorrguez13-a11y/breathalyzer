@@ -150,7 +150,8 @@ files, and the four that load have no pack entry either.
   uses as its own is looked up in your files at build; a missing one or a clash with one of Link's (a family file
   that has a Link clip name too) skips that character, with the reason. `charsel.json` in the output says what was
   built where, and why anything was skipped. `charsel check` reads every pack back: one actor link on the right
-  name, sorted animation names, one clip each, the cutscene dummy's AI, no physics, the right profile, under 64 KB.
+  name, sorted animation names, one clip each, the cutscene dummy's AI, no physics, no attention list and no damage
+  parameters (so a ghost or your puppet can never be locked on to, talked to or hit), the right profile, under 64 KB.
 - **On the network** only the id travels (feature `look`, protocol version 1, [multiplayer](multiplayer.md)): the
   hello carries `"look":{"id":"zelda","v":1,"name":"Zelda"}`, a new pick goes as a `look` message (the client sends
   at most one every 2 s; the relay takes one 1.5 s after the last, for network jitter, and if it still says "too
@@ -200,8 +201,14 @@ How it works:
   its own clips first (Daruk sprints as his rolling ball: Link's `Move` from 6.9 m/s is `RunGear2`; Revali glides
   with Rito wings; Mipha swims with Zora clips), Link's clips where it has none, and a near name for the rest of a
   family (a climb jump plays `ClimbMove`). It is shown only once it plays a clip (never a T-pose).
-- The camera stays on Link (nothing moves him). Your weapon, shield and bow are copied into the puppet's hands (the
-  ghost's held items) while no friend's ghost is up; with a friend's ghost up, the puppet's hands are empty.
+- The camera stays on Link (nothing moves him). What Link holds in his hands (a drawn weapon, a raised shield, an
+  aimed bow) is copied into the puppet's hands (the ghost's held items) while no friend's ghost is up; the copy comes
+  0.3-0.8 s after he draws it [G] and goes when he puts it away. With a friend's ghost up, the puppet's hands are
+  empty. Nothing goes on the puppet's back: Link's back places on a bigger body poked out of it (Daruk's weapon over
+  his head, 2026-11-13). Link's own sheathed items are hidden with him (each weapon's frame update copies its
+  holder's draw flags [V code]).
+- The puppet can't be locked on to, talked to or hit (no attention list, no damage, no physics in its pack). The
+  green ring that shows next to it while you sprint or climb is Link's own stamina wheel, where it always is.
 - **Link shows instead** while he can't be mirrored: loading, cutscenes, riding a horse, a shield surf, and a state the
   character has no clip for (a climb or swim with no climb or swim clip). The pause menu keeps what was shown. After a
   load or a death the puppet is spawned again on the new stage.

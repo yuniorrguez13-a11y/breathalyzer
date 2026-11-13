@@ -10,10 +10,15 @@
 //   (walk, run and sprint are one name on Link: 1.6, 5.4 and 8 m/s in the game) by his speed: Walk, Run, and RunGear2
 //   from PUP_SPRINT_FROM; a near name for the rest of a family (ClimbJump -> ClimbMove, SwimDash...);
 // - hides Link with the game's own show/hide of a model (MODEL_SHOW: bit 0 of each model unit's flags; the game's
-//   actor show sets it, its hide actions clear it [V code]). His armor and held items copy his model's flags every
-//   frame (0x70012132d0, called by the armor's and the weapon's frame updates [V code]), so they go with him;
-// - gives the puppet copies of Link's weapon, shield and bow (the ghost's held items, ghost.c) while no friend's
-//   ghost is up (with a friend's ghost up, the items are the ghost's: the puppet's hands are empty).
+//   actor show sets it, its hide actions clear it [V code]). His armor and his items, in his hands or on his back,
+//   copy his model's flags every frame (0x70012132d0(item, holder), called by the armor's frame update and by each
+//   weapon's, Weapon vf_63 at 0x70007a83f8 [V code]), so they go with him;
+// - gives the puppet copies of what Link holds in his hands (weapon, shield, bow: the ghost's held items, ghost.c)
+//   while no friend's ghost is up (with a friend's ghost up, the items are the ghost's: the puppet's hands are
+//   empty). Nothing goes on the puppet's back: Link's back places on another body poke out of it (Daruk's weapon over
+//   his head, 2026-11-13), so a sheathed item is only on Link's back, hidden with him.
+// The puppet can't be locked on, talked to or hit: its pack's actor link has no attention (lock-on, talk), no damage
+// and no physics (tools/charsel.py check_pack). The green ring next to it while it sprints is Link's stamina wheel.
 // Link is shown instead (and the puppet hidden) whenever he can't be mirrored: no real position (a load, a cutscene,
 // riding a horse), a state the character has no clip for (Link's climb, swim or glide family when the pack lacks it,
 // a horse, a shield surf), and until the puppet's animations answer. The pause menu keeps what was shown. `iam link`
@@ -560,21 +565,21 @@ static void pup_tick(struct Cpu *c, uint64_t pi, uint64_t player, double t) {
 }
 
 // The held items' holder this tick and its request (ghost.c's items part): the ghost's, while a friend's ghost is
-// wanted or up; else the puppet, holding copies of Link's own weapon, shield and bow (his back ones on its back, at
-// his own offsets); else none.
+// wanted or up; else the puppet, holding copies of what Link holds in his hands (a drawn weapon, a raised shield, an
+// aimed bow; the copy comes 0.3-0.8 s after he draws it [G] and goes when he puts it away); else none. Nothing on the
+// puppet's back: Link's own back items are hidden with him.
 static uint64_t pup_items_holder(const Requests *rq, Requests *out) {
     *out = *rq;
     if (t_status.wanted || t_status.state != ST_IDLE) return t_status.state == ST_LIVE ? t_status.actor : 0;
     if (t_pup.state != PS_LIVE || !t_pup.proc) return 0;
     const SelfState *s = &t_status.self;
     const char *names[3] = {s->weapon, s->shield, s->bow};
-    out->items_on = 1, out->items_back = 1, out->items_mask = 0;
+    out->items_on = 1, out->items_back = 0, out->items_mask = 0;
     for (int i = 0; i < 3; i++) {
-        const char *n = s->equip_ok && valid_name(names[i]) && item_name_ok(i, names[i]) ? names[i] : "";
+        const char *n =
+            s->equip_ok && !s->back[i] && valid_name(names[i]) && item_name_ok(i, names[i]) ? names[i] : "";
         memcpy(out->item_names[i], n, strlen(n) + 1);
-        out->items_mask |= (s->back[i] ? 1 : 0) << i;
-        out->item_has_rel[i] = s->has_rel[i] && *n;
-        if (out->item_has_rel[i]) memcpy(out->item_rel[i], s->rel[i], sizeof out->item_rel[i]);
+        out->item_has_rel[i] = 0;
     }
     return t_pup.proc;
 }
