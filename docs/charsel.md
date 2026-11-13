@@ -4,10 +4,11 @@ Like a ped selector: you pick a character on a wheel, and your friend sees you a
 Tier 1, 2026-11-12. Tier 2 (2026-11-12): [you see yourself as your pick too](#see-yourself-as-your-pick), live in the
 game with no restart, or [at the next start](#play-as-at-the-next-start-the-restart-way) as a fallback.
 
-**Status (2026-11-12):** in the game, Hylian, Paya, Bokoblin and Moblin load as ghosts and as your live self;
-Zelda, Urbosa, Daruk, Revali and Mipha don't load live yet, but Daruk works as your own body at the next start
-([play as](#play-as-at-the-next-start-the-restart-way)). The wheel and the network part are tested with made-up data
-only. The [in-game check](#in-game-check) has the details.
+**Status (2026-11-13):** in the game, Hylian, Paya, Bokoblin and Moblin load as ghosts and as your live self;
+Zelda, Urbosa, Daruk, Revali and Mipha didn't load (2026-11-12 and -13: their model lists' animation targets, see
+[animation targets](#animation-targets)); rebuilt with the fix, not yet checked in the game. Daruk works as your
+own body at the next start ([play as](#play-as-at-the-next-start-the-restart-way)). The wheel and the network part
+are tested with made-up data only. The [in-game check](#in-game-check) has the details.
 
 ## Use it
 
@@ -68,7 +69,7 @@ the keys. All text is 18 pt or larger, white on dark green, blue and red (contra
 | Hylians | `zelda` | Zelda | `Dm_Npc_Sheiker_Searcher_M_000` | 6 + 27 | 10.6 MB |
 | Hylians | `hylian` | Hylian (a Hateno villager) | `Dm_Npc_UMii_Hylia_BodyS_M_001` | 6 + 27 | 11.5 MB |
 | Races | `sheikah` (`paya`) | Paya (Sheikah) | `Dm_Npc_UMii_Hylia_BodyS_M_002` | 6 + 27 | 6.4 MB |
-| Races | `gerudo` (`urbosa`) | Urbosa (Gerudo) | `Dm663_Npc_Gerudo_S_A` | 6 + 27 | 16.2 MB |
+| Races | `gerudo` (`urbosa`) | Urbosa (Gerudo) | `Dm_Npc_Handmaid_B` | 6 + 27 | 16.2 MB |
 | Races | `goron` (`daruk`) | Daruk (Goron) | `Dm663_Npc_Assasin_A` | 6 + 27 | 10.9 MB |
 | Races | `rito` (`revali`) | Revali (Rito) | `Dm_Npc_UMii_Hylia_BodyS_M_011` | 7 + 26 | 10.6 MB |
 | Races | `zora` (`mipha`) | Mipha (Zora) | `Dm_Npc_UMii_Hylia_BodyS_M_003` | 9 + 24 | 11.0 MB |
@@ -77,6 +78,33 @@ the keys. All text is 18 pt or larger, white on dark green, blue and red (contra
 
 "Loads" is what the game reads to show that body (model, textures, animation files) when no real one is nearby
 (from the study's size-table read). Urbosa is the heaviest: on a slow laptop pick a lighter one.
+
+## Animation targets
+
+Zelda, Urbosa, Daruk, Revali and Mipha were never created ("the game could not create it"), in two in-game checks
+(2026-11-12 and -13), on six different free names, with and without Link's clips retargeted. Their donors' model
+lists (`Dm_Npc_Zelda_Sibyl`, `Dm_Npc_*_Hero`) have four animation targets of types 0, 0, 3, 2; every pack that loads
+has 0, 1, 3 (Paya, the Hylian, the Link body) or only type 0 (the monsters). The game sets up a type-2 target apart
+from the others, and it only ever has one together with a look file and an animation info: all 132 of its NPC packs
+with a type-2 target have both, and ours give neither. So `charsel build` gives a model list with a type-2 target
+the Link body's block instead (types 0, 1, 3 on `Root`, `Spine_1` and `Face_Root`: the same as Paya's own list), after
+checking the body has those bones. The face keeps still. `charsel.json` says `anim_targets: "link-body"` for those,
+the build says "(Link body's anim targets)", and `charsel check` refuses a pack that still has a type-2 target.
+
+## The heap
+
+Each free actor name has its own heap (the game's ActorInfo `instSize`: 554 KB to 1.1 MB). After the first check it
+looked like the five big skeletons outgrew it (Zelda 179 bones, Urbosa 161, Mipha 151, Daruk 144, Revali 126, times
+about 1,400 retargeted clips); the second check failed them the same way without that, and the animation targets
+explain all of them. So the heap rule is only a precaution now [G]: `charsel build` estimates each pack's need (about
+320 KB plus 4 bytes per retargeted clip and model bone) against its name's heap, and a body that would outgrow it gets
+Link's animation file **without** the retarget (Link's clips only turn bones, and these bodies' main bones have
+Link's names, parents and rest turns; the hip height comes from Link's clips as it is: `ghost puppet lift`). Their own
+walk and run keep the retarget. `--link-retarget on` keeps Link's file retargeted on every body (to try in the game:
+it fits the clips to each body), `off` drops it everywhere. Urbosa is on `Dm_Npc_Handmaid_B` (902 KB; the tall names
+have 554 KB). `charsel.json` says per character `link_retarget` and `heap` (`need`, `have`, `bones`); the build says
+"(not retargeted)". Not the size table: the game has entries for all their model and texture files, larger than the
+files, and the four that load have no pack entry either.
 
 ## What looks right, what may not
 
@@ -152,9 +180,10 @@ keeps your friends' view but shows you Link (`iam self on` again). `iam` alone s
   and held Link's weapon and shield. Those are Hylian, Paya, Bokoblin and Moblin (the same as the character check).
 - **Daruk does not load live:** "Daruk did not load (the game could not create it): you stay Link", after 5 tries,
   and `iam` says to restart with `charsel playas daruk`. The same for Zelda, Urbosa, Revali and Mipha, on any free
-  name (the character check moved Zelda and Daruk to names that work for others: still refused). What they share:
-  their own big model (380-710 KB, textures 1.5-2.6 MB); Paya's is 250 KB. The cause is not found yet. **For these
-  five, use the restart way below** (it works: Daruk in the game, rolling sprint and all).
+  name (the character check moved Zelda and Daruk to names that work for others: still refused). The cause: a
+  type-2 animation target in their model lists ([animation targets](#animation-targets)); rebuilt 2026-11-13, not yet
+  checked in the game. Until
+  then, **for these five, the restart way below** works (Daruk in the game, rolling sprint and all).
 - **The ghost mod must be the only frame-hook mod.** With Infinite Stamina on, the ghost mod never runs (only the
   first DLL by file name that wraps the game's frame job runs, [game basics](game-basics.md)): `iam daruk` did
   nothing at all. `iam` now says so ("the ghost mod isn't running ... Infinite Stamina?"), and `modman deploy` warns

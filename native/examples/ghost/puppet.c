@@ -54,7 +54,7 @@ static const PupSlot PUP_SLOTS[] = {
     {"zelda", "Dm_Npc_Sheiker_Searcher_M_000", "Zelda", "zelda"},
     {"hylian", "Dm_Npc_UMii_Hylia_BodyS_M_001", "Hylian", "hylian"},
     {"sheikah", "Dm_Npc_UMii_Hylia_BodyS_M_002", "Paya", "paya"},
-    {"gerudo", "Dm663_Npc_Gerudo_S_A", "Urbosa", "urbosa"},
+    {"gerudo", "Dm_Npc_Handmaid_B", "Urbosa", "urbosa"},
     {"goron", "Dm663_Npc_Assasin_A", "Daruk", "daruk"},
     {"rito", "Dm_Npc_UMii_Hylia_BodyS_M_011", "Revali", "revali"},
     {"zora", "Dm_Npc_UMii_Hylia_BodyS_M_003", "Mipha", "mipha"},

@@ -12,6 +12,8 @@ Not yet run.
                                                          mod 0.8.0, the characters deployed with your mods, a save
                                                          loaded); it is left running
     python tools/mp/charsel_ingame_check.py --only zelda,bokoblin     some characters only
+    --library out\\showcase-lib (with --no-launch: the library the game was deployed from), --no-shots,
+    --link-retarget auto|on|off (the check's own build: as charsel build)
 
 Before: python tools\\build_native.py build (ghost.dll 0.8.0) and python tools\\charsel.py build. Results go to
 out\\research\\charsel-ingame-results.txt and screenshots to out\\shots\\charselcheck\\ (never committed).
@@ -111,13 +113,15 @@ def judge_log(text: str, slots: list[str]) -> tuple[str, str]:
 
 # ------------------------------------------------------------------ the run
 
-def deploy(game_dir: Path, overlay: Path = OVERLAY, packs: Path = PACKS) -> dict[str, str]:
+def deploy(game_dir: Path, overlay: Path = OVERLAY, packs: Path = PACKS, link_retarget: str = "auto"
+           ) -> dict[str, str]:
     """Build the Link body and the characters (into `packs`, the check's own folder; the Linkle mod read from your
     library), and deploy both alone to `overlay`. Returns the game's env."""
     from mp import ghost_link_pack as glp
     romfs = game_dir / "extracted" / "romfs"
     glp.build(romfs, glp.DEFAULT_OUT)
-    charsel.build(romfs, packs, library=charsel.DEFAULT_LIBRARY if charsel.DEFAULT_LIBRARY.is_dir() else None)
+    charsel.build(romfs, packs, library=charsel.DEFAULT_LIBRARY if charsel.DEFAULT_LIBRARY.is_dir() else None,
+                  link_retarget=link_retarget)
     py = [sys.executable, str(REPO / "tools" / "romfs_mods.py")]
     subprocess.run(py + ["deploy", "--out", str(overlay), "--game-romfs", str(romfs), str(glp.DEFAULT_OUT),
                          str(packs)], check=True)
@@ -125,7 +129,10 @@ def deploy(game_dir: Path, overlay: Path = OVERLAY, packs: Path = PACKS) -> dict
     return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
 
 
-def check_character(c: Control, cid: str, info: dict, rep: gic.Report) -> None:
+FPS_AGAIN = 27.0   # frames a second: under this with the character there, measured once more (and the better kept)
+
+
+def check_character(c: Control, cid: str, info: dict, rep: gic.Report, shots: bool = True) -> None:
     slot = info["slot"]
     fwd = gic.cam_forward(c)
     off = (f"{3 * fwd[0]:.2f}", "0", f"{3 * fwd[1]:.2f}") if fwd else ("0", "0", "3")
@@ -141,11 +148,17 @@ def check_character(c: Control, cid: str, info: dict, rep: gic.Report) -> None:
     for name in want:
         c.cmd("ghost", "anim", name)
         time.sleep(0.6)
-        gic.shot(c, f"{cid}_{name}")
+        if shots:
+            gic.shot(c, f"{cid}_{name}")
         played[name] = str(c.cmd("ghost").get("as", ""))
     rep.add(f"{cid}.anims", *judge_anims(played, want))
     c.cmd("ghost", "anim", "auto")
     with_it = gic.fps(c)
+    # (2026-11-13: the first body of a run dropped to 4-21 fps for about 12 s right after it spawned, with the host
+    # late on vsync, then ran at 30 with it still there: a one-off stall, not its cost. A cost shows twice.)
+    if with_it is not None and with_it < FPS_AGAIN:
+        again = gic.fps(c)
+        with_it = max(with_it, again) if again is not None else with_it
     c.cmd("ghost", "despawn")
     without = gic.fps(c, 3)
     rep.add(f"{cid}.frames", *gic.judge_frames(without, with_it))
@@ -244,6 +257,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-launch", action="store_true", help="use a running game (left running)")
     ap.add_argument("--only", help="these characters only (comma-separated ids)")
     ap.add_argument("--wait-max", type=float, default=120.0, metavar="MIN")
+    ap.add_argument("--library", type=Path,
+                    help="with --no-launch: the mod library the running game was deployed from (default: modman's)")
+    ap.add_argument("--no-shots", action="store_true", help="no screenshot per animation (saves disk)")
+    ap.add_argument("--link-retarget", choices=charsel.LINK_RETARGET, default="auto",
+                    help="the check's own build: Link's clips fitted to each body by the heap estimate, always, never")
     args = ap.parse_args(argv)
     rep = gic.Report()
     game = None
@@ -254,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"No {dll}: run python tools\\build_native.py build first.")
             return 2
         try:
-            env = deploy(args.game)
+            env = deploy(args.game, link_retarget=args.link_retarget)
         except Exception as e:   # (say it and stop: nothing to check without the packs)
             print(f"Couldn't build or deploy: {type(e).__name__}: {e}")
             return 2
@@ -264,8 +282,8 @@ def main(argv: list[str] | None = None) -> int:
             rep.add("setup", "SKIP", "another program's game ran the whole time")
             return 1
     # (launched: the check's own build; --no-launch: only what your game really has, deployed with your mods)
-    cat = charsel.load_catalog(PACKS) if not args.no_launch else charsel.deployed_catalog()
-    overlay = OVERLAY if not args.no_launch else charsel.overlay_dir()
+    cat = charsel.load_catalog(PACKS) if not args.no_launch else charsel.deployed_catalog(args.library)
+    overlay = OVERLAY if not args.no_launch else charsel.overlay_dir(args.library)
     ids = [i for i in (args.only.split(",") if args.only else cat.get("built", {})) if i in cat.get("built", {})]
     try:
         c = wait_for_game(args.port, timeout=180)
@@ -280,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
         SHOTS.mkdir(parents=True, exist_ok=True)
         c.cmd("ghost", "far", "0")
         for cid in ids:
-            check_character(c, cid, cat["built"][cid], rep)
+            check_character(c, cid, cat["built"][cid], rep, shots=not args.no_shots)
         check_iam(c, rep)
         c.cmd("ghost", "far", "60", "50")
         if {"zelda", "goron", "bokoblin"} & set(ids):

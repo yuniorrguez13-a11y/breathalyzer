@@ -1,5 +1,7 @@
 """Tests for Who am I (tools/charsel.py): the characters, their packs, the wheel and your choice. Made-up data only:
 no game files, no window on the screen (the wheel's window is drawn into a withdrawn Tk root)."""
+import contextlib
+import io
 import json
 import os
 import re
@@ -52,6 +54,23 @@ def model_list(folder=None):
     return aamp.dump(PList(lists=lists))
 
 
+LINK_BODY_TARGETS = ((0, ("Face_Root",)), (1, ("Root", "Face_Root")), (3, ("Root", "Spine_1", "Face_Root")))
+HERO_TARGETS = LINK_BODY_TARGETS[:1] + ((0, ("Root", "Face_Root")),) + LINK_BODY_TARGETS[2:] + ((2, ()),)
+
+
+def target_list(targets, folder=None):
+    """A model list with animation targets ((TargetType, partial bones) each), like the game's."""
+    at = PList()
+    for i, (tt, bones) in enumerate(targets):
+        part = PList(objects={name_hash(f"Partial_{k}"): obj(Bone=(STRING64, b)) for k, b in enumerate(bones)})
+        at.lists[name_hash(f"AnmTarget_{i}")] = PList(
+            objects={name_hash("Base"): obj(NumASSlot=(INT, 1), TargetType=(INT, tt))},
+            lists={name_hash("Partial"): part} if bones else {})
+    root = aamp.load(model_list(folder))
+    root.lists[name_hash("AnmTarget")] = at
+    return aamp.dump(root)
+
+
 def as_list(*adds):
     add = PList()
     for i, (anim, rt) in enumerate(adds):
@@ -68,15 +87,16 @@ def template_pack():
                 ProfileUser="DemoNPC", AIProgramUser="DemoDummy", ASUser="MadeUp_AS", ModelUser="MadeUp_Model",
                 PhysicsUser="MadeUp_Phys", UMiiUser="MadeUp_Mii"),
             "Actor/AIProgram/DemoDummy.baiprog": aamp.dump(PList(objects={1: obj(X=(INT, 1))})),
-            "Actor/ModelList/MadeUp_Model.bmodellist": model_list(None),
+            "Actor/ModelList/MadeUp_Model.bmodellist": target_list(LINK_BODY_TARGETS),
             "Actor/ASList/MadeUp_AS.baslist": as_list(("MadeUp_Body", True)),
             "Actor/Physics/MadeUp_Phys.bphysics": b"made up", "Actor/UMii/MadeUp_Mii.bumii": b"made up"}
 
 
-def donor_pack(actor, folder="MadeUpBody", umii=None, adds=(("FamilyFile", False),)):
+def donor_pack(actor, folder="MadeUpBody", umii=None, adds=(("FamilyFile", False),), targets=None):
     files = {f"Actor/ActorLink/{actor}.bxml": actor_link(ProfileUser="NPC", AIProgramUser="Npc", ASUser="D_AS",
                                                          ModelUser="D_Model", UMiiUser=umii or "Dummy"),
-             "Actor/ModelList/D_Model.bmodellist": model_list(None if umii else folder),
+             "Actor/ModelList/D_Model.bmodellist": (target_list(targets, None if umii else folder) if targets
+                                                    else model_list(None if umii else folder)),
              "Actor/ASList/D_AS.baslist": as_list(*adds)}
     if umii:
         files[f"Actor/UMii/{umii}.bumii"] = b"made-up look"
@@ -130,8 +150,22 @@ class Recipes(unittest.TestCase):
         self.assertEqual(set(charsel.SLOT_PROFILE), set(charsel.FREE_SLOTS))
         for cid in ("zelda", "goron", "bokoblin"):                              # one of each family on a cutscene name
             self.assertIn(charsel.SLOTS[cid], charsel.DEMO_SLOTS)
-        for cid in ("gerudo", "moblin"):                                        # the tall ones on the tall box
-            self.assertIn(charsel.SLOTS[cid], charsel.TALL_SLOTS)
+        self.assertIn(charsel.SLOTS["moblin"], charsel.TALL_SLOTS)                # the Moblin on the tall box
+        self.assertNotIn(charsel.SLOTS["gerudo"], charsel.TALL_SLOTS)            # Urbosa: its heap is too small
+
+    def test_fit_heap(self):
+        # (the first in-game check: Paya, 97 bones, loaded on a 1.1 MB name with Link's file retargeted; Zelda, 179
+        # bones, didn't on 831 KB or 1.1 MB)
+        files = [("UMii_Common_Body_W_Animation", True), (charsel.PLAYER_ANIM, True)]
+        count = {"UMii_Common_Body_W_Animation": 254, charsel.PLAYER_ANIM: 1167}.get
+        self.assertEqual(charsel.fit_heap(files, 97, 1_099_000, count)[0], files)
+        for heap in (831_520, 1_123_576):
+            out, need = charsel.fit_heap(files, 179, heap, count)
+            self.assertEqual(out, [("UMii_Common_Body_W_Animation", True), (charsel.PLAYER_ANIM, False)])
+            self.assertLessEqual(need, heap)
+        self.assertEqual(charsel.fit_heap(files, None, 831_520, count), (files, None))   # unknown: as before
+        self.assertEqual(charsel.fit_heap([("Enemy_Bokoblin_Animation", False)], 75, 554_232, count)[1],
+                         charsel.HEAP_BASE)
 
     def test_find_id(self):
         cases = {"zelda": "zelda", "ZELDA": "zelda", " Daruk ": "goron", "paya": "sheikah", "Urbosa": "gerudo",
@@ -141,7 +175,7 @@ class Recipes(unittest.TestCase):
             self.assertEqual(charsel.find_id(text), want, text)
 
     def test_look_message_and_display(self):
-        self.assertEqual(charsel.look_message("goron"), {"id": "goron", "v": 1, "name": "Daruk (Goron)"})
+        self.assertEqual(charsel.look_message("goron"), {"id": "goron", "v": 3, "name": "Daruk (Goron)"})
         self.assertEqual(charsel.display({"id": "goron"}), "Daruk (Goron)")
         self.assertEqual(charsel.display({"id": "newer-one", "name": "Ganon"}), "Ganon")
         self.assertEqual(charsel.display(None), "Link")
@@ -228,6 +262,39 @@ class Packs(unittest.TestCase):
             charsel.make_pack(TEST_RECIPE, charsel.DEMO_SLOTS[0], "DemoNPC", t, donor_pack("Npc_MadeUp"))
         with self.assertRaises(charsel.CharselError):
             charsel.make_pack(charsel.RECIPES["link"], charsel.DEMO_SLOTS[0], "DemoNPC", template_pack(), {})
+
+    def test_type2_targets_take_the_link_bodys(self):
+        # (2026-11-13: every hero list, targets 0 0 3 2, was never created; Paya's 0 1 3 was)
+        donor = donor_pack("Npc_MadeUp", targets=HERO_TARGETS)
+        files = self.make(donor=donor)
+        ml = aamp.load(files["Actor/ModelList/SwChar_madeup.bmodellist"])
+        self.assertEqual(charsel.target_types(ml), [0, 1, 3])
+        self.assertEqual(charsel.target_bones(ml), {"Root", "Spine_1", "Face_Root"})
+        self.assertEqual(ml.list("ModelData").list("ModelData_0").object("Base").get_value("Folder"), "MadeUpBody")
+        data = glp.pack_bytes(files)[0]
+        self.assertEqual(charsel.check_pack(data, charsel.DEMO_SLOTS[0]), [])
+        self.assertEqual(charsel.read_back(data)["targets"], [0, 1, 3])
+        bones = ["Root", "Spine_1", "Face_Root", "Arm_1_L"]
+        files = charsel.make_pack(TEST_RECIPE, charsel.DEMO_SLOTS[0], "DemoNPC", template_pack(), donor, None, None,
+                                  bones)
+        self.assertEqual(charsel.target_types(aamp.load(files["Actor/ModelList/SwChar_madeup.bmodellist"])), [0, 1, 3])
+        with self.assertRaises(charsel.CharselError) as e:                      # a body without a bone they name
+            charsel.make_pack(TEST_RECIPE, charsel.DEMO_SLOTS[0], "DemoNPC", template_pack(), donor, None, None,
+                              ["Root", "Spine_1"])
+        self.assertIn("Face_Root", str(e.exception))
+        t = template_pack()                                                     # nothing to copy: refused
+        t["Actor/ModelList/MadeUp_Model.bmodellist"] = target_list(HERO_TARGETS)
+        with self.assertRaises(charsel.CharselError):
+            charsel.make_pack(TEST_RECIPE, charsel.DEMO_SLOTS[0], "DemoNPC", t, donor)
+        # lists without a type-2 target stay byte for byte (Paya's, the monsters')
+        for targets in (LINK_BODY_TARGETS, ((0, ("Root",)), (0, ("Root",)))):
+            ml = target_list(targets, "MadeUpBody")
+            self.assertEqual(charsel.body_targets(ml, template_pack()), (ml, False))
+        # a pack that still has one is refused by the check
+        hero = charsel._pack_files("madeup", charsel.DEMO_SLOTS[0], "DemoNPC", template_pack(),
+                                   target_list(HERO_TARGETS, "MadeUpBody"), None, [("FamilyFile", True)],
+                                   charsel.clip_map(TEST_RECIPE))
+        self.assertTrue(any("type-2" in b for b in charsel.check_pack(glp.pack_bytes(hero)[0])))
 
     def test_read_back_and_check(self):
         data, unpacked = glp.pack_bytes(self.make())
@@ -343,6 +410,29 @@ class Build(unittest.TestCase):
         # a build of all of them starts over
         cat = charsel.build(self.romfs, self.out, None, cache=self.root / "cache.json", say=quiet)
         self.assertEqual(cat["kept"], [])
+
+    def test_hero_lists_and_link_retarget(self):
+        donors = {"Dm_Npc_Zelda_Sibyl": donor_pack("Dm_Npc_Zelda_Sibyl", "Npc_Zelda_Miko", targets=HERO_TARGETS,
+                                                   adds=(("UMii_Common_Body_W_Animation", True),))}
+        pack = self.out / "romfs" / "Actor" / "Pack" / f"{charsel.SLOTS['zelda']}.sbactorpack"
+        cat = self.build(["zelda"], donors)
+        self.assertEqual(cat["built"]["zelda"]["anim_targets"], "link-body")
+        self.assertEqual(cat["built"]["zelda"]["v"], 3)
+        rb = charsel.read_back(pack.read_bytes())
+        self.assertEqual(rb["targets"], [0, 1, 3])
+        self.assertEqual(rb["adds"], [("UMii_Common_Body_W_Animation", "Skeleton"), (charsel.PLAYER_ANIM, "Skeleton")])
+        self.assertEqual(charsel.check(self.out), {"zelda": []})
+        for how, want in (("off", None), ("on", "Skeleton")):
+            charsel.build(self.romfs, self.out, ["zelda"], cache=self.root / "cache.json", say=quiet,
+                          link_retarget=how)
+            self.assertEqual(charsel.read_back(pack.read_bytes())["adds"][-1], (charsel.PLAYER_ANIM, want), how)
+        with self.assertRaises(charsel.CharselError):
+            charsel.build(self.romfs, self.out, ["zelda"], say=quiet, link_retarget="maybe")
+        with contextlib.redirect_stdout(io.StringIO()):                     # (an empty library of its own)
+            self.assertEqual(charsel.main(["build", "zelda", "--romfs", str(self.romfs), "--out", str(self.out),
+                                           "--library", str(self.root), "--cache", str(self.root / "cache.json"),
+                                           "--link-retarget", "off"]), 0)
+        self.assertEqual(charsel.read_back(pack.read_bytes())["adds"][-1], (charsel.PLAYER_ANIM, None))
 
     def test_never_exported_as_a_breath(self):
         import breath

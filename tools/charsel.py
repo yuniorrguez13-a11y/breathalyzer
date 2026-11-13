@@ -130,6 +130,7 @@ RECIPES: dict[str, Recipe] = {r.id: r for r in (
            looks="Needs the Linkle mod on your friend's PC too; without it they see Link."),
     Recipe("zelda", "Zelda", "Hylians", "pack", "Dm_Npc_Zelda_Sibyl",
            (("UMii_Common_Body_W_Animation", True), (PLAYER_ANIM, True)), UMII_W, load_mb=10.6, aliases=("princess",),
+           v=3,
            looks="Her own stand, walk, run; Link's moves for the rest. The dress is stiff."),
     Recipe("hylian", "Hylian", "Hylians", "pack", "Npc_HatenoVillage004",
            (("UMii_Common_Body_M_Animation", True), (PLAYER_ANIM, True)), UMII_M, load_mb=11.5,
@@ -139,21 +140,21 @@ RECIPES: dict[str, Recipe] = {r.id: r for r in (
            looks="Her own stand, walk, run; Link's moves for the rest."),
     Recipe("gerudo", "Urbosa (Gerudo)", "Races", "pack", "Dm_Npc_Gerdo_Hero",
            (("UMii_Gerudo_BodyC_W_Animation", True), ("UMii_Common_Body_W_Animation", True), (PLAYER_ANIM, True)),
-           UMII_W, load_mb=16.2, aliases=("urbosa",),
+           UMII_W, load_mb=16.2, aliases=("urbosa",), v=3,
            looks="Tall: the heaviest one (16 MB). Link's moves may sink her hips a little [G]."),
     Recipe("goron", "Daruk (Goron)", "Races", "pack", "Dm_Npc_Goron_Hero",
            (("UMii_Goron_BodyC_M_Animation", True), (PLAYER_ANIM, True)),
-           _with(UMII_M, RunGear2="Common_Move_Ball"), load_mb=10.9, aliases=("daruk",),
+           _with(UMII_M, RunGear2="Common_Move_Ball"), load_mb=10.9, aliases=("daruk",), v=3,
            looks="Sprints as a rolling ball. Link's climb and glide on a Goron body may look odd [G]."),
     Recipe("rito", "Revali (Rito)", "Races", "pack", "Dm_Npc_Rito_Hero",
            (("UMii_Rito_Body_M_Animation", True), ("UMii_Common_Body_M_Animation", True),
             ("Npc_Rito_Teba_Animation", True), (PLAYER_ANIM, True)),
-           _with(UMII_M, ParashawlGlide="Npc_Rito_Teba_BattleFly"), load_mb=10.6, aliases=("revali",),
+           _with(UMII_M, ParashawlGlide="Npc_Rito_Teba_BattleFly"), load_mb=10.6, aliases=("revali",), v=3,
            looks="Glides with real wings (a Rito flying clip)."),
     Recipe("zora", "Mipha (Zora)", "Races", "pack", "Dm_Npc_Zora_Hero",
            (("UMii_Common_Body_W_Animation", True), ("UMii_Zora_BodyC_M_Animation", True), (PLAYER_ANIM, True)),
            _with(UMII_W, SwimWait="Common_Swim_Wait", SwimMove="Common_Move_Swim_Walk",
-                 SwimDash="Common_Move_Swim_Run"), load_mb=11.0, aliases=("mipha",),
+                 SwimDash="Common_Move_Swim_Run"), load_mb=11.0, aliases=("mipha",), v=3,
            looks="Swims with Zora swim clips."),
     Recipe("bokoblin", "Bokoblin", "Monsters", "pack", "Enemy_Bokoblin_Junior",
            (("Enemy_Bokoblin_Animation", False),), BOKO, rest="speed", load_mb=6.2, aliases=("boko",),
@@ -179,7 +180,7 @@ TALL_SLOTS = tuple(f"Dm663_Npc_Gerudo_S_{c}" for c in "ABCDEF")
 FREE_SLOTS = DEMO_SLOTS + NPC_SLOTS + TALL_SLOTS
 SLOTS = {"zelda": DEMO_SLOTS[0], "goron": DEMO_SLOTS[1], "bokoblin": DEMO_SLOTS[2],
          "hylian": NPC_SLOTS[0], "sheikah": NPC_SLOTS[1], "zora": NPC_SLOTS[2], "rito": NPC_SLOTS[3],
-         "gerudo": TALL_SLOTS[0], "moblin": TALL_SLOTS[1],
+         "gerudo": NPC_SLOTS[6], "moblin": TALL_SLOTS[1],   # (Urbosa: a bigger heap than the tall box, HEAP_BASE)
          "linkle": NPC_SLOTS[4], "link": NPC_SLOTS[5]}     # (the last two: only with --model-copies)
 SLOT_PROFILE = {**{s: "DemoNPC" for s in DEMO_SLOTS}, **{s: "NPC" for s in NPC_SLOTS + TALL_SLOTS}}
 
@@ -912,10 +913,161 @@ def resolve(r: Recipe, clips_of, rest: str | None = None) -> dict:
     return res
 
 
+# The animation targets (the model list's AnmTarget block). This is why Zelda, Urbosa, Daruk, Revali and Mipha were
+# never created ("the game could not create it", two in-game checks, 2026-11-12 and -13, on 6 different free names,
+# with and without Link's file retargeted). Their donors' lists (Dm_Npc_Zelda_Sibyl, Dm_Npc_*_Hero) have 4 targets of
+# types 0, 0, 3, 2; every pack that loads has 0, 1, 3 (Paya, the Hylian, the Link body) or 0, 0 / 0 (the monsters).
+# A type-2 target is set up apart from the others (the game counts them in a pool of their own when it sizes an
+# actor's animations) and the game only ever has one with a look file and an animation info: all 132 of its NPC packs
+# with a type-2 target have both [V: game packs read], and our packs give neither (UMii and AnimationInfo Dummy). So a
+# list with a type-2 target gets the Link body's block instead (the template's, the Sheikah man's: 0, 1, 3 on Root,
+# Spine_1 and Face_Root, which these skeletons have): the same block Paya's own list has, proven in the game. The face
+# keeps still (no type-2 target: the game's own Paya pack has none either) [G].
+SWAP_TARGET_TYPES = (2,)   # the animation target types we never ship
+
+
+def target_types(ml) -> list:
+    """The TargetType of each animation target of a model list (a PList), in order."""
+    at = ml.list("AnmTarget")
+    return [t.object("Base").get_value("TargetType") if t.object("Base") else None
+            for t in (at.lists.values() if at else ())]
+
+
+def target_bones(ml) -> set[str]:
+    """The bones a model list's animation targets name (their partial lists)."""
+    at = ml.list("AnmTarget")
+    out = set()
+    for t in (at.lists.values() if at else ()):
+        part = t.list("Partial")
+        for o in (part.objects.values() if part else ()):
+            b = o.get_value("Bone")
+            if isinstance(b, str) and b:
+                out.add(b)
+    return out
+
+
+def body_targets(model_list: bytes, template: dict[str, bytes], bones=None) -> tuple[bytes, bool]:
+    """(the model list, swapped): a donor's model list with a type-2 animation target gets the template's (the Link
+    body's) block of targets; any other list stays byte for byte. bones: the body's bone names, when known (the
+    template's targets must find theirs in it)."""
+    import aamp
+    from aamp import name_hash
+    from mp import ghost_link_pack as glp
+    ml = aamp.load(model_list)
+    if not any(t in SWAP_TARGET_TYPES for t in target_types(ml)):
+        return model_list, False
+    _, lt = glp.link_target(template, TEMPLATE)
+    tml = template.get(f"Actor/ModelList/{glp.user(lt, 'ModelUser')}.bmodellist")
+    key = name_hash("AnmTarget")
+    tpl = aamp.load(tml) if tml else None
+    if tpl is None or key not in tpl.lists or any(t in SWAP_TARGET_TYPES for t in target_types(tpl)):
+        raise CharselError(f"{TEMPLATE}'s model list has no animation targets to copy")
+    missing = sorted(target_bones(tpl) - set(bones)) if bones else []
+    if missing:
+        raise CharselError(f"the body has no {', '.join(missing)} bone (the Link body's animation targets need it)")
+    ml.lists[key] = tpl.lists[key]
+    return aamp.dump(ml), True
+
+
+def donor_model_list(r: Recipe, donor: dict[str, bytes]) -> bytes | None:
+    """The donor's model list file, or None."""
+    from mp import ghost_link_pack as glp
+    try:
+        _, dlt = glp.link_target(donor, r.donor)
+        return donor.get(f"Actor/ModelList/{glp.user(dlt, 'ModelUser')}.bmodellist")
+    except (KeyError, glp.PackError, AttributeError):
+        return None
+
+
+# The actor heap. Each free name has its own heap (ActorInfo `instSize`, 554 KB-1.1 MB), and everything the actor makes
+# at creation must fit in it. After the first in-game check this looked like the cause of the five failures (big
+# skeletons x about 1,400 retargeted clips); the second check (2026-11-13) failed them the same way with Link's file
+# not retargeted and on bigger names, and the animation targets (above) explain all of them. So the rule below is
+# only a precaution now, unproven either way [G]: a body whose estimate outgrows its name's heap gets Link's file
+# without the retarget (`charsel build --link-retarget on` keeps it, to try in the game; `off` drops it everywhere).
+# Link's clips turn bones only (no limb moves), and these bodies' main bones have Link's names, parents and rest
+# turns (play-as reads the same), so they still drive them.
+RETARGET_BYTES = 4         # heap per retargeted clip and model bone [G: fitted to the first in-game check]
+HEAP_BASE = 320_000        # bytes: the rest of the actor (model instance, animation slots, the cutscene dummy's AI) [G]
+PLAYER_CLIPS = 1167        # clips in Link's animation file (when it can't be read here)
+LINK_RETARGET = ("auto", "on", "off")   # charsel build --link-retarget: by the heap estimate, always, never
+
+
+def pack_anim_files(r: Recipe, donor: dict[str, bytes], rest: str | None = None) -> list[tuple[str, bool]]:
+    """The pack's animation files and their retarget: the donor's own animation list says which of its files it
+    retargets, and we do the same for those files; the recipe's flag for the others."""
+    import aamp
+    from mp import ghost_link_pack as glp
+    _, dlt = glp.link_target(donor, r.donor)
+    flags: dict[str, bool] = {}
+    d_as = dlt.get_value("ASUser")
+    if isinstance(d_as, str) and f"Actor/ASList/{d_as}.baslist" in donor:
+        add = aamp.load(donor[f"Actor/ASList/{d_as}.baslist"]).list("AddReses")
+        for o in (add.objects.values() if add else ()):
+            a = o.get_value("Anim")
+            if isinstance(a, str):
+                flags[a] = o.get_value("RetargetModel") not in (None, "")
+    return [(anim, flags.get(anim, rt)) for anim, rt in anim_files(r, rest)]
+
+
+def donor_model(r: Recipe, donor: dict[str, bytes]) -> str | None:
+    """The donor's model folder (its model list's first ModelData), or None (a body put together from a look file)."""
+    import aamp
+    try:
+        ml = aamp.load(donor_model_list(r, donor) or b"").list("ModelData")
+        if ml and ml.lists:
+            folder = next(iter(ml.lists.values())).object("Base").get_value("Folder")
+            return folder if isinstance(folder, str) and folder else None
+    except (aamp.AampError, AttributeError):
+        pass
+    return None
+
+
+def model_bone_names(romfs: Path, folder: str | None) -> list[str] | None:
+    """The bone names of a model file's first model (Model/<folder>.sbfres from the game's files), or None."""
+    if not folder:
+        return None
+    try:
+        from wiiu_model import nx_model
+        data = model_file(Path(romfs), folder)
+        if data is None:
+            return None
+        res = nx_model.read(_unyaz(data))
+        return [b.name for b in res.models[0].skeleton.bones] if res.models else None
+    except Exception:   # (any read failure: no estimate, no bone check; the pack is built as before)
+        return None
+
+
+def model_bones(romfs: Path, folder: str | None) -> int | None:
+    """How many bones a model file's first model has, or None."""
+    names = model_bone_names(romfs, folder)
+    return len(names) if names is not None else None
+
+
+def heap_need(files: list[tuple[str, bool]], bones: int, count) -> int:
+    """About how much actor heap a pack needs (bytes): HEAP_BASE plus RETARGET_BYTES per retargeted clip and bone."""
+    return HEAP_BASE + RETARGET_BYTES * bones * sum(count(f) for f, rt in files if rt)
+
+
+def fit_heap(files: list[tuple[str, bool]], bones: int | None, heap: int | None, count
+             ) -> tuple[list[tuple[str, bool]], int | None]:
+    """(the files, the estimated need): Link's file without its retarget when the body would outgrow the name's heap
+    with it (the family's files keep theirs: the own walk and run fit the body). Unknown bones or heap: as given."""
+    if not bones or not heap:
+        return files, None
+    need = heap_need(files, bones, count)
+    if need <= heap:
+        return files, need
+    off = [(f, rt and f != PLAYER_ANIM) for f, rt in files]
+    return off, heap_need(off, bones, count)
+
+
 def make_pack(r: Recipe, slot: str, profile: str, template: dict[str, bytes], donor: dict[str, bytes],
-              rest: str | None = None) -> dict[str, bytes]:
+              rest: str | None = None, files: list[tuple[str, bool]] | None = None, bones=None) -> dict[str, bytes]:
     """The files of a character's pack, from the template's pack (the game's cutscene Sheikah man: actor link, AI
-    program) and the donor's (its model list, its animation list's flags, its look file)."""
+    program, animation targets when the donor's can't be used: body_targets) and the donor's (its model list, its
+    animation list's flags, its look file). files: the animation files and their retarget (default pack_anim_files;
+    build passes fit_heap's). bones: the body's bone names, when known."""
     import aamp
     from mp import ghost_link_pack as glp
     if r.kind != "pack":
@@ -933,18 +1085,11 @@ def make_pack(r: Recipe, slot: str, profile: str, template: dict[str, bytes], do
     d_umii = dlt.get_value("UMiiUser") or "Dummy"
     if umii and (d_umii == "Dummy" or f"Actor/UMii/{d_umii}.bumii" not in donor):
         raise CharselError(f"{r.donor} has no model data and no look file")
-    # the donor's own animation list says which of its files it retargets: we do the same for those files
-    flags: dict[str, bool] = {}
-    d_as = dlt.get_value("ASUser")
-    if isinstance(d_as, str) and f"Actor/ASList/{d_as}.baslist" in donor:
-        add = aamp.load(donor[f"Actor/ASList/{d_as}.baslist"]).list("AddReses")
-        for o in (add.objects.values() if add else ()):
-            a = o.get_value("Anim")
-            if isinstance(a, str):
-                flags[a] = o.get_value("RetargetModel") not in (None, "")
-    files = [(anim, flags.get(anim, rt)) for anim, rt in anim_files(r, rest)]
+    if files is None:
+        files = pack_anim_files(r, donor, rest)
     look = (d_umii, donor[f"Actor/UMii/{d_umii}.bumii"]) if umii else None
-    return _pack_files(r.id, slot, profile, template, donor[ml_name], look, files, clip_map(r, rest))
+    model_list, _swapped = body_targets(donor[ml_name], template, bones)
+    return _pack_files(r.id, slot, profile, template, model_list, look, files, clip_map(r, rest))
 
 
 def _pack_files(cid: str, slot: str, profile: str, template: dict[str, bytes], model_list: bytes,
@@ -1075,13 +1220,15 @@ def read_back(data: bytes) -> dict:
         clips[n] = aamp.load(bas).list("Elements").list("Element0").object("Parameters").get_value("FileName")
     adds = [(o.get_value("Anim"), o.get_value("RetargetModel")) for o in asl.list("AddReses").objects.values()]
     ml = files.get(f"Actor/ModelList/{users['ModelUser']}.bmodellist")
-    folder = None
+    folder, targets = None, []
     if ml:
-        md = aamp.load(ml).list("ModelData")
+        mlp = aamp.load(ml)
+        md = mlp.list("ModelData")
         if md and md.lists:
             folder = next(iter(md.lists.values())).object("Base").get_value("Folder")
+        targets = target_types(mlp)
     return {"slot": slot, "users": users, "names": names, "clips": clips, "missing_sets": missing, "adds": adds,
-            "folder": folder, "files": len(files), "unpacked": len(raw), "packed": len(data)}
+            "folder": folder, "targets": targets, "files": len(files), "unpacked": len(raw), "packed": len(data)}
 
 
 def check_pack(data: bytes, expect_slot: str | None = None) -> list[str]:
@@ -1114,6 +1261,8 @@ def check_pack(data: bytes, expect_slot: str | None = None) -> list[str]:
         bad.append(f"{r['unpacked']:,} bytes unpacked (limit {PACK_LIMIT:,})")
     if not r["adds"]:
         bad.append("no animation files")
+    if any(t in SWAP_TARGET_TYPES for t in r["targets"]):
+        bad.append("a type-2 animation target (the game can't create it without a look file: rebuild)")
     return bad
 
 
@@ -1147,8 +1296,9 @@ def parse_slots(items) -> dict[str, str]:
 
 
 def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots=None, model_copies=False,
-          monster_link=False, cache=DEFAULT_CACHE, say=print) -> dict:
-    """Build the mod folder (mod.toml, romfs\\Actor\\Pack\\<free name>.sbactorpack, charsel.json). Returns the catalog."""
+          monster_link=False, link_retarget="auto", cache=DEFAULT_CACHE, say=print) -> dict:
+    """Build the mod folder (mod.toml, romfs\\Actor\\Pack\\<free name>.sbactorpack, charsel.json). Returns the catalog.
+    link_retarget: Link's file retargeted by the heap estimate ("auto"), always ("on") or never ("off")."""
     from mp import ghost_link_pack as glp
     from wiiu_convert import FormatError
     import aamp
@@ -1157,6 +1307,8 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
         raise CharselError("--out must be a folder of your own, not inside the game's files")
     if not (romfs / "Actor" / "Pack").is_dir():
         raise CharselError(f"{romfs} isn't the game's extracted romfs (no Actor\\Pack)")
+    if link_retarget not in LINK_RETARGET:
+        raise CharselError(f"--link-retarget is {', '.join(LINK_RETARGET)}")
     all_ids = not ids
     ids = list(dict.fromkeys(find_id(i) or i for i in (ids or order())))
     bad = [i for i in ids if i not in RECIPES]
@@ -1215,6 +1367,8 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
     for cid in ids:
         r = RECIPES[cid]
         rest = None
+        need = heap = bones = None
+        link_rt, swap = True, False
         try:
             if r.kind == "pack":
                 rest = "link" if (monster_link and r.cat == "Monsters") else None
@@ -1226,7 +1380,26 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
                 res = resolve(r, lambda f: None if f == PLAYER_ANIM else clips.clips(f), rest)
                 if res["missing"] or res["clash"]:
                     raise CharselError(f"clips missing {res['missing']} clash {res['clash']}")
-                files = make_pack(r, slot, profile, template, donor, rest)
+                anims = pack_anim_files(r, donor, rest)
+                dml = donor_model_list(r, donor)
+                swap = bool(dml) and any(t in SWAP_TARGET_TYPES for t in target_types(aamp.load(dml)))
+                names = (model_bone_names(romfs, donor_model(r, donor))
+                         if swap or any(rt for _f, rt in anims) else None)
+                bones = len(names) if names else None
+                heap = ((ainfo or {}).get(slot) or {}).get("instSize")
+
+                def count(f):
+                    return len(clips.clips(f) or ()) or (PLAYER_CLIPS if f == PLAYER_ANIM else 0)
+                if link_retarget == "auto":
+                    anims, need = fit_heap(anims, bones, heap, count)
+                else:
+                    anims = [(f, rt and (f != PLAYER_ANIM or link_retarget == "on")) for f, rt in anims]
+                    need = heap_need(anims, bones, count) if bones and heap else None
+                link_rt = any(rt for f, rt in anims if f == PLAYER_ANIM)
+                if need and heap and need > heap:
+                    notes.append(f"{r.name} may not fit {slot}'s heap (about {need:,} of {heap:,} bytes): if it "
+                                 "doesn't load, move it to a bigger free name with --slot.")
+                files = make_pack(r, slot, profile, template, donor, rest, anims, names)
             elif model_copies and (cid == "linkle" and pm and pm["linkle"] or cid == "link" and pm):
                 slot = table[cid]
                 profile, problems = check_slot(romfs, slot, ainfo)
@@ -1261,8 +1434,15 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
                                  "unpacked": unpacked, "packed": len(data), "own": len(res["own"]),
                                  "link": len(res["link"]), "names": len(res["own"]) + len(res["link"]),
                                  "rest": (rest or r.rest) if r.kind == "pack" else "link", "load_mb": r.load_mb}
+        if r.kind == "pack" and need:
+            catalog["built"][cid].update(heap={"need": need, "have": heap, "bones": bones},
+                                         link_retarget=link_rt)
+        if r.kind == "pack" and swap:
+            catalog["built"][cid]["anim_targets"] = "link-body"
         say(f"  {r.name:16} on {slot:31} {len(files):3} files, {unpacked:6,} B unpacked, own clips "
-            f"{len(res['own']):2}, Link's {len(res['link']):2}")
+            f"{len(res['own']):2}, Link's {len(res['link']):2}"
+            + (f"{'' if link_rt else ' (not retargeted)'}" if r.kind == "pack" and res["link"] else "")
+            + (" (Link body's anim targets)" if r.kind == "pack" and swap else ""))
     # write: our files in the romfs folder (the kept characters' stay; every other pack or model of ours goes), the
     # catalog, and built.txt (made from the game's files: never exported as a .breath)
     top = out / "romfs"
@@ -2185,6 +2365,8 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--slot", action="append", metavar="ID=ACTOR")
     b.add_argument("--model-copies", action="store_true")
     b.add_argument("--monster-link-clips", action="store_true")
+    b.add_argument("--link-retarget", choices=LINK_RETARGET, default="auto",
+                   help="fit Link's clips to each body: by the heap estimate (auto), always (on) or never (off)")
     b.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     c = sub.add_parser("check", help="read every built pack back")
     c.add_argument("--out", type=Path, default=DEFAULT_OUT)
@@ -2216,7 +2398,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "build":
             print(f"Building from {args.romfs} into {args.out}:")
             cat = build(args.romfs, args.out, args.ids, library=args.library, slots=parse_slots(args.slot),
-                        model_copies=args.model_copies, monster_link=args.monster_link_clips, cache=args.cache)
+                        model_copies=args.model_copies, monster_link=args.monster_link_clips,
+                        link_retarget=args.link_retarget, cache=args.cache)
             print(f"Built {len(cat['built']) - len(cat['kept'])}, kept {len(cat['kept'])}, skipped "
                   f"{len(cat['skipped'])}. Linkle: {cat['linkle']['how']}.")
             print(f"Next: python tools\\modman.py add {args.out} (once), then Play or deploy: only deployed "
