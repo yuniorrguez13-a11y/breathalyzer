@@ -20,7 +20,8 @@ Breathalyzer, by giruka.
 - The Mod menu (`native/examples/modmenu`, docs/mod-menu.md) follows Savage Wind Recomp 0.4.1-alpha.4's
   `runtime/ui/game_options.mm`: the option entry and row layouts, how a text is handed to the game, the reopen logic
   of the title and pause menus, and `rt_opt_pointer_kind`'s logic. Savage Wind Recomp is MIT licensed: Copyright (c)
-  2026 Revivedx and the Savage Wind Recomp contributors; Copyright (c) 2026 Peiikai.
+  2026 Revivedx and the Savage Wind Recomp contributors; Copyright (c) 2026 Peiikai. Its full licence text is in
+  THIRD-PARTY-NOTICES.md.
 - Mods page v2 (being built): the easy-to-read font and the symbols the menu font lacks use Fira Sans (SIL Open
   Font License 1.1, Copyright (c) 2012-2015 The Mozilla Foundation and Telefonica S.A.), taken from your Savage Wind
   folder when it ships `FiraSans-*.ttf`, else from `assets/fonts/` with its license file. Ports of Savage Wind Recomp

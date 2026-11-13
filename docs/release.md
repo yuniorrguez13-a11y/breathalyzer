@@ -47,7 +47,8 @@ jobs' half-done work and whatever `build\native` holds now never get in. The com
 
 The player zips leave out what only developers need (it stays in the source zip): `docs/PLAN.md`,
 `docs/release.md`, `tools/make_release.py`, `tools/check_clean.py`, and the test drivers that start the game
-(`*_ingame_check.py`, `*_items_check.py`).
+(`*_ingame_check.py`, `*_items_check.py`), and the web page `site/` (its screenshots of the game don't belong
+in a download).
 
 The zips land in `out\release\`. `out\` is ignored by git.
 Without `--version`, the version is the `VERSION` line at the top of the tool.
@@ -120,7 +121,7 @@ python.org's "embeddable package", plus Tcl/Tk for the window, from the same pyt
 - **Recorded:** every file's SHA-256 goes into `tools/packaging/runtime.lock.json`. `make_release.py` ships the
   runtime only when it matches the lock file for file: nothing more, nothing less, nothing changed.
   `python tools/packaging/build_runtime.py --check` compares them.
-- **Size:** 341 files, 26.6 MB unpacked; each player zip is about 15 MB (31 MB unpacked).
+- **Size:** 341 files, 26.6 MB unpacked; each player zip is about 17 MB (about 35 MB unpacked).
 - **Licences:** Python's `LICENSE.txt` (PSF License v2, with the notices of OpenSSL, libffi, zlib, SQLite and the
   rest; Tcl's and Tk's licence text is in it too, around line 564) and Tk's `tcl\tk8.6\license.terms` go in. The
   READ ME files point at `app\runtime\LICENSE.txt`. A separate copy of Tcl's `license.terms` isn't needed;

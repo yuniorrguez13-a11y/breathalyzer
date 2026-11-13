@@ -55,7 +55,8 @@ title = "Infinite Stamina"
 description = "Stamina never runs out. Type infstamina off in the command box (F12) to stop."
 default = "off"
 why = "It changes how the game plays."
-tags = ["Changes how the game plays", "While it is on, Play turns on developer commands"]
+tags = ["Changes how the game plays", "While it is on, Play turns on developer commands",
+        "Ghost multiplayer doesn't run while this is on"]
 developer = true
 ready = true
 kind = "code"
@@ -94,10 +95,14 @@ build = [["quality.py", "toggle", "ssao", "off"], ["quality.py", "toggle", "bloo
 [[mod]]
 id = "botw-mod-loader.ghost"
 title = "Ghost multiplayer"
-description = "See a friend as a second Link in your world (on your home network)."
+description = "See a friend in your world as a stand-in figure (home network only)."
 default = "off"
-why = "It uses the network, and it isn't tested on two PCs yet."
-tags = ["Experimental", "Uses the network", "Comes with a surprise, built when you first turn it on (30 seconds)"]
+why = "It uses the network, and playing the story together isn't tested on two PCs yet."
+tags = ["Experimental", "Uses the network (home network only)", 'Started by hand for now: app\docs\multiplayer.md',
+        "Doesn't run while Infinite Stamina is on", "While it is on, Play turns on developer commands",
+        "Comes with a surprise, built when you first turn it on (about 1 minute)"]
+# (developer: Play opens the game's control port, which tools\mp\client.py talks to)
+developer = true
 ready = false
 kind = "code"
 manifest = "native/examples/ghost/mod.toml"
@@ -134,14 +139,6 @@ kind = "recipe"
 folder = "castle"
 build = [["castle_build.py", "build"]]
 
-[[mod]]
-id = "botw-mod-loader.perf-shadows"
-title = "Performance: shorter shadows"
-description = "Meant to end sun shadows nearer. No visible change found yet."
-default = "off"
-why = "No visible change or fps gain was measured."
-tags = ["Experimental", "Built from your game files the first time"]
-ready = false
-kind = "recipe"
-folder = "native/examples/perf_shadows"
-build = [["quality.py", "toggle", "shadow_range", "1000"]]
+# Left out of the beta (no visible change or fps gain was measured), so not listed even with --with-experimental:
+# "Performance: shorter shadows" (botw-mod-loader.perf-shadows, recipe native/examples/perf_shadows,
+# build [["quality.py", "toggle", "shadow_range", "1000"]]). List it again once it shows a change.

@@ -13,8 +13,9 @@ The editions (docs/release.md):
 
 - core: what players download when they want no mods. "Start Breathalyzer.exe" (tools/packaging/build_starter.py),
   "READ ME FIRST.txt" and app/: app/runtime (our own Python and Tk, tools/packaging/build_runtime.py: players need no
-  Python), app/tools, app/native, app/docs, app/assets, README, LICENSE, NOTICE, and modhost.dll (the loader, not a
-  mod). Not the tests or tools/packaging. No DLL but modhost.dll and the runtime's.
+  Python), app/tools, app/native, app/docs, app/assets, README, LICENSE, NOTICE, THIRD-PARTY-NOTICES, and
+  modhost.dll (the loader, not a mod). Not the tests, site/ or tools/packaging. No DLL but modhost.dll and the
+  runtime's.
 - plus: the same, plus our own mods from tools/packaging/bundled-mods.toml (ready = true): each in
   app/bundled-mods/<name>/ with a mod.toml carrying the player title and description, and app/bundled-mods.json, the
   list the mod picker shows (title, description, on or off by default, why, tags). Only ids starting with
@@ -26,8 +27,9 @@ into out/packaging-work/src/<commit>/ and the DLLs are built from that copy (its
 so other jobs' unfinished files never get in. The commit id is the first line of SHA256SUMS.txt (a '# ' comment) and
 "commit" in bundled-mods.json. --overlay <file> lays one uncommitted file over the commit for a test build (each is
 listed with its SHA-256; such zips are not for upload); --working-tree takes everything as it is (tests only). The
-player zips leave out developer-only files: docs/PLAN.md, docs/release.md, make_release.py, check_clean.py and the
-test drivers that start the game (*_ingame_check.py, *_items_check.py).
+player zips leave out developer-only files: docs/PLAN.md, docs/release.md, make_release.py, check_clean.py, the
+test drivers that start the game (*_ingame_check.py, *_items_check.py) and the web page (site/: its screenshots of
+the game don't belong in a download).
 
 The runtime must match tools/packaging/runtime.lock.json file for file (SHA-256), and the starter
 tools/packaging/starter.lock.json (built from today's start.c); a 64-bit window program that uses only kernel32 and
@@ -101,7 +103,7 @@ EXIT_WRITE_FAILED = 3
 
 # The allow-list: these folders and top-level files (plus anything git tracks). Compared in lower case.
 ROOT_DIRS = ("tools", "native", "docs", "tests", ".github", "assets")
-ROOT_FILES = ("README.md", "LICENSE", "NOTICE.md", ".gitignore", ".cleanallow")
+ROOT_FILES = ("README.md", "LICENSE", "NOTICE.md", "THIRD-PARTY-NOTICES.md", ".gitignore", ".cleanallow")
 # Never, whatever git says (in any letter case: on Windows Build/ is build/): tool output, build output, the local
 # Savage Wind clone, Python caches.
 NEVER_TOP = {"out", "build", "upstream", "dist", ".git", ".venv", ".vscode"}
@@ -164,7 +166,8 @@ BUNDLED_DIR = "bundled-mods"                  # app/bundled-mods/<name>/: one fo
 BUNDLED_JSON = "bundled-mods.json"            # app/bundled-mods.json: what the mod picker shows
 READ_ME = {"core": f"{PACKAGING}/read-me-first-core.txt", "plus": f"{PACKAGING}/read-me-first-plus.txt"}
 BACKUP_CMD_SRC = f"{PACKAGING}/start-backup.cmd"
-PLAYER_SKIP_TOP = {"tests", ".github"}        # repo folders that stay out of the player zips
+# repo folders that stay out of the player zips (site/: the web page, with its screenshots of the game)
+PLAYER_SKIP_TOP = {"tests", ".github", "site"}
 # developer-only files (they stay in the source zip): the build PC's notes, the release steps, the release and
 # clean-check tools; and (PLAYER_SKIP_NAME) the test drivers that start the game
 PLAYER_SKIP_FILES = {".gitignore", ".cleanallow", "docs/plan.md", "docs/release.md", "tools/make_release.py",

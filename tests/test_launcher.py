@@ -225,7 +225,7 @@ class Checks(Temp):
         rep = check(self.tmp / "v-0.4.2-alpha.1", tmp=self.tmp)
         self.assertEqual(rep.first().key, "other_version")
         self.assertEqual(rep.first().heading, "This Savage Wind is version 0.4.2-alpha.1")
-        self.assertEqual(rep.first().buttons[0], ("Open Savage Wind's download page", "download"))
+        self.assertEqual(rep.first().buttons[0], ("Get Savage Wind 0.4.1-alpha.4", "download"))
         self.assertEqual(check(self.tmp / "v-None", tmp=self.tmp).first().key, "no_version")
 
     def test_every_problem_screen(self):

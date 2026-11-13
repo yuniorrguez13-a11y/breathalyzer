@@ -50,7 +50,7 @@ It checks, and says what to do when one fails (one plain screen each, the techni
 | Check | When it fails |
 |---|---|
 | `savagewind.exe` is in the folder | That's not the Savage Wind folder (or: Savage Wind isn't in ... any more, **Find it again**) |
-| Savage Wind is 0.4.1-alpha.4 (read from the exe) | This Savage Wind is version ...: **Open Savage Wind's download page**. An exe with the right version but not the official one is allowed ("a custom build") |
+| Savage Wind is 0.4.1-alpha.4 (read from the exe) | This Savage Wind is version ...: **Get Savage Wind 0.4.1-alpha.4** (opens that release's page; newer ones, like 0.5.x, are refused). An exe with the right version but not the official one is allowed ("a custom build") |
 | The game files are set up | Set up the game files first: **Open Savage Wind**, press Set up game files, then **Check again** |
 | The game files are BotW 1.9.0 | Your game files are not 1.9.0 |
 | The game files weren't moved (`SAVAGEWIND_DATA_ROOT`) | Breathalyzer can't use a moved data folder yet |
@@ -75,7 +75,9 @@ you turned on is built from your game files first").
 - **Play** does everything: it waits if Savage Wind is already open; uses the changes you made on the game's Mods page;
   gets your mods ready when they changed since the last time ("Getting your mods ready... 2:31"; **Cancel** stops it);
   then starts the game. If your code mods can't be built, **Play without code mods** starts the game with the others.
-- **Play without mods** starts Savage Wind as it is. Your mods stay as they are for next time.
+- **Play without mods** starts Savage Wind as it is. Your mods stay as they are for next time. If you ever turned
+  on Ghost multiplayer, don't load a save that holds its surprise item without mods: the game has no data for it
+  then, and that save can break. Use a save from before, or play with mods.
 - **Your mods**: ON or OFF, the mod's name and what it does; the whole text of the selected mod is under the list.
   **Space** (or a click on ON/OFF) turns a mod on or off. The next Play uses the change.
 - **Export as .breath**: the selected mod in one `.breath` file, to send to a friend (saved on your Desktop at
@@ -162,7 +164,9 @@ Your own things are not in this folder:
 - **Update**: unpack the new zip and use it; delete the old folder when the new one works. Your mods and choices
   stay, because they aren't in Breathalyzer's folder.
 - **Remove**: press Settings > **Unregister .breath** if you registered it, then delete the Breathalyzer folder. To
-  remove your mods too, delete the `modloader` folder next to Savage Wind. In the Savage Wind folder Breathalyzer
+  remove your mods too, delete the `modloader` folder next to Savage Wind (if you ever turned on Ghost
+  multiplayer: a save that holds its surprise item can break without it, so keep a save from before). In the Savage
+  Wind folder Breathalyzer
   changes only the `frame_rate` line of `savagewind.ini`, and only when you pick a frame rate in Settings
   (`savagewind.ini.breathalyzer-backup` is the file as it was). `%LOCALAPPDATA%\Breathalyzer` holds only the
   launcher's choices and the `.breath` files being added.

@@ -13,10 +13,22 @@ each player's speed (below); not yet re-tested in the game.
 
 ## What you need
 
-- Each player: Savage Wind 0.4.1-alpha.4 (or later) with their own game set up, Python 3.13 (nothing to install)
-  and this repo.
-- One player runs the relay. The others must reach its TCP port 7788: same home network, or the host forwards
-  TCP 7788 on their router, or you all join a virtual LAN tool.
+- Each player: Savage Wind 0.4.1-alpha.4 (not a newer one such as 0.5.x: Breathalyzer refuses it) with their own
+  game set up, and Breathalyzer Plus (it brings its own Python: where this page says `python`, use
+  `runtime\python.exe` from Breathalyzer's `app` folder) or this repo with Python 3.13.
+- One player runs the relay. The others must reach its TCP port 7788 on the same home network (or a virtual LAN
+  tool). The relay turns away anyone outside the home network: internet play comes in a later update.
+
+### With Breathalyzer Plus (beta, Experimental)
+
+1. In Breathalyzer, turn on **Ghost multiplayer** and press **Play** (not Play without mods: Play loads the mod and
+   opens the game's control port). Load a save.
+2. Open a Command Prompt in Breathalyzer's `app` folder (in Explorer: type `cmd` in the address bar, Enter).
+3. Host: `runtime\python.exe tools\mp\relay.py`. Everyone: `runtime\python.exe tools\mp\client.py --relay
+   192.168.1.20 --name Ana --ghost` (the host uses `--relay 127.0.0.1`).
+
+Ghost multiplayer doesn't run while Infinite Stamina is on. The friend shows as a stand-in figure: the Link body
+needs a pack the launcher can't build yet (docs/ghost.md).
 
 ## Play with a friend
 
@@ -27,9 +39,10 @@ each player's speed (below); not yet re-tested in the game.
    ```
 
    If Windows asks whether Python may use the network, allow it for private networks. Tell your friend your
-   address: the IPv4 address from `ipconfig` on a home network, or your public IP if you forwarded the port.
+   address: the IPv4 address from `ipconfig`.
 
-2. **Everyone: start the game with the control socket on**, from the Savage Wind folder, then load a save:
+2. **Everyone: start the game with the control socket on**, then load a save. With Breathalyzer: Play (above).
+   From this repo (this way skips modman run, so no mod loads; use `modman run` for the ghost mod):
 
    ```powershell
    $env:SAVAGEWIND_CONTROL='7777'; & '.\savagewind.exe'

@@ -57,7 +57,9 @@ SUPPORTED = "0.4.1-alpha.4"       # the Savage Wind this Breathalyzer works with
 # unknown one with the right string is "a custom build": allowed, with a note). Add each official release here.
 KNOWN_EXES = {"90bdae43315a1f8f348296f1c9dd8144421f027582f62a371c8ee62ce62f2804": "0.4.1-alpha.4"}
 GAME_BUILD = "cd57b23fa4bbad65"   # BotW 1.9.0's main build id (modman.BUILD_190)
-DOWNLOAD_PAGE = "https://github.com/Revivedx/SavageWindRecomp/releases"
+# (the page of the one release Breathalyzer works with: the releases list shows a newer one first, 0.5.x, that it
+# refuses)
+DOWNLOAD_PAGE = f"https://github.com/Revivedx/SavageWindRecomp/releases/tag/v{SUPPORTED}"
 LIBRARY_NAME = "modloader"        # (modman.LIBRARY_NAME: the library goes next to the Savage Wind folder)
 ENV_LIBRARY = "SWMOD_LIBRARY"
 ENV_DATA_ROOT = "SAVAGEWIND_DATA_ROOT"
@@ -553,11 +555,11 @@ SCREENS = {
     "wrong_pick": ("That's not the Savage Wind folder", "There's no savagewind.exe in {folder}.",
                    [("Choose again", "choose")], True),
     "other_version": ("This Savage Wind is version {version}",
-                      f"Breathalyzer works with Savage Wind {SUPPORTED} only.",
-                      [("Open Savage Wind's download page", "download"), ("Choose another folder", "choose")], True),
+                      f"Breathalyzer works with Savage Wind {SUPPORTED} only, not newer ones. Get {SUPPORTED}.",
+                      [(f"Get Savage Wind {SUPPORTED}", "download"), ("Choose another folder", "choose")], True),
     "no_version": ("This Savage Wind's version can't be read",
-                   f"Breathalyzer works with Savage Wind {SUPPORTED} only.",
-                   [("Open Savage Wind's download page", "download"), ("Choose another folder", "choose")], True),
+                   f"Breathalyzer works with Savage Wind {SUPPORTED} only, not newer ones. Get {SUPPORTED}.",
+                   [(f"Get Savage Wind {SUPPORTED}", "download"), ("Choose another folder", "choose")], True),
     "not_set_up": ("Set up the game files first",
                    "Open Savage Wind and press Set up game files (once, about 10 minutes). Come back after.",
                    [("Open Savage Wind", "open_game"), ("Check again", "recheck")], True),

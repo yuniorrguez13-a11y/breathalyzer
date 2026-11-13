@@ -5,7 +5,7 @@ HOW TO START
 
 1. Unpack this whole zip: right-click it, choose Extract All.
    A good place: next to your Savage Wind folder, for example Documents\SavageWind\Breathalyzer.
-   Not in Program Files.
+   Not in Program Files. (If you get a folder inside a folder with the same name, that's fine: use the inner one.)
 2. Open "Start Breathalyzer".
 3. The first time, show it your Savage Wind folder (the folder with savagewind.exe in it).
 4. Pick your mods: each one has a title and a short description. Turn on the ones you want.
@@ -14,14 +14,22 @@ HOW TO START
 
 WHAT YOU NEED
 
-- Savage Wind 0.4.1-alpha.4, with its game files set up from your own copy of the game (version 1.9.0).
+- Savage Wind 0.4.1-alpha.4 exactly. NOT the newest one (0.5.x): Breathalyzer doesn't work with it yet.
+  Get 0.4.1-alpha.4 here: https://github.com/Revivedx/SavageWindRecomp/releases/tag/v0.4.1-alpha.4
+- Its game files set up from your own copy of the game (version 1.9.0).
 - Nothing else. Breathalyzer brings its own Python. You don't install anything.
 
 THE MODS
 
 The mods in this zip are made by us, for Breathalyzer. Mods that change the game are off until you turn them on.
 Some are built from your own game files the first time you turn them on.
-The list: app\bundled-mods.json
+"Experimental" means not finished or not tested enough yet: off at first, turn it on only to try it out.
+
+MULTIPLAYER (EXPERIMENTAL)
+
+- Ghost multiplayer: see a friend in your world. Home network only (both PCs on the same Wi-Fi or router).
+- For now you start it by hand. The steps: app\docs\multiplayer.md ("With Breathalyzer Plus").
+- It doesn't run while Infinite Stamina is on.
 
 SHARE A MOD
 
@@ -36,6 +44,11 @@ IF WINDOWS OR YOUR ANTIVIRUS STOPS IT
   Start Breathalyzer is a small new program that isn't signed yet.
 - If your antivirus holds Start Breathalyzer back, open app\Start Breathalyzer (backup).cmd instead.
 
+REMOVE IT
+
+- Delete the Breathalyzer folder. Your mods are in the "modloader" folder next to Savage Wind: delete it too to
+  remove them. Used Ghost multiplayer? Read app\docs\launcher.md ("Update or remove") first: a save can break.
+
 GOOD TO KNOW
 
 - No game files are in this zip, and no mods made by other people.
@@ -44,4 +57,5 @@ GOOD TO KNOW
 - Help: app\docs\launcher.md
 
 Free and open source (MIT licence, app\LICENSE). Python (PSF licence, app\runtime\LICENSE.txt) and
-Tcl/Tk (BSD-style licence, also in app\runtime\LICENSE.txt) come with it.
+Tcl/Tk (BSD-style licence, also in app\runtime\LICENSE.txt) come with it. Code from other projects:
+app\THIRD-PARTY-NOTICES.md.

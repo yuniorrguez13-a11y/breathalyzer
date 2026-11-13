@@ -621,7 +621,9 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("port, room cap, rate and max clients must be positive (port below 65536)")
 
     async def run():
-        relay = Relay(args.host, args.port, rate=args.rate, room_cap=args.room_cap, max_clients=args.max_clients)
+        # (lan_only: the beta is home-network play only, like the co-op host; internet play waits for its update)
+        relay = Relay(args.host, args.port, rate=args.rate, room_cap=args.room_cap, max_clients=args.max_clients,
+                      lan_only=True)
         try:
             host, port = await relay.start()
         except OSError as e:

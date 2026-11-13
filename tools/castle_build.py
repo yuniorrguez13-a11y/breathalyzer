@@ -1063,11 +1063,16 @@ def _low_priority() -> None:
 def main(argv: list[str] | None = None) -> int:
     with contextlib.suppress(AttributeError, ValueError, OSError):
         sys.stdout.reconfigure(errors="replace")
+    lib_help = "the mod library (default: SWMOD_LIBRARY, else modman's)"
+    game_help = "the Savage Wind folder (default: the library's)"
+    common = argparse.ArgumentParser(add_help=False)   # (before or after the command: the launcher puts --library last)
+    common.add_argument("--library", help=lib_help, default=argparse.SUPPRESS)
+    common.add_argument("--game", help=game_help, default=argparse.SUPPRESS)
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--library", help="the mod library (default: SWMOD_LIBRARY, else modman's)")
-    ap.add_argument("--game", help="the Savage Wind folder (default: the library's)")
+    ap.add_argument("--library", help=lib_help)
+    ap.add_argument("--game", help=game_help)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    b = sub.add_parser("build", help="build the castle mod and add it to the library")
+    b = sub.add_parser("build", parents=[common], help="build the castle mod and add it to the library")
     b.add_argument("--unit", choices=("static", "dynamic"), default="static",
                    help="where the doors go: E-4_Static in TitleBG.pack (default) or the loose E-4_Dynamic")
     b.add_argument("--cloth", action="store_true", help="keep Zelda's cloth (costs 3-8 fps)")
@@ -1075,8 +1080,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="leave out the event flows (door warps, Zelda's talk): doors and Zelda only")
     b.add_argument("--no-add", action="store_true", help="only write the mod folder (--out)")
     b.add_argument("--out", help="where to write the mod folder (needed with --no-add; a new or empty folder)")
-    sub.add_parser("check", help="offline checks on your files (reads only)")
-    sub.add_parser("where", help="the game files the castle is built from")
+    sub.add_parser("check", parents=[common], help="offline checks on your files (reads only)")
+    sub.add_parser("where", parents=[common], help="the game files the castle is built from")
     args = ap.parse_args(argv)
     _low_priority()
     try:
