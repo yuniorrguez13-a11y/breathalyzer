@@ -215,7 +215,7 @@ def choose(timeout_s: float | None = None, search=discovery.search) -> dict:
     choice = charsel.load_choice()
     cat, _where = charsel.here_catalog(choice["packs"])   # (what this PC's game really has: deployed, enabled)
     lobby = Lobby(choice["look"], cat.get("built") if cat else None,
-                  (cat.get("linkle") or {}).get("how") == "link-body" if cat else None)
+                  charsel.linkle_ready(cat))   # (her costume built, or the Linkle Mod on; None: no catalog)
     root = tk.Tk()
     root.title("Multiplayer")
     win = LobbyWindow(root, lobby, on_plan=lambda plan: root.quit(), pad=charsel.Pad())

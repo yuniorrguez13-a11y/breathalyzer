@@ -73,19 +73,49 @@ the keys. All text is 18 pt or larger, white on dark green, blue and red (contra
 | Group | id (what you type) | Name | Built on actor name | Own clips + Link's | Loads |
 |---|---|---|---|---|---|
 | Hylians | `link` | Link | the Link body (`Dm_Npc_Sheiker_Searcher_M_001`) | 33 Link | 0 MB |
-| Hylians | `linkle` | Linkle | the Link body, when the Linkle mod is on that PC | 33 Link | 0 MB |
+| Hylians | `linkle` | Linkle | `Dm_Npc_UMii_Hylia_BodyS_M_012`: a costume built from The Linkle Mod's files (on or off in your library) | 33 Link | 0.9 MB model + its textures |
 | Hylians | `zelda` | Zelda | `Dm_Npc_Sheiker_Searcher_M_000` | 6 + 27 | 10.6 MB |
 | Hylians | `hylian` | Hylian (a Hateno villager) | `Dm_Npc_UMii_Hylia_BodyS_M_001` | 6 + 27 | 11.5 MB |
 | Races | `sheikah` (`paya`) | Paya (Sheikah) | `Dm_Npc_UMii_Hylia_BodyS_M_002` | 6 + 27 | 6.4 MB |
-| Races | `gerudo` (`urbosa`) | Urbosa (Gerudo) | `Dm_Npc_Handmaid_B` | 6 + 27 | 16.2 MB |
+| Races | `gerudo` (`urbosa`) | Urbosa (Gerudo) | `Dm_Npc_Handmaid_B` | 6 + 27 | 13.3 MB |
 | Races | `goron` (`daruk`) | Daruk (Goron) | `Dm663_Npc_Assasin_A` | 6 + 27 | 10.9 MB |
 | Races | `rito` (`revali`) | Revali (Rito) | `Dm_Npc_UMii_Hylia_BodyS_M_011` | 7 + 26 | 10.6 MB |
 | Races | `zora` (`mipha`) | Mipha (Zora) | `Dm_Npc_UMii_Hylia_BodyS_M_003` | 9 + 24 | 11.0 MB |
-| Monsters | `bokoblin` (`boko`) | Bokoblin | `Dm663_Npc_Assasin_B` | 26 + 0 | 6.2 MB |
-| Monsters | `moblin` | Moblin | `Dm663_Npc_Gerudo_S_B` | 26 + 0 | 7.8 MB |
+| Monsters | `bokoblin` (`boko`) | Bokoblin | `Dm663_Npc_Assasin_B` | 32 + 0 | 6.2 MB |
+| Monsters | `moblin` | Moblin | `Dm663_Npc_Gerudo_S_B` | 32 + 0 | 7.8 MB |
 
 "Loads" is what the game reads to show that body (model, textures, animation files) when no real one is nearby
 (from the study's size-table read). Urbosa is the heaviest: on a slow laptop pick a lighter one.
+
+### Own moves (2026-11-14)
+
+- **Where the game has them, the costume plays the character's own clips** [V: the stock actors' packs]. The game's
+  own Urbosa, Zelda, Mipha and Paya pick their stand and walk by their look file's personality (`Woman_Active` ->
+  `Positive_*`, `Woman_Deflated` -> `Negative_*`, else `Default_*`): Zelda, Mipha and Paya are `Woman_Normal`, Urbosa
+  `Woman_Active` on the men's sets (which test `Man_Active`), so all four play `Default_Wait` and `Default_Move_Walk`
+  from the women's file `UMii_Common_Body_W`. That is what the costumes play. **The game has no champion-only walk
+  or run** (the memories are videos), so Zelda, Urbosa and Mipha walk like the game's own Zelda, Urbosa and Mipha
+  do, which is the same women's walk [V].
+- **Urbosa (v4)** no longer loads the Gerudo guards' file first (v3: her stand and walk were a generic Gerudo
+  guard's; the real Urbosa never loads that file [V]). 2.9 MB lighter.
+- **Sprint** for Zelda, Urbosa, Mipha, Paya: their own run at 1.3x (the women's file has only a panic run, which v3
+  used). Set in the animation set's own frame control (`FrameCtrl` `Rate`, as the game's sets do [V]).
+- **Paya:** her own shy stand (her own file). **Mipha:** a Zora woman's swim: moving, the clip lies her down in the
+  water (its hips, `Skl_Root`, turned 39-73 degrees about X at its first frame, the tread clip's 0 [V]; that this
+  is lying forward: [G]); still, she treads upright; her head is kept at
+  Link's head height (the ground clamp's swim rule).
+- **Still Link's clips** (no own clip in the game's files [V]): jump, fall, land, climb, glide (but Revali's wings),
+  swim (but Mipha), crouch walk, the attacks, bow, shield, damage, death (lying: the ragdoll pose). Turns on the spot
+  exist (`Default_Turn_*`) but need a turn direction the puppet doesn't read yet.
+- **Bokoblin and Moblin (v2): their own swing for each of Link's, picked by his weapon and timed to his hit.** The
+  self puppet now asks for `<swing>_Lsword` / `<swing>_Spear` when Link holds a two-hander or a spear (as the
+  multiplayer client does for a friend's ghost; every pack's Link-clip costume gets Link's own two-hander and spear
+  swings this way too). Each monster swing has a start frame and a rate so the middle of its hit lands on the middle
+  of Link's (hit windows read from the game's animation sets [V frames], the look [G]): e.g. the Bokoblin's
+  `Attack_Small` from frame 23 at 1.21x for Link's first sword swing. The Moblin no longer stabs with a sword. In
+  water they wade (their walk, slowed: no swim clip in their files [V]).
+- **Linkle:** `iam linkle` without a Linkle costume built says so ("add The Linkle Mod to your mods (it can stay
+  off) and build the characters again. You stay Link.").
 
 ## Animation targets
 
@@ -210,16 +240,16 @@ How it works:
   with Rito wings; Mipha swims with Zora clips), Link's clips where it has none, and a near name for the rest of a
   family (a climb jump plays `ClimbMove`). It is shown only once it plays a clip (never a T-pose).
 - The camera stays on Link (nothing moves him). What Link holds in his hands (a drawn weapon, a raised shield, an
-  aimed bow) is copied into the puppet's hands (the ghost's held items) while no friend's ghost is up; the copy comes
-  0.3-0.8 s after he draws it [G] and goes when he puts it away. With a friend's ghost up, the puppet's hands are
-  empty. Nothing goes on the puppet's back: Link's back places on a bigger body poked out of it (Daruk's weapon over
-  his head, 2026-11-13). Link's own sheathed items are hidden with him (each weapon's frame update copies its
-  holder's draw flags [V code]).
+  aimed bow) is copied into the puppet's hands (the ghost's held items) while no friend's ghost is up, and what he
+  carries on his back onto its back ([held items](#held-items-the-ground-the-hands)). With a friend's ghost up, the
+  puppet's hands are empty. Link's own items are hidden with him (each weapon's frame update copies its holder's draw
+  flags [V code]).
 - The puppet can't be locked on to, talked to or hit (no attention list, no damage, no physics in its pack). The
   green ring that shows next to it while you sprint or climb is Link's own stamina wheel, where it always is.
-- **Link shows instead** while he can't be mirrored: loading, cutscenes, riding a horse, a shield surf, and a state the
-  character has no clip for (a climb or swim with no climb or swim clip). The pause menu keeps what was shown. After a
-  load or a death the puppet is spawned again on the new stage.
+- **Link shows instead** while he can't be mirrored: loading, cutscenes, riding a horse, a shield surf. A state the
+  character has no clip for no longer shows Link (0.9.3): it stands or walks there (a glide: it falls), and swimming
+  its head is kept at Link's head height. The pause menu keeps what was shown. After a load or a death the puppet is
+  spawned again on the new stage.
 - A pack that never loads (not built, not deployed, or the game refuses it) is tried 5 times; then you stay Link and
   `iam` says: "Daruk did not load (...): you stay Link. Restart the game to play as Daruk: python tools\charsel.py
   playas daruk".
@@ -314,6 +344,41 @@ see him walking while falling through a hill".
   `balls`. Selftest rows: `rd_detect_slides`, `rd_rest_retarget`, `rd_rest_refused`, `rd_motion_slope`, `rd_limp`,
   `ball_shape_place`, `rd_after_step`, `rd_slide_followed`, `ball_rolls`, `rd_why_cleared`, `short_doubt_keeps`.
 - Not checked in the game yet [G]: all of round 3.
+
+### Held items, the ground, the hands
+
+**2026-11-14 (still ghost 0.9.1 by number; not yet checked in the game [G]).** The user played every character
+(2026-11-13): weapons missing or flickering in most hands, Urbosa's sword on her back and her shield nowhere, Daruk's
+blades clipped at his wrist, Urbosa sinking while attacking, the Moblin turning into Link to swim.
+
+- **Why the weapons failed:** the copy sat on the item's own bone follow, and the game picks that place by the
+  holder's class (`ghost-items-game-attach.md`, slot 153). An NPC-class holder is asked "stowed?" by its own holder
+  object, so the copy goes to `Pod_A` (Urbosa's lower back) or nowhere. The NPC-class slots are the Hylian, Paya,
+  Mipha, Revali, Urbosa and the Moblin [V ActorInfo]; Zelda, Daruk and the Bokoblin are DemoNPC (never stowed, no
+  offsets), which is why Zelda held them [S + the user's report]. Every body has `Weapon_R` and `Weapon_L`, turned as
+  Link's [V models]: the bones were never missing.
+- **Now:** every copy the puppet holds is on our own bone follow, never the game's: the body's `Weapon_R` (the shield
+  and the bow `Weapon_L`) with the item's own "in the hand" offsets (Link's), or its back (`Spine_2`, where Link's
+  `Pod_A` sits on his, out of each body's own back box) with the item's own back offsets. When the game puts its own
+  follow back, ours goes back the next frame (`items.N.grip_sets` counts it). Sheathed items now show on the costume's
+  back. A name Link's equipment read loses for under 0.4 s keeps its copy (the flicker was a delete and a new copy
+  0.3-0.8 s later).
+- **Per body** (`PUP_GRIPS` in `puppet.c`): Daruk's grip moves 24 cm to his finger roots (his `Weapon_R` sits mid-palm,
+  every other body's at its finger roots [V models]) and his items are 1.8 times Link's; the Moblin 2.0, the
+  Bokoblin 1.3; the rest 1 [G sizes]. `ghost puppet grip <size> [x y z cm]` tries others live, `grip -` goes back.
+- **Hands:** a hand holding a copy closes as Link's does (his finger turns), and while he guards with the shield in
+  hand (a parry, or the `...Attention`/`...Atn...` stance) his whole left arm is copied: the shield goes up. Written
+  after each unit's own step, those bones only (`ghost puppet hands off|on`; `hands`, `hand_bones`).
+- **Ground clamp, every state:** its lowest foot goes as high as Link's lowest foot (his skeleton, both bodies' feet
+  boxes): attacks, landings, crouching, slopes, the air. Swimming, its head goes to his head's height
+  (`ghost puppet clamp off|on`; `clamp` feet/head, `clamp_m`, `clamp_want_m`).
+- **Daruk:** the ball keeps rolling through a sprint dip of up to 0.35 s (a frame hitch popped it upright). The
+  camera inside his body is not fixed: no camera address is known in this repo, so nothing safe can move it yet.
+- **Moblin:** his limb chains all carry Link's names (46 bones) [V model], so the round-3 pose fix covers his
+  ragdoll; swimming now wades (stands, head at Link's head height) instead of showing Link.
+- **Death:** an event or his body gone keeps the costume while it follows his ragdoll or he plays a death clip.
+- Selftest rows: `grip_place`, `items_kept`, `guard_detect`, `hands_overlay`, `death_keeps_costume`, `clamp_step`,
+  `ball_dip_hold`, `missing_clip_no_link`, `items_grip`, `clamp_world`.
 
 **Big bodies and knockback (designed, not built) [G].** A big body (Daruk, the Moblin) could shrug off small knocks
 (a bomb, a small hit) and still take the damage. Big hits (a Guardian beam, a big explosion, a Lynel) and death would

@@ -81,22 +81,51 @@ _ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,23}")
 UMII_M = (("Wait", "Default_Wait"), ("Walk", "Default_Move_Walk"), ("Run", "Common_Move_Run"),
           ("RunGear2", "Common_Move_Run_Gear2"), ("SquatWait", "Common_Crouch"), ("DamageS", "Common_Stagger_F_L"))
 UMII_W = tuple((n, "Common_Move_Escape" if n == "RunGear2" else c) for n, c in UMII_M)
+# The monsters (v2, 2026-11-14): each of Link's swings gets the monster's swing for that weapon (one-hander, two-hander
+# `_Lsword`, spear `_Spear`: the self puppet asks for the held weapon's name, puppet.c pup_weapon_pick), and BOKO_CTRL /
+# MOBLIN_CTRL time it so the monster's hit (the middle of its clip's hit window) lands on the middle of Link's: hit windows
+# and lengths read from the game's animation sets (Link's Player_Cut*, Bokoblin.baslist, Moriblin_Blue.baslist) [V
+# frames], start frame and rate computed from them (out/research/charsel-anims-physics.md section 2) [G: the look].
+# In water (no swim clip: the Moblin has only Drown [V]) they wade: their walk, slowed, their head at Link's (puppet.c).
 BOKO = (("Wait", "Wait"), ("Walk", "Walk"), ("Run", "Run"), ("RunGear2", "Run"), ("Jump", "Jump_Start"),
         ("Fall", "Jump_Loop"), ("Land", "Jump_End"), ("SquatWait", "Wait_Squat_Loop"), ("CutS1", "Attack_Small"),
-        ("CutS2", "Attack_Small_Two"), ("CutS3", "Attack_Small"), ("CutSF", "Attack_Big_Quick"),
-        ("CutDash", "Attack_Run_Sword"), ("CutJumpSt", "Attack_Big_Quick"), ("CutCharge", "Attack_Big_Quick"),
+        ("CutS2", "Attack_Small_Two"), ("CutS3", "Attack_Small"), ("CutSF", "Attack_Run_Sword"),
+        ("CutDash", "Attack_Run_Sword"), ("CutJumpSt", "Attack_Big_Quick"), ("CutCharge", "Attack_Ratation_End"),
         ("CutS1_Lsword", "Attack_Side_Lsword"), ("CutSF_Lsword", "Attack_Side_Lsword"),
-        ("CutS1_Spear", "Attack_Small_Spear"), ("CutS2_Spear", "Attack_Small_Spear"), ("CutSF_Spear", "Attack_Run_Spear"),
-        ("BowCharge", "Attack_Bow_Start"), ("BowShoot", "Attack_Bow_End"), ("GuardJust", "Guard_Just"),
-        ("DamageS", "Damage_Small"), ("Dead", "Down_Wait"), ("WeaponEquipOn", "Weapon_Catch"))
+        ("CutDash_Lsword", "Attack_Side_Lsword"), ("CutS1_Spear", "Attack_Small_Spear"),
+        ("CutS2_Spear", "Attack_Small_Spear"), ("CutS3_Spear", "Attack_Small_Spear"), ("CutSF_Spear", "Attack_Small_Spear"),
+        ("CutDash_Spear", "Attack_Small_Spear"), ("BowCharge", "Attack_Bow_Start"), ("BowShoot", "Attack_Bow_End"),
+        ("GuardJust", "Guard_Just"), ("DamageS", "Damage_Small"), ("Dead", "Down_Wait"), ("WeaponEquipOn", "Weapon_Catch"),
+        ("SwimWait", "Wait"), ("SwimMove", "Walk"), ("SwimDash", "Walk"))
+# (ghost name, rate, start frame, end frame; None: the clip's own)
+BOKO_CTRL = (("CutS1", 1.21, 23, None), ("CutS2", 1.28, 39, 65), ("CutS3", 1.11, 23, None), ("CutSF", 0.8, 6, None),
+             ("CutDash", 0.8, 10, None), ("CutCharge", 1.19, 0, 40), ("CutS1_Lsword", 1.6, 34, None),
+             ("CutSF_Lsword", 1.6, 27, None), ("CutDash_Lsword", 1.6, 37, None), ("CutS1_Spear", 0.8, 27, None),
+             ("CutS2_Spear", 0.8, 27, None), ("CutS3_Spear", 0.8, 27, None), ("CutSF_Spear", 0.8, 22, None),
+             ("CutDash_Spear", 0.8, 22, None), ("SwimMove", 0.6, None, None), ("SwimDash", 0.8, None, None))
 MOBLIN = (("Wait", "Wait"), ("Walk", "Walk"), ("Run", "Run"), ("RunGear2", "Run"), ("Jump", "Jump_Start"),
-          ("Fall", "Jump_Loop"), ("Land", "Jump_End"), ("SquatWait", "Wait_Squat_Loop"), ("CutS1", "Attack_Small"),
-          ("CutS2", "Attack_Small_Quick"), ("CutS3", "Attack_Side"), ("CutSF", "Attack_Center"),
-          ("CutDash", "Attack_Step"), ("CutJumpSt", "Attack_Center"), ("CutCharge", "Attack_Double_Start"),
-          ("CutS1_Lsword", "Attack_Two_Lsword"), ("CutSF_Lsword", "Attack_Two_Lsword"), ("CutS1_Spear", "Attack_Small"),
-          ("CutS2_Spear", "Attack_Small_Quick"), ("CutSF_Spear", "Attack_Center"), ("BowCharge", "Attack_Bow_Start"),
-          ("BowShoot", "Attack_Bow_End"), ("GuardJust", "Guard_Just_Shield"), ("DamageS", "Damage_Sword"),
-          ("Dead", "Down_Wait"), ("WeaponEquipOn", "Weapon_Catch_R"))
+          ("Fall", "Jump_Loop"), ("Land", "Jump_End"), ("SquatWait", "Wait_Squat_Loop"), ("CutS1", "Attack_Walk_Stay"),
+          ("CutS2", "Attack_Walk_Stay"), ("CutS3", "Attack_Walk"), ("CutSF", "Attack_Side"),
+          ("CutDash", "Attack_Walk"), ("CutJumpSt", "Attack_One_Lsword_Start"), ("CutCharge", "Attack_Side"),
+          ("CutS1_Lsword", "Attack_Two_Lsword"), ("CutSF_Lsword", "Attack_One_Lsword_Start"),
+          ("CutDash_Lsword", "Attack_Side"), ("CutS1_Spear", "Attack_Small"), ("CutS2_Spear", "Attack_Small"),
+          ("CutS3_Spear", "Attack_Small"), ("CutSF_Spear", "Attack_Center"), ("CutDash_Spear", "Attack_Step"),
+          ("BowCharge", "Attack_Bow_Start"), ("BowShoot", "Attack_Bow_End"), ("GuardJust", "Guard_Just_Shield"),
+          ("DamageS", "Damage_Sword"), ("Dead", "Down_Wait"), ("WeaponEquipOn", "Weapon_Catch_R"),
+          ("SwimWait", "Wait"), ("SwimMove", "Walk"), ("SwimDash", "Walk"))
+MOBLIN_CTRL = (("CutS1", 0.8, 17, 30), ("CutS2", 1.25, 37, 62), ("CutS3", 0.8, 24, 40), ("CutSF", 1.6, 24, None),
+               ("CutDash", 0.8, 22, 40), ("CutJumpSt", 0.8, 52, None), ("CutCharge", 1.6, 30, None),
+               ("CutS1_Lsword", 0.8, 41, 80), ("CutSF_Lsword", 0.8, 52, None), ("CutDash_Lsword", 1.6, 30, None),
+               ("CutS1_Spear", 1.4, 22, None), ("CutS2_Spear", 1.4, 22, None), ("CutS3_Spear", 1.4, 22, None),
+               ("CutSF_Spear", 0.8, 24, None), ("CutDash_Spear", 0.91, 22, None), ("SwimMove", 0.6, None, None),
+               ("SwimDash", 0.8, None, None))
+# Names only the costume packs have (not the Link body's, ghost_link_pack.ANIMS): the monsters' swing for a spear's
+# third hit and the two-hander's and spear's dash attack (puppet.c PUP_SWINGS_OWN).
+EXTRA_NAMES = ("CutS3_Spear", "CutDash_Lsword", "CutDash_Spear")
+FRAME_CTRL = 0x43885a40   # a clip node's Extend > FrameCtrl object (Rate, StartFrame, EndFrame), as the game's sets [V]
+# People's sprint where their family file has no sprint (UMii_Common_Body_W: only Common_Move_Escape, a panic run [V]):
+# their own run, played faster.
+SPRINT_RATE = 1.3
 
 
 def _with(base: tuple, **kw) -> tuple:
@@ -121,27 +150,44 @@ class Recipe:
     looks: str = ""           # one honest line: what looks right and what doesn't
     v: int = 1                # bump when the recipe changes: a build keeps an older pack only while its v matches
     #                           (it also travels in the look message, for the log; receivers don't compare it)
+    ctrl: tuple = ()          # (ghost name, rate, start frame, end frame): how its set plays the clip (None: as is)
 
 
 RECIPES: dict[str, Recipe] = {r.id: r for r in (
     Recipe("link", "Link", "Hylians", "link", aliases=("hero",),
            looks="Works in the game (the Link body). Bald and in underwear: hair and clothes are armor actors."),
-    Recipe("linkle", "Linkle", "Hylians", "linkle", aliases=("linkel",),
-           looks="Needs the Linkle mod on your friend's PC too; without it they see Link."),
+    Recipe("linkle", "Linkle", "Hylians", "linkle", aliases=("linkel",), v=2,
+           looks="Needs The Linkle Mod in your mod library (on or off): her costume is built from its files."),
+    # Own moves (2026-11-14): the stock actors' own sets pick their stand and walk by the look file's personality
+    # (Woman_Active -> Positive_*, Woman_Deflated -> Negative_*, else Default_*); Zelda, Mipha and Paya are
+    # Woman_Normal, Urbosa Woman_Active on the men's sets (Man_Active / Man_Deflated / default), so all four play
+    # Default_Wait and Default_Move_Walk, found first in the women's file [V: their packs]. The game has no
+    # champion-only walk or run (memories are videos) [V]. Sprint: their run, faster (the women's file has only a panic
+    # run, which v3 used).
     Recipe("zelda", "Zelda", "Hylians", "pack", "Dm_Npc_Zelda_Sibyl",
-           (("UMii_Common_Body_W_Animation", True), (PLAYER_ANIM, True)), UMII_W, load_mb=10.6, aliases=("princess",),
-           v=3,
-           looks="Her own stand, walk, run; Link's moves for the rest. The dress is stiff."),
+           (("UMii_Common_Body_W_Animation", True), (PLAYER_ANIM, True)), _with(UMII_W, RunGear2="Common_Move_Run"),
+           load_mb=10.6, aliases=("princess",), v=4, ctrl=(("RunGear2", SPRINT_RATE, None, None),),
+           looks="Her game actor's own stand, walk, run (sprint: her run, faster); Link's moves for the rest. "
+                 "The dress is stiff."),
     Recipe("hylian", "Hylian", "Hylians", "pack", "Npc_HatenoVillage004",
            (("UMii_Common_Body_M_Animation", True), (PLAYER_ANIM, True)), UMII_M, load_mb=11.5,
            aliases=("hateno", "villager"), looks="A Hateno villager: his own walk, Link's moves for the rest."),
+    # Paya: her own shy stand (her own animation file, made for her skeleton: no retarget, as her game pack has it),
+    # then the walk and run her game pack uses (the Hylian women's), Link's moves for the rest (retargeted).
+    # load_mb: 6.4 + her own file (0.4 MB unpacked).
     Recipe("sheikah", "Paya (Sheikah)", "Races", "pack", "Npc_Kakariko002",
-           (("UMii_Common_Body_W_Animation", True), (PLAYER_ANIM, True)), UMII_W, load_mb=6.4, aliases=("paya",),
-           looks="Her own stand, walk, run; Link's moves for the rest."),
+           (("Npc_Shiekah_Heir_Animation", False), ("UMii_Common_Body_W_Animation", True), (PLAYER_ANIM, True)),
+           _with(UMII_W, Wait="Npc_Shiekah_Heir_Talk_Shy_Wait", RunGear2="Common_Move_Run"), load_mb=6.8,
+           aliases=("paya",), v=3, ctrl=(("RunGear2", SPRINT_RATE, None, None),),
+           looks="Her own shy stand; the game's walk and run for her; Link's moves for the rest."),
+    # Urbosa (v4): the women's file, where her game actor finds her stand, walk and run, no longer the Gerudo guards'
+    # file (v3 had it first: her stand and walk were a Gerudo guard's; the real Urbosa never loads it [V]). Her actor
+    # also loads the men's file (5.1 MB unpacked) for a real sprint; left out to keep her light: her run, faster.
+    # load_mb: 16.2 - 2.9 (the guards' file, unpacked) [V].
     Recipe("gerudo", "Urbosa (Gerudo)", "Races", "pack", "Dm_Npc_Gerdo_Hero",
-           (("UMii_Gerudo_BodyC_W_Animation", True), ("UMii_Common_Body_W_Animation", True), (PLAYER_ANIM, True)),
-           UMII_W, load_mb=16.2, aliases=("urbosa",), v=3,
-           looks="Tall: the heaviest one (16 MB). Link's moves may sink her hips a little [G]."),
+           (("UMii_Common_Body_W_Animation", True), (PLAYER_ANIM, True)), _with(UMII_W, RunGear2="Common_Move_Run"),
+           load_mb=13.3, aliases=("urbosa",), v=4, ctrl=(("RunGear2", SPRINT_RATE, None, None),),
+           looks="Tall. Her game actor's own stand, walk and run (sprint: her run, faster); Link's moves for the rest."),
     Recipe("goron", "Daruk (Goron)", "Races", "pack", "Dm_Npc_Goron_Hero",
            (("UMii_Goron_BodyC_M_Animation", True), (PLAYER_ANIM, True)),
            _with(UMII_M, RunGear2="Common_Move_Ball"), load_mb=10.9, aliases=("daruk",), v=3,
@@ -151,17 +197,27 @@ RECIPES: dict[str, Recipe] = {r.id: r for r in (
             ("Npc_Rito_Teba_Animation", True), (PLAYER_ANIM, True)),
            _with(UMII_M, ParashawlGlide="Npc_Rito_Teba_BattleFly"), load_mb=10.6, aliases=("revali",), v=3,
            looks="Glides with real wings (a Rito flying clip)."),
+    # Mipha: the stand, walk and run her game pack plays (the Hylian women's file, retargeted to her), and a Zora
+    # WOMAN's swim (UMii_Zora_BodyC_W; v3 had the Zora men's file, whose Default_Wait is a man's stance too). Her
+    # size is her game model's, scale 1 (hips 0.75 m, legs 0.54 m: her own game clip Gift_Healing has her hips at
+    # 0.753 m) [V]. load_mb: 11.0 + 0.2 (the women's file is bigger than the men's).
     Recipe("zora", "Mipha (Zora)", "Races", "pack", "Dm_Npc_Zora_Hero",
-           (("UMii_Common_Body_W_Animation", True), ("UMii_Zora_BodyC_M_Animation", True), (PLAYER_ANIM, True)),
+           (("UMii_Common_Body_W_Animation", True), ("UMii_Zora_BodyC_W_Animation", True), (PLAYER_ANIM, True)),
            _with(UMII_W, SwimWait="Common_Swim_Wait", SwimMove="Common_Move_Swim_Walk",
-                 SwimDash="Common_Move_Swim_Run"), load_mb=11.0, aliases=("mipha",), v=3,
-           looks="Swims with Zora swim clips."),
+                 SwimDash="Common_Move_Swim_Run", RunGear2="Common_Move_Run"), load_mb=11.2, aliases=("mipha",), v=5,
+           ctrl=(("RunGear2", SPRINT_RATE, None, None),),
+           looks="Her game size (shorter than Link). Swims with a Zora woman's swim clips (lying in the water when "
+                 "she moves, upright when she treads)."),
     Recipe("bokoblin", "Bokoblin", "Monsters", "pack", "Enemy_Bokoblin_Junior",
-           (("Enemy_Bokoblin_Animation", False),), BOKO, rest="speed", load_mb=6.2, aliases=("boko",),
-           looks="Its own clips (attacks too). No climb, glide or swim pose: it stands or walks there."),
+           (("Enemy_Bokoblin_Animation", False),), BOKO, rest="speed", load_mb=6.2, aliases=("boko",), v=2,
+           ctrl=BOKO_CTRL,
+           looks="Its own clips; each swing timed to Link's hit and picked by his weapon. No climb or glide pose; "
+                 "it wades in water."),
     Recipe("moblin", "Moblin", "Monsters", "pack", "Enemy_Moriblin_Junior",
-           (("Enemy_Moriblin_Animation", False),), MOBLIN, rest="speed", load_mb=7.8, aliases=("moriblin",),
-           looks="Its own clips. No climb, glide or swim pose. Big: may pop in at the screen's edges."),
+           (("Enemy_Moriblin_Animation", False),), MOBLIN, rest="speed", load_mb=7.8, aliases=("moriblin",), v=2,
+           ctrl=MOBLIN_CTRL,
+           looks="Its own clips; each swing timed to Link's hit and picked by his weapon. No climb or glide pose; "
+                 "it wades in water. Big: may pop in at the screen's edges."),
 )}
 
 CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -329,6 +385,16 @@ def here_catalog(folder=None, library=None) -> tuple[dict, str]:
     return cat, cat["where"]
 
 
+def linkle_ready(cat: dict | None) -> bool | None:
+    """Whether this PC can show Linkle (the wheel's Ready): her costume is built (and, in a deployed catalog, deployed),
+    or the Linkle Mod is on (the Link body is Linkle then). None: no catalog. (tools/mp_page.py and tools/mp/lobby.py
+    should ask this too.)"""
+    if not cat:
+        return None
+    lk = cat.get("linkle") if isinstance(cat.get("linkle"), dict) else {}
+    return lk.get("how") == "link-body" or "linkle" in (cat.get("built") or {})
+
+
 class Looks:
     """How this PC shows other players' looks: an id from the network becomes an actor name only through this PC's
     own catalog (what it built, on which free name), never raw. Anything else is the Link body, with a reason."""
@@ -474,7 +540,8 @@ class Wheel:
         short = r.name.split(" (")[0]
         out = ["Who am I?", f"  {groups}", f"  <  {r.name}  >" + (f"   {st}" if st else ""),
                f"  Others see you as: {short}." + (f" You see yourself as {short} too, live in the game."
-                                                    if r.kind == "pack" else " You play as: Link.")]
+                                                    if r.kind == "pack" or r.kind == "linkle" and self.linkle
+                                                    else " You play as: Link.")]
         if r.looks:
             out.append(f"  {r.looks}")
         if self.playas_note:
@@ -757,12 +824,238 @@ def player_model_mod(library) -> dict | None:
 
 
 def _read_link_model(where: Path, member: str, tex: bool = False) -> bytes | None:
+    return _read_mod_model(where, member, "Link.Tex" if tex else "Link")
+
+
+def _read_mod_model(where: Path, member: str, name: str) -> bytes | None:
+    """Model/<name>.sbfres next to a mod's Link model (where/member as _link_model_in gives them), or None."""
     from mp import ghost_link_pack as glp
-    name = "Model/Link.Tex.sbfres" if tex else "Model/Link.sbfres"
     if not member:
-        p = where.with_name("Link.Tex.sbfres") if tex else where
+        p = Path(where).with_name(f"{name}.sbfres")
         return p.read_bytes() if p.is_file() else None
-    return glp._sarc_member(where, name)
+    return glp._sarc_member(Path(where), f"Model/{name}.sbfres")
+
+
+def linkle_mod(library) -> dict | None:
+    """The Linkle Mod in a modman library, ON OR OFF (read only; the last one listed wins): its own files make the
+    Linkle costume, so `iam linkle` works with the mod off too. {"id", "name", "version", "enabled", "where",
+    "member", "fp"}, or None when the library has none."""
+    try:
+        cfg = json.loads((Path(library) / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    found = None
+    for m in (cfg.get("mods") or []) if isinstance(cfg, dict) else []:
+        if not (isinstance(m, dict) and isinstance(m.get("id"), str)):
+            continue
+        name = str(m.get("name") or m["id"])
+        if "linkle" not in (m["id"] + " " + name).lower():
+            continue
+        hit = _link_model_in(Path(library) / "mods" / m["id"])
+        if hit:
+            found = {"id": m["id"], "name": name, "version": str(m.get("version") or ""),
+                     "enabled": bool(m.get("enabled")), "where": str(hit[0]), "member": hit[1]}
+    if found:
+        data = _read_link_model(Path(found["where"]), found["member"])
+        found["fp"] = hashlib.sha256(data).hexdigest()[:16] if data else ""
+    return found
+
+
+# The Linkle costume: the Linkle Mod's body (its Model/Link) wears its default look (its Model/Armor_Default: the hair,
+# the skirt and the pouches, which the game puts on the player as armor). One model with both, so a costume pack shows
+# all of her: merge_parts puts each part's shapes on the body's skeleton.
+LINKLE_LOOK = "Armor_Default"
+PART_PREFIX = "SwPart"      # a part's material names: SwPart<k>_<name> (k: the part's number)
+REST_GAP = 1e-3             # m: a part bone may rest this far from the body's (else its bone-space shapes are left out)
+
+
+def merge_parts(base, parts, tex_rename: dict | None = None) -> tuple[object, dict]:
+    """The model `base` (a neutral Model) with the shapes of `parts` (models skinned to bones named as the base's, like
+    an armor's) added: one skeleton (the base's bones, then each part's own new bones, resting where they rest in the
+    part), each part vertex skinned to the merged skeleton's matrix for the same bone. Both bind poses must be their
+    skeletons' rest (the game's models are: checked), so a vertex in model space stays where it was; a bone-space
+    (rigid) part shape whose bone rests elsewhere in the base is left out. Materials: SwPart<k>_<name>, textures
+    renamed by tex_rename. Returns (the model, info)."""
+    import copy
+    import struct
+    from wiiu_model import formats
+    from wiiu_model.neutral import Bone, Skeleton
+    m = copy.deepcopy(base)
+    sk = m.skeleton
+    if not sk.flags & EULER_ROT:
+        raise CharselError("only Euler skeletons are merged here")
+    bones = list(sk.bones)
+    index = {b.name: i for i, b in enumerate(bones)}
+    if len(index) != len(bones):
+        raise CharselError("the body's skeleton has a bone name twice")
+    worlds = _worlds(bones)
+    s0 = sk.smooth_count
+    smooth = list(sk.matrix_to_bone[:s0])
+    rigid = list(sk.matrix_to_bone[s0:])
+    ibs = bytearray(sk.inverse_matrices)
+    smooth_of = {b: k for k, b in enumerate(smooth)}
+    rigid_of = {b: k for k, b in enumerate(rigid)}
+    new_smooth: list[int] = []      # bones of the smooth matrices added (after the base's)
+    new_rigid: list[int] = []
+    pending: list[tuple] = []       # (vertex buffer, [(attribute, {part matrix: ("s"|"r", merged bone)})])
+    info = {"parts": [], "shapes": 0, "left_out": [], "new_bones": 0}
+    ren = tex_rename or {}
+
+    def check_bind(p):
+        pw = _worlds(p.skeleton.bones)
+        for k in range(p.skeleton.smooth_count):
+            ib = struct.unpack_from("<12f", p.skeleton.inverse_matrices, 48 * k)
+            want = _inv(pw[p.skeleton.matrix_to_bone[k]])
+            if max(abs(ib[4 * r + c] - want[r][c]) for r in range(3) for c in range(4)) > 1e-3:
+                raise CharselError(f"{p.name}'s bind pose isn't its rest pose: not merged")
+        return pw
+
+    for k, part in enumerate(parts):
+        psk = part.skeleton
+        if not psk.flags & EULER_ROT:
+            raise CharselError(f"{part.name}: only Euler skeletons are merged here")
+        pw = check_bind(part)
+        pmap: dict[int, int] = {}                       # part bone -> merged bone
+        for i, b in enumerate(psk.bones):
+            if b.name in index:
+                pmap[i] = index[b.name]
+                continue
+            par = pmap[b.parent] if b.parent >= 0 else -1
+            rel = _mul(_inv(worlds[par]), pw[i]) if par >= 0 else pw[i]
+            sc, rot, tr = _decompose(rel)
+            nb = Bone(b.name, par, -1, -1, b.billboard_index, b.flags & ~0x0F000000, sc, rot, tr,
+                      list(b.user_data), dict(b.extra))
+            bones.append(nb)
+            index[b.name] = pmap[i] = len(bones) - 1
+            worlds.append(_local(nb) if par < 0 else _mul(worlds[par], _local(nb)))
+            info["new_bones"] += 1
+        moved = {i for i in pmap if _gap(pw[i], worlds[pmap[i]]) > REST_GAP}   # (part bones resting elsewhere)
+        mat0 = len(m.materials)
+        for mat in part.materials:
+            mm = copy.deepcopy(mat)
+            mm.name = f"{PART_PREFIX}{k}_{mat.name}"
+            mm.textures = [ren.get(t, t) for t in mm.textures]
+            m.materials.append(mm)
+        names = {s.name for s in m.shapes}
+        kept = 0
+        for sh in part.shapes:
+            vb = part.vertex_buffers[sh.vertex_buffer]
+            if vb.vertex_count <= 1:                    # (a placeholder: a part the mod shrank away)
+                continue
+            at = {a.name: a for a in vb.attributes}
+            idx_attrs = [a for n, a in sorted(at.items()) if n.startswith("_i")]
+            used: dict[int, tuple] = {}
+            for a in idx_attrs:
+                for v in range(vb.vertex_count):
+                    for mi in _attr_values(a.format, vb.buffers[a.buffer], v * vb.strides[a.buffer] + a.offset):
+                        mi = int(mi)
+                        if mi not in used:
+                            if mi >= len(psk.matrix_to_bone):
+                                raise CharselError(f"{part.name}: a vertex names skin matrix {mi} of "
+                                                   f"{len(psk.matrix_to_bone)}")
+                            pb = psk.matrix_to_bone[mi]
+                            used[mi] = ("s" if mi < psk.smooth_count else "r", pmap[pb], pb)
+            bone_space = sh.skin_count == 0 or any(kind == "r" for kind, _b, _p in used.values())
+            local_bones = {pb for _k, _b, pb in used.values()} | ({sh.bone} if sh.skin_count == 0 else set())
+            if bone_space and local_bones & moved:
+                info["left_out"].append(f"{part.name}/{sh.name}")
+                continue
+            for kind, mb, _pb in used.values():         # (a matrix for each bone, the base's when it has one)
+                if kind == "s" and mb not in smooth_of and mb not in new_smooth:
+                    new_smooth.append(mb)
+                elif kind == "r" and mb not in rigid_of and mb not in new_rigid:
+                    new_rigid.append(mb)
+            nvb = copy.deepcopy(vb)
+            m.vertex_buffers.append(nvb)
+            pending.append((nvb, [(a, {mi: (kind, mb) for mi, (kind, mb, _p) in used.items()}) for a in idx_attrs]))
+            nsh = copy.deepcopy(sh)
+            nsh.vertex_buffer = len(m.vertex_buffers) - 1
+            nsh.material = mat0 + sh.material
+            nsh.bone = pmap[sh.bone]
+            nsh.skin_bones = [pmap[b] for b in sh.skin_bones]
+            if nsh.name in names:
+                nsh.name = f"{PART_PREFIX}{k}_{nsh.name}"
+            names.add(nsh.name)
+            m.shapes.append(nsh)
+            kept += 1
+        info["parts"].append({"model": part.name, "shapes": kept})
+        info["shapes"] += kept
+    # the final matrix list: the base's smooth, the new smooth, the base's rigid, the new rigid
+    ns = len(new_smooth)
+    final = smooth + new_smooth + rigid + new_rigid
+    if len(final) > 255:
+        raise CharselError(f"{len(final)} skin matrices: more than one byte can name")
+    s_at = {b: i for i, b in enumerate(smooth + new_smooth)}
+    r_at = {b: s0 + ns + i for i, b in enumerate(rigid + new_rigid)}
+
+    def write(vb, a, fn):
+        sizes = formats.attr_component_sizes(a.format)
+        buf = bytearray(vb.buffers[a.buffer])
+        for v in range(vb.vertex_count):
+            off = v * vb.strides[a.buffer] + a.offset
+            vals = _attr_values(a.format, bytes(buf), off)
+            for c, size in enumerate(sizes):
+                new = fn(int(vals[c]))
+                if new >= 1 << (8 * size):
+                    raise CharselError(f"skin matrix {new} doesn't fit its {size}-byte index")
+                buf[off:off + size] = new.to_bytes(size, "little")
+                off += size
+        vb.buffers[a.buffer] = bytes(buf)
+
+    if ns:                                              # (the base's rigid matrices move up by the new smooth ones)
+        for vb in m.vertex_buffers[:len(base.vertex_buffers)]:
+            for a in vb.attributes:
+                if a.name.startswith("_i"):
+                    write(vb, a, lambda i: i + ns if i >= s0 else i)
+    for vb, attrs in pending:
+        for a, mp_ in attrs:
+            write(vb, a, lambda i, mp_=mp_: s_at[mp_[i][1]] if mp_[i][0] == "s" else r_at[mp_[i][1]])
+    for b in new_smooth:
+        w = _inv(worlds[b])
+        ibs += struct.pack("<12f", *(w[r][c] for r in range(3) for c in range(4)))
+    for b in bones:
+        b.smooth_index = b.rigid_index = -1
+    for i, b in enumerate(final):
+        if i < s0 + ns:
+            bones[b].smooth_index = i
+        else:
+            bones[b].rigid_index = i
+    m.skeleton = Skeleton(sk.flags, bones, final, s0 + ns, len(rigid) + len(new_rigid), bytes(ibs), dict(sk.extra))
+    m.total_vertex_count = sum(vb.vertex_count for vb in m.vertex_buffers)
+    info.update(bones=len(bones), matrices=len(final), vertices=m.total_vertex_count)
+    return m, info
+
+
+def linkle_costume(where, member) -> tuple[bytes, bytes, dict]:
+    """(model, textures, info) of the Linkle costume, from the Linkle Mod's own files (where/member: linkle_mod's):
+    its Link model with its default look (Armor_Default: hair, skirt, pouches) merged on, and its Link textures with
+    the look's beside them. Yaz0-packed, like the game's .sbfres. Mod files only, read only."""
+    import copy
+    from wiiu_model import checks, nx_model
+    from wiiu_model.convert import set_texinfo
+    from wiiu_model.neutral import ResFile
+    where = Path(where)
+    body, body_tex = _read_link_model(where, member), _read_link_model(where, member, tex=True)
+    look, look_tex = _read_mod_model(where, member, LINKLE_LOOK), _read_mod_model(where, member, LINKLE_LOOK + ".Tex")
+    if not body or not body_tex:
+        raise CharselError("the Linkle Mod's Link model or textures aren't in its files")
+    if not look or not look_tex:
+        raise CharselError(f"the Linkle Mod has no {LINKLE_LOOK} (her hair and clothes)")
+    res = nx_model.read(_unyaz(body))
+    if len(res.models) != 1:
+        raise CharselError(f"the Linkle Mod's Link model file has {len(res.models)} models, expected 1")
+    parts = [p for p in nx_model.read(_unyaz(look)).models
+             if any(p.vertex_buffers[s.vertex_buffer].vertex_count > 1 for s in p.shapes)]
+    tex_raw, tex_names, rename = merge_textures(body_tex, look_tex)
+    model, info = merge_parts(res.models[0], parts, rename)
+    out = ResFile(res.name, [model], [], [], [copy.deepcopy(e) for e in res.external], dict(res.extra))
+    set_texinfo(out, len(tex_names))
+    raw = nx_model.write(out)
+    bad = checks.switch_model_problems(raw)
+    if bad:
+        raise CharselError(f"the Linkle costume model fails the self-check: {bad[:3]}")
+    info.update(textures=len(tex_names), texture_renames=rename)
+    return _yaz(raw), _yaz(tex_raw), info
 
 
 # ------------------------------------------------------------------------------------------------ the game's files
@@ -870,12 +1163,52 @@ def clip_map(r: Recipe, rest: str | None = None) -> dict[str, str]:
     """{ghost name: clip}: the character's own, then (rest "link") Link's clip for every other ghost name."""
     from mp import ghost_link_pack as glp
     link = {n: c for n, c, _f in glp.ANIMS}
-    unknown = [n for n, _ in r.own if n not in link]
+    unknown = [n for n, _ in r.own if n not in link and n not in EXTRA_NAMES]
     if unknown:
         raise CharselError(f"{r.id}: {', '.join(unknown)} isn't a ghost name")
     m = dict(link) if (rest or r.rest) == "link" or r.kind != "pack" else {}
     m.update(r.own)
     return m
+
+
+def frame_ctrl(r: Recipe) -> dict[str, tuple]:
+    """{ghost name: (rate, start frame, end frame)} for the names whose set doesn't play its clip as it is."""
+    m = clip_map(r)
+    bad = [c[0] for c in r.ctrl if c[0] not in m]
+    if bad:
+        raise CharselError(f"{r.id}: frame control for {', '.join(bad)}, which it has no clip for")
+    return {n: (rate, start, end) for n, rate, start, end in r.ctrl}
+
+
+def as_file(clip: str, rate=None, start=None, end=None) -> bytes:
+    """An animation set with one clip node (ghost_link_pack.as_file), and the game's own frame control on the node
+    when given: Extend > FrameCtrl > Rate / StartFrame / EndFrame, as Link's Player_CutS1 has it [V]."""
+    import aamp
+    from aamp import F32, INT, STRING64, PList, PObject, name_hash
+    from mp import ghost_link_pack as glp
+    if rate is None and start is None and end is None:
+        return glp.as_file(clip)
+    params = PObject()
+    params.set("TypeIndex", INT, 67)
+    params.set("FileName", STRING64, clip)
+    fc = PObject()
+    for key, v in (("Rate", rate), ("StartFrame", start), ("EndFrame", end)):
+        if v is not None:
+            fc.set(key, F32, float(v))
+    ext = PList(lists={name_hash("FrameCtrl"): PList(objects={FRAME_CTRL: fc})})
+    element = PList(objects={name_hash("Parameters"): params}, lists={name_hash("Extend"): ext})
+    return aamp.dump(PList(lists={name_hash("Elements"): PList(lists={name_hash("Element0"): element})}))
+
+
+def as_ctrl(bas: bytes) -> tuple:
+    """(rate, start frame, end frame) of a one-clip set (None: not set)."""
+    import aamp
+    from aamp import name_hash
+    el = aamp.load(bas).list("Elements").list("Element0")
+    ext = el.lists.get(name_hash("Extend"))
+    fcl = ext.lists.get(name_hash("FrameCtrl")) if ext else None
+    fc = fcl.objects.get(FRAME_CTRL) if fcl else None
+    return tuple(fc.get_value(k) if fc else None for k in ("Rate", "StartFrame", "EndFrame"))
 
 
 def anim_files(r: Recipe, rest: str | None = None) -> list[tuple[str, bool]]:
@@ -1089,12 +1422,12 @@ def make_pack(r: Recipe, slot: str, profile: str, template: dict[str, bytes], do
         files = pack_anim_files(r, donor, rest)
     look = (d_umii, donor[f"Actor/UMii/{d_umii}.bumii"]) if umii else None
     model_list, _swapped = body_targets(donor[ml_name], template, bones)
-    return _pack_files(r.id, slot, profile, template, model_list, look, files, clip_map(r, rest))
+    return _pack_files(r.id, slot, profile, template, model_list, look, files, clip_map(r, rest), frame_ctrl(r))
 
 
 def _pack_files(cid: str, slot: str, profile: str, template: dict[str, bytes], model_list: bytes,
-                look: tuple[str, bytes] | None, files: list[tuple[str, bool]], mapping: dict[str, str]
-                ) -> dict[str, bytes]:
+                look: tuple[str, bytes] | None, files: list[tuple[str, bool]], mapping: dict[str, str],
+                ctrl: dict[str, tuple] | None = None) -> dict[str, bytes]:
     """The pack: the template's actor link with our users (no AI but the cutscene dummy's, no physics), the files the
     kept users need, our model list, the look file (bodies the game puts together from one), our animation list
     (files, sorted names, blend frames) and one animation set per name. Every name of ours is SwChar_<id>, so two
@@ -1165,7 +1498,7 @@ def _pack_files(cid: str, slot: str, profile: str, template: dict[str, bytes], m
                                                                  name_hash("ASDefines"): defines,
                                                                  name_hash("CFDefines"): cf}))
     for n, clip in mapping.items():
-        out[f"Actor/AS/{name}_{n}.bas"] = glp.as_file(clip)
+        out[f"Actor/AS/{name}_{n}.bas"] = as_file(clip, *(ctrl or {}).get(n, (None, None, None)))
     return out
 
 
@@ -1209,7 +1542,7 @@ def read_back(data: bytes) -> dict:
     users = {k: lt.get_value(k) for k in ("ProfileUser", "ModelUser", "ASUser", "PhysicsUser", "AIProgramUser",
                                           "UMiiUser", "AnimationInfo") + UNTOUCHABLE}
     asl = aamp.load(files[f"Actor/ASList/{users['ASUser']}.baslist"])
-    names, clips, missing = [], {}, []
+    names, clips, missing, ctrls = [], {}, [], {}
     for o in asl.list("ASDefines").objects.values():
         n, fn = o.get_value("Name"), o.get_value("Filename")
         names.append(n)
@@ -1218,7 +1551,10 @@ def read_back(data: bytes) -> dict:
             missing.append(n)
             continue
         clips[n] = aamp.load(bas).list("Elements").list("Element0").object("Parameters").get_value("FileName")
-    adds = [(o.get_value("Anim"), o.get_value("RetargetModel")) for o in asl.list("AddReses").objects.values()]
+        fc = as_ctrl(bas)
+        if any(v is not None for v in fc):
+            ctrls[n] = fc
+    adds =[(o.get_value("Anim"), o.get_value("RetargetModel")) for o in asl.list("AddReses").objects.values()]
     ml = files.get(f"Actor/ModelList/{users['ModelUser']}.bmodellist")
     folder, targets = None, []
     if ml:
@@ -1227,7 +1563,8 @@ def read_back(data: bytes) -> dict:
         if md and md.lists:
             folder = next(iter(md.lists.values())).object("Base").get_value("Folder")
         targets = target_types(mlp)
-    return {"slot": slot, "users": users, "names": names, "clips": clips, "missing_sets": missing, "adds": adds,
+    return {"slot": slot, "users": users, "names": names, "clips": clips, "ctrl": ctrls, "missing_sets": missing,
+            "adds": adds,
             "folder": folder, "targets": targets, "files": len(files), "unpacked": len(raw), "packed": len(data)}
 
 
@@ -1334,9 +1671,10 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
             keep[cid] = info
     table = dict(SLOTS)
     table.update(slots or {})
+    lm = linkle_mod(library) if library else None    # (on or off: her costume comes from its files)
     on: dict[str, list[str]] = {}
-    for cid in ids:   # (Link and Linkle get a name of their own only with --model-copies)
-        if cid in table and (RECIPES[cid].kind == "pack" or model_copies):
+    for cid in ids:   # (Link gets a name of its own only with --model-copies; Linkle whenever her mod's files are here)
+        if cid in table and (RECIPES[cid].kind == "pack" or model_copies or cid == "linkle" and lm):
             on.setdefault(table[cid], []).append(cid)
     for cid, info in keep.items():
         on.setdefault(info["slot"], []).append(cid)
@@ -1357,6 +1695,16 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
         pause = glp.read_pack(glp.find_pack(romfs, glp.DONOR_LINK)) if model_copies else None
     except (glp.PackError, FormatError, aamp.AampError, OSError) as e:
         raise CharselError(f"a game file didn't read as expected: {e}") from None
+    if pause is None and lm and "linkle" in ids:    # (Linkle's costume: the pause-menu Link's model list)
+        try:
+            pause = glp.read_pack(glp.find_pack(romfs, glp.DONOR_LINK))
+        except (glp.PackError, FormatError, aamp.AampError, OSError) as e:
+            lm = None
+            catalog_note = f"Linkle wasn't built: the game's {glp.DONOR_LINK} didn't read ({e})"
+        else:
+            catalog_note = ""
+    else:
+        catalog_note = ""
     clips = ClipCache(romfs, cache)
     pm = player_model_mod(library) if library else None
     catalog = {"format": 1, "builder": VERSION, "mod": MOD_ID, "built": dict(keep), "kept": sorted(keep),
@@ -1409,14 +1757,25 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
                     notes.append(f"{r.name} may not fit {slot}'s heap (about {need:,} of {heap:,} bytes): if it "
                                  "doesn't load, move it to a bigger free name with --slot.")
                 files = make_pack(r, slot, profile, template, donor, rest, anims, names)
-            elif model_copies and (cid == "linkle" and pm and pm["linkle"] or cid == "link" and pm):
+            elif cid == "linkle" and lm or model_copies and cid == "link" and pm:
                 slot = table[cid]
                 profile, problems = check_slot(romfs, slot, ainfo)
                 if problems:
                     raise CharselError("; ".join(problems))
-                if cid == "linkle":
-                    src = Path(pm["where"]), pm["member"]
-                    model, tex = _read_link_model(*src), _read_link_model(*src, tex=True)
+                if cid == "linkle":   # her costume: the mod's body wearing its own hair and clothes
+                    src = Path(lm["where"]), lm["member"]
+                    try:
+                        model, tex, linfo = linkle_costume(*src)
+                        look = {"how": "costume", "parts": linfo["parts"], "left_out": linfo["left_out"]}
+                    except Exception as e:   # (any read failure: the mod's body as it is, said)
+                        model, tex = _read_link_model(*src), _read_link_model(*src, tex=True)
+                        look = {"how": "body only", "why": str(e)[:200]}
+                        notes.append(f"Linkle's hair and clothes couldn't be put on her ({str(e)[:120]}): her costume "
+                                     "is the Linkle Mod's body only.")
+                    catalog["linkle"].update(costume=slot, mod=lm["name"], version=lm["version"], fp=lm["fp"],
+                                             mod_on=lm["enabled"], look=look)
+                    if catalog["linkle"]["how"] == "missing":
+                        catalog["linkle"]["how"] = "costume"
                 else:
                     model, tex = model_file(romfs, "Link"), model_file(romfs, "Link.Tex")
                 if not model or not tex:
@@ -1425,8 +1784,11 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
                 files = make_copy_pack(cid, slot, profile, template, pause)
                 res = {"own": {}, "link": {n: c for n, c, _ in glp.ANIMS}}
             else:
-                if cid == "linkle" and catalog["linkle"]["how"] == "missing":
-                    catalog["skipped"][cid] = "no Linkle mod in your library: friends who pick Linkle look like Link"
+                if cid == "linkle" and catalog_note:
+                    catalog["skipped"][cid] = catalog_note
+                elif cid == "linkle" and catalog["linkle"]["how"] == "missing":
+                    catalog["skipped"][cid] = ("no Linkle mod in your mod library (on or off): Linkle can't be built, "
+                                               "so `iam linkle` and friends who pick Linkle show Link")
                 continue
         except (CharselError, glp.PackError, FormatError, aamp.AampError, OSError) as e:
             catalog["skipped"][cid] = str(e)[:300]
@@ -2521,8 +2883,73 @@ def body_model(romfs: Path, cid: str) -> tuple[str, str] | None:
     return (folder, unit) if isinstance(folder, str) and folder else None
 
 
-def bodies_header(boxes: dict[str, dict[str, list[int]]]) -> str:
-    """pup_bodies.h: the C table puppet.c reads ({id: {bone: box}}; link first)."""
+# Each body's hand and weapon bones, for the costume's held items (the "character weapons" job): the bones a held
+# weapon, shield or bow can sit on, where each rests in its parent's frame, and the finger bones of each hand (for a
+# closed fist). Every person and monster here has Wrist_L/R and Weapon_L/R (Weapon_* a child of Wrist_*); Pod_A/B
+# (the back and waist places) all but Zelda's model and the monsters; Link alone has Pod_C and Weapon_Root [V: the
+# game's models, `charsel.py bodies`].
+HAND_BONES = ("Wrist_L", "Wrist_R", "Weapon_L", "Weapon_R", "Pod_A", "Pod_B", "Pod_C", "Weapon_Root")
+
+
+def hand_bones(model) -> dict:
+    """{"bones": {name: {"parent", "place" (cm), "turn" (degrees, Euler XYZ)}} for the HAND_BONES a model has, at rest
+    in the parent's frame; "fingers": {"L": [names], "R": [names]} (the bones under each wrist named Finger*); "hip":
+    the hips' (Skl_Root's) height at rest, m}. (A Link clip played WITHOUT the retarget puts a body's hips at Link's
+    height, 0.994 m at rest: Mipha's rest at 0.751 then hangs 0.24 m up, Urbosa's at 1.343 sinks 0.35 m.)"""
+    import math
+    sk = model.skeleton
+    if not sk.flags & EULER_ROT:
+        raise CharselError("the skeleton's turns aren't Euler (not read here)")
+    bones = sk.bones
+    root = next((i for i, b in enumerate(bones) if b.name == "Skl_Root"), None)
+    out: dict = {"bones": {}, "fingers": {"L": [], "R": []},
+                 "hip": round(_worlds(bones)[root][1][3], 3) if root is not None else 0.0}
+    for b in bones:
+        if b.name in HAND_BONES:
+            out["bones"][b.name] = {"parent": bones[b.parent].name if b.parent >= 0 else "",
+                                    "place": [round(t * 100, 1) for t in b.translation[:3]],
+                                    "turn": [round(math.degrees(r), 1) for r in b.rotation[:3]]}
+    for side in "LR":
+        wrist = next((i for i, b in enumerate(bones) if b.name == f"Wrist_{side}"), None)
+        for i, b in enumerate(bones):
+            p = b.parent
+            while p >= 0 and p != wrist:
+                p = bones[p].parent
+            if wrist is not None and p == wrist and b.name.startswith("Finger"):
+                out["fingers"][side].append(b.name)
+    return out
+
+
+def hands_header(hands: dict[str, dict]) -> str:
+    """The hand bones as C (an addition to pup_bodies.h, compiled only with PUP_WANT_HANDS defined before it)."""
+    n = len(HAND_BONES)
+    lines = ["",
+             "// Hand and weapon bones (charsel.py bodies), for the held items: per body, each bone's place (cm) and turn",
+             "// (degrees, Euler XYZ) at rest in its parent's frame (has 0: no such bone), how many finger bones each",
+             "// hand has (left, right), and the hips' (Skl_Root's) height at rest (m; a Link clip played without the",
+             "// retarget puts them at Link's). Define PUP_WANT_HANDS before including this file to get the table.",
+             "#ifdef PUP_WANT_HANDS", f"#define PUP_NHAND_BONES {n}",
+             "static const char *const PUP_HAND_BONES[PUP_NHAND_BONES] = {",
+             "    " + ", ".join(f'"{b}"' for b in HAND_BONES) + ",", "};",
+             "typedef struct {", "    const char *id;", "    signed char has[PUP_NHAND_BONES];",
+             "    float place[PUP_NHAND_BONES][3], turn[PUP_NHAND_BONES][3];", "    signed char fingers[2];",
+             "    float hip;", "} PupHands;", "static const PupHands PUP_HANDS[] = {"]
+    for cid in sorted(hands, key=lambda c: (c != "link", c)):
+        h = hands[cid]["bones"]
+        has = ", ".join("1" if b in h else "0" for b in HAND_BONES)
+        place = ", ".join("{" + ", ".join(f"{v:.1f}f" for v in h.get(b, {}).get("place", [0, 0, 0])) + "}"
+                          for b in HAND_BONES)
+        turn = ", ".join("{" + ", ".join(f"{v:.1f}f" for v in h.get(b, {}).get("turn", [0, 0, 0])) + "}"
+                         for b in HAND_BONES)
+        f = hands[cid]["fingers"]
+        lines += [f'    {{"{cid}", {{{has}}},', f"     {{{place}}},", f"     {{{turn}}},",
+                  f"     {{{len(f['L'])}, {len(f['R'])}}}, {hands[cid].get('hip', 0.0):.3f}f}},"]
+    lines += ["};", "#endif", ""]
+    return "\n".join(lines)
+
+
+def bodies_header(boxes: dict[str, dict[str, list[int]]], hands: dict[str, dict] | None = None) -> str:
+    """pup_bodies.h: the C table puppet.c reads ({id: {bone: box}}; link first), then (hands given) the hand bones."""
     lines = ["// Made by python tools\\charsel.py bodies from the game's own models (numbers only): each body's flesh around",
              "// its main bones, the box its vertices fill in the bone's own frame at rest, cm (x-, x+, y-, y+, z-, z+).",
              "// puppet.c turns them with the bones during a ragdoll to keep the costume's lowest point on the ground.",
@@ -2542,13 +2969,16 @@ def bodies_header(boxes: dict[str, dict[str, list[int]]]) -> str:
             lines.append("        " + ", ".join(rows[k:k + 3]) + ",")
         lines.append("    }},")
     lines.append("};")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n" + (hands_header(hands) if hands else "")
 
 
-def build_bodies(romfs: Path = DEFAULT_ROMFS, out: Path = BODY_HEADER) -> dict[str, dict[str, list[int]]]:
-    """Measure Link and every pack body from the game's files and write pup_bodies.h. Read-only on the game."""
+def build_bodies(romfs: Path = DEFAULT_ROMFS, out: Path = BODY_HEADER, hands: dict | None = None
+                 ) -> dict[str, dict[str, list[int]]]:
+    """Measure Link and every pack body from the game's files and write pup_bodies.h (the body boxes, then the hand
+    bones). Read-only on the game. hands: a dict to fill with each body's hand_bones()."""
     from wiiu_model import nx_model
     got: dict[str, dict[str, list[int]]] = {}
+    hand: dict[str, dict] = {} if hands is None else hands
     for cid in ["link"] + [c for c, r in RECIPES.items() if r.kind == "pack"]:
         where = body_model(romfs, cid)
         data = model_file(romfs, where[0]) if where else None
@@ -2557,9 +2987,10 @@ def build_bodies(romfs: Path = DEFAULT_ROMFS, out: Path = BODY_HEADER) -> dict[s
         res = nx_model.read(_unyaz(data))
         model = next((m for m in res.models if m.name == where[1]), res.models[0])
         got[cid] = body_boxes(model)
+        hand[cid] = hand_bones(model)
     if "link" not in got:
         raise CharselError("Link's model isn't in your game files: nothing written")
-    Path(out).write_text(bodies_header(got), encoding="utf-8", newline="\n")
+    Path(out).write_text(bodies_header(got, hand), encoding="utf-8", newline="\n")
     return got
 
 
@@ -2609,9 +3040,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "playas":
             return _playas_cmd(args)
         if args.cmd == "bodies":
-            got = build_bodies(args.romfs, args.out)
+            hands: dict = {}
+            got = build_bodies(args.romfs, args.out, hands)
             for cid, b in got.items():
-                print(f"  {cid:9} {len(b)} bones")
+                h = hands.get(cid, {"bones": {}, "fingers": {"L": [], "R": []}})
+                print(f"  {cid:9} {len(b)} bones; hands: " + ", ".join(
+                    f"{n} (on {v['parent']})" for n, v in h["bones"].items())
+                      + f"; fingers L {len(h['fingers']['L'])}, R {len(h['fingers']['R'])}; hips at "
+                      f"{h.get('hip', 0.0):.3f} m")
             print(f"Written: {args.out}. Rebuild the ghost mod: python tools\\build_native.py build")
             return 0
         if args.cmd == "list":
@@ -2654,8 +3090,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         ch = load_choice(args.state)
         cat, _where = here_catalog(args.out or ch["packs"])
-        got = choose_window(ch["look"], cat.get("built") if cat else None,
-                            (cat.get("linkle") or {}).get("how") == "link-body" if cat else None)
+        got = choose_window(ch["look"], cat.get("built") if cat else None, linkle_ready(cat))
         if got:
             save_choice(got, args.state)
             print(f"Done. Others see you as {RECIPES[got].name.split(' (')[0]}.")

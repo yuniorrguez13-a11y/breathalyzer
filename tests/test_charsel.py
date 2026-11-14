@@ -129,7 +129,7 @@ class Recipes(unittest.TestCase):
             self.assertIn(r.cat, dict(charsel.CATEGORIES))
             self.assertIn(cid, dict(charsel.CATEGORIES)[r.cat])
             for n, clip in r.own:
-                self.assertIn(n, GHOST, f"{cid}: {n}")                       # only ghost names
+                self.assertIn(n, GHOST | set(charsel.EXTRA_NAMES), f"{cid}: {n}")   # only ghost names
                 self.assertTrue(re.fullmatch(r"[A-Za-z0-9_]{1,63}", clip), clip)
             self.assertEqual(len(dict(r.own)), len(r.own), cid)
             for w in (cid,) + r.aliases:
@@ -166,6 +166,65 @@ class Recipes(unittest.TestCase):
         self.assertEqual(charsel.fit_heap(files, None, 831_520, count), (files, None))   # unknown: as before
         self.assertEqual(charsel.fit_heap([("Enemy_Bokoblin_Animation", False)], 75, 554_232, count)[1],
                          charsel.HEAP_BASE)
+
+    def test_own_moves_2026_11_14(self):
+        # Paya: her own shy stand from her own file (not retargeted: made for her skeleton, as her game pack has it)
+        paya = charsel.RECIPES["sheikah"]
+        self.assertEqual(dict(paya.own)["Wait"], "Npc_Shiekah_Heir_Talk_Shy_Wait")
+        self.assertEqual(paya.anims[0], ("Npc_Shiekah_Heir_Animation", False))
+        self.assertEqual(paya.v, 3)
+        # Mipha: a Zora woman's swim; the Zora men's file (and its man's Default_Wait) is gone
+        mipha = charsel.RECIPES["zora"]
+        self.assertEqual([f for f, _ in mipha.anims],
+                         ["UMii_Common_Body_W_Animation", "UMii_Zora_BodyC_W_Animation", charsel.PLAYER_ANIM])
+        self.assertEqual(mipha.v, 5)
+        # Urbosa: no Gerudo guards' file any more (the real Urbosa never loads it): her actor's women's file first
+        urbosa = charsel.RECIPES["gerudo"]
+        self.assertEqual([f for f, _ in urbosa.anims], ["UMii_Common_Body_W_Animation", charsel.PLAYER_ANIM])
+        self.assertEqual(dict(urbosa.own)["Wait"], "Default_Wait")
+        # the women's sprint: their run, faster (not the panic run)
+        for cid in ("zelda", "sheikah", "gerudo", "zora"):
+            r = charsel.RECIPES[cid]
+            self.assertEqual(dict(r.own)["RunGear2"], "Common_Move_Run", cid)
+            self.assertEqual(charsel.frame_ctrl(r)["RunGear2"], (charsel.SPRINT_RATE, None, None), cid)
+        self.assertEqual(charsel.RECIPES["linkle"].v, 2)
+        # the resolve: Paya's Wait comes from her own file, the rest of her own from the women's
+        clips = {"Npc_Shiekah_Heir_Animation": {"Npc_Shiekah_Heir_Talk_Shy_Wait"},
+                 "UMii_Common_Body_W_Animation": {c for _n, c in charsel.UMII_W}}
+        res = charsel.resolve(paya, lambda f: None if f == charsel.PLAYER_ANIM else clips.get(f, set()))
+        self.assertEqual((res["missing"], res["clash"]), ([], []))
+        self.assertEqual(res["own"]["Wait"], "Npc_Shiekah_Heir_Talk_Shy_Wait")
+
+    def test_monster_swings_2026_11_14(self):
+        # each swing for each weapon, timed to Link's hit (rates in 0.8..1.6 by the research's rule), and wading
+        for cid in ("bokoblin", "moblin"):
+            r = charsel.RECIPES[cid]
+            own, ctrl = dict(r.own), charsel.frame_ctrl(r)
+            for n in ("CutS1", "CutS2", "CutS3", "CutSF", "CutDash", "CutS1_Lsword", "CutSF_Lsword") + \
+                    charsel.EXTRA_NAMES:
+                self.assertIn(n, own, f"{cid} {n}")
+                self.assertIn(n, ctrl, f"{cid} {n}")
+                rate, start, end = ctrl[n]
+                self.assertTrue(0.8 <= rate <= 1.6 and start >= 0 and (end is None or end > start), f"{cid} {n}")
+            self.assertEqual((own["SwimWait"], own["SwimMove"]), ("Wait", "Walk"))
+        moblin = dict(charsel.RECIPES["moblin"].own)                            # no stab for a sword any more
+        self.assertNotEqual(moblin["CutS1"], moblin["CutS1_Spear"])
+        bad = charsel.Recipe("bad", "Bad", "Monsters", "pack", "X", (), (("Wait", "W"),), rest="speed",
+                             ctrl=(("CutS1", 1.0, 0, None),))
+        with self.assertRaises(charsel.CharselError):                           # frame control for a name it lacks
+            charsel.frame_ctrl(bad)
+
+    def test_frame_ctrl_set(self):
+        # the game's own frame control on the clip node (Extend > FrameCtrl > Rate/StartFrame/EndFrame)
+        bas = charsel.as_file("Attack_Small", 1.21, 23, None)
+        el = aamp.load(bas).list("Elements").list("Element0")
+        self.assertEqual(el.object("Parameters").get_value("FileName"), "Attack_Small")
+        self.assertEqual(el.object("Parameters").get_value("TypeIndex"), 67)
+        rate, start, end = charsel.as_ctrl(bas)
+        self.assertAlmostEqual(rate, 1.21, places=5)
+        self.assertEqual((start, end), (23.0, None))
+        self.assertEqual(charsel.as_file("Wait"), glp.as_file("Wait"))         # no control: as before
+        self.assertEqual(charsel.as_ctrl(glp.as_file("Wait")), (None, None, None))
 
     def test_find_id(self):
         cases = {"zelda": "zelda", "ZELDA": "zelda", " Daruk ": "goron", "paya": "sheikah", "Urbosa": "gerudo",
@@ -389,7 +448,7 @@ class Build(unittest.TestCase):
         cat = self.build(["zelda", "goron", "boko", "link"], donors)
         self.assertEqual(sorted(cat["built"]), ["bokoblin", "goron", "zelda"])  # (link: the Link body, no pack)
         self.assertEqual(cat["built"]["zelda"]["slot"], charsel.SLOTS["zelda"])
-        self.assertEqual((cat["built"]["bokoblin"]["own"], cat["built"]["bokoblin"]["link"]), (26, 0))
+        self.assertEqual((cat["built"]["bokoblin"]["own"], cat["built"]["bokoblin"]["link"]), (len(charsel.BOKO), 0))
         self.assertEqual(cat["built"]["goron"]["own"] + cat["built"]["goron"]["link"], len(GHOST))
         self.assertTrue((self.out / "mod.toml").is_file())
         self.assertIn(charsel.MOD_ID, (self.out / "mod.toml").read_text(encoding="utf-8"))
@@ -431,7 +490,7 @@ class Build(unittest.TestCase):
         pack = self.out / "romfs" / "Actor" / "Pack" / f"{charsel.SLOTS['zelda']}.sbactorpack"
         cat = self.build(["zelda"], donors)
         self.assertEqual(cat["built"]["zelda"]["anim_targets"], "link-body")
-        self.assertEqual(cat["built"]["zelda"]["v"], 3)
+        self.assertEqual(cat["built"]["zelda"]["v"], charsel.RECIPES["zelda"].v)
         rb = charsel.read_back(pack.read_bytes())
         self.assertEqual(rb["targets"], [0, 1, 3])
         self.assertEqual(rb["adds"], [("UMii_Common_Body_W_Animation", "Skeleton"), (charsel.PLAYER_ANIM, "Skeleton")])
@@ -516,22 +575,44 @@ class Build(unittest.TestCase):
             {"id": "off-mod", "name": "Off", "enabled": False}]}), encoding="utf-8")
         pm = charsel.player_model_mod(lib)
         self.assertEqual((pm["id"], pm["linkle"], len(pm["fp"])), ("the-linkle-mod", True, 16))
-        cat = self.build(["linkle"], {}, library=lib)
+        cat = self.build(["linkle"], {}, library=lib)                           # (no pause-menu Link here)
         self.assertEqual(cat["linkle"]["how"], "link-body")                    # the Link body *is* Linkle there
-        self.assertNotIn("linkle", cat["skipped"])
-        # --model-copies: a renamed copy of the mod's own model, on its own free name
+        self.assertIn(glp.DONOR_LINK, cat["skipped"]["linkle"])                 # her costume needs it: said
+        # her costume: the mod's own model (made up here, so no hair merged: said) on its own free name
         tmp = self.root / "romfs2"
         fake_romfs(tmp, {glp.DONOR_LINK: pause_pack()})
-        cat = charsel.build(tmp, self.out, ["linkle"], library=lib, model_copies=True, cache=None, say=quiet)
+        cat = charsel.build(tmp, self.out, ["linkle"], library=lib, cache=None, say=quiet)
         self.assertEqual(cat["built"]["linkle"]["slot"], charsel.SLOTS["linkle"])
+        self.assertEqual((cat["linkle"]["how"], cat["linkle"]["mod_on"]), ("link-body", True))
+        self.assertEqual(cat["linkle"]["look"]["how"], "body only")
+        self.assertTrue(any("hair and clothes" in n for n in cat["notes"]))
         self.assertEqual((self.out / "romfs" / "Model" / "SwChar_linkle.sbfres").read_bytes(), b"made-up Linkle model")
         self.assertEqual(charsel.check(self.out), {"linkle": []})
+        self.assertTrue(charsel.linkle_ready(cat))
+        self.assertEqual(charsel.Looks(cat).actor({"id": "linkle"}), (charsel.SLOTS["linkle"], ""))
+        # the mod OFF (out\showcase-lib, 2026-11-13: "iam linkle just returns to Link"): still built from its files
+        (lib / "config.json").write_text(json.dumps({"mods": [
+            {"id": "the-linkle-mod", "name": "The Linkle Mod", "enabled": False, "version": "3.0.1"}]}),
+            encoding="utf-8")
+        self.assertIsNone(charsel.player_model_mod(lib))
+        self.assertEqual(charsel.linkle_mod(lib)["enabled"], False)
+        cat = charsel.build(tmp, self.out, ["linkle"], library=lib, cache=None, say=quiet)
+        self.assertEqual((cat["linkle"]["how"], cat["linkle"]["mod_on"]), ("costume", False))
+        self.assertIn("linkle", cat["built"])
+        self.assertTrue(charsel.linkle_ready(cat))
+        # --model-copies: Link's own copy too
+        cat = charsel.build(tmp, self.out, ["linkle"], library=lib, model_copies=True, cache=None, say=quiet)
+        self.assertEqual(cat["built"]["linkle"]["slot"], charsel.SLOTS["linkle"])
         # another player-model mod: noted, not Linkle
         (lib / "config.json").write_text(json.dumps({"mods": [{"id": "off-mod", "name": "Hero Skin",
                                                                "enabled": True}]}), encoding="utf-8")
         cat = charsel.build(tmp, self.out, ["link"], library=lib, cache=None, say=quiet)
         self.assertEqual(cat["linkle"]["how"], "missing")
         self.assertTrue(any("Hero Skin" in n for n in cat["notes"]))
+        self.assertIsNone(charsel.linkle_mod(lib))
+        cat = charsel.build(tmp, self.out, ["linkle"], library=lib, cache=None, say=quiet)
+        self.assertIn("no Linkle mod in your mod library (on or off)", cat["skipped"]["linkle"])
+        self.assertFalse(charsel.linkle_ready(cat))
 
 
 class LooksHere(unittest.TestCase):

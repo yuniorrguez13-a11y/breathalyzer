@@ -143,7 +143,10 @@ class AnimationFiles(unittest.TestCase):
 
     def test_player_moves_mipha_swims(self):
         r = charsel.RECIPES["zora"]
-        clips = {"UMii_Zora_BodyC_M_Animation": ["Common_Swim_Wait", "Common_Move_Swim_Walk", "Common_Move_Swim_Run"]}
+        # (a Zora WOMAN's swim since v4: UMii_Zora_BodyC_W, not the men's file)
+        self.assertIn(("UMii_Zora_BodyC_W_Animation", True), r.anims)
+        self.assertNotIn("UMii_Zora_BodyC_M_Animation", dict(r.anims))
+        clips = {"UMii_Zora_BodyC_W_Animation": ["Common_Swim_Wait", "Common_Move_Swim_Walk", "Common_Move_Swim_Run"]}
         edits, where, _ = charsel.player_moves(r, clips.get)
         self.assertEqual(edits["Actor/AS/Player_SwimMove.bas"],
                          {"Swim_Wait": "Common_Swim_Wait", "Swim_Move_Slow_F": "Common_Move_Swim_Walk",

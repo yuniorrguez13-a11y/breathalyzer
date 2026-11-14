@@ -206,7 +206,7 @@ def characters(library, on: bool = True, link_body: bool = False) -> list[dict]:
     import charsel
     cat = charsel.load_catalog(Path(library) / "mods" / CHARS_ID) if on else {}
     built = cat.get("built") or {}
-    linkle = (cat.get("linkle") or {}).get("how") == "link-body"
+    linkle = bool(charsel.linkle_ready(cat))   # (her costume built, or the Linkle Mod on)
     out = []
     for group, ids in charsel.CATEGORIES:
         for cid in ids:

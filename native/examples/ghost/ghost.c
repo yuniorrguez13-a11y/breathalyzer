@@ -1053,6 +1053,13 @@ static uint64_t g_size_item[ITEM_SLOTS];  // 0.6.2: the ghost's grabbed items: t
                                           // player's scale (written by the tick, read on any game thread)
 static int64_t g_scale_sets;               // ... how often it did
 static void size_item_set(int i, uint64_t item) { __atomic_store_n(&g_size_item[i], item, __ATOMIC_RELEASE); }
+static uint32_t g_size_mul[ITEM_SLOTS];    // 0.9.3: ... times this (float bits; 0: 1): the self puppet's size for it
+static void size_mul_set(int i, float k) {
+    uint32_t b = 0;
+    if (k > 0.05f && k < 20.0f && k != 1.0f) memcpy(&b, &k, sizeof b);
+    __atomic_store_n(&g_size_mul[i], b, __ATOMIC_RELEASE);
+}
+static _Alignas(16) float g_grip_e[12];      // 0.9.3: the item's own offset (MTX_FROM_EULER), before the costume's grip
 static _Alignas(16) Link g_trash[TRASH_MAX];  // deleted items, watched until they are gone (`stray`)
 static _Alignas(16) Handle g_give_handle;     // `ghost give`: its own request, never the ghost's or an item's
 static _Alignas(16) Pack g_give_pack;
@@ -1157,6 +1164,8 @@ typedef struct {
     float own_scale;     // ... its own scale (ACTOR_SCALE), the mean of the three
     float model_scale;   // ... its model's scale (the model holder's copy of it; -1: not read)
     int copied;          // 0.6.2: on the back with the other player's own offset (`ghost items rel`)
+    int64_t grip_sets;   // 0.9.3: held by the self puppet: our follow put on it (set up or put back after the game's)
+    float grip_scale;    // ... its size on that costume (1: Link's; 0: not the puppet's)
 } ItemStatus;
 
 typedef struct {
@@ -1538,6 +1547,11 @@ typedef struct {
     int has_rel;        // 0.6.2: a copied back offset (`ghost items rel`) is used instead of the item's own ...
     float rel[12];      // ... this one (3x4 row by row, m)
     int rel_new;        // ... it changed while the item was on our follow: set up again
+    int grip_kind;      // 0.9.3: held by the self puppet: what our follow is set up for (0 none, 1 hand, 2 back) ...
+    int grip_follow;    // ... which of the two
+    const char *grip_bone;  // ... on which bone, with which grip (the costume's: pup_item_grip)
+    float grip_g[12];
+    float grip_scale;   // ... the item's size on that costume (1: Link's)
 } ItemSlot;
 
 static ItemSlot t_items[ITEM_SLOTS];
@@ -1798,25 +1812,32 @@ static int item_state(uint64_t item, double t) {
 
 // Its own "on the back" offsets (the player's: trans in m, rot in degrees), by its kind (out/research/
 // ghost-items-plan.md): the parameter object and the two values' places in it. 0: not readable.
-static int item_hold(uint64_t item, float rot[3], float trans[3], double t) {
+// 0.9.3: equip 1: its own "in the hand" offsets instead (PlayerEquip: zero for most weapons, a few have some; Link's own
+// hand uses them, a DemoNPC's hand none: Zelda's costume holds most weapons right, 2026-11-13).
+static int item_offsets(uint64_t item, int equip, float rot[3], float trans[3], double t) {
     static const struct {
         int obj, trans, rot;
-    } K[5] = {{12, 0x78, 0xa0}, {14, 0x78, 0xa0}, {15, 0x78, 0xa0}, {17, 0x2c0, 0x2e8}, {16, 0x50, 0x78}};
+    } K[2][5] = {{{12, 0x78, 0xa0}, {14, 0x78, 0xa0}, {15, 0x78, 0xa0}, {17, 0x2c0, 0x2e8}, {16, 0x50, 0x78}},
+                 {{12, 0xc8, 0xf0}, {14, 0xc8, 0xf0}, {15, 0xc8, 0xf0}, {17, 0x310, 0x338}, {16, 0xa0, 0xc8}}};
+    const int e = equip ? 1 : 0;
     uint32_t kind = self_u32(item + ITEM_KIND, t);
     if (kind > 4) return 0;
     uint64_t pl = self_u64(item + ACTOR_PARAMS, t), gp = pl ? self_u64(pl + PARAMS_LIST, t) : 0;
     if (!gp) return 0;
     int32_t n = (int32_t)self_u32(gp + PLIST_COUNT, t);
-    if (n <= K[kind].obj || n > 256) return 0;
-    uint64_t tab = self_u64(gp + PLIST_OBJS, t), obj = tab ? self_u64(tab + (uint64_t)K[kind].obj * 8, t) : 0;
-    if (!obj || !mem_ok(obj + (uint64_t)K[kind].trans, 12, t) || !mem_ok(obj + (uint64_t)K[kind].rot, 12, t)) return 0;
+    if (n <= K[e][kind].obj || n > 256) return 0;
+    uint64_t tab = self_u64(gp + PLIST_OBJS, t), obj = tab ? self_u64(tab + (uint64_t)K[e][kind].obj * 8, t) : 0;
+    if (!obj || !mem_ok(obj + (uint64_t)K[e][kind].trans, 12, t) || !mem_ok(obj + (uint64_t)K[e][kind].rot, 12, t))
+        return 0;
     for (int k = 0; k < 3; k++) {
-        trans[k] = rdf(obj + (uint64_t)K[kind].trans + 4 * (uint64_t)k);
-        rot[k] = rdf(obj + (uint64_t)K[kind].rot + 4 * (uint64_t)k);
+        trans[k] = rdf(obj + (uint64_t)K[e][kind].trans + 4 * (uint64_t)k);
+        rot[k] = rdf(obj + (uint64_t)K[e][kind].rot + 4 * (uint64_t)k);
         if (!finite_f(trans[k], 5.0f) || !finite_f(rot[k], 720.0f)) return 0;
     }
     return 1;
 }
+
+static int item_hold(uint64_t item, float rot[3], float trans[3], double t) { return item_offsets(item, 0, rot, trans, t); }
 
 // A link still names a live actor: the same test as the game's LINK_VALID (the id matches the link data's; the actor
 // is there and, for a link that doesn't hold it, not being deleted), as plain reads, every address checked. So a held
@@ -1906,7 +1927,8 @@ static void item_remove(struct Cpu *c, int i, double t) {
         item_zero_link(i);
     }
     s->state = IS_NONE;
-    s->grabbed = 0, s->nofollow_t = 0, s->has_hold = 0;
+    s->grabbed = 0, s->nofollow_t = 0, s->has_hold = 0, s->grip_kind = 0;
+    size_mul_set(i, 1.0f);
     t_status.items.slot[i].actor = 0;
 }
 
@@ -2083,6 +2105,65 @@ static const char *item_place(struct Cpu *c, int i, uint64_t item, uint64_t ghos
     return cur == own ? "hand" : ours ? "back" : "other";
 }
 
+// 0.9.3: where the self puppet's copy goes (docs/charsel.md "Held items"): ALWAYS one of our follows, never the item's
+// own. The item's own one is the game's choice for its holder (out/research/ghost-items-game-attach.md, slot 153): for
+// an NPC-class holder it asks the NPC's holder object "stowed?", so Urbosa's, Paya's, Mipha's, Revali's, the Hylian's
+// and the Moblin's copies (NPC-class slots) went to Pod_A (her lower back) or nowhere, while Zelda, Daruk and the
+// Bokoblin (DemoNPC: never stowed, no offsets) held them. Ours: the costume's own hand bone (Weapon_R; Weapon_L for the
+// shield and the bow) or its back (Spine_2), with its grip (pup_item_grip: an offset and a size per body) times the
+// item's own offsets (Link's in the hand, Link's on the back), the size through the WEAPON_CALC wrapper. Put back at
+// once whenever the game puts its own follow back (its AI's enter does). Returns the place: "grip" (in the hand),
+// "back", or the game's.
+static int pup_item_grip(int slot, int back, const char **bone, float G[12], float *scale);
+static const char *item_place_pup(struct Cpu *c, int i, uint64_t item, uint64_t holder, int want_back, double t) {
+    ItemSlot *s = &t_items[i];
+    ItemStatus *o = &t_status.items.slot[i];
+    uint64_t cur = self_u64(item + ACTOR_FOLLOW, t), own = item + ITEM_FOLLOW;
+    if (!cur) return "none";
+    int kind = want_back ? 2 : 1;
+    const char *bone = BONE_R_NAME;
+    float G[12], scale = 1.0f;
+    pup_item_grip(i, want_back, &bone, G, &scale);
+    s->grip_scale = o->grip_scale = scale;
+    int same = s->grip_kind == kind && s->grip_bone == bone && !memcmp(s->grip_g, G, sizeof G);
+    if (same && cur == P(&g_follow[i][s->grip_follow])) return want_back ? "back" : "grip";
+    if (!mem_ok(item + ACTOR_FLAGS, 4, t) || (self_u32(item + ACTOR_FLAGS, t) & FLAG_OWNS_FOLLOW))
+        return cur == own ? "hand" : "other";  // (never ours on an actor that deletes its follow when it goes)
+    if (same) {  // (the game put its own back: ours again, as it was)
+        gcall(c, FOLLOW_SET, item, P(&g_follow[i][s->grip_follow]), 0, 0, 0, 0, 0);
+        o->grip_sets++;
+        return want_back ? "back" : "grip";
+    }
+    int k = cur == P(&g_follow[i][0]) ? 1 : 0;  // (the one the item doesn't run now)
+    Follow *f = &g_follow[i][k];
+    if (!t_follow_built[i][k]) {
+        GCALL1(c, FOLLOW_CTOR, f);
+        t_follow_built[i][k] = 1;
+    }
+    GCALL3(c, LINK_SET, f->b + FOLLOW_TARGET, holder, 0);
+    uint64_t bp = P(bone);
+    uint32_t again = 0xffffffffu, mode = 0;
+    memcpy(f->b + FOLLOW_BONE, &bp, 8);
+    memcpy(f->b + FOLLOW_INDEX, &again, 4);
+    memcpy(f->b + FOLLOW_MODE, &mode, 4);
+    float rot[3] = {0, 0, 0}, tr[3] = {0, 0, 0};
+    if (!item_offsets(item, !want_back, rot, tr, t)) memset(rot, 0, sizeof rot), memset(tr, 0, sizeof tr);
+    for (int j = 0; j < 3; j++) g_euler_rot[j] = rot[j] * 0.0174533f, g_euler_trans[j] = tr[j] * scale;
+    gcall(c, MTX_FROM_EULER, P(g_grip_e), P(g_euler_rot), P(g_euler_trans), 0, 0, 0, 0);
+    float off[12];  // (the grip, then the item's own: G E)
+    for (int r = 0; r < 3; r++) {
+        for (int j = 0; j < 3; j++)
+            off[r * 4 + j] = G[r * 4] * g_grip_e[j] + G[r * 4 + 1] * g_grip_e[4 + j] + G[r * 4 + 2] * g_grip_e[8 + j];
+        off[r * 4 + 3] = G[r * 4] * g_grip_e[3] + G[r * 4 + 1] * g_grip_e[7] + G[r * 4 + 2] * g_grip_e[11] + G[r * 4 + 3];
+    }
+    memcpy(f->b + FOLLOW_OFFSET, off, sizeof off);
+    gcall(c, FOLLOW_SET, item, P(f), 0, 0, 0, 0, 0);
+    s->grip_kind = kind, s->grip_follow = k, s->grip_bone = bone;
+    memcpy(s->grip_g, G, sizeof G);
+    o->grip_sets++;
+    return want_back ? "back" : "grip";  // (until the next tick reads it back)
+}
+
 // 0.6.2: how big a held item is drawn (plain reads; the status only). The fourteenth round showed the ghost's items
 // 1.4-1.5 times Link's: the weapon's own per-frame update gives a weapon held by anyone but the player a bigger scale.
 // weapon_calc_wrapper gives the ghost's the player's scale instead (g_size_item), right after the game's update.
@@ -2103,7 +2184,9 @@ static void item_size_read(int i, uint64_t item, double t) {
 // scale object's WEAPON_SCALE_PLAYER (the same reads the game's update just made). On a game thread: plain reads,
 // each pointer in the guest window.
 static int guest_ptr(uint64_t a) { return a >= GUEST_LO && a < GUEST_HI && !(a & 7); }
-static void weapon_player_scale(uint64_t w) {
+static void weapon_player_scale(uint64_t w, uint32_t mul_bits) {
+    float mul = 1.0f;
+    if (mul_bits) memcpy(&mul, &mul_bits, sizeof mul);
     uint64_t pl = rd64(w + ACTOR_PARAMS);
     uint64_t gp = guest_ptr(pl) ? rd64(pl + PARAMS_LIST) : 0;
     if (!guest_ptr(gp)) return;
@@ -2117,7 +2200,7 @@ static void weapon_player_scale(uint64_t w) {
     for (int j = 0; j < 3; j++) {
         float b = rdf(w + WEAPON_BASE_SCALE + 4 * (uint64_t)j);
         if (!(b > 0.01f && b < 100.0f)) return;
-        out[j] = b * k;
+        out[j] = b * k * mul;
     }
     memcpy((void *)(uintptr_t)(w + ACTOR_SCALE), out, sizeof out);
     __atomic_fetch_add(&g_scale_sets, 1, __ATOMIC_RELAXED);
@@ -2132,7 +2215,7 @@ static void weapon_calc_wrapper(struct Cpu *c) {
     if (!self) return;
     for (int i = 0; i < ITEM_SLOTS; i++)
         if (__atomic_load_n(&g_size_item[i], __ATOMIC_ACQUIRE) == self) {
-            weapon_player_scale(self);
+            weapon_player_scale(self, __atomic_load_n(&g_size_mul[i], __ATOMIC_ACQUIRE));
             return;
         }
 }
@@ -2171,8 +2254,12 @@ static void item_held(struct Cpu *c, int i, uint64_t ghost, int want_back, doubl
     const float *tr = s->has_rel ? (const float[3]){s->rel[3], s->rel[7], s->rel[11]} : s->trans;
     o->hold = s->has_hold || s->has_rel ? __builtin_sqrtf(tr[0] * tr[0] + tr[1] * tr[1] + tr[2] * tr[2]) : -1.0f;
     o->copied = s->has_rel;
-    const char *place = item_place(c, i, item, ghost, want_back && (s->has_hold || s->has_rel), t);
+    int pup = ghost && ghost == t_pup_proc;  // (0.9.3: the self puppet's: always our follow, its grip and size)
+    const char *place = pup ? item_place_pup(c, i, item, ghost, want_back, t)
+                            : item_place(c, i, item, ghost, want_back && (s->has_hold || s->has_rel), t);
     snprintf(o->place, sizeof o->place, "%s", place);
+    size_mul_set(i, pup ? s->grip_scale : 1.0f);
+    if (!pup) o->grip_scale = 0;
     size_item_set(i, item);  // (0.6.2: the player's scale: weapon_calc_wrapper)
     item_size_read(i, item, t);
     if (t >= s->dist_t) {
@@ -2243,7 +2330,8 @@ static void item_status_empty(int i) {
 // is released by the next items part if its unit still points back at our handle (items_orphans).
 static void items_forget(double t) {
     for (int i = 0; i < ITEM_SLOTS; i++) {
-        size_item_set(i, 0);
+        size_item_set(i, 0), size_mul_set(i, 1.0f);
+        t_items[i].grip_kind = 0;
         if (t_items[i].state == IS_GRAB || t_items[i].state == IS_HELD) trash_add(&g_item_link[i], t, 1);
         if (t_items[i].state == IS_PENDING) t_item_orphan[i] = 1;
         else memset(&g_item_handle[i], 0, sizeof g_item_handle[i]);
@@ -2355,7 +2443,8 @@ static void items_tick(struct Cpu *c, uint64_t ghost, const Requests *rq, double
                 item_grab_tick(c, i, ghost, t);
                 break;
             case IS_HELD:
-                item_held(c, i, ghost, rq->items_back && (rq->items_mask >> i & 1) && t_bone_idx[BONE_POD] >= 0, t);
+                item_held(c, i, ghost, rq->items_back && (rq->items_mask >> i & 1) &&
+                                           (t_bone_idx[BONE_POD] >= 0 || ghost == t_pup_proc), t);  // (0.9.3: Spine_2)
                 break;
             }
             o->state = s->state;
@@ -3179,6 +3268,8 @@ static void report(SwModReply *r) {
         api->reply_num(r, ITEM_KEY("own_scale"), held ? o->own_scale : -1.0);
         api->reply_num(r, ITEM_KEY("model_scale"), held ? o->model_scale : -1.0);
         api->reply_bool(r, ITEM_KEY("copied"), held && o->copied);
+        api->reply_int(r, ITEM_KEY("grip_sets"), o->grip_sets);  // (0.9.3: the self puppet's copies)
+        api->reply_num(r, ITEM_KEY("grip_scale"), held ? o->grip_scale : 0.0);
 #undef ITEM_KEY
     }
     api->reply_str(r, "give.state", GV_NAMES[it->give_state >= 0 && it->give_state <= GV_FAILED ? it->give_state : 0]);

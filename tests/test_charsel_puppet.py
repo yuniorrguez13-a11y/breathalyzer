@@ -45,8 +45,13 @@ class Table(unittest.TestCase):
     def test_every_pack_character_on_charsels_actor_name(self):
         slots = dll_slots()
         packs = [r.id for r in charsel.RECIPES.values() if r.kind == "pack"]
-        self.assertEqual(sorted(slots), sorted(packs))
+        # Linkle's costume (charsel build, from the Linkle Mod's files, on or off) is on charsel's linkle name too,
+        # once the DLL lists it (the native change of 2026-11-14)
+        self.assertEqual(sorted(set(slots) - {"linkle"}), sorted(packs))
         for cid, (actor, name, playas) in slots.items():
+            if cid == "linkle":
+                self.assertEqual((actor, name, playas), (charsel.SLOTS["linkle"], "Linkle", ""))
+                continue
             with self.subTest(cid=cid):
                 r = charsel.RECIPES[cid]
                 self.assertEqual(actor, charsel.SLOTS[cid])
@@ -57,8 +62,22 @@ class Table(unittest.TestCase):
                     self.assertEqual(charsel.find_id(playas), cid)   # (`charsel playas <word>` takes it)
 
     def test_aliases_match(self):
-        want = {a: r.id for r in charsel.RECIPES.values() if r.kind == "pack" for a in r.aliases}
+        on = set(dll_slots())
+        want = {a: r.id for r in charsel.RECIPES.values() if r.kind == "pack" or r.id in on for a in r.aliases}
         self.assertEqual(dll_aliases(), want)
+
+    def test_weapon_swing_names(self):
+        # the held weapon's swing names the DLL asks for: the Link body's (every pack has them), and the monsters'
+        # extra ones (charsel EXTRA_NAMES, in both monster recipes)
+        from mp import ghost_link_pack as glp
+        text = PUPPET_C.read_text(encoding="utf-8")
+        names = lambda key: re.findall(r'"([A-Za-z0-9_]+)"', text.split(f"{key}[] = {{", 1)[1].split("};", 1)[0])  # noqa
+        ghost = {n for n, _c, _f in glp.ANIMS}
+        self.assertTrue(set(names("PUP_SWINGS")) <= ghost)
+        self.assertEqual(tuple(names("PUP_SWINGS_OWN")), charsel.EXTRA_NAMES)
+        for cid in ("bokoblin", "moblin"):
+            self.assertTrue(set(charsel.EXTRA_NAMES) <= set(dict(charsel.RECIPES[cid].own)), cid)
+            self.assertIn(f'"{cid}"', text.split("pup_own_swings(const char *id)", 1)[1].split("}", 1)[0])
 
     def test_versions(self):
         toml = (GHOST / "mod.toml").read_text(encoding="utf-8")
@@ -112,6 +131,90 @@ class Table(unittest.TestCase):
             charsel.body_boxes(types.SimpleNamespace(skeleton=Skeleton(0, bones, [], 0, 0, b""), shapes=[],
                                                      vertex_buffers=[]))
 
+    def test_hand_bones_and_header(self):
+        import types
+        from wiiu_model.neutral import Bone, Skeleton
+        z = (1.0, 1.0, 1.0)
+        bones = [Bone("Root", -1, -1, -1, 0xFFFF, 0, z, (0.0, 0.0, 0.0, 1.0), (0.0, 0.0, 0.0)),
+                 Bone("Wrist_R", 0, -1, -1, 0xFFFF, 0, z, (0.0, 0.0, 0.0, 1.0), (-0.3, 1.2, 0.0)),
+                 Bone("Weapon_R", 1, -1, -1, 0xFFFF, 0, z, (1.5707963, 0.0, 0.0, 1.0), (-0.107, 0.0, -0.028)),
+                 Bone("Finger_A_1_R", 1, -1, -1, 0xFFFF, 0, z, (0.0, 0.0, 0.0, 1.0), (-0.05, 0.0, 0.0)),
+                 Bone("Finger_A_2_R", 3, -1, -1, 0xFFFF, 0, z, (0.0, 0.0, 0.0, 1.0), (-0.03, 0.0, 0.0))]
+        model = types.SimpleNamespace(skeleton=Skeleton(charsel.EULER_ROT, bones, [], 0, 0, b""))
+        h = charsel.hand_bones(model)
+        self.assertEqual(h["bones"]["Weapon_R"], {"parent": "Wrist_R", "place": [-10.7, 0.0, -2.8],
+                                                  "turn": [90.0, 0.0, 0.0]})
+        self.assertNotIn("Weapon_L", h["bones"])
+        self.assertEqual(h["fingers"], {"L": [], "R": ["Finger_A_1_R", "Finger_A_2_R"]})
+        self.assertEqual(h["hip"], 0.0)                                # (no Skl_Root in this one)
+        text = charsel.hands_header({"link": h})
+        self.assertIn("#ifdef PUP_WANT_HANDS", text)                  # (compiled only where it is read)
+        self.assertNotRegex(text, r"[^.\d]\d+f")                     # (every float is a C float: 0.0f, never 0f)
+        self.assertIn('{"link", {0, 1, 0, 1, 0, 0, 0, 0},', text)
+        # the header keeps the body boxes as they were and only adds the hands after them
+        boxes = {"link": {"Skl_Root": [-1, 1, -1, 1, -1, 1]}}
+        self.assertTrue(charsel.bodies_header(boxes, {"link": h}).startswith(charsel.bodies_header(boxes)))
+
+    def test_merge_parts(self):
+        # a body (Root, Skl_Root, Head; smooth matrices on Skl_Root and Head, a rigid one on Root) and a hair part
+        # (Root, Head and its own Hair_1; smooth matrices on Head and Hair_1): one model, one skeleton
+        import struct
+        import types
+        from wiiu_model.neutral import Attribute, Bone, Skeleton, VertexBuffer
+        z, r0 = (1.0, 1.0, 1.0), (0.0, 0.0, 0.0, 1.0)
+
+        def skel(bones, m2b, smooth):
+            w = charsel._worlds(bones)
+            ib = b"".join(struct.pack("<12f", *(v for row in charsel._inv(w[b])[:3] for v in row))
+                          for b in m2b[:smooth])
+            return Skeleton(charsel.EULER_ROT, bones, m2b, smooth, len(m2b) - smooth, ib)
+
+        def vb(indices):
+            idx = b"".join(struct.pack("<2B", *i) for i in indices)
+            pos = b"".join(struct.pack("<3f", 0.0, 1.0, 0.0) for _ in indices)
+            return VertexBuffer(len(indices), 2, [Attribute("_p0", (0x18 << 8) | 5, 0, 0),
+                                                  Attribute("_i0", (0x09 << 8) | 3, 0, 1)], [12, 2], [pos, idx])
+
+        def shape(name, mat, skin):
+            return types.SimpleNamespace(name=name, material=mat, bone=0, vertex_buffer=0, skin_bones=[],
+                                         skin_count=skin)
+
+        body_bones = [Bone("Root", -1, -1, 2, 0xFFFF, 0, z, r0, (0.0, 0.0, 0.0)),
+                      Bone("Skl_Root", 0, 0, -1, 0xFFFF, 0, z, r0, (0.0, 1.0, 0.0)),
+                      Bone("Head", 1, 1, -1, 0xFFFF, 0, z, r0, (0.0, 0.5, 0.0))]
+        body = types.SimpleNamespace(name="Link", skeleton=skel(body_bones, [1, 2, 0], 2),
+                                     vertex_buffers=[vb([(0, 1), (2, 2)])], shapes=[shape("Skin", 0, 2)],
+                                     materials=[types.SimpleNamespace(name="Mt_Skin", textures=["Skin_Alb"])],
+                                     total_vertex_count=2)
+        hair_bones = [Bone("Root", -1, -1, -1, 0xFFFF, 0, z, r0, (0.0, 0.0, 0.0)),
+                      Bone("Head", 0, 0, -1, 0xFFFF, 0, z, r0, (0.0, 1.5, 0.0)),
+                      Bone("Hair_1", 1, 1, -1, 0xFFFF, 0, z, r0, (0.0, 0.1, -0.1))]
+        hair = types.SimpleNamespace(name="Armor_Default_Head", skeleton=skel(hair_bones, [1, 2], 2),
+                                     vertex_buffers=[vb([(0, 1), (1, 1)])], shapes=[shape("Hair", 0, 2)],
+                                     materials=[types.SimpleNamespace(name="Mt_Skin", textures=["Hair_Alb"])])
+        m, info = charsel.merge_parts(body, [hair], {"Hair_Alb": "SwBody_Hair_Alb"})
+        names = [b.name for b in m.skeleton.bones]
+        self.assertEqual(names, ["Root", "Skl_Root", "Head", "Hair_1"])
+        self.assertEqual(m.skeleton.matrix_to_bone, [1, 2, 3, 0])          # smooth: body's, the new one; then rigid
+        self.assertEqual((m.skeleton.smooth_count, m.skeleton.rigid_count), (3, 1))
+        self.assertEqual((m.skeleton.bones[3].smooth_index, m.skeleton.bones[0].rigid_index), (2, 3))
+        idx = lambda v: list(struct.iter_unpack("<2B", v.buffers[1]))    # noqa: E731
+        self.assertEqual(idx(m.vertex_buffers[0]), [(0, 1), (3, 3)])         # (the body's rigid matrix moved up)
+        self.assertEqual(idx(m.vertex_buffers[1]), [(1, 2), (2, 2)])         # (Head: the body's; Hair_1: the new one)
+        world = charsel._worlds(m.skeleton.bones)
+        self.assertLess(charsel._gap(world[3], charsel._worlds(hair_bones)[2]), 1e-6)   # (Hair_1 rests where it did)
+        ib = struct.unpack_from("<12f", m.skeleton.inverse_matrices, 48 * 2)
+        self.assertAlmostEqual(ib[7], -1.6, places=5)                       # (its bind: its rest, y 1.6)
+        self.assertEqual([x.name for x in m.materials], ["Mt_Skin", "SwPart0_Mt_Skin"])
+        self.assertEqual(m.materials[1].textures, ["SwBody_Hair_Alb"])
+        self.assertEqual((m.shapes[1].material, m.shapes[1].vertex_buffer), (1, 1))
+        self.assertEqual((info["new_bones"], info["shapes"], info["left_out"]), (1, 1, []))
+        # a part whose bind pose isn't its rest is refused
+        bad = types.SimpleNamespace(**dict(vars(hair), skeleton=Skeleton(charsel.EULER_ROT, hair_bones, [1, 2], 2, 0,
+                                                                         b"\0" * 96)))
+        with self.assertRaises(charsel.CharselError):
+            charsel.merge_parts(body, [bad])
+
     def test_hint_words(self):
         self.assertIn("Restart the game to play as Daruk", charsel.playas_hint("goron"))
         self.assertIn("charsel.py playas daruk", charsel.playas_hint("goron"))
@@ -146,16 +249,19 @@ class Selftest(unittest.TestCase):
             cls.rows[(group, name)] = (status, detail)
 
     def test_puppet(self):
-        names = ["move_by_speed", "near_names", "unmirrored_shows_link", "ids", "sentences", "spawns_and_swaps",
+        names = ["move_by_speed", "near_names", "missing_clip_no_link", "ids", "sentences", "spawns_and_swaps",
                  "at_link", "sprint_and_walk", "rehide", "climb_near_name", "horse_shows_link", "cutscene_shows_link",
-                 "pause_keeps", "items_to_puppet", "stage_change", "iam_link_back", "self_off", "refused_gives_up",
-                 "no_tick_says_why"]
+                 "pause_keeps", "items_to_puppet", "items_grip", "stage_change", "iam_link_back", "self_off",
+                 "refused_gives_up", "no_tick_says_why"]
         if ("puppet", "world") in self.rows:      # (the made-up globals' page was taken: the pure part only)
             names = names[:5]
+        # 0.9.3 (pure): held copies per body, kept names, the guard, the hands, death, the ground clamp, the ball's dip
+        names += ["grip_place", "items_kept", "guard_detect", "hands_overlay", "death_keeps_costume", "clamp_step",
+                  "ball_dip_hold"]
         # 0.9.1: the costume falls with Link's ragdoll (his pose, on the ground), pure and in the made-up world
         names += ["rd_detect", "rd_order_refuses_loop", "rd_pose", "rd_ground", "rd_lift", "rd_upright", "rd_bodies"]
         if ("puppet", "rd_world") not in self.rows:
-            names += ["rd_follow", "rd_getup", "rd_clip_and_off", "rd_removed"]
+            names += ["rd_follow", "rd_getup", "rd_clip_and_off", "rd_removed", "ball_rolls", "clamp_world"]
         for name in names:
             with self.subTest(check=name):
                 status, detail = self.rows.get(("puppet", name), ("MISSING", "not run"))
