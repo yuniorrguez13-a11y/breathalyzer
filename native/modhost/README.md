@@ -11,6 +11,8 @@ code library, and modhost loads the real one plus your mods. How to install and 
 | `swmod.h` | The mod API. The only header a mod needs. |
 | `modhost.c` | The host: the proxy `swgame_tables`, the mod loader, the `mods` command, and `modload`, `modunload` and `modreload` (load a mod while the game runs). |
 | `settings.c` | Mod settings (API 3, [docs/mod-settings.md](../../docs/mod-settings.md)): reads `settings.txt`, keeps the values, runs watchers, saves `<library>\settings\<id>.json`, and the `modsettings` / `modset` commands. It is `#include`d by `modhost.c` (compiled alone it is empty), so modhost still builds from `modhost.c`. |
+| `swmod_overlay.h` | Overlays: draw over the game with Savage Wind's own ImGui and hold the game's input while you do (`swmod_overlay_add`, an export of modhost.dll; see "Overlays" below). |
+| `overlay.c` | The overlay host. `#include`d by `modhost.c` like `settings.c`. Nothing is patched until a mod adds an overlay. |
 | `botw.h` | Plain-named helpers for the most basic game values (BotW 1.9.0): [docs/game-basics.md](../../docs/game-basics.md). |
 | `sw_runtime.h` | Savage Wind runtime declarations the host uses (copied from Savage Wind, MIT). Mods don't use it. |
 | `platform_min.h` | Hand-written Win32 / C runtime declarations (the zig that ships with Savage Wind has no `windows.h` or `stdio.h`). |
@@ -108,6 +110,24 @@ Rules:
 - Guest memory is wiped when the player goes back to the start screen. Mods are not loaded again: keep no guest
   pointers across that.
 - A crash in a mod is a crash of the game. Only install mods you trust: they run with your full rights.
+
+## Overlays
+
+A mod can draw over the game (a menu, a wheel, a board game) with Savage Wind's own Dear ImGui and hold the game's
+input while it is up, through `swmod_overlay.h` (Savage Wind 0.4.1-alpha.4 only). Call
+`swmod_overlay_add(api, update, draw, user, why, sizeof why)` from `swmod_init`. Every shown frame, on Savage Wind's
+present thread, `update` gets the window size, the time, and the keyboard, mouse and controller (held now, and pressed
+since the last frame) and answers `SWMOD_OVL_DRAW` (draw this frame) and/or `SWMOD_OVL_CAPTURE` (the game gets no
+input now); `draw` then draws with rectangles, lines, circles, polygons and text (FiraSans, any size). While any
+overlay captures, Link stands still and the camera stops, as with Savage Wind's own menu; afterwards the game stays
+muted until every key and button is up, plus 400 ms. Savage Wind's menu and console stay on top.
+
+How: the first `swmod_overlay_add` checks the exe's 2 calls of `menu_render` and its 13 calls of
+`menu_input_captured` byte for byte and points them at modhost; any other Savage Wind build answers
+`SWMOD_OVL_UNSUPPORTED` and nothing is patched. With no overlay, nothing is patched at all. Every export it uses
+(ImGui, its Vulkan backend, SDL3) is looked up at run time, so modhost still loads on a Savage Wind without them. It
+is an export of `modhost.dll`, not a field of the API, so it needs no newer mod API (an older modhost answers
+`SWMOD_OVL_NO_HOST`). The emote wheel ([docs/emotes.md](../../docs/emotes.md)) is the first user.
 
 ## Credits
 

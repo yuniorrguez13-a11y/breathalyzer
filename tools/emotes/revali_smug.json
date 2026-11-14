@@ -1,29 +1,28 @@
 {
   "id": "revali_smug", "name": "Revali smug", "aliases": ["revali", "smug", "crossed"],
   "page": "hyrule", "slot": 2, "by": "giruka",
-  "about": "Arms crossed, head tilted back and turned away, one foot taps.",
-  "kind": "keys", "frames": 48, "loop": true, "face": "smug", "morph": 6, "contact": ["Wrist_R", "Wrist_L"],
-  "poses": {
-    "base": {"reach": {"Wrist_R": {"on": "Spine_2", "at": [0.15, 0.08, 0.21]}, "Wrist_L": {"on": "Spine_2", "at": [-0.14, 0.04, 0.17]}},
-             "elbow": {"R": [-0.7, -0.5, 0.5], "L": [0.7, -0.5, 0.5]}, "hand": {"R": "open", "L": "relaxed"},
-             "turn": {"Head": [-16, 12, 0], "Spine_1": [-4, 0, 0]}, "step": {"Ankle_R": [0, 0, 0.03]}},
-    "tap":  {"reach": {"Wrist_R": {"on": "Spine_2", "at": [0.15, 0.08, 0.21]}, "Wrist_L": {"on": "Spine_2", "at": [-0.14, 0.04, 0.17]}},
-             "elbow": {"R": [-0.7, -0.5, 0.5], "L": [0.7, -0.5, 0.5]}, "hand": {"R": "open", "L": "relaxed"},
-             "turn": {"Head": [-16, 12, 0], "Spine_1": [-4, 0, 0], "Ankle_R": [-22, 0, 0]},
-             "step": {"Ankle_R": [0, 0.025, 0.05]}}
-  },
+  "about": "Arms crossed, chin up, head turned away, weight on one leg; a slow dismissive flick of the hand, an impatient foot.",
+  "kind": "keys", "frames": 120, "loop": true, "face": "smug", "morph": 8, "ease": "spline", "contact": ["arms"],
+  "lag": {"Head": 3, "Wrist_R": 2, "Spine_2": 1},
+  "breath": [1.6, 60],
   "keys": [
-    {"f": 0, "pose": "base"},
-    {"f": 6, "pose": "tap"},
-    {"f": 10, "pose": "base"},
-    {"f": 16, "pose": "tap"},
-    {"f": 20, "pose": "base"},
-    {"f": 48, "pose": "base"}
+    {"f": 0, "hips": [-0.035, -0.012, 0], "heel": {"L": 12.0}, "step": {"Ankle_L": [0.02, 0, 0.06]}, "turn": {"Skl_Root": [0.0, 0.0, -4.0], "Spine_1": [-3.0, -6.0, 6.0], "Head": [-14.0, 18.0, 7.0]}, "reach": {"Wrist_L": {"on": "Spine_2", "at": [-0.082, -0.038, 0.142]}, "Wrist_R": {"on": "Spine_2", "at": [0.068, 0.027, 0.18]}}, "aim": {"Wrist_L": [-1.0, -0.1, 0.2], "Wrist_R": [1.0, -0.25, 0.5]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, -1]}, "elbow": {"L": [1.0, -0.4, 0.3], "R": [-1.0, -0.4, 0.3]}, "hand": {"R": "relaxed", "L": "relaxed"}},
+    {"f": 18, "hips": [-0.049, -0.012, 0], "heel": {"L": 12.0}, "step": {"Ankle_L": [0.02, 0, 0.06]}, "turn": {"Skl_Root": [0.0, 0.0, -4.0], "Spine_1": [-3.0, -6.0, 6.0], "Head": [-14.0, 24.0, 7.0]}, "reach": {"Wrist_L": {"on": "Spine_2", "at": [-0.082, -0.038, 0.142]}, "Wrist_R": {"on": "Spine_2", "at": [0.068, 0.027, 0.18]}}, "aim": {"Wrist_L": [-1.0, -0.1, 0.2], "Wrist_R": [1.0, -0.25, 0.5]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, -1]}, "elbow": {"L": [1.0, -0.4, 0.3], "R": [-1.0, -0.4, 0.3]}},
+    {"f": 34, "hips": [-0.031, -0.012, 0], "heel": {"L": 12.0}, "step": {"Ankle_L": [0.02, 0, 0.06]}, "turn": {"Skl_Root": [0.0, 0.0, -4.0], "Spine_1": [-3.0, -6.0, 6.0], "Head": [-14.0, 19.0, 7.0]}, "reach": {"Wrist_L": {"on": "Spine_2", "at": [-0.082, -0.038, 0.142]}, "Wrist_R": {"on": "Spine_2", "at": [0.068, 0.027, 0.18]}}, "aim": {"Wrist_L": [-1.0, -0.1, 0.2], "Wrist_R": [1.0, -0.25, 0.5]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, -1]}, "elbow": {"L": [1.0, -0.4, 0.3], "R": [-1.0, -0.4, 0.3]}},
+    {"f": 46, "hips": [-0.035, -0.012, 0], "heel": {"L": 12.0}, "step": {"Ankle_L": [0.02, 0, 0.06]}, "turn": {"Skl_Root": [0.0, 0.0, -4.0], "Spine_1": [-3.0, -6.0, 6.0], "Head": [-14.0, 26.0, 7.0]}, "reach": {"Wrist_L": {"on": "Spine_2", "at": [-0.082, -0.038, 0.142]}, "Wrist_R": [-0.36, 1.24, 0.3]}, "aim": {"Wrist_L": [-1.0, -0.1, 0.2], "Wrist_R": [-0.3, 0.55, 0.8]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 1, -0.2]}, "elbow": {"L": [1.0, -0.4, 0.3], "R": [-1, -0.8, -0.2]}, "hand": {"R": "open"}},
+    {"f": 52, "hips": [-0.035, -0.012, 0], "heel": {"L": 12.0}, "step": {"Ankle_L": [0.02, 0, 0.06]}, "turn": {"Skl_Root": [0.0, 0.0, -4.0], "Spine_1": [-3.0, -6.0, 6.0], "Head": [-16.0, 30.0, 10.0]}, "reach": {"Wrist_L": {"on": "Spine_2", "at": [-0.082, -0.038, 0.142]}, "Wrist_R": [-0.4, 1.25, 0.27]}, "aim": {"Wrist_L": [-1.0, -0.1, 0.2], "Wrist_R": [-0.85, 0.35, 0.4]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [-0.3, 0.6, -0.7]}, "elbow": {"L": [1.0, -0.4, 0.3], "R": [-1, -0.8, -0.2]}, "hand": {"R": "open"}, "ease": "out"},
+    {"f": 62, "hips": [-0.035, -0.012, 0], "heel": {"L": 12.0}, "step": {"Ankle_L": [0.02, 0, 0.06]}, "turn": {"Skl_Root": [0.0, 0.0, -4.0], "Spine_1": [-3.0, -6.0, 6.0], "Head": [-15.0, 28.0, 9.0]}, "reach": {"Wrist_L": {"on": "Spine_2", "at": [-0.082, -0.038, 0.142]}, "Wrist_R": [-0.41, 1.22, 0.26]}, "aim": {"Wrist_L": [-1.0, -0.1, 0.2], "Wrist_R": [-0.85, 0.35, 0.4]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [-0.3, 0.6, -0.7]}, "elbow": {"L": [1.0, -0.4, 0.3], "R": [-1, -0.8, -0.2]}, "hand": {"R": "open"}},
+    {"f": 80, "hips": [-0.035, -0.012, 0], "heel": {"L": 12.0}, "step": {"Ankle_L": [0.02, 0, 0.06]}, "turn": {"Skl_Root": [0.0, 0.0, -4.0], "Spine_1": [-3.0, -6.0, 6.0], "Head": [-14.0, 20.0, 7.0]}, "reach": {"Wrist_L": {"on": "Spine_2", "at": [-0.082, -0.038, 0.142]}, "Wrist_R": {"on": "Spine_2", "at": [0.068, 0.027, 0.18]}}, "aim": {"Wrist_L": [-1.0, -0.1, 0.2], "Wrist_R": [1.0, -0.25, 0.5]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, -1]}, "elbow": {"L": [1.0, -0.4, 0.3], "R": [-1.0, -0.4, 0.3]}, "hand": {"R": "relaxed"}},
+    {"f": 90, "hips": [-0.035, -0.012, 0], "heel": {"L": 22}, "step": {"Ankle_L": [0.02, 0, 0.06]}, "turn": {"Skl_Root": [0.0, 0.0, -4.0], "Spine_1": [-3.0, -6.0, 6.0], "Head": [-14.0, 16.0, 7.0]}, "reach": {"Wrist_L": {"on": "Spine_2", "at": [-0.082, -0.038, 0.142]}, "Wrist_R": {"on": "Spine_2", "at": [0.068, 0.027, 0.18]}}, "aim": {"Wrist_L": [-1.0, -0.1, 0.2], "Wrist_R": [1.0, -0.25, 0.5]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, -1]}, "elbow": {"L": [1.0, -0.4, 0.3], "R": [-1.0, -0.4, 0.3]}},
+    {"f": 96, "hips": [-0.035, -0.012, 0], "heel": {"L": 10}, "step": {"Ankle_L": [0.02, 0, 0.06]}, "turn": {"Skl_Root": [0.0, 0.0, -4.0], "Spine_1": [-3.0, -6.0, 6.0], "Head": [-14.0, 15.0, 7.0]}, "reach": {"Wrist_L": {"on": "Spine_2", "at": [-0.082, -0.038, 0.142]}, "Wrist_R": {"on": "Spine_2", "at": [0.068, 0.027, 0.18]}}, "aim": {"Wrist_L": [-1.0, -0.1, 0.2], "Wrist_R": [1.0, -0.25, 0.5]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, -1]}, "elbow": {"L": [1.0, -0.4, 0.3], "R": [-1.0, -0.4, 0.3]}},
+    {"f": 102, "hips": [-0.035, -0.012, 0], "heel": {"L": 22}, "step": {"Ankle_L": [0.02, 0, 0.06]}, "turn": {"Skl_Root": [0.0, 0.0, -4.0], "Spine_1": [-3.0, -6.0, 6.0], "Head": [-14.0, 14.0, 7.0]}, "reach": {"Wrist_L": {"on": "Spine_2", "at": [-0.082, -0.038, 0.142]}, "Wrist_R": {"on": "Spine_2", "at": [0.068, 0.027, 0.18]}}, "aim": {"Wrist_L": [-1.0, -0.1, 0.2], "Wrist_R": [1.0, -0.25, 0.5]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, -1]}, "elbow": {"L": [1.0, -0.4, 0.3], "R": [-1.0, -0.4, 0.3]}},
+    {"f": 108, "hips": [-0.023, -0.012, 0], "heel": {"L": 11}, "step": {"Ankle_L": [0.02, 0, 0.06]}, "turn": {"Skl_Root": [0.0, 0.0, -4.0], "Spine_1": [-3.0, -6.0, 6.0], "Head": [-14.0, 13.0, 7.0]}, "reach": {"Wrist_L": {"on": "Spine_2", "at": [-0.082, -0.038, 0.142]}, "Wrist_R": {"on": "Spine_2", "at": [0.068, 0.027, 0.18]}}, "aim": {"Wrist_L": [-1.0, -0.1, 0.2], "Wrist_R": [1.0, -0.25, 0.5]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, -1]}, "elbow": {"L": [1.0, -0.4, 0.3], "R": [-1.0, -0.4, 0.3]}}
   ],
   "expect": [
-    {"f": 30, "left_of": ["Wrist_R", "Spine_2"]},
-    {"f": 30, "right_of": ["Wrist_L", "Spine_2"]},
-    {"f": 30, "in_front": ["Wrist_R", "Spine_2"]},
-    {"f": 30, "feet_on_ground": true}
+    {"f": 10, "left_of": ["Wrist_R", "Spine_2"]},
+    {"f": 10, "right_of": ["Wrist_L", "Spine_2"]},
+    {"f": 10, "in_front": ["Wrist_R", "Spine_2"]},
+    {"f": 56, "right_of": ["Wrist_R", "Arm_1_R"]},
+    {"f": 10, "above": ["Ankle_L", "Ankle_R"]}
   ]
 }

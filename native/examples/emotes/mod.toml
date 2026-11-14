@@ -6,19 +6,26 @@
 # emotes.dll isn't in this folder: for the examples in this repo, modman takes it from build\native\emotes-mods,
 # where build_native.py puts it (docs/mod-format.md). Add the example again after you rebuild it.
 # It needs no hook slots: it wraps Link's own per-frame update through hle_override.
+# The emote wheel (hold G, or D-pad Down) is drawn by modhost's overlay host (native/modhost/swmod_overlay.h): it needs
+# the modhost of this repo and Savage Wind 0.4.1-alpha.4; elsewhere the wheel stays off and the rest works.
 # The block at the end (the favourite keys and the Play page) is made by: python tools/emote_build.py header
 
 [mod]
 id = "botw-mod-loader.emotes"
 name = "Emotes"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["giruka"]
-description = "Dances, thumbs up and down, and a ragdoll for Link: keys 5 to 0, the console command emote, or the Play page. Changes a game file (Link's animation list), so it starts off."
+description = "Dances, thumbs up and down, and a ragdoll for Link: hold G (or D-pad Down) for the emote wheel, or keys 5 to 0, the console command emote, the Play page. Changes a game file (Link's animation list), so it starts off."
 game_versions = ["1.9.0"]   # it calls game functions by their 1.9.0 addresses
 loader_api = 3              # reads its settings through the mod API (version 3)
 
 [code]
 windows = "emotes.dll"
+
+[[pages]]
+key = "wheel"
+label = "Wheel favourites"
+description = "The 8 emotes on the first page of the wheel."
 
 [[pages]]
 key = "keys"
@@ -58,10 +65,419 @@ applies = "live"
 key = "extras"
 type = "text"
 label = "Extra emotes"
-description = "Ids of emotes you added to tools/emotes, comma between (for the wheel, later)."
+description = "Ids of emotes you added to tools/emotes, comma between: the wheel's Extras page."
 default = ""
 max_length = 64
 applies = "restart"
+
+[[settings]]
+key = "wheel"
+type = "toggle"
+label = "Emote wheel"
+description = "Hold the wheel key (or D-pad Down) for a big wheel of emotes. Let go to play."
+default = true
+applies = "live"
+
+[[settings]]
+key = "wheel_key"
+type = "key"
+label = "Wheel key"
+description = "Hold it for the wheel, let go to play. A quick tap keeps the wheel open."
+default = "G"
+applies = "live"
+
+[[settings]]
+key = "wheel_pad"
+type = "choice"
+label = "Controller wheel"
+description = "Hold D-pad Down for half a second. Link may whistle first."
+default = "dpad_down"
+applies = "live"
+choices = [
+  { value = "dpad_down", label = "Hold D-pad Down" },
+  { value = "off", label = "Off" },
+]
+
+[[settings]]
+key = "wheel_size"
+type = "slider"
+label = "Wheel size"
+description = "How big the wheel and its names are."
+min = 100
+max = 200
+step = 25
+default = 150
+unit = " percent"
+applies = "live"
+
+[[settings]]
+key = "show_names"
+type = "toggle"
+label = "Show emote name"
+description = "Shows the emote's name at the bottom for 2 seconds, or why it can't play."
+default = true
+applies = "live"
+
+[[settings]]
+key = "wheel_1"
+type = "choice"
+label = "Slice 1 (top)"
+description = "The emote in slice 1 of the wheel's first page (key 1 in the wheel)."
+default = "wave"
+applies = "live"
+page = "wheel"
+choices = [
+  { value = "wave", label = "Wave" },
+  { value = "thumbs_up", label = "Thumbs up" },
+  { value = "thumbs_down", label = "Thumbs down" },
+  { value = "clap", label = "Clap" },
+  { value = "point", label = "Point" },
+  { value = "shrug", label = "Shrug" },
+  { value = "facepalm", label = "Facepalm" },
+  { value = "bow", label = "Bow" },
+  { value = "floss", label = "Floss" },
+  { value = "six_seven", label = "Six seven" },
+  { value = "in_love", label = "In love" },
+  { value = "robot", label = "Robot" },
+  { value = "moonwalk", label = "Moonwalk" },
+  { value = "air_guitar", label = "Air guitar" },
+  { value = "korok_hop", label = "Korok hop" },
+  { value = "hestu_shake", label = "Hestu shake" },
+  { value = "salute", label = "Salute" },
+  { value = "revali_smug", label = "Revali smug" },
+  { value = "daruk_flex", label = "Daruk flex" },
+  { value = "urbosa_snap", label = "Urbosa snap" },
+  { value = "mipha_wave", label = "Mipha wave" },
+  { value = "selfie", label = "Photo pose" },
+  { value = "snack", label = "Snack time" },
+  { value = "victory", label = "Victory" },
+  { value = "archer", label = "Archer" },
+  { value = "sword_up", label = "Sword up" },
+  { value = "big_sword", label = "Big sword" },
+  { value = "spear_pose", label = "Spear pose" },
+  { value = "sword_pose", label = "Sword pose" },
+  { value = "hip_pose", label = "Hand on hip" },
+  { value = "hand_up", label = "Hand up" },
+  { value = "chin_pose", label = "Chin pose" },
+  { value = "ragdoll", label = "Ragdoll" },
+  { value = "none", label = "(Empty)" },
+]
+
+[[settings]]
+key = "wheel_2"
+type = "choice"
+label = "Slice 2 (top right)"
+description = "The emote in slice 2 of the wheel's first page (key 2 in the wheel)."
+default = "thumbs_up"
+applies = "live"
+page = "wheel"
+choices = [
+  { value = "wave", label = "Wave" },
+  { value = "thumbs_up", label = "Thumbs up" },
+  { value = "thumbs_down", label = "Thumbs down" },
+  { value = "clap", label = "Clap" },
+  { value = "point", label = "Point" },
+  { value = "shrug", label = "Shrug" },
+  { value = "facepalm", label = "Facepalm" },
+  { value = "bow", label = "Bow" },
+  { value = "floss", label = "Floss" },
+  { value = "six_seven", label = "Six seven" },
+  { value = "in_love", label = "In love" },
+  { value = "robot", label = "Robot" },
+  { value = "moonwalk", label = "Moonwalk" },
+  { value = "air_guitar", label = "Air guitar" },
+  { value = "korok_hop", label = "Korok hop" },
+  { value = "hestu_shake", label = "Hestu shake" },
+  { value = "salute", label = "Salute" },
+  { value = "revali_smug", label = "Revali smug" },
+  { value = "daruk_flex", label = "Daruk flex" },
+  { value = "urbosa_snap", label = "Urbosa snap" },
+  { value = "mipha_wave", label = "Mipha wave" },
+  { value = "selfie", label = "Photo pose" },
+  { value = "snack", label = "Snack time" },
+  { value = "victory", label = "Victory" },
+  { value = "archer", label = "Archer" },
+  { value = "sword_up", label = "Sword up" },
+  { value = "big_sword", label = "Big sword" },
+  { value = "spear_pose", label = "Spear pose" },
+  { value = "sword_pose", label = "Sword pose" },
+  { value = "hip_pose", label = "Hand on hip" },
+  { value = "hand_up", label = "Hand up" },
+  { value = "chin_pose", label = "Chin pose" },
+  { value = "ragdoll", label = "Ragdoll" },
+  { value = "none", label = "(Empty)" },
+]
+
+[[settings]]
+key = "wheel_3"
+type = "choice"
+label = "Slice 3 (right)"
+description = "The emote in slice 3 of the wheel's first page (key 3 in the wheel)."
+default = "floss"
+applies = "live"
+page = "wheel"
+choices = [
+  { value = "wave", label = "Wave" },
+  { value = "thumbs_up", label = "Thumbs up" },
+  { value = "thumbs_down", label = "Thumbs down" },
+  { value = "clap", label = "Clap" },
+  { value = "point", label = "Point" },
+  { value = "shrug", label = "Shrug" },
+  { value = "facepalm", label = "Facepalm" },
+  { value = "bow", label = "Bow" },
+  { value = "floss", label = "Floss" },
+  { value = "six_seven", label = "Six seven" },
+  { value = "in_love", label = "In love" },
+  { value = "robot", label = "Robot" },
+  { value = "moonwalk", label = "Moonwalk" },
+  { value = "air_guitar", label = "Air guitar" },
+  { value = "korok_hop", label = "Korok hop" },
+  { value = "hestu_shake", label = "Hestu shake" },
+  { value = "salute", label = "Salute" },
+  { value = "revali_smug", label = "Revali smug" },
+  { value = "daruk_flex", label = "Daruk flex" },
+  { value = "urbosa_snap", label = "Urbosa snap" },
+  { value = "mipha_wave", label = "Mipha wave" },
+  { value = "selfie", label = "Photo pose" },
+  { value = "snack", label = "Snack time" },
+  { value = "victory", label = "Victory" },
+  { value = "archer", label = "Archer" },
+  { value = "sword_up", label = "Sword up" },
+  { value = "big_sword", label = "Big sword" },
+  { value = "spear_pose", label = "Spear pose" },
+  { value = "sword_pose", label = "Sword pose" },
+  { value = "hip_pose", label = "Hand on hip" },
+  { value = "hand_up", label = "Hand up" },
+  { value = "chin_pose", label = "Chin pose" },
+  { value = "ragdoll", label = "Ragdoll" },
+  { value = "none", label = "(Empty)" },
+]
+
+[[settings]]
+key = "wheel_4"
+type = "choice"
+label = "Slice 4 (bottom right)"
+description = "The emote in slice 4 of the wheel's first page (key 4 in the wheel)."
+default = "six_seven"
+applies = "live"
+page = "wheel"
+choices = [
+  { value = "wave", label = "Wave" },
+  { value = "thumbs_up", label = "Thumbs up" },
+  { value = "thumbs_down", label = "Thumbs down" },
+  { value = "clap", label = "Clap" },
+  { value = "point", label = "Point" },
+  { value = "shrug", label = "Shrug" },
+  { value = "facepalm", label = "Facepalm" },
+  { value = "bow", label = "Bow" },
+  { value = "floss", label = "Floss" },
+  { value = "six_seven", label = "Six seven" },
+  { value = "in_love", label = "In love" },
+  { value = "robot", label = "Robot" },
+  { value = "moonwalk", label = "Moonwalk" },
+  { value = "air_guitar", label = "Air guitar" },
+  { value = "korok_hop", label = "Korok hop" },
+  { value = "hestu_shake", label = "Hestu shake" },
+  { value = "salute", label = "Salute" },
+  { value = "revali_smug", label = "Revali smug" },
+  { value = "daruk_flex", label = "Daruk flex" },
+  { value = "urbosa_snap", label = "Urbosa snap" },
+  { value = "mipha_wave", label = "Mipha wave" },
+  { value = "selfie", label = "Photo pose" },
+  { value = "snack", label = "Snack time" },
+  { value = "victory", label = "Victory" },
+  { value = "archer", label = "Archer" },
+  { value = "sword_up", label = "Sword up" },
+  { value = "big_sword", label = "Big sword" },
+  { value = "spear_pose", label = "Spear pose" },
+  { value = "sword_pose", label = "Sword pose" },
+  { value = "hip_pose", label = "Hand on hip" },
+  { value = "hand_up", label = "Hand up" },
+  { value = "chin_pose", label = "Chin pose" },
+  { value = "ragdoll", label = "Ragdoll" },
+  { value = "none", label = "(Empty)" },
+]
+
+[[settings]]
+key = "wheel_5"
+type = "choice"
+label = "Slice 5 (bottom)"
+description = "The emote in slice 5 of the wheel's first page (key 5 in the wheel)."
+default = "in_love"
+applies = "live"
+page = "wheel"
+choices = [
+  { value = "wave", label = "Wave" },
+  { value = "thumbs_up", label = "Thumbs up" },
+  { value = "thumbs_down", label = "Thumbs down" },
+  { value = "clap", label = "Clap" },
+  { value = "point", label = "Point" },
+  { value = "shrug", label = "Shrug" },
+  { value = "facepalm", label = "Facepalm" },
+  { value = "bow", label = "Bow" },
+  { value = "floss", label = "Floss" },
+  { value = "six_seven", label = "Six seven" },
+  { value = "in_love", label = "In love" },
+  { value = "robot", label = "Robot" },
+  { value = "moonwalk", label = "Moonwalk" },
+  { value = "air_guitar", label = "Air guitar" },
+  { value = "korok_hop", label = "Korok hop" },
+  { value = "hestu_shake", label = "Hestu shake" },
+  { value = "salute", label = "Salute" },
+  { value = "revali_smug", label = "Revali smug" },
+  { value = "daruk_flex", label = "Daruk flex" },
+  { value = "urbosa_snap", label = "Urbosa snap" },
+  { value = "mipha_wave", label = "Mipha wave" },
+  { value = "selfie", label = "Photo pose" },
+  { value = "snack", label = "Snack time" },
+  { value = "victory", label = "Victory" },
+  { value = "archer", label = "Archer" },
+  { value = "sword_up", label = "Sword up" },
+  { value = "big_sword", label = "Big sword" },
+  { value = "spear_pose", label = "Spear pose" },
+  { value = "sword_pose", label = "Sword pose" },
+  { value = "hip_pose", label = "Hand on hip" },
+  { value = "hand_up", label = "Hand up" },
+  { value = "chin_pose", label = "Chin pose" },
+  { value = "ragdoll", label = "Ragdoll" },
+  { value = "none", label = "(Empty)" },
+]
+
+[[settings]]
+key = "wheel_6"
+type = "choice"
+label = "Slice 6 (bottom left)"
+description = "The emote in slice 6 of the wheel's first page (key 6 in the wheel)."
+default = "daruk_flex"
+applies = "live"
+page = "wheel"
+choices = [
+  { value = "wave", label = "Wave" },
+  { value = "thumbs_up", label = "Thumbs up" },
+  { value = "thumbs_down", label = "Thumbs down" },
+  { value = "clap", label = "Clap" },
+  { value = "point", label = "Point" },
+  { value = "shrug", label = "Shrug" },
+  { value = "facepalm", label = "Facepalm" },
+  { value = "bow", label = "Bow" },
+  { value = "floss", label = "Floss" },
+  { value = "six_seven", label = "Six seven" },
+  { value = "in_love", label = "In love" },
+  { value = "robot", label = "Robot" },
+  { value = "moonwalk", label = "Moonwalk" },
+  { value = "air_guitar", label = "Air guitar" },
+  { value = "korok_hop", label = "Korok hop" },
+  { value = "hestu_shake", label = "Hestu shake" },
+  { value = "salute", label = "Salute" },
+  { value = "revali_smug", label = "Revali smug" },
+  { value = "daruk_flex", label = "Daruk flex" },
+  { value = "urbosa_snap", label = "Urbosa snap" },
+  { value = "mipha_wave", label = "Mipha wave" },
+  { value = "selfie", label = "Photo pose" },
+  { value = "snack", label = "Snack time" },
+  { value = "victory", label = "Victory" },
+  { value = "archer", label = "Archer" },
+  { value = "sword_up", label = "Sword up" },
+  { value = "big_sword", label = "Big sword" },
+  { value = "spear_pose", label = "Spear pose" },
+  { value = "sword_pose", label = "Sword pose" },
+  { value = "hip_pose", label = "Hand on hip" },
+  { value = "hand_up", label = "Hand up" },
+  { value = "chin_pose", label = "Chin pose" },
+  { value = "ragdoll", label = "Ragdoll" },
+  { value = "none", label = "(Empty)" },
+]
+
+[[settings]]
+key = "wheel_7"
+type = "choice"
+label = "Slice 7 (left)"
+description = "The emote in slice 7 of the wheel's first page (key 7 in the wheel)."
+default = "thumbs_down"
+applies = "live"
+page = "wheel"
+choices = [
+  { value = "wave", label = "Wave" },
+  { value = "thumbs_up", label = "Thumbs up" },
+  { value = "thumbs_down", label = "Thumbs down" },
+  { value = "clap", label = "Clap" },
+  { value = "point", label = "Point" },
+  { value = "shrug", label = "Shrug" },
+  { value = "facepalm", label = "Facepalm" },
+  { value = "bow", label = "Bow" },
+  { value = "floss", label = "Floss" },
+  { value = "six_seven", label = "Six seven" },
+  { value = "in_love", label = "In love" },
+  { value = "robot", label = "Robot" },
+  { value = "moonwalk", label = "Moonwalk" },
+  { value = "air_guitar", label = "Air guitar" },
+  { value = "korok_hop", label = "Korok hop" },
+  { value = "hestu_shake", label = "Hestu shake" },
+  { value = "salute", label = "Salute" },
+  { value = "revali_smug", label = "Revali smug" },
+  { value = "daruk_flex", label = "Daruk flex" },
+  { value = "urbosa_snap", label = "Urbosa snap" },
+  { value = "mipha_wave", label = "Mipha wave" },
+  { value = "selfie", label = "Photo pose" },
+  { value = "snack", label = "Snack time" },
+  { value = "victory", label = "Victory" },
+  { value = "archer", label = "Archer" },
+  { value = "sword_up", label = "Sword up" },
+  { value = "big_sword", label = "Big sword" },
+  { value = "spear_pose", label = "Spear pose" },
+  { value = "sword_pose", label = "Sword pose" },
+  { value = "hip_pose", label = "Hand on hip" },
+  { value = "hand_up", label = "Hand up" },
+  { value = "chin_pose", label = "Chin pose" },
+  { value = "ragdoll", label = "Ragdoll" },
+  { value = "none", label = "(Empty)" },
+]
+
+[[settings]]
+key = "wheel_8"
+type = "choice"
+label = "Slice 8 (top left)"
+description = "The emote in slice 8 of the wheel's first page (key 8 in the wheel)."
+default = "victory"
+applies = "live"
+page = "wheel"
+choices = [
+  { value = "wave", label = "Wave" },
+  { value = "thumbs_up", label = "Thumbs up" },
+  { value = "thumbs_down", label = "Thumbs down" },
+  { value = "clap", label = "Clap" },
+  { value = "point", label = "Point" },
+  { value = "shrug", label = "Shrug" },
+  { value = "facepalm", label = "Facepalm" },
+  { value = "bow", label = "Bow" },
+  { value = "floss", label = "Floss" },
+  { value = "six_seven", label = "Six seven" },
+  { value = "in_love", label = "In love" },
+  { value = "robot", label = "Robot" },
+  { value = "moonwalk", label = "Moonwalk" },
+  { value = "air_guitar", label = "Air guitar" },
+  { value = "korok_hop", label = "Korok hop" },
+  { value = "hestu_shake", label = "Hestu shake" },
+  { value = "salute", label = "Salute" },
+  { value = "revali_smug", label = "Revali smug" },
+  { value = "daruk_flex", label = "Daruk flex" },
+  { value = "urbosa_snap", label = "Urbosa snap" },
+  { value = "mipha_wave", label = "Mipha wave" },
+  { value = "selfie", label = "Photo pose" },
+  { value = "snack", label = "Snack time" },
+  { value = "victory", label = "Victory" },
+  { value = "archer", label = "Archer" },
+  { value = "sword_up", label = "Sword up" },
+  { value = "big_sword", label = "Big sword" },
+  { value = "spear_pose", label = "Spear pose" },
+  { value = "sword_pose", label = "Sword pose" },
+  { value = "hip_pose", label = "Hand on hip" },
+  { value = "hand_up", label = "Hand up" },
+  { value = "chin_pose", label = "Chin pose" },
+  { value = "ragdoll", label = "Ragdoll" },
+  { value = "none", label = "(Empty)" },
+]
+
 
 # ---- generated by tools/emote_build.py header (the favourites and the Play page): do not edit below
 
@@ -98,6 +514,14 @@ choices = [
   { value = "selfie", label = "Photo pose" },
   { value = "snack", label = "Snack time" },
   { value = "victory", label = "Victory" },
+  { value = "archer", label = "Archer" },
+  { value = "sword_up", label = "Sword up" },
+  { value = "big_sword", label = "Big sword" },
+  { value = "spear_pose", label = "Spear pose" },
+  { value = "sword_pose", label = "Sword pose" },
+  { value = "hip_pose", label = "Hand on hip" },
+  { value = "hand_up", label = "Hand up" },
+  { value = "chin_pose", label = "Chin pose" },
   { value = "ragdoll", label = "Ragdoll" },
 ]
 
@@ -134,6 +558,14 @@ choices = [
   { value = "selfie", label = "Photo pose" },
   { value = "snack", label = "Snack time" },
   { value = "victory", label = "Victory" },
+  { value = "archer", label = "Archer" },
+  { value = "sword_up", label = "Sword up" },
+  { value = "big_sword", label = "Big sword" },
+  { value = "spear_pose", label = "Spear pose" },
+  { value = "sword_pose", label = "Sword pose" },
+  { value = "hip_pose", label = "Hand on hip" },
+  { value = "hand_up", label = "Hand up" },
+  { value = "chin_pose", label = "Chin pose" },
   { value = "ragdoll", label = "Ragdoll" },
 ]
 
@@ -170,6 +602,14 @@ choices = [
   { value = "selfie", label = "Photo pose" },
   { value = "snack", label = "Snack time" },
   { value = "victory", label = "Victory" },
+  { value = "archer", label = "Archer" },
+  { value = "sword_up", label = "Sword up" },
+  { value = "big_sword", label = "Big sword" },
+  { value = "spear_pose", label = "Spear pose" },
+  { value = "sword_pose", label = "Sword pose" },
+  { value = "hip_pose", label = "Hand on hip" },
+  { value = "hand_up", label = "Hand up" },
+  { value = "chin_pose", label = "Chin pose" },
   { value = "ragdoll", label = "Ragdoll" },
 ]
 
@@ -206,6 +646,14 @@ choices = [
   { value = "selfie", label = "Photo pose" },
   { value = "snack", label = "Snack time" },
   { value = "victory", label = "Victory" },
+  { value = "archer", label = "Archer" },
+  { value = "sword_up", label = "Sword up" },
+  { value = "big_sword", label = "Big sword" },
+  { value = "spear_pose", label = "Spear pose" },
+  { value = "sword_pose", label = "Sword pose" },
+  { value = "hip_pose", label = "Hand on hip" },
+  { value = "hand_up", label = "Hand up" },
+  { value = "chin_pose", label = "Chin pose" },
   { value = "ragdoll", label = "Ragdoll" },
 ]
 
@@ -242,6 +690,14 @@ choices = [
   { value = "selfie", label = "Photo pose" },
   { value = "snack", label = "Snack time" },
   { value = "victory", label = "Victory" },
+  { value = "archer", label = "Archer" },
+  { value = "sword_up", label = "Sword up" },
+  { value = "big_sword", label = "Big sword" },
+  { value = "spear_pose", label = "Spear pose" },
+  { value = "sword_pose", label = "Sword pose" },
+  { value = "hip_pose", label = "Hand on hip" },
+  { value = "hand_up", label = "Hand up" },
+  { value = "chin_pose", label = "Chin pose" },
   { value = "ragdoll", label = "Ragdoll" },
 ]
 
@@ -278,6 +734,14 @@ choices = [
   { value = "selfie", label = "Photo pose" },
   { value = "snack", label = "Snack time" },
   { value = "victory", label = "Victory" },
+  { value = "archer", label = "Archer" },
+  { value = "sword_up", label = "Sword up" },
+  { value = "big_sword", label = "Big sword" },
+  { value = "spear_pose", label = "Spear pose" },
+  { value = "sword_pose", label = "Sword pose" },
+  { value = "hip_pose", label = "Hand on hip" },
+  { value = "hand_up", label = "Hand up" },
+  { value = "chin_pose", label = "Chin pose" },
   { value = "ragdoll", label = "Ragdoll" },
 ]
 
@@ -286,7 +750,7 @@ key = "play_wave"
 type = "button"
 label = "Wave"
 button = "Play"
-description = "Right hand high over the head, four big side-to-side swings, a smile."
+description = "Weight onto one leg, the right hand sweeps up over the head and waves side..."
 page = "play"
 
 [[settings]]
@@ -294,7 +758,7 @@ key = "play_thumbs_up"
 type = "button"
 label = "Thumbs up"
 button = "Play"
-description = "Right arm out to the side and forward, fist with the thumb up, a firm nod..."
+description = "A little wind-up, then the arm punches forward into a thumbs up with a firm..."
 page = "play"
 
 [[settings]]
@@ -302,7 +766,7 @@ key = "play_thumbs_down"
 type = "button"
 label = "Thumbs down"
 button = "Play"
-description = "Arm forward, thumb down, a slow head shake, the shoulders drop."
+description = "The shoulders sag, the arm goes out with the thumb down and pumps it twice..."
 page = "play"
 
 [[settings]]
@@ -310,7 +774,7 @@ key = "play_clap"
 type = "button"
 label = "Clap"
 button = "Play"
-description = "Hands meet in front of the chest twice a second, with a small bounce."
+description = "Claps twice a second in front of the chest: the hands speed up into each..."
 page = "play"
 
 [[settings]]
@@ -318,7 +782,7 @@ key = "play_point"
 type = "button"
 label = "Point"
 button = "Play"
-description = "'You!': the arm snaps forward pointing, the other hand on the hip, a lean in."
+description = "'You!': the hand draws back, then shoots forward pointing with a lean in..."
 page = "play"
 
 [[settings]]
@@ -326,7 +790,7 @@ key = "play_shrug"
 type = "button"
 label = "Shrug"
 button = "Play"
-description = "Palms up, shoulders up, a head tilt, elbows out."
+description = "Palms turn up, the shoulders pop up past the top and settle, elbows out, a..."
 page = "play"
 
 [[settings]]
@@ -334,7 +798,7 @@ key = "play_facepalm"
 type = "button"
 label = "Facepalm"
 button = "Play"
-description = "The hand rises to the face, the head drops into it, a slow shake."
+description = "A big sigh: the hand comes up to the face, the head drops into it and..."
 page = "play"
 
 [[settings]]
@@ -342,7 +806,7 @@ key = "play_bow"
 type = "button"
 label = "Bow"
 button = "Play"
-description = "A polite bow from the waist, the right hand on the chest."
+description = "The right hand goes to the chest, a polite bow from the waist (the head..."
 page = "play"
 
 [[settings]]
@@ -350,7 +814,7 @@ key = "play_floss"
 type = "button"
 label = "Floss"
 button = "Play"
-description = "Straight arms swing side to side, one crossing in front of the hips and one..."
+description = "Straight arms, fists: both swing side to side, one crossing in front of the..."
 page = "play"
 
 [[settings]]
@@ -374,7 +838,7 @@ key = "play_robot"
 type = "button"
 label = "Robot"
 button = "Play"
-description = "Stiff 90-degree arm poses that snap from one to the next while the head..."
+description = "Pop-lock robot: elbows locked at 90 degrees, flat hands; each part hits..."
 page = "play"
 
 [[settings]]
@@ -382,7 +846,7 @@ key = "play_moonwalk"
 type = "button"
 label = "Moonwalk"
 button = "Play"
-description = "On the spot: one heel pops up high while the other foot slides back, then..."
+description = "On the spot: one foot on its toes, heel up and knee forward, while the..."
 page = "play"
 
 [[settings]]
@@ -390,7 +854,7 @@ key = "play_air_guitar"
 type = "button"
 label = "Air guitar"
 button = "Play"
-description = "Wide stance, the left hand on the neck, the right hand strums, head-banging..."
+description = "Wide stance, fast down-up strums at the hip, the other hand slides along..."
 page = "play"
 
 [[settings]]
@@ -406,8 +870,13 @@ key = "play_hestu_shake"
 type = "button"
 label = "Hestu shake"
 button = "Play"
-description = "Fists high shaking maracas, a side-step shuffle, the hips sway."
+description = "Hestu's maraca dance: maracas up by the head, a sharp shake on every beat..."
 page = "play"
+
+[[pages]]
+key = "play_2"
+label = "Play an emote (2)"
+description = "More emotes: press Play, then close the menu."
 
 [[settings]]
 key = "play_salute"
@@ -415,15 +884,15 @@ type = "button"
 label = "Salute"
 button = "Play"
 description = "A Hylian guard's salute: heels together, right fist to the heart, chin up, held."
-page = "play"
+page = "play_2"
 
 [[settings]]
 key = "play_revali_smug"
 type = "button"
 label = "Revali smug"
 button = "Play"
-description = "Arms crossed, head tilted back and turned away, one foot taps."
-page = "play"
+description = "Arms crossed, chin up, head turned away, weight on one leg; a slow..."
+page = "play_2"
 
 [[settings]]
 key = "play_daruk_flex"
@@ -431,23 +900,23 @@ type = "button"
 label = "Daruk flex"
 button = "Play"
 description = "Link's own muscle-man idle from the game: he flexes both arms with a proud face."
-page = "play"
+page = "play_2"
 
 [[settings]]
 key = "play_urbosa_snap"
 type = "button"
 label = "Urbosa snap"
 button = "Play"
-description = "A hand on the hip, the other raised, a confident finger snap and a smirk."
-page = "play"
+description = "Hand on the hip, weight on one leg; the other arm sweeps up, cocks back and..."
+page = "play_2"
 
 [[settings]]
 key = "play_mipha_wave"
 type = "button"
 label = "Mipha wave"
 button = "Play"
-description = "A small shy wave near the chin, head tilted, a little step back, blushing."
-page = "play"
+description = "Shy: shoulders up, head tilted, one foot turned in; a small wave by the..."
+page = "play_2"
 
 [[settings]]
 key = "play_selfie"
@@ -455,7 +924,7 @@ type = "button"
 label = "Photo pose"
 button = "Play"
 description = "One hand up high, posing for a photo (the game's own selfie pose, no Slate..."
-page = "play"
+page = "play_2"
 
 [[settings]]
 key = "play_snack"
@@ -463,15 +932,79 @@ type = "button"
 label = "Snack time"
 button = "Play"
 description = "Link mimes a hearty bite with both hands (the game's own eating clip)."
-page = "play"
+page = "play_2"
 
 [[settings]]
 key = "play_victory"
 type = "button"
 label = "Victory"
 button = "Play"
-description = "Link's cooking celebration with his voice (a copy of the game's own set..."
-page = "play"
+description = "Link's very-good-cooking celebration without the looks down at the pot..."
+page = "play_2"
+
+[[settings]]
+key = "play_archer"
+type = "button"
+label = "Archer"
+button = "Play"
+description = "Draws an invisible bow: one arm out straight, the other hand pulled back to..."
+page = "play_2"
+
+[[settings]]
+key = "play_sword_up"
+type = "button"
+label = "Sword up"
+button = "Play"
+description = "One arm raised straight up to the sky, as if holding up a sword (the game's..."
+page = "play_2"
+
+[[settings]]
+key = "play_big_sword"
+type = "button"
+label = "Big sword"
+button = "Play"
+description = "A wide stance with both hands up at one shoulder, holding an invisible..."
+page = "play_2"
+
+[[settings]]
+key = "play_spear_pose"
+type = "button"
+label = "Spear pose"
+button = "Play"
+description = "A low, wide stance, one arm drawn back high as if about to throw a spear..."
+page = "play_2"
+
+[[settings]]
+key = "play_sword_pose"
+type = "button"
+label = "Sword pose"
+button = "Play"
+description = "A low fighting stance, one arm out as if holding a sword ready (the game's..."
+page = "play_2"
+
+[[settings]]
+key = "play_hip_pose"
+type = "button"
+label = "Hand on hip"
+button = "Play"
+description = "Relaxed, weight on one leg, a hand on the hip (the game's own photo pose)."
+page = "play_2"
+
+[[settings]]
+key = "play_hand_up"
+type = "button"
+label = "Hand up"
+button = "Play"
+description = "One hand raised up high by the head, the other on the hip (the game's own..."
+page = "play_2"
+
+[[settings]]
+key = "play_chin_pose"
+type = "button"
+label = "Chin pose"
+button = "Play"
+description = "A hand up by the chin, weight on one leg (the game's own photo pose)."
+page = "play_2"
 
 [[settings]]
 key = "play_ragdoll"
@@ -479,5 +1012,5 @@ type = "button"
 label = "Ragdoll"
 button = "Play"
 description = "Link is thrown forward and ragdolls to the ground, then gets up."
-page = "play"
+page = "play_2"
 # ---- end of generated settings

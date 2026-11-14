@@ -1,6 +1,6 @@
 {
   "id": "victory", "name": "Victory", "aliases": ["cheer", "yay", "win"],
   "page": "hyrule", "slot": 8, "by": "giruka",
-  "about": "Link's cooking celebration with his voice (a copy of the game's own set GetCookingVeryGood).",
-  "kind": "game_set", "set": "GetCookingVeryGood", "loop": true, "morph": 6, "fallback": "GetCookingVeryGood"
+  "about": "Link's very-good-cooking celebration without the looks down at the pot (before and after): a crouch, a jump with both fists up, a landing.",
+  "kind": "game_clip", "clip": "Demo_Get_Cooking_VeryGood", "start": 112, "end": 151, "loop": false, "face": "smile", "morph": 8, "fallback": "GetCookingVeryGood"
 }

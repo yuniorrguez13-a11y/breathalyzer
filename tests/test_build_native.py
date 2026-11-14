@@ -322,7 +322,8 @@ class Commands(unittest.TestCase):
                 redirect_stdout(io.StringIO()) as text:
             self.assertEqual(bn.main(["build", "--out", str(out)]), 0)
         self.assertEqual(seen, ["modhost", "hello", "stamina_hook", "ghost", "basics_show_pos", "basics_inf_stamina",
-                                "basics_teleport_up", *(["settings_demo"] if bn.SETTINGS_EXAMPLES else [])])
+                                "basics_teleport_up", *(["settings_demo"] if bn.SETTINGS_EXAMPLES else []),
+                                *(t.name for t in bn.EMOTES_EXAMPLES)])
         self.assertIn(str(Path("ghost-mods") / "ghost.dll"), text.getvalue())
         self.assertIn("docs/ghost.md", text.getvalue())
         self.assertIn(str(out / "basics-mods"), text.getvalue())

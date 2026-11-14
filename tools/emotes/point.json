@@ -1,18 +1,20 @@
 {
   "id": "point", "name": "Point", "aliases": ["you", "pointing"],
   "page": "hello", "slot": 5, "by": "giruka",
-  "about": "\"You!\": the arm snaps forward pointing, the other hand on the hip, a lean in.",
-  "kind": "keys", "frames": 50, "loop": false, "face": "smile", "morph": 5,
+  "about": "\"You!\": the hand draws back, then shoots forward pointing with a lean in, the other hand on the hip; two little jabs.",
+  "kind": "keys", "frames": 56, "loop": false, "face": "smile", "morph": 5, "ease": "spline", "contact": ["Wrist_L"],
+  "lag": {"Head": 3, "Neck": 1, "Spine_2": 1, "Wrist_*": 2, "Finger_*": 3},
+  "breath": [1.2, 56],
   "keys": [
     {"f": 0},
-    {"f": 6, "ease": "linear",
-     "aim": {"Arm_1_R": [-0.12, 0.08, 1], "Arm_2_R": [-0.05, 0.1, 1], "Wrist_R": [-0.03, 0.08, 1]},
-     "palm": {"Wrist_R": [0.4, -1, 0]}, "hand": {"R": "point", "L": "fist"},
-     "reach": {"Wrist_L": {"on": "Skl_Root", "at": [0.21, 0.03, -0.02]}}, "elbow": {"L": [1, 0, -0.4]},
-     "turn": {"Spine_1": [8, 8, 0], "Head": [-4, 0, 0]}},
-    {"f": 10, "turn": {"Spine_1": [10, 9, 0], "Head": [-4, 0, 0]}},
-    {"f": 38},
-    {"f": 50, "reset": true}
+    {"f": 7, "reset": true, "hips": [-0.013, -0.004, 0], "turn": {"Skl_Root": [0.0, 0.0, -1.5], "Spine_1": [-3.0, -6.0, 1.2], "Head": [-3.0, 4.0, 0.0]}, "heel": {"L": 4.5}, "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.202, 0.079, 0.166]}}, "elbow": {"R": [-1, -0.3, -0.6]}, "hand": {"R": "point", "L": "fist"}},
+    {"f": 15, "reset": true, "hips": [-0.02, -0.012, 0.025], "turn": {"Skl_Root": [0.0, 0.0, -3.0], "Spine_1": [9.0, 9.0, 0.5], "Head": [-6.0, -3.0, -4.0]}, "heel": {"L": 9.0}, "aim": {"Arm_1_R": [-0.12, 0.1, 1], "Arm_2_R": [-0.05, 0.14, 1], "Wrist_R": [-0.03, 0.2, 1]}, "palm": {"Wrist_R": [0.4, -1, 0]}, "hand": {"R": "point", "L": "fist"}, "reach": {"Wrist_L": {"on": "Skl_Root", "at": [0.21, 0.03, -0.02]}}, "elbow": {"L": [1, 0, -0.4]}, "ease": "smooth"},
+    {"f": 20, "reset": true, "hips": [-0.02, -0.012, 0.025], "turn": {"Skl_Root": [0.0, 0.0, -3.0], "Spine_1": [9.0, 9.0, 0.5], "Head": [-6.0, -3.0, -4.0]}, "heel": {"L": 9.0}, "aim": {"Arm_1_R": [-0.12, 0.08, 1], "Arm_2_R": [-0.05, 0.1, 1], "Wrist_R": [-0.03, 0.08, 1]}, "palm": {"Wrist_R": [0.4, -1, 0]}, "hand": {"R": "point", "L": "fist"}, "reach": {"Wrist_L": {"on": "Skl_Root", "at": [0.21, 0.03, -0.02]}}, "elbow": {"L": [1, 0, -0.4]}},
+    {"f": 24, "reset": true, "hips": [-0.02, -0.012, 0.025], "turn": {"Skl_Root": [0.0, 0.0, -3.0], "Spine_1": [9.0, 9.0, 0.5], "Head": [-8.0, -3.0, -4.0]}, "heel": {"L": 9.0}, "aim": {"Arm_1_R": [-0.12, 0.1, 1], "Arm_2_R": [-0.05, 0.14, 1], "Wrist_R": [-0.03, 0.2, 1]}, "palm": {"Wrist_R": [0.4, -1, 0]}, "hand": {"R": "point", "L": "fist"}, "reach": {"Wrist_L": {"on": "Skl_Root", "at": [0.21, 0.03, -0.02]}}, "elbow": {"L": [1, 0, -0.4]}},
+    {"f": 29, "reset": true, "hips": [-0.02, -0.012, 0.025], "turn": {"Skl_Root": [0.0, 0.0, -3.0], "Spine_1": [9.0, 9.0, 0.5], "Head": [-6.0, -3.0, -4.0]}, "heel": {"L": 9.0}, "aim": {"Arm_1_R": [-0.12, 0.08, 1], "Arm_2_R": [-0.05, 0.1, 1], "Wrist_R": [-0.03, 0.08, 1]}, "palm": {"Wrist_R": [0.4, -1, 0]}, "hand": {"R": "point", "L": "fist"}, "reach": {"Wrist_L": {"on": "Skl_Root", "at": [0.21, 0.03, -0.02]}}, "elbow": {"L": [1, 0, -0.4]}},
+    {"f": 35, "reset": true, "hips": [-0.02, -0.012, 0.025], "turn": {"Skl_Root": [0.0, 0.0, -3.0], "Spine_1": [9.0, 9.0, 0.5], "Head": [-6.0, -3.0, -4.0]}, "heel": {"L": 9.0}, "aim": {"Arm_1_R": [-0.12, 0.1, 1], "Arm_2_R": [-0.05, 0.14, 1], "Wrist_R": [-0.03, 0.2, 1]}, "palm": {"Wrist_R": [0.4, -1, 0]}, "hand": {"R": "point", "L": "fist"}, "reach": {"Wrist_L": {"on": "Skl_Root", "at": [0.21, 0.03, -0.02]}}, "elbow": {"L": [1, 0, -0.4]}},
+    {"f": 42, "reset": true, "hips": [-0.02, -0.012, 0.025], "turn": {"Skl_Root": [0.0, 0.0, -2.4], "Spine_1": [9.0, 9.0, 0.0], "Head": [-4.0, -3.0, -4.0]}, "heel": {"L": 7.2}, "aim": {"Arm_1_R": [-0.12, 0.08, 1], "Arm_2_R": [-0.05, 0.1, 1], "Wrist_R": [-0.03, 0.08, 1]}, "palm": {"Wrist_R": [0.4, -1, 0]}, "hand": {"R": "point", "L": "fist"}, "reach": {"Wrist_L": {"on": "Skl_Root", "at": [0.21, 0.03, -0.02]}}, "elbow": {"L": [1, 0, -0.4]}},
+    {"f": 56, "reset": true}
   ],
   "expect": [
     {"f": 20, "in_front": ["Finger_B_3_R", "Head"]},

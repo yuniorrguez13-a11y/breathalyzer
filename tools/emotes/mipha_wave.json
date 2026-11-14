@@ -1,28 +1,26 @@
 {
   "id": "mipha_wave", "name": "Mipha wave", "aliases": ["mipha", "shy wave", "shy"],
   "page": "hyrule", "slot": 5, "by": "giruka",
-  "about": "A small shy wave near the chin, head tilted, a little step back, blushing.",
-  "kind": "keys", "frames": 60, "loop": false, "face": "blush", "morph": 6, "contact": ["Wrist_L"],
-  "poses": {
-    "shy": {"reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.08, 0.27, 0.24]}, "Wrist_L": {"on": "Spine_2", "at": [0.0, 0.12, 0.18]}},
-            "aim": {"Wrist_R": [-0.1, 1, 0.15]}, "palm": {"Wrist_R": [0, 0, 1], "Wrist_L": [0, 0, -1]},
-            "hand": {"R": "open", "L": "relaxed"}, "elbow": {"R": [-0.6, -1, 0], "L": [1, -1, 0]},
-            "turn": {"Head": [10, -6, 14]}, "step": {"Ankle_R": [0, 0, -0.08]}, "hips": [0, -0.01, -0.03]}
-  },
+  "about": "Shy: shoulders up, head tilted, one foot turned in; a small wave by the chin, the other hand on the tummy, then the hands meet.",
+  "kind": "keys", "frames": 84, "loop": false, "face": "blush", "morph": 6, "ease": "spline", "contact": ["Wrist_L", "Wrist_R", "hands"],
+  "lag": {"Head": 3, "Wrist_R": 1, "Finger_*_R": 2, "Spine_2": 1},
+  "breath": [1.4, 50],
   "keys": [
     {"f": 0},
-    {"f": 12, "pose": "shy"},
-    {"f": 18, "pose": "shy", "aim": {"Wrist_R": [-0.45, 0.9, 0.15]}},
-    {"f": 24, "pose": "shy", "aim": {"Wrist_R": [0.2, 1, 0.15]}},
-    {"f": 30, "pose": "shy", "aim": {"Wrist_R": [-0.45, 0.9, 0.15]}},
-    {"f": 36, "pose": "shy", "aim": {"Wrist_R": [0.2, 1, 0.15]}},
-    {"f": 42, "pose": "shy", "aim": {"Wrist_R": [-0.45, 0.9, 0.15]}},
-    {"f": 48, "pose": "shy"},
-    {"f": 60, "reset": true}
+    {"f": 16, "step": {"Ankle_R": [0.03, 0, -0.07]}, "heel": {"R": 18}, "knee": {"R": [0.5, 0, 1]}, "elbow": {"R": [-0.6, -1, 0], "L": [1, -1, -0.2]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, 1]}, "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.113, 0.265, 0.209]}, "Wrist_L": {"on": "Spine_1", "at": [0.049, 0.043, 0.162]}}, "aim": {"Wrist_R": [-0.1, 1, 0.15]}, "hips": [0, -0.012, -0.02], "turn": {"Clavicle_R": [0.0, 4.0, -5.0], "Clavicle_L": [0.0, -4.0, 5.0], "Spine_1": [4.0, 0.0, 0.0], "Head": [8.0, -6.0, 13.0]}, "hand": {"R": "open", "L": "relaxed"}},
+    {"f": 23, "step": {"Ankle_R": [0.03, 0, -0.07]}, "heel": {"R": 18}, "knee": {"R": [0.5, 0, 1]}, "elbow": {"R": [-0.6, -1, 0], "L": [1, -1, -0.2]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, 1]}, "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.113, 0.265, 0.209]}, "Wrist_L": {"on": "Spine_1", "at": [0.049, 0.043, 0.162]}}, "aim": {"Wrist_R": [-0.4, 0.9, 0.15]}, "hips": [-0.012, -0.012, -0.02], "turn": {"Clavicle_R": [0.0, 4.0, -5.0], "Clavicle_L": [0.0, -4.0, 5.0], "Spine_1": [4.0, 0.0, 2.0], "Head": [8.0, -9.0, 11.0]}},
+    {"f": 30, "step": {"Ankle_R": [0.03, 0, -0.07]}, "heel": {"R": 18}, "knee": {"R": [0.5, 0, 1]}, "elbow": {"R": [-0.6, -1, 0], "L": [1, -1, -0.2]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, 1]}, "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.113, 0.265, 0.209]}, "Wrist_L": {"on": "Spine_1", "at": [0.049, 0.043, 0.162]}}, "aim": {"Wrist_R": [0.2, 1, 0.15]}, "hips": [0.012, -0.012, -0.02], "turn": {"Clavicle_R": [0.0, 4.0, -5.0], "Clavicle_L": [0.0, -4.0, 5.0], "Spine_1": [4.0, 0.0, -2.0], "Head": [8.0, -3.0, 15.0]}},
+    {"f": 37, "step": {"Ankle_R": [0.03, 0, -0.07]}, "heel": {"R": 18}, "knee": {"R": [0.5, 0, 1]}, "elbow": {"R": [-0.6, -1, 0], "L": [1, -1, -0.2]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, 1]}, "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.113, 0.265, 0.209]}, "Wrist_L": {"on": "Spine_1", "at": [0.049, 0.043, 0.162]}}, "aim": {"Wrist_R": [-0.4, 0.9, 0.15]}, "hips": [-0.012, -0.012, -0.02], "turn": {"Clavicle_R": [0.0, 4.0, -5.0], "Clavicle_L": [0.0, -4.0, 5.0], "Spine_1": [4.0, 0.0, 2.0], "Head": [8.0, -9.0, 11.0]}},
+    {"f": 44, "step": {"Ankle_R": [0.03, 0, -0.07]}, "heel": {"R": 18}, "knee": {"R": [0.5, 0, 1]}, "elbow": {"R": [-0.6, -1, 0], "L": [1, -1, -0.2]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, 1]}, "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.113, 0.265, 0.209]}, "Wrist_L": {"on": "Spine_1", "at": [0.049, 0.043, 0.162]}}, "aim": {"Wrist_R": [0.2, 1, 0.15]}, "hips": [0.012, -0.012, -0.02], "turn": {"Clavicle_R": [0.0, 4.0, -5.0], "Clavicle_L": [0.0, -4.0, 5.0], "Spine_1": [4.0, 0.0, -2.0], "Head": [8.0, -3.0, 15.0]}},
+    {"f": 51, "step": {"Ankle_R": [0.03, 0, -0.07]}, "heel": {"R": 18}, "knee": {"R": [0.5, 0, 1]}, "elbow": {"R": [-0.6, -1, 0], "L": [1, -1, -0.2]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, 1]}, "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.113, 0.265, 0.209]}, "Wrist_L": {"on": "Spine_1", "at": [0.049, 0.043, 0.162]}}, "aim": {"Wrist_R": [-0.4, 0.9, 0.15]}, "hips": [-0.006, -0.012, -0.02], "turn": {"Clavicle_R": [0.0, 4.0, -5.0], "Clavicle_L": [0.0, -4.0, 5.0], "Spine_1": [4.0, 0.0, 1.0], "Head": [8.0, -7.5, 12.0]}},
+    {"f": 60, "step": {"Ankle_R": [0.03, 0, -0.07]}, "heel": {"R": 18}, "knee": {"R": [0.5, 0, 1]}, "elbow": {"R": [-0.6, -1, 0], "L": [1, -1, -0.2]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, 1]}, "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.043, -0.08, 0.211]}, "Wrist_L": {"on": "Spine_1", "at": [0.049, 0.043, 0.162]}}, "aim": {"Wrist_R": [0.4, 0.3, 0.8]}, "hips": [0, -0.012, -0.02], "turn": {"Clavicle_R": [0.0, 4.0, -5.0], "Clavicle_L": [0.0, -4.0, 5.0], "Spine_1": [4.0, 0.0, 0.0], "Head": [8.0, -6.0, 16.0]}, "hand": {"R": "relaxed"}},
+    {"f": 68, "step": {"Ankle_R": [0.03, 0, -0.07]}, "heel": {"R": 18}, "knee": {"R": [0.5, 0, 1]}, "elbow": {"R": [-0.6, -1, 0], "L": [1, -1, -0.2]}, "palm": {"Wrist_L": [0, 0, -1], "Wrist_R": [0, 0, 1]}, "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.043, -0.08, 0.211]}, "Wrist_L": {"on": "Spine_1", "at": [0.049, 0.043, 0.162]}}, "aim": {"Wrist_R": [0.4, 0.3, 0.8]}, "hips": [0.004, -0.012, -0.02], "turn": {"Clavicle_R": [0.0, 4.0, -5.0], "Clavicle_L": [0.0, -4.0, 5.0], "Spine_1": [4.0, 0.0, -0.6], "Head": [8.0, -5.1, 15.6]}},
+    {"f": 84, "reset": true}
   ],
   "expect": [
-    {"f": 24, "above": ["Wrist_R", "Spine_2"]},
-    {"f": 24, "below": ["Wrist_R", "Head"]},
-    {"f": 24, "behind": ["Ankle_R", "Ankle_L"]}
+    {"f": 30, "above": ["Wrist_R", "Spine_2"]},
+    {"f": 30, "below": ["Wrist_R", "Head"]},
+    {"f": 30, "behind": ["Ankle_R", "Ankle_L"]},
+    {"f": 64, "near": ["Wrist_R", "Wrist_L", 15]}
   ]
 }

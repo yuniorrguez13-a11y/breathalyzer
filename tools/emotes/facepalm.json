@@ -1,21 +1,24 @@
 {
   "id": "facepalm", "name": "Facepalm", "aliases": ["ugh", "smh"],
   "page": "hello", "slot": 7, "by": "giruka",
-  "about": "The hand rises to the face, the head drops into it, a slow shake.",
-  "kind": "keys", "frames": 75, "loop": false, "face": "frown", "morph": 6, "contact": ["Wrist_R"],
+  "about": "A big sigh: the hand comes up to the face, the head drops into it and shakes slowly, the shoulders sag.",
+  "kind": "keys", "frames": 88, "loop": false, "face": "frown", "morph": 6, "ease": "spline", "contact": ["Wrist_R"],
+  "lag": {"Head": 2, "Spine_2": 1, "Finger_*": 3},
+  "breath": [2.5, 88],
   "keys": [
     {"f": 0},
-    {"f": 14, "reach": {"Wrist_R": {"on": "Head", "at": [-0.02, 0.0, 0.17]}}, "aim": {"Wrist_R": [0.15, 1, 0]},
-     "palm": {"Wrist_R": [0, 0, -1]}, "hand": {"R": "open"}, "elbow": {"R": [-0.3, -1, 0.4]}},
-    {"f": 24, "turn": {"Head": [20, 0, 0], "Spine_1": [8, 0, 0]}},
-    {"f": 34, "turn": {"Head": [20, -10, 0], "Spine_1": [8, 0, 0]}},
-    {"f": 44, "turn": {"Head": [20, 10, 0], "Spine_1": [8, 0, 0]}},
-    {"f": 54, "turn": {"Head": [20, -8, 0], "Spine_1": [8, 0, 0]}},
-    {"f": 62, "turn": {"Head": [20, 0, 0], "Spine_1": [8, 0, 0]}},
-    {"f": 75, "reset": true}
+    {"f": 8, "reset": true, "hips": [0.01, -0.003, 0], "turn": {"Skl_Root": [0.0, 0.0, 1.2], "Spine_1": [-3.0, 0.0, -1.0], "Head": [-6.0, 0.0, 0.0]}, "heel": {"R": 3.6}},
+    {"f": 20, "reset": true, "hips": [0.026, -0.008, 0], "turn": {"Skl_Root": [0.0, 0.0, 3.0], "Spine_1": [3.0, 0.0, -2.5], "Head": [6.0, 0.0, 0.0]}, "heel": {"R": 9.0}, "reach": {"Wrist_R": {"on": "Head", "at": [-0.02, 0, 0.17]}}, "aim": {"Wrist_R": [0.15, 1, 0]}, "palm": {"Wrist_R": [0, 0, -1]}, "hand": {"R": "open"}, "elbow": {"R": [-0.3, -1, 0.4]}},
+    {"f": 28, "reset": true, "hips": [0.024, -0.02, 0], "turn": {"Skl_Root": [0.0, 0.0, 3.0], "Spine_1": [9.0, 0.0, -2.5], "Clavicle_L": [0.0, 0.0, -4.0], "Clavicle_R": [0.0, 0.0, 2.0], "Head": [21.0, 0.0, 0.0]}, "heel": {"R": 9.0}, "reach": {"Wrist_R": {"on": "Head", "at": [-0.02, 0, 0.17]}}, "aim": {"Wrist_R": [0.15, 1, 0]}, "palm": {"Wrist_R": [0, 0, -1]}, "hand": {"R": "open"}, "elbow": {"R": [-0.3, -1, 0.4]}, "ease": "out"},
+    {"f": 38, "reset": true, "hips": [0.024, -0.02, 0], "turn": {"Skl_Root": [0.0, 0.0, 3.0], "Spine_1": [9.0, 0.0, -2.5], "Clavicle_L": [0.0, 0.0, -4.0], "Clavicle_R": [0.0, 0.0, 2.0], "Head": [21.0, -11.0, 0.0]}, "heel": {"R": 9.0}, "reach": {"Wrist_R": {"on": "Head", "at": [-0.02, 0, 0.17]}}, "aim": {"Wrist_R": [0.15, 1, 0]}, "palm": {"Wrist_R": [0, 0, -1]}, "hand": {"R": "open"}, "elbow": {"R": [-0.3, -1, 0.4]}},
+    {"f": 48, "reset": true, "hips": [0.024, -0.02, 0], "turn": {"Skl_Root": [0.0, 0.0, 3.0], "Spine_1": [9.0, 0.0, -2.5], "Clavicle_L": [0.0, 0.0, -4.0], "Clavicle_R": [0.0, 0.0, 2.0], "Head": [21.0, 10.0, 0.0]}, "heel": {"R": 9.0}, "reach": {"Wrist_R": {"on": "Head", "at": [-0.02, 0, 0.17]}}, "aim": {"Wrist_R": [0.15, 1, 0]}, "palm": {"Wrist_R": [0, 0, -1]}, "hand": {"R": "open"}, "elbow": {"R": [-0.3, -1, 0.4]}},
+    {"f": 58, "reset": true, "hips": [0.024, -0.02, 0], "turn": {"Skl_Root": [0.0, 0.0, 3.0], "Spine_1": [9.0, 0.0, -2.5], "Clavicle_L": [0.0, 0.0, -4.0], "Clavicle_R": [0.0, 0.0, 2.0], "Head": [21.0, -7.0, 0.0]}, "heel": {"R": 9.0}, "reach": {"Wrist_R": {"on": "Head", "at": [-0.02, 0, 0.17]}}, "aim": {"Wrist_R": [0.15, 1, 0]}, "palm": {"Wrist_R": [0, 0, -1]}, "hand": {"R": "open"}, "elbow": {"R": [-0.3, -1, 0.4]}},
+    {"f": 65, "reset": true, "hips": [0.024, -0.02, 0], "turn": {"Skl_Root": [0.0, 0.0, 3.0], "Spine_1": [9.0, 0.0, -2.5], "Clavicle_L": [0.0, 0.0, -4.0], "Clavicle_R": [0.0, 0.0, 2.0], "Head": [19.0, 2.0, 0.0]}, "heel": {"R": 9.0}, "reach": {"Wrist_R": {"on": "Head", "at": [-0.02, 0, 0.17]}}, "aim": {"Wrist_R": [0.15, 1, 0]}, "palm": {"Wrist_R": [0, 0, -1]}, "hand": {"R": "open"}, "elbow": {"R": [-0.3, -1, 0.4]}},
+    {"f": 76, "reset": true, "hips": [0.013, -0.004, 0], "turn": {"Skl_Root": [0.0, 0.0, 1.5], "Spine_1": [4.0, 0.0, -1.2], "Head": [5.0, 0.0, 0.0]}, "heel": {"R": 4.5}, "hand": {"R": "relaxed"}},
+    {"f": 88, "reset": true}
   ],
   "expect": [
-    {"f": 30, "near": ["Wrist_R", "Head", 25]},
-    {"f": 30, "above": ["Wrist_R", "Spine_2"]}
+    {"f": 35, "near": ["Wrist_R", "Head", 25]},
+    {"f": 35, "above": ["Wrist_R", "Spine_2"]}
   ]
 }

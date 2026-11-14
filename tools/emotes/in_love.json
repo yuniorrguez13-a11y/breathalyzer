@@ -2,7 +2,7 @@
   "id": "in_love", "name": "In love", "aliases": ["thrust", "so in love", "inlove", "love"],
   "page": "dances", "slot": 3, "by": "giruka",
   "about": "The \"I'm so in love with you\" trend: hands behind the head, elbows wide, hips thrust forward on the beat, knees bend.",
-  "kind": "keys", "frames": 16, "loop": true, "face": "smug", "morph": 6,
+  "kind": "keys", "frames": 16, "loop": true, "face": "smug", "morph": 6, "contact": ["hands"],
   "poses": {
     "back":   {"reach": {"Wrist_R": {"on": "Head", "at": [-0.08, 0.09, -0.09]}, "Wrist_L": {"on": "Head", "at": [0.08, 0.09, -0.09]}},
                "elbow": {"R": [-1, 0.3, 0.25], "L": [1, 0.3, 0.25]}, "palm": {"Wrist_R": [0, 0, 1], "Wrist_L": [0, 0, 1]},

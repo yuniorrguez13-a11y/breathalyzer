@@ -4,7 +4,8 @@
 // giruka.emotes-anims: our own keyframed clips, a few game clips by name, one copy of a game set) on Link's body
 // slot, from Link's own per-frame update, never the frame job (the ghost mod wraps that one).
 //
-//   - Start: the keys 5 6 7 8 9 0 (and the numpad's), the console command `emote`, or the Play buttons on the Mods
+//   - Start: the emote wheel (hold G, or D-pad Down for 0.4 s: wheel.c, drawn through modhost's overlay host), the
+//     keys 5 6 7 8 9 0 (and the numpad's), the console command `emote`, or the Play buttons on the Mods
 //     page. Only while Link stands still with nothing in his hands: the PlayerWait action under PlayerNormal, or
 //     (AI not found) the body slot has shown Wait for 0.5 s, he doesn't move (3D) and no talk or cutscene set was
 //     seen in the last 2 s.
@@ -96,7 +97,7 @@ __declspec(dllimport) unsigned long __stdcall GetWindowThreadProcessId(void *hwn
 __declspec(dllimport) unsigned long __stdcall GetCurrentProcessId(void);
 __declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char *name, char *buf, unsigned long size);
 
-#define EMOTES_VERSION "0.2.0"
+#define EMOTES_VERSION "0.3.0"
 
 // ------------------------------------------------------------------ game addresses (1.9.0)
 #define LINK_UPDATE 0x7000cd1ee8ull      // Link's per-frame update (x0 = Link); one pointer to it, no direct calls
@@ -400,6 +401,10 @@ typedef struct {         // what the tick knows, copied for the commands
     float w00, w10, w11; // blend weights: slot 0 sub 0, slot 1 sub 0, slot 1 sub 1 (-1: unreadable)
     int upper_playing;   // slot 1 sub 1 has a running set (then the game gives slot 1 sub 0 weight 0)
     char dbg_upper[32];  // developer: the set `emotedbg upper` played (until it ended or was stopped)
+    uint32_t toast_n;    // goes up with each new toast (the wheel shows it at the bottom for 2 s)
+    char toast[128];     // the emote that started, or why one didn't
+    char cant[96];       // why Link can't start an emote now ("" he can)
+    double tick_at;      // now_s() of the last tick (the wheel: Link is in the world while it runs)
 } Snap;
 static Snap g_snap;
 
@@ -1091,9 +1096,11 @@ static int t_button_pending = -1;
 static double t_button_since;
 static int g_settings_changed = 1;
 
+static int g_wheel_settings_dirty = 1;  // (wheel.c reads its settings again)
 static void settings_changed(const SwModApi *self, const char *key, void *user) {
     (void)self, (void)key, (void)user;
     __atomic_store_n(&g_settings_changed, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_wheel_settings_dirty, 1, __ATOMIC_RELEASE);
 }
 
 static void read_settings(int first) {
@@ -1132,11 +1139,22 @@ static int (*in_front)(void) = game_in_front;
 static int (*key_is_down)(int vk) = real_key;
 static int (*player_pos)(float out[3]) = real_pos;
 
+// ------------------------------------------------------------------ the emote wheel (present thread): wheel.c
+#include "wheel.c"
+
+// The number keys. While the wheel is up its own keys 1-8 and 0 pick slices: these keys stay quiet then, and after
+// it closed until all six are up (a key that picked a slice must not play a favourite too).
+static uint32_t t_wheel_seen;
+static int t_keys_quiet;
 static void poll_keys(void) {
     int front = in_front();
+    uint32_t opens = __atomic_load_n(&g_wheel_opens, __ATOMIC_ACQUIRE);
+    int up = __atomic_load_n(&g_wheel_up, __ATOMIC_ACQUIRE), any = 0;
+    if (up || opens != t_wheel_seen) t_keys_quiet = 1, t_wheel_seen = opens;
     for (int i = 0; i < 6; i++) {
         int down = front && t_keys_on && (key_is_down(FAV_KEYS[i]) || key_is_down(FAV_NUMPAD[i]));
-        if (down && !t_key_down[i] && t_fav[i] >= 0) {
+        any |= down;
+        if (down && !t_key_down[i] && t_fav[i] >= 0 && !t_keys_quiet) {
             int ix = t_fav[i];
             if (ix == ragdoll_index()) request(REQ_TOGGLE, ix, 0);
             else if (t_state != ST_IDLE && t_index == ix) request(REQ_STOP, -1, 0);  // the same key again: stop
@@ -1144,6 +1162,16 @@ static void poll_keys(void) {
         }
         t_key_down[i] = down;
     }
+    if (t_keys_quiet && !up && !any) t_keys_quiet = 0;
+}
+
+// The toast the wheel shows: what started, or why not (first letter made big).
+static uint32_t t_toast_n;
+static char t_toast[128];
+static void toast_set(const char *text) {
+    snprintf(t_toast, sizeof t_toast, "%s", text ? text : "");
+    if (t_toast[0] >= 'a' && t_toast[0] <= 'z') t_toast[0] = (char)(t_toast[0] - 32);
+    t_toast_n++;
 }
 
 // ------------------------------------------------------------------ the tick (after Link's own update)
@@ -1256,6 +1284,7 @@ static void tick(struct Cpu *c, uint64_t link) {
                     set_why("the game didn't take the animation: are Emotes (animations) on in the launcher (then "
                             "Deploy)? See: emotedbg slot");
                 }
+                toast_set(g_snap.why);
             }
         }
     } else if (t_state == ST_PLAYING) {
@@ -1282,6 +1311,7 @@ static void tick(struct Cpu *c, uint64_t link) {
     if (rq.kind == REQ_TOGGLE)
         rq.kind = (t_th != TH_NONE || (t_state != ST_IDLE && t_index == ragdoll_index())) ? REQ_RAGDOLL_OFF
                                                                                           : REQ_RAGDOLL_ON;
+    uint32_t seq_before = t_seq;
     switch (rq.kind) {
     case REQ_STOP:
     case REQ_RAGDOLL_OFF:
@@ -1356,6 +1386,17 @@ static void tick(struct Cpu *c, uint64_t link) {
     default:
         break;
     }
+    if (rq.kind == REQ_PLAY || rq.kind == REQ_DBG_PLAY || rq.kind == REQ_RAGDOLL_ON) {  // the wheel's toast
+        if (t_seq != seq_before) {
+            int rix = ragdoll_index();
+            const char *shown = rq.kind == REQ_RAGDOLL_ON && rix >= 0 ? EMOTES[rix].name
+                                : t_index >= 0 ? EMOTES[t_index].name : t_set;
+            if (!strncmp(shown, EMOTE_SET_PREFIX, sizeof EMOTE_SET_PREFIX - 1)) shown += sizeof EMOTE_SET_PREFIX - 1;
+            toast_set(shown);
+        } else if (g_snap.why[0]) {
+            toast_set(g_snap.why);
+        }
+    }
     if (t_th_failed) {  // the game didn't switch (rd_tick): the pose instead, if he still may
         t_th_failed = 0;
         rd_note("the game didn't switch to its launch (see emotedbg rd): the pose instead");
@@ -1420,7 +1461,12 @@ static void tick(struct Cpu *c, uint64_t link) {
     g_snap.th_dir[0] = t_th_dir[0], g_snap.th_dir[1] = t_th_dir[1];
     g_snap.th_cool = t_th == TH_NONE && now - t_th_end < THROW_COOLDOWN_S ? THROW_COOLDOWN_S - (now - t_th_end) : 0.0;
     memcpy(g_snap.rd_why, t_rd_why, sizeof g_snap.rd_why);
-    g_snap.can = start_blocker(link, slot0, ours, now) == 0;
+    const char *blocker = start_blocker(link, slot0, ours, now);
+    g_snap.can = blocker == 0;
+    snprintf(g_snap.cant, sizeof g_snap.cant, "%s", blocker ? blocker : "");
+    g_snap.toast_n = t_toast_n;
+    memcpy(g_snap.toast, t_toast, sizeof g_snap.toast);
+    g_snap.tick_at = now;
     g_snap.call_works = t_call_works;
     g_snap.ours_ticks = t_ours_ticks;
     g_snap.hold = t_hold, g_snap.replays = t_replays;
@@ -1533,11 +1579,12 @@ static Snap snap_copy(void) {
 }
 
 static void reply_list(SwModReply *r) {
-    static const char *const PAGE[] = {"", "hello", "dances", "hyrule"};
+    static const char *const PAGE[] = {"", "hello", "dances", "hyrule", "poses"};
     for (int i = 0; i < EMOTE_COUNT; i++)
         api->reply_text(r, "%2d  %-13s %s%s", i + 1, EMOTES[i].id, EMOTES[i].page ? PAGE[EMOTES[i].page] : "special",
                         EMOTES[i].loop ? " (loops)" : "");
-    api->reply_text(r, "emote <name or number> plays one; emote stop; emote ragdoll [on|off]. Keys 5-0 too.");
+    api->reply_text(r, "emote <name or number> plays one; emote stop; emote ragdoll [on|off]. Keys 5-0 too. Hold G "
+                       "(or D-pad Down) for the emote wheel; emote wheel opens it.");
 }
 
 static void cmd_emote(int argc, char **argv, SwModReply *r) {
@@ -1564,6 +1611,20 @@ static void cmd_emote(int argc, char **argv, SwModReply *r) {
         for (int i = 0; i < EMOTE_COUNT && n + 32 < sizeof list; i++)
             n += (size_t)snprintf(list + n, sizeof list - n, "%s%s", i ? "," : "", EMOTES[i].id);
         api->reply_str(r, "list", list);
+        char ws[200];
+        wheel_state_text(ws, sizeof ws);
+        api->reply_str(r, "wheel", ws);
+        return;
+    }
+    if (!strcmp(argv[1], "wheel")) {
+        if (__atomic_load_n(&g_wheel_state, __ATOMIC_ACQUIRE) <= 0) {
+            char ws[200];
+            wheel_state_text(ws, sizeof ws);
+            api->reply_fail(r, "The emote wheel is %s. Keys 5-0 and this console still work.", ws);
+            return;
+        }
+        __atomic_store_n(&g_wheel_cmd, 1, __ATOMIC_RELEASE);
+        api->reply_text(r, "Emote wheel up (Esc closes it).");
         return;
     }
     if (!strcmp(argv[1], "stop")) {
@@ -1768,7 +1829,7 @@ static void cmd_emotedbg(int argc, char **argv, SwModReply *r) {
 }
 
 static const SwModCommand COMMANDS[] = {
-    {"emote", "[name|number|stop|ragdoll [on|off]|state]", "Link does an emote (the list: emote)", cmd_emote,
+    {"emote", "[name|number|stop|ragdoll [on|off]|wheel|state]", "Link does an emote (the list: emote)", cmd_emote,
      SWMOD_CMD_PLAYER},
     {"emotedbg",
      "slot|play <set>|upper <set>|-|path body|generic|ai|rd|mask off|calc|always|hold on|off|ragdoll throw|slip|pose|"
@@ -1830,6 +1891,16 @@ SWMOD_EXPORT int swmod_init(const SwModApi *a) {
         g_job_on = botw_on_frame(a, job_fn);
         a->log("emotes: developer frame-job test %s", g_job_on ? "on" : "couldn't start");
     }
-    a->log("emotes %s: %d emotes, keys 5-0, console: emote", EMOTES_VERSION, EMOTE_COUNT);
+    // the wheel: drawn by modhost's overlay host (it checks Savage Wind's calls before it changes anything)
+    char why[160];
+    if (swmod_overlay_add(a, wheel_update, wheel_draw, 0, why, sizeof why) == SWMOD_OVL_OK) {
+        __atomic_store_n(&g_wheel_state, 1, __ATOMIC_RELEASE);
+    } else {
+        snprintf(g_wheel_off, sizeof g_wheel_off, "%s", why);
+        __atomic_store_n(&g_wheel_state, -1, __ATOMIC_RELEASE);
+        a->log("emotes: no emote wheel: %s (keys 5-0, the console and the Play page still work)", why);
+    }
+    a->log("emotes %s: %d emotes, wheel %s, keys 5-0, console: emote", EMOTES_VERSION, EMOTE_COUNT,
+           g_wheel_state > 0 ? "on G / D-pad Down" : "off");
     return 0;
 }

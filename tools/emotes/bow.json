@@ -1,24 +1,20 @@
 {
   "id": "bow", "name": "Bow", "aliases": ["thanks", "bowing"],
   "page": "hello", "slot": 8, "by": "giruka",
-  "about": "A polite bow from the waist, the right hand on the chest.",
-  "kind": "keys", "frames": 60, "loop": false, "face": "smile", "morph": 6, "contact": ["Wrist_R"],
-  "poses": {
-    "hand": {"reach": {"Wrist_R": {"on": "Spine_2", "at": [0.0, 0.16, 0.17]}}, "aim": {"Wrist_R": [1, 0.15, 0]},
-             "palm": {"Wrist_R": [0, 0, -1]}, "hand": {"R": "open"}, "elbow": {"R": [-1, -0.4, 0.2]}}
-  },
+  "about": "The right hand goes to the chest, a polite bow from the waist (the head follows a moment later), held, then up again.",
+  "kind": "keys", "frames": 66, "loop": false, "face": "smile", "morph": 6, "ease": "spline", "contact": ["Wrist_R"],
+  "lag": {"Head": 3, "Spine_2": 2, "Arm_*_L": 3, "Finger_*": 3},
+  "breath": [1.2, 66],
   "keys": [
     {"f": 0},
-    {"f": 10, "pose": "hand"},
-    {"f": 24, "pose": "hand", "turn": {"Spine_1": [35, 0, 0], "Head": [10, 0, 0]}, "hips": [0, 0, -0.05],
-     "aim": {"Arm_1_L": [0.15, -1, 0.12], "Arm_2_L": [0.08, -1, 0.15]}},
-    {"f": 40, "pose": "hand", "turn": {"Spine_1": [35, 0, 0], "Head": [10, 0, 0]}, "hips": [0, 0, -0.05],
-     "aim": {"Arm_1_L": [0.15, -1, 0.12], "Arm_2_L": [0.08, -1, 0.15]}},
-    {"f": 47, "pose": "hand"},
-    {"f": 60, "reset": true}
+    {"f": 11, "reset": true, "reach": {"Wrist_R": {"on": "Spine_2", "at": [0, 0.16, 0.17]}}, "aim": {"Wrist_R": [1, 0.15, 0]}, "palm": {"Wrist_R": [0, 0, -1]}, "hand": {"R": "open"}, "elbow": {"R": [-1, -0.4, 0.2]}, "turn": {"Head": [-3.0, 0.0, 0.0]}, "hips": [0, 0, 0.005]},
+    {"f": 25, "reset": true, "reach": {"Wrist_R": {"on": "Spine_2", "at": [0, 0.16, 0.17]}}, "aim": {"Wrist_R": [1, 0.15, 0], "Arm_1_L": [0.12, -1, 0.15], "Arm_2_L": [0.06, -1, 0.2]}, "palm": {"Wrist_R": [0, 0, -1]}, "hand": {"R": "open"}, "elbow": {"R": [-1, -0.4, 0.2]}, "turn": {"Spine_1": [36.0, 0.0, 0.0], "Head": [12.0, 0.0, 0.0]}, "hips": [0, -0.005, -0.055], "ease": "out"},
+    {"f": 37, "reset": true, "reach": {"Wrist_R": {"on": "Spine_2", "at": [0, 0.16, 0.17]}}, "aim": {"Wrist_R": [1, 0.15, 0], "Arm_1_L": [0.12, -1, 0.15], "Arm_2_L": [0.06, -1, 0.2]}, "palm": {"Wrist_R": [0, 0, -1]}, "hand": {"R": "open"}, "elbow": {"R": [-1, -0.4, 0.2]}, "turn": {"Spine_1": [38.0, 0.0, 0.0], "Head": [15.0, 0.0, 0.0]}, "hips": [0, -0.005, -0.055]},
+    {"f": 50, "reset": true, "reach": {"Wrist_R": {"on": "Spine_2", "at": [0, 0.16, 0.17]}}, "aim": {"Wrist_R": [1, 0.15, 0]}, "palm": {"Wrist_R": [0, 0, -1]}, "hand": {"R": "open"}, "elbow": {"R": [-1, -0.4, 0.2]}, "turn": {"Spine_1": [-2.0, 0.0, 0.0], "Head": [-4.0, 0.0, 0.0]}},
+    {"f": 66, "reset": true}
   ],
   "expect": [
-    {"f": 30, "in_front": ["Head", "Ankle_L"]},
-    {"f": 30, "feet_on_ground": true}
+    {"f": 32, "in_front": ["Head", "Ankle_L"]},
+    {"f": 32, "feet_on_ground": true}
   ]
 }

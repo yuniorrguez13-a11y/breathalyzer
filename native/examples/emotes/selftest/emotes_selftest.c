@@ -301,10 +301,72 @@ static void fake_reply_fail(SwModReply *r, const char *fmt, ...) {
     g_reply_failed = 1;
 }
 static double fake_now(void) { return g_now; }
-static int fake_front(void) { return 0; }
-static int fake_key(int vk) {
-    (void)vk;
-    return 0;
+static int g_front;            // the game window is in front (the number keys)
+static int g_vk_down[256];     // Windows keys held (GetAsyncKeyState's view)
+static int fake_front(void) { return g_front; }
+static int fake_key(int vk) { return vk > 0 && vk < 256 && g_vk_down[vk]; }
+
+// ---- a made-up overlay host for the wheel (modhost's SwModOverlay): input set by the checks, drawing recorded
+static SwModOverlay ov;
+static bool ov_keys[512];
+static int ov_polys, ov_texts;
+static char ov_seen[4096];
+static void ov_rect_filled(float x0, float y0, float x1, float y1, uint32_t col, float r) {
+    (void)x0, (void)y0, (void)x1, (void)y1, (void)col, (void)r;
+}
+static void ov_rect(float x0, float y0, float x1, float y1, uint32_t col, float r, float t) {
+    (void)x0, (void)y0, (void)x1, (void)y1, (void)col, (void)r, (void)t;
+}
+static void ov_line(float x0, float y0, float x1, float y1, uint32_t col, float t) {
+    (void)x0, (void)y0, (void)x1, (void)y1, (void)col, (void)t;
+}
+static void ov_circle_filled(float x, float y, float r, uint32_t col) { (void)x, (void)y, (void)r, (void)col; }
+static void ov_circle(float x, float y, float r, uint32_t col, float t) { (void)x, (void)y, (void)r, (void)col, (void)t; }
+static void ov_tri(float x0, float y0, float x1, float y1, float x2, float y2, uint32_t col) {
+    (void)x0, (void)y0, (void)x1, (void)y1, (void)x2, (void)y2, (void)col;
+}
+static void ov_poly(const float *xy, int n, uint32_t col) {
+    (void)xy, (void)col;
+    if (n >= 3) ov_polys++;
+}
+static void ov_polyline(const float *xy, int n, uint32_t col, bool closed, float t) {
+    (void)xy, (void)n, (void)col, (void)closed, (void)t;
+}
+static void ov_text(float x, float y, float px, uint32_t col, const char *s) {
+    (void)x, (void)y, (void)col;
+    if (px <= 0 || !s) return;
+    ov_texts++;
+    size_t n = strlen(ov_seen);
+    snprintf(ov_seen + n, sizeof ov_seen - n, "%s|", s);
+}
+static float ov_text_width(float px, const char *s) { return 0.5f * px * (float)strlen(s); }
+static void ov_init(void) {
+    memset(&ov, 0, sizeof ov);
+    memset(ov_keys, 0, sizeof ov_keys);
+    ov.size = (uint32_t)sizeof ov;
+    ov.w = 1920, ov.h = 1080, ov.scale = 1;
+    ov.drawable = ov.focused = true;
+    ov.keys = ov_keys, ov.nkeys = 512;
+    ov.rect_filled = ov_rect_filled, ov.rect = ov_rect, ov.line = ov_line, ov.circle_filled = ov_circle_filled;
+    ov.circle = ov_circle, ov.triangle_filled = ov_tri, ov.poly_filled = ov_poly, ov.polyline = ov_polyline;
+    ov.text = ov_text, ov.text_width = ov_text_width;
+}
+static void ov_hit(int sc) { ov.keys_hit[sc >> 5] |= 1u << (sc & 31); }
+// one overlay frame: the wheel's update with the input set since the last one (then the "since" parts are spent)
+static unsigned ov_update(void) {
+    ov.time = g_now;
+    unsigned r = wheel_update(&ov, 0);
+    memset(ov.keys_hit, 0, sizeof ov.keys_hit);
+    ov.mouse_dx = ov.mouse_dy = 0, ov.wheel = 0, ov.mouse_hit = 0, ov.pad_hit = 0;
+    return r;
+}
+static void wheel_reset(void) {
+    wheel_close();
+    memset(g_vk_down, 0, sizeof g_vk_down);
+    wh.key_was = wh.pad_was = 0, wh.hl = -1, wh.page = 0, wh.by_pad = 0;
+    __atomic_store_n(&g_wheel_cmd, 0, __ATOMIC_RELEASE);
+    ov_init();
+    memset(&g_req, 0, sizeof g_req);
 }
 static int fake_pos(float out[3]) {
     memcpy(out, g_pos, sizeof g_pos);
@@ -387,7 +449,7 @@ SWMOD_EXPORT int emotes_selftest(char *out, int cap) {
     check("parse", "id", idx("wave") == 0 && idx("WAVE") == 0, "");
     check("parse", "alias_67", idx("67") == idx("six_seven") && idx("6 7") == idx("six_seven") && idx("six_seven") >= 0, "");
     check("parse", "alias_thrust", idx("thrust") == idx("in_love") && idx("in_love") >= 0, "");
-    check("parse", "number", idx("3") == 2 && idx("25") == 24 && idx("26") == FIND_NONE, "");
+    check("parse", "number", idx("3") == 2 && idx("25") == 24 && idx("99") == FIND_NONE, "");
     check("parse", "prefix", idx("flo") == idx("floss") && idx("s") == FIND_AMBIGUOUS, "");
     check("parse", "community", idx("my_dance") == FIND_COMMUNITY && idx("Bad!") == FIND_NONE, "");
     {
@@ -986,6 +1048,286 @@ SWMOD_EXPORT int emotes_selftest(char *out, int cap) {
     step();
     snprintf(d, sizeof d, "stops %d upper '%s'", calls_stop_upper, W.upper_obj.str);
     check("path", "upper_dbg_stop_cmd", calls_stop_upper == 2 && !W.upper_obj.str[0] && !t_dbg_upper[0], d);
+
+    // ---- the emote wheel (wheel.c), driven through a made-up overlay host
+    {
+        world_init(1);
+        reset_mod();
+        wheel_reset();
+        g_wheel_state = 1;
+        unsigned both = SWMOD_OVL_DRAW | SWMOD_OVL_CAPTURE, r;
+        snprintf(d, sizeof d, "%d %d %d %d %d %d %d", wheel_slice_at(0, -1), wheel_slice_at(1, -1),
+                 wheel_slice_at(1, 0), wheel_slice_at(0, 1), wheel_slice_at(-1, 0), wheel_slice_at(-1, -1),
+                 wheel_slice_at(-0.2f, -1));
+        check("wheel", "slices", !strcmp(d, "0 1 2 4 6 7 0"), d);
+        wheel_settings(g_now);
+        wheel_build_pages();
+        int last = 0, listed = 0;  // the list's pages (1 hello, 2 dances, 3 hyrule, more later): each one a page
+        for (int i = 0; i < EMOTE_COUNT; i++) last = EMOTES[i].page > last ? EMOTES[i].page : last;
+        for (int pg = 1; pg <= last; pg++)
+            for (int i = 0; i < WHEEL_SLICES; i++) listed += wh.pages[pg].e[i].ix >= 0;
+        int paged = 0;
+        for (int i = 0; i < EMOTE_COUNT; i++) paged += EMOTES[i].page > 0;
+        snprintf(d, sizeof d, "pages %d (list %d) '%s' '%s' '%s' '%s' emotes %d/%d", wh.npages, last,
+                 wh.pages[0].title, wh.pages[1].title, wh.pages[2].title, wh.pages[3].title, listed, paged);
+        check("wheel", "pages", wh.npages == 1 + last && last >= 3 && !strcmp(wh.pages[0].title, "Favourites") &&
+                                    wh.pages[0].e[0].ix == idx("wave") && wh.pages[0].e[2].ix == idx("floss") &&
+                                    !strcmp(wh.pages[1].title, "Hello") && wh.pages[1].e[7].ix == idx("bow") &&
+                                    wh.pages[2].e[0].ix == idx("floss") && wh.pages[3].e[7].ix == idx("victory") &&
+                                    listed == paged, d);
+        snprintf(wh.extras, sizeof wh.extras, "my_dance, other_one,Bad!");
+        wheel_build_pages();
+        const WPage *xp = &wh.pages[1 + last];
+        snprintf(d, sizeof d, "pages %d '%s' %d '%s' %d", wh.npages, xp->title, xp->e[0].ix, xp->e[1].id, xp->e[2].ix);
+        check("wheel", "extras_page", wh.npages == 2 + last && !strcmp(xp->title, "Extras") && xp->e[0].ix == -1 &&
+                                          !strcmp(xp->e[0].id, "my_dance") && !strcmp(xp->e[1].id, "other_one") &&
+                                          xp->e[2].ix == -2, d);
+        wh.extras[0] = 0;
+
+        // no Link in the world yet (no tick): G does nothing
+        g_vk_down['G'] = 1;
+        r = ov_update();
+        check("wheel", "no_world_no_wheel", !wh.open && r == 0 && !strcmp(wheel_blocker(&ov), "Link isn't in the world"),
+              wheel_blocker(&ov));
+        g_vk_down['G'] = 0;
+        ov_update();
+
+        // hold G: it opens; the mouse lights slice 3 (back in the middle: none); let go after 0.5 s: it plays
+        step();
+        g_vk_down['G'] = 1;
+        r = ov_update();
+        check("wheel", "hold_opens", wh.open && (r & both) == both && g_wheel_up == 1 && wh.page == 0, "");
+        ov.mouse_dx = 300;
+        ov_update();
+        int lit = wh.hl;
+        ov.mouse_dx = -300;
+        ov_update();
+        int none = wh.hl;
+        ov.mouse_dx = 280, ov.mouse_dy = 20;
+        ov_update();
+        snprintf(d, sizeof d, "lit %d middle %d again %d", lit, none, wh.hl);
+        check("wheel", "mouse_points", lit == 2 && none == -1 && wh.hl == 2, d);
+        g_now += 0.5;
+        step();
+        g_vk_down['G'] = 0;
+        r = ov_update();
+        snprintf(d, sizeof d, "open %d kind %d index %d up %d r %u", wh.open, g_req.kind, g_req.index, g_wheel_up, r);
+        check("wheel", "release_plays", !wh.open && g_req.kind == REQ_PLAY && g_req.index == idx("floss") &&
+                                            !g_wheel_up && !(r & SWMOD_OVL_CAPTURE), d);
+        step();
+        r = ov_update();
+        snprintf(d, sizeof d, "toast '%s' r %u", wh.toast, r);
+        check("wheel", "toast_names", !strcmp(wh.toast, "Floss") && (r & SWMOD_OVL_DRAW) &&
+                                          !(r & SWMOD_OVL_CAPTURE), d);
+
+        // a tap of G keeps it open; the key 4 plays slice 4 at once
+        g_now += 1.0;
+        step();
+        g_vk_down['G'] = 1;
+        ov_update();
+        g_now += 0.1;
+        step();
+        g_vk_down['G'] = 0;
+        ov_update();
+        int sticky = wh.open && wh.sticky;
+        ov_hit(SWMOD_SC_1 + 3);
+        ov_update();
+        snprintf(d, sizeof d, "sticky %d open %d kind %d index %d", sticky, wh.open, g_req.kind, g_req.index);
+        check("wheel", "tap_then_digit", sticky && !wh.open && g_req.kind == REQ_PLAY &&
+                                             g_req.index == idx("six_seven"), d);
+        step();
+
+        // the number keys stay quiet: 5 picks slice 5 (In love) in the wheel, not the favourite of key 5 too
+        g_front = 1;
+        g_now += 1.0;
+        step();
+        g_vk_down['G'] = 1;
+        ov_update();
+        g_vk_down['G'] = 0;
+        ov_update();
+        step();
+        g_vk_down['5'] = 1;
+        ov_hit(SWMOD_SC_1 + 4);
+        ov_update();
+        int k1 = g_req.kind, i1 = g_req.index;
+        step();
+        int played = t_index;
+        g_vk_down['5'] = 0;
+        step();
+        g_now += 0.5;
+        g_vk_down['5'] = 1;
+        step();
+        snprintf(d, sizeof d, "wheel %d/%d then %d, key 5 later %d", k1, i1, played, t_index);
+        check("wheel", "keys_quiet", k1 == REQ_PLAY && i1 == idx("in_love") && played == idx("in_love") &&
+                                         t_index == idx("thumbs_up"), d);
+        g_vk_down['5'] = 0, g_front = 0;
+        step();
+
+        // `emote wheel` opens it; pages: the mouse wheel, Q, R, Tab (round the end)
+        g_now += 1.0;
+        step();
+        char w0[] = "emote", w1[] = "wheel";
+        char *wv[] = {w0, w1};
+        g_reply[0] = 0;
+        g_reply_failed = 0;
+        cmd_emote(2, wv, 0);
+        ov_update();
+        check("wheel", "cmd_opens", wh.open && wh.sticky && !g_reply_failed, g_reply);
+        ov.wheel = -1;
+        ov_update();
+        int p1 = wh.page;
+        ov_hit(SWMOD_SC_Q);
+        ov_update();
+        int p2 = wh.page;
+        ov_hit(SWMOD_SC_R);
+        ov_update();
+        ov_hit(SWMOD_SC_TAB);
+        ov_update();
+        int p3 = wh.page;
+        ov.wheel = 1;
+        ov_update();
+        ov.wheel = 1;
+        ov_update();
+        ov.wheel = 1;
+        ov_update();
+        snprintf(d, sizeof d, "%d %d %d %d of %d", p1, p2, p3, wh.page, wh.npages);
+        check("wheel", "page_turns", p1 == 1 && p2 == 0 && p3 == 2 && wh.page == wh.npages - 1, d);
+        for (int i = 0; i < 10 && wh.page != 3; i++) {  // back to page 4 (Hyrule) with the wheel
+            ov.wheel = 1;
+            ov_update();
+        }
+        // page 4 (Hyrule): right + down lights slice 4 (Urbosa snap), Enter plays it
+        ov_keys[SWMOD_SC_RIGHT] = ov_keys[SWMOD_SC_DOWN] = true;
+        ov_update();
+        ov_keys[SWMOD_SC_RIGHT] = ov_keys[SWMOD_SC_DOWN] = false;
+        int hl = wh.hl;
+        ov_hit(SWMOD_SC_RETURN);
+        ov_update();
+        snprintf(d, sizeof d, "lit %d kind %d index %d", hl, g_req.kind, g_req.index);
+        check("wheel", "keys_point_enter_plays", hl == 3 && g_req.kind == REQ_PLAY &&
+                                                     g_req.index == idx("urbosa_snap"), d);
+        step();
+
+        // what it draws: 8 slices, icons, big names (two lines when long), the page and the controls
+        g_now += 1.0;
+        step();
+        cmd_emote(2, wv, 0);
+        ov_update();
+        ov.mouse_dy = -300;
+        ov_update();
+        ov_seen[0] = 0, ov_polys = ov_texts = 0;
+        wheel_draw(&ov, 0);
+        char page1[32];
+        snprintf(page1, sizeof page1, "Page 1 of %d|", wh.npages);
+        snprintf(d, sizeof d, "polys %d texts %d: %.300s", ov_polys, ov_texts, ov_seen);
+        check("wheel", "draws", wh.hl == 0 && ov_polys >= 8 && strstr(ov_seen, "Favourites|") &&
+                                    strstr(ov_seen, "|Wave|") && strstr(ov_seen, "|Floss|") &&
+                                    strstr(ov_seen, "|Thumbs|") && strstr(ov_seen, "|down|") &&
+                                    !strstr(ov_seen, "Thumbs down") && strstr(ov_seen, page1) &&
+                                    strstr(ov_seen, "Esc: close|") && strstr(ov_seen, "|67|"), d);
+        memset(&g_req, 0, sizeof g_req);
+        ov_hit(SWMOD_SC_ESCAPE);
+        ov_update();
+        check("wheel", "esc_closes", !wh.open && g_req.kind == REQ_NONE && !g_wheel_up, "");
+
+        // the controller: hold D-pad Down 0.4 s, the stick lights slice 3 (and it stays lit), let go: it plays
+        g_now += 1.0;
+        step();
+        ov.pad_held = 1u << SWMOD_PAD_DPAD_DOWN;
+        ov_update();
+        g_now += 0.3;
+        step();
+        ov_update();
+        int early = wh.open;
+        g_now += 0.15;
+        step();
+        ov_update();
+        int opened = wh.open && wh.by_pad;
+        ov.pad_axes[0] = 1.0f;
+        ov_update();
+        ov.pad_axes[0] = 0.0f;
+        ov_update();
+        lit = wh.hl;
+        ov.pad_held = 0;
+        ov_update();
+        snprintf(d, sizeof d, "early %d opened %d lit %d open %d kind %d index %d", early, opened, lit, wh.open,
+                 g_req.kind, g_req.index);
+        check("wheel", "pad_hold", !early && opened && lit == 2 && !wh.open && g_req.kind == REQ_PLAY &&
+                                       g_req.index == idx("floss"), d);
+        step();
+        // B closes it, and the D-pad still held doesn't open it again
+        g_now += 1.0;
+        step();
+        ov.pad_held = 1u << SWMOD_PAD_DPAD_DOWN;
+        ov_update();
+        g_now += 0.45;
+        step();
+        ov_update();
+        opened = wh.open;
+        ov.pad_hit = 1u << SWMOD_PAD_SOUTH;
+        ov_update();
+        int closed = !wh.open;
+        g_now += 1.0;
+        step();
+        ov_update();
+        snprintf(d, sizeof d, "opened %d closed %d again %d kind %d", opened, closed, wh.open, g_req.kind);
+        check("wheel", "pad_b_closes", opened && closed && !wh.open && g_req.kind == REQ_NONE, d);
+        ov.pad_held = 0;
+        ov_update();
+
+        // 0 in the wheel: ragdoll; Savage Wind's menu coming up closes it
+        cmd_emote(2, wv, 0);
+        ov_update();
+        ov_hit(SWMOD_SC_0);
+        ov_update();
+        snprintf(d, sizeof d, "kind %d index %d open %d", g_req.kind, g_req.index, wh.open);
+        check("wheel", "zero_ragdoll", g_req.kind == REQ_TOGGLE && g_req.index == ragdoll_index() && !wh.open, d);
+        memset(&g_req, 0, sizeof g_req);
+        cmd_emote(2, wv, 0);
+        ov_update();
+        int was = wh.open;
+        ov.sw_menu = true;
+        r = ov_update();
+        ov.sw_menu = false;
+        check("wheel", "menu_closes", was && !wh.open && !(r & SWMOD_OVL_CAPTURE), "");
+
+        // closed and no toast: nothing drawn, the game's input not held
+        g_now += 3.0;
+        step();
+        r = ov_update();
+        check("wheel", "idle_nothing", r == 0, "");
+
+        // a refusal: the toast says why
+        set_child(W.normal, 1);  // walking
+        cmd_emote(2, wv, 0);
+        ov_update();
+        ov_hit(SWMOD_SC_1);
+        ov_update();
+        step();
+        set_child(W.normal, 0);
+        r = ov_update();
+        snprintf(d, sizeof d, "toast '%s' r %u", wh.toast, r);
+        check("wheel", "toast_why", !strcmp(wh.toast, "Link has to stand still") && (r & SWMOD_OVL_DRAW), d);
+
+        // emote state's wheel field, and `emote wheel` when it is off
+        char e0[] = "emote", e1[] = "state";
+        char *ev[] = {e0, e1};
+        g_reply[0] = 0;
+        cmd_emote(2, ev, 0);
+        int down = strstr(g_reply, "wheel=down;") != 0;
+        g_wheel_state = -1;
+        snprintf(g_wheel_off, sizeof g_wheel_off, "made-up reason");
+        g_reply[0] = 0;
+        cmd_emote(2, ev, 0);
+        int off = strstr(g_reply, "wheel=off: made-up reason;") != 0;
+        g_reply_failed = 0;
+        cmd_emote(2, wv, 0);
+        snprintf(d, sizeof d, "down %d off %d refused %d", down, off, g_reply_failed);
+        check("wheel", "state_field", down && off && g_reply_failed, d);
+        g_reply_failed = 0;
+        g_wheel_state = 0;
+        wheel_reset();
+    }
 
     // ---- emote state (for multiplayer): nothing played yet = no id
     world_init(1);

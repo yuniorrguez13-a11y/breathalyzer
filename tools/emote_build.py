@@ -8,7 +8,10 @@
                                                             (writes nothing)
     python tools/emote_build.py lint                        the keyframe files only (no game files needed)
     python tools/emote_build.py preview <id|all> --out F    stick figures (front and side) as a PNG (or .svg) file;
-                                                            never opens a window. With all: --out is a folder
+                                                            never opens a window. With all: --out is a folder.
+                                       [--sheet] [--step N] a .jpg --out (or --sheet): a contact sheet with the hand
+                                                            paths, a speed graph, a rough body and clipping marked
+                                                            (needs Pillow; game clips too)
     python tools/emote_build.py list                        id, name, page, frames, loop, kind
     python tools/emote_build.py header                      (developers) writes native/examples/emotes/emote_list.h
 
@@ -72,7 +75,7 @@ SET_PREFIX = "ZEmote_"                         # animation sets (ASDefine Name):
 BAS_PREFIX = "Player_ZEmote_"                  # ASDefine Filename -> Actor/AS/<it>.bas
 LAST_GAME_SET = "WeaponThrowCharge"            # the game's last set name (1.9.0): ours must sort after it
 MAX_SET_NAME = 31                              # the ghost's name limit (32 with its 0)
-PAGES = ("hello", "dances", "hyrule")
+PAGES = ("hello", "dances", "hyrule", "poses")
 SPECIAL = "special"                            # ragdoll: its own key, not a wheel slice
 SLOTS_PER_PAGE = 8
 ASLIST_PATH = (f"{BASE_TID}/romfs/Pack/TitleBG.pack//Actor/Pack/GameROMPlayer.sbactorpack//Actor/ASList/"
@@ -101,6 +104,7 @@ _STRAIGHT = (0.0, 0.0, 0.0)
 HAND_PRESETS: dict[str, dict | None] = {
     "relaxed": None,
     "open": {f: _STRAIGHT for f in "ABCDE"},
+    "flat": {"A": (25.0, 10.0, 0.0), **{f: _STRAIGHT for f in "BCDE"}},      # a "karate" hand: the thumb along it
     "fist": {"A": _THUMB_IN, **{f: _FIST for f in "BCDE"}},
     "thumb_up": {"A": _STRAIGHT, **{f: _FIST for f in "BCDE"}},
     "point": {"A": _THUMB_IN, "B": _STRAIGHT, **{f: _FIST for f in "CDE"}},
@@ -110,7 +114,13 @@ HAND_PRESETS: dict[str, dict | None] = {
     "claw": {f: (40.0, 50.0, 40.0) for f in "ABCDE"},
     "grip": {"A": (5.0, 20.0, 20.0), **{f: (60.0, 70.0, 40.0) for f in "BCDE"}},
 }
-EASES = ("smooth", "linear", "snap", "hold")
+# How a key is reached from the one before it. smooth: ease in and out (stops at both keys); linear; snap: the last 2
+# frames; hold: stays, then jumps on the key; spline: a curve through the keys that keeps moving through them (no stop:
+# a key between two spline moves keeps its speed); in: speeds up; out: slows into the key; hit: a sharp move that
+# overshoots a little and settles on the key (pops, hits).
+EASES = ("smooth", "linear", "snap", "hold", "spline", "in", "out", "hit")
+FAST_EASES = ("snap", "hold", "hit")           # deliberate fast moves: the per-frame jump check skips them
+HEEL_MAX = 70.0                                 # heel: degrees the foot turns up about the ball of the foot
 KINDS = ("keys", "game_clip", "game_set")
 
 # Two-bone chains (reach): end -> (upper, lower). Aim: a bone points at this child.
@@ -121,6 +131,8 @@ TIP = {"Clavicle_L": "Arm_1_L", "Arm_1_L": "Arm_2_L", "Arm_2_L": "Wrist_L", "Wri
        "Leg_1_L": "Leg_2_L", "Leg_2_L": "Ankle_L", "Ankle_L": "Toe_L",
        "Leg_1_R": "Leg_2_R", "Leg_2_R": "Ankle_R", "Ankle_R": "Toe_R",
        "Spine_1": "Spine_2", "Spine_2": "Neck", "Neck": "Head"}
+# palm: which way a wrist's palm faces; on an arm bone, which way the inside of the arm faces (its twist)
+PALM_BONES = ("Wrist_L", "Wrist_R", "Arm_1_L", "Arm_1_R", "Arm_2_L", "Arm_2_R")
 # Bones solved first among their siblings (the head and hips before the arms, so a hand can follow them: reach "on")
 SOLVE_FIRST = {"Neck": 0, "Head": 0, "Waist": 1}
 # The body bones an emote may name (Link's own names). Face, belt and pouch bones are left to the game.
@@ -129,11 +141,13 @@ BODY_BONES = (["Root", "Skl_Root", "Spine_1", "Spine_2", "Neck", "Head", "Waist"
                                                      "Ankle", "Toe")]
               + [f"Finger_{c}_{j}_{s}" for s in "LR" for c in "ABCDE" for j in (1, 2, 3)])
 KEY_FIELDS = {"f", "pose", "mirror", "ease", "reset", "free", "aim", "palm", "reach", "step", "elbow", "knee",
-              "hand", "turn", "local", "rest", "hips", "feet", "note"}
+              "hand", "turn", "local", "rest", "hips", "feet", "heel", "note"}
 POSE_FIELDS = KEY_FIELDS - {"f", "pose", "mirror", "ease", "reset", "free"}
 TOP_FIELDS = {"id", "name", "aliases", "page", "slot", "by", "about", "kind", "frames", "loop", "face", "morph",
-              "poses", "keys", "expect", "clip", "set", "fallback", "key", "note", "contact", "button_text"}
+              "poses", "keys", "expect", "clip", "set", "fallback", "key", "note", "contact", "button_text", "ease",
+              "lag", "breath", "start", "end"}
 BUTTON_TEXT_MAX = 80
+CONTACTS = ("Wrist_L", "Wrist_R", "hands", "arms")
 EXPECTS = {"above", "below", "left_of", "right_of", "in_front", "behind", "near", "far", "thumb", "feet_on_ground"}
 
 
@@ -464,10 +478,12 @@ class State:
     rest: set = field(default_factory=set)        # bones at the skeleton's rest rotation
     hips: tuple = (0.0, 0.0, 0.0)
     feet: str = "planted"
+    heel: dict = field(default_factory=dict)      # "R"/"L" -> degrees: the heel up, the ball of the foot down
 
     def copy(self) -> State:
         return State(dict(self.aim), dict(self.palm), dict(self.reach), dict(self.step), dict(self.hint),
-                     dict(self.hand), dict(self.turn), dict(self.local), set(self.rest), tuple(self.hips), self.feet)
+                     dict(self.hand), dict(self.turn), dict(self.local), set(self.rest), tuple(self.hips), self.feet,
+                     dict(self.heel))
 
 
 def _side_swap(name: str) -> str:
@@ -498,7 +514,8 @@ def mirror_state(st: State) -> State:
                  {_side_swap(k): v for k, v in st.hand.items()},
                  {_side_swap(k): (v[0], -v[1], -v[2]) for k, v in st.turn.items()},
                  {_side_swap(k): (v[0], -v[1], -v[2]) for k, v in st.local.items()},
-                 {_side_swap(k) for k in st.rest}, _mx(st.hips), st.feet)
+                 {_side_swap(k) for k in st.rest}, _mx(st.hips), st.feet,
+                 {_side_swap(k): v for k, v in st.heel.items()})
 
 
 def _vec(v, what: str) -> tuple:
@@ -532,8 +549,8 @@ def apply_fields(st: State, src: dict, skel: Skeleton | None, what: str) -> None
                 raise EmoteError(f"{what}: aim on {b}: only these bones can aim: {', '.join(sorted(TIP))}")
             st.aim[b] = _vec(v, f"{what} aim {k}")
     for k, v in (src.get("palm") or {}).items():
-        if k not in ("Wrist_L", "Wrist_R"):
-            raise EmoteError(f"{what}: palm is for Wrist_L or Wrist_R, not {k}")
+        if k not in PALM_BONES:
+            raise EmoteError(f"{what}: palm is for {', '.join(PALM_BONES)}, not {k}")
         st.palm[k] = _vec(v, f"{what} palm {k}")
     for k, v in (src.get("reach") or {}).items():
         if k not in CHAINS:
@@ -579,6 +596,15 @@ def apply_fields(st: State, src: dict, skel: Skeleton | None, what: str) -> None
         if src["feet"] not in ("planted", "free"):
             raise EmoteError(f"{what}: feet is planted or free")
         st.feet = src["feet"]
+    for k, v in (src.get("heel") or {}).items():
+        if k not in ("R", "L"):
+            raise EmoteError(f"{what}: heel is {{\"R\": degrees, \"L\": degrees}}, not {k}")
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not 0 <= v <= HEEL_MAX:
+            raise EmoteError(f"{what}: heel {k}: 0 to {HEEL_MAX:.0f} degrees")
+        if v:
+            st.heel[k] = float(v)
+        else:
+            st.heel.pop(k, None)
 
 
 def free_bones(st: State, names: list[str], skel: Skeleton | None) -> None:
@@ -586,6 +612,7 @@ def free_bones(st: State, names: list[str], skel: Skeleton | None) -> None:
     for n in names:
         if n in ("R", "L"):
             st.hand.pop(n, None)
+            st.heel.pop(n, None)
             gone |= {f"Wrist_{n}", f"Ankle_{n}"}
         gone |= set(skel.match(n)) if skel is not None else {n}
     for d in (st.aim, st.palm, st.reach, st.step, st.hint, st.turn, st.local):
@@ -602,6 +629,7 @@ def key_states(spec: dict, skel: Skeleton | None = None) -> list[tuple[int, Stat
     poses = spec.get("poses") or {}
     out = []
     cur = State()
+    default_ease = spec.get("ease", "smooth")
     for n, k in enumerate(spec["keys"]):
         what = f"{spec['id']} key {n} (frame {k.get('f')})"
         if k.get("reset"):
@@ -618,7 +646,7 @@ def key_states(spec: dict, skel: Skeleton | None = None) -> list[tuple[int, Stat
         if k.get("free"):
             free_bones(cur, list(k["free"]), skel)
         apply_fields(cur, k, skel, what)
-        out.append((int(k["f"]), cur.copy(), k.get("ease", "smooth")))
+        out.append((int(k["f"]), cur.copy(), k.get("ease", default_ease)))
     return out
 
 
@@ -689,6 +717,20 @@ def solve_pose(skel: Skeleton, idle: Idle, st: State, hints: dict, idle_W=None, 
     for end in ("Ankle_L", "Ankle_R"):
         if end in targets and skel.has(end):
             lock[end] = idle_W[skel.idx[end]]
+    # heel: the foot turns up about the ball of the foot (the toe joint), which stays where the step puts it; the toes
+    # stay flat on the ground
+    for side, deg in st.heel.items():
+        end, toe = f"Ankle_{side}", f"Toe_{side}"
+        if not deg or not (skel.has(end) and skel.has(toe)):
+            continue
+        a0, b0 = idle_P[skel.idx[end]], idle_P[skel.idx[toe]]
+        d = vsub(b0, a0)
+        R = axis_angle(cross((0.0, 1.0, 0.0), unit((d[0], 0.0, d[2]))), math.radians(deg))
+        cur = targets.get(end, a0)
+        off = vsub(cur, a0) if not isinstance(cur, dict) else (0.0, 0.0, 0.0)
+        targets[end] = vadd(vadd(b0, off), mvec(R, vsub(a0, b0)))
+        lock[end] = mmul(R, idle_W[skel.idx[end]])
+        lock[toe] = idle_W[skel.idx[toe]]
     upper = {CHAINS[e][0]: e for e in targets if e in CHAINS and all(skel.has(x) for x in CHAINS[e])}
     rots = [None] * n
     Wr, Wp = [None] * n, [None] * n
@@ -771,39 +813,171 @@ class Clip:
     key_frames: list
 
 
+def ease_t(ease: str, u: float, fr: int, f1: int) -> float:
+    """How far (0 to 1, a hit a little past 1) a segment is at fraction u, frame fr, toward its key at frame f1."""
+    if ease in ("smooth", "spline"):              # spline here: a move between two stops (no slopes): eases like smooth
+        return smooth(u)
+    if ease == "linear":
+        return u
+    if ease == "snap":
+        return max(0.0, min(1.0, (fr - (f1 - 2)) / 2.0))
+    if ease == "hold":
+        return 0.0
+    if ease == "in":
+        return u * u
+    if ease == "out":
+        return 1.0 - (1.0 - u) * (1.0 - u)
+    # hit: a fast start (about half the move on the first of 4 frames, not three quarters: a limb that jumps most of
+    # the way in one frame reads as a glitch), about 4 % past the key at 3/4, settles on it
+    return 1.0 - (1.0 - u) * (1.0 - u) * (1.0 - 2.92 * u * u)
+
+
+def _qdot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+
+
+def _qneg(a):
+    return (-a[0], -a[1], -a[2], -a[3])
+
+
+def _qnorm(q):
+    n = math.sqrt(_qdot(q, q))
+    return tuple(v / n for v in q)
+
+
+def _spline_tangents(solved, Q, nfr: int, loop: bool) -> list:
+    """Per key: (rotation, translation) slopes per frame for every bone where both moves around the key are spline
+    (Catmull-Rom through the neighbours; a loop wraps), else None (the key is a stop)."""
+    K = len(solved)
+    out = [None] * K
+    nb = len(Q[0])
+    for k in range(K):
+        if k > 0:
+            left = solved[k][4] == "spline"
+        else:
+            left = loop and K > 2 and solved[K - 1][4] == "spline"
+        if k < K - 1:
+            right = solved[k + 1][4] == "spline"
+        else:
+            right = loop and K > 2 and solved[1][4] == "spline"
+        if not (left and right):
+            continue
+        pk = k - 1 if k > 0 else K - 2
+        nk = k + 1 if k < K - 1 else 1
+        fp = solved[pk][0] - (nfr if k == 0 else 0)
+        fn = solved[nk][0] + (nfr if k == K - 1 else 0)
+        span = float(fn - fp)
+        mq, mt = [], []
+        for i in range(nb):
+            qk, qp, qn = Q[k][i], Q[pk][i], Q[nk][i]
+            if _qdot(qp, qk) < 0:
+                qp = _qneg(qp)
+            if _qdot(qn, qk) < 0:
+                qn = _qneg(qn)
+            mq.append(tuple((b - a) / span for a, b in zip(qp, qn)))
+            mt.append(tuple((b - a) / span for a, b in zip(solved[pk][2][i], solved[nk][2][i])))
+        out[k] = (mq, mt)
+    return out
+
+
+def _world_turns(skel: Skeleton, rots: list, trans: list, turns: dict) -> None:
+    """Turn bones (index -> rotation matrix about the model's axes) on top of a pose's local rotations, in place."""
+    Wr, _ = fk(skel, rots, trans)
+    for i in sorted(turns):
+        W = Wr[i]
+        rots[i] = mmul(rots[i], mmul(mT(W), mmul(turns[i], W)))
+
+
+BREATH_BONES = (("Spine_2", (-0.6, 0.0, 0.0)), ("Head", (0.6, 0.0, 0.0)), ("Clavicle_L", (0.0, 0.0, 0.8)),
+                ("Clavicle_R", (0.0, 0.0, -0.8)))
+
+
 def sample(solver: Solver, spec: dict) -> Clip:
-    """Every frame of a keys emote: keys solved, eased in and out, rotations slerped. A loop's last frame is its
-    first (a closing key is added when the data has none)."""
-    ks = key_states(spec, solver.skel)
+    """Every frame of a keys emote: keys solved, eased in and out (or a spline through them), rotations slerped; then
+    lag (bones a few frames behind: overlapping action) and breath. A loop's last frame is its first (a closing key
+    is added when the data has none)."""
+    skel = solver.skel
+    ks = key_states(spec, skel)
     nfr = int(spec["frames"])
-    if spec.get("loop") and ks[-1][0] != nfr:
-        ks.append((nfr, ks[0][1].copy(), "smooth"))
-    elif not spec.get("loop") and ks[-1][0] != nfr:
+    loop = bool(spec.get("loop"))
+    if loop and ks[-1][0] != nfr:
+        ks.append((nfr, ks[0][1].copy(), spec.get("ease", "smooth")))
+    elif not loop and ks[-1][0] != nfr:
         ks.append((nfr, ks[-1][1].copy(), "hold"))
     solved = []
     for f, st, ease in ks:
         rots, trans = solver.solve(st)
         solved.append((f, rots, trans, [m2q(r) for r in rots], ease))
+    K, nb = len(solved), len(skel.bones)
+    Q = [list(s[3]) for s in solved]
+    for k in range(1, K):
+        for i in range(nb):
+            if _qdot(Q[k][i], Q[k - 1][i]) < 0:
+                Q[k][i] = _qneg(Q[k][i])
+    tang = _spline_tangents(solved, Q, nfr, loop) if any(s[4] == "spline" for s in solved) else [None] * K
+    zero4, zero3 = (0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
     frames, eases = [], []
     for fr in range(nfr + 1):
         k = max(i for i, s in enumerate(solved) if s[0] <= fr)
-        if k == len(solved) - 1:
+        if k == K - 1:
             frames.append((solved[k][1], solved[k][2]))
             eases.append("hold")
             continue
         f0, r0, t0, q0, _ = solved[k]
         f1, r1, t1, q1, ease = solved[k + 1]
         u = (fr - f0) / (f1 - f0)
-        t = {"smooth": smooth(u), "linear": u, "snap": max(0.0, min(1.0, (fr - (f1 - 2)) / 2.0)), "hold": 0.0}[ease]
+        eases.append(ease)
+        if ease == "spline" and (tang[k] or tang[k + 1]) and 0.0 < u < 1.0:
+            h = float(f1 - f0)
+            u2, u3 = u * u, u * u * u
+            h00, h10, h01, h11 = 2 * u3 - 3 * u2 + 1, (u3 - 2 * u2 + u) * h, -2 * u3 + 3 * u2, (u3 - u2) * h
+            m0, m1 = tang[k], tang[k + 1]
+            rots, trans = [], []
+            for i in range(nb):
+                a, b = Q[k][i], Q[k + 1][i]
+                ma, mb = (m0[0][i] if m0 else zero4), (m1[0][i] if m1 else zero4)
+                if a == b and ma == zero4 and mb == zero4:
+                    rots.append(r0[i])
+                else:
+                    rots.append(q2m(_qnorm(tuple(h00 * x + h10 * y + h01 * z + h11 * w
+                                                 for x, y, z, w in zip(a, ma, b, mb)))))
+                pa, pb = t0[i], t1[i]
+                va, vb = (m0[1][i] if m0 else zero3), (m1[1][i] if m1 else zero3)
+                if pa == pb and va == zero3 and vb == zero3:
+                    trans.append(pa)
+                else:
+                    trans.append(tuple(h00 * x + h10 * y + h01 * z + h11 * w for x, y, z, w in zip(pa, va, pb, vb)))
+            frames.append((rots, trans))
+            continue
+        t = ease_t(ease, u, fr, f1)
         if t <= 0.0:
             frames.append((r0, t0))
-        elif t >= 1.0:
+        elif t == 1.0:
             frames.append((r1, t1))
         else:
             rots = [a if a is b else q2m(slerp(qa, qb, t)) for a, b, qa, qb in zip(r0, r1, q0, q1)]
             trans = [p if p == q else tuple(x + (y - x) * t for x, y in zip(p, q)) for p, q in zip(t0, t1)]
             frames.append((rots, trans))
-        eases.append(ease)
+    lag = {skel.idx[b]: int(n) for pat, n in (spec.get("lag") or {}).items() for b in skel.match(pat)}
+    if lag:
+        base = [r for r, _ in frames]
+        for fr in range(nfr + 1):
+            rots = list(frames[fr][0])
+            for i, n in lag.items():
+                rots[i] = base[(fr - n) % nfr if loop else max(0, fr - n)][i]
+            frames[fr] = (rots, frames[fr][1])
+    br = spec.get("breath")
+    if br:
+        amp, period = float(br[0]), float(br[1])
+        turns_of = [(skel.idx[n], v) for n, v in BREATH_BONES if skel.has(n)]
+        for fr in range(nfr + 1):
+            env = 1.0 if loop else smooth(max(0.0, min(1.0, fr / 12.0, (nfr - fr) / 12.0)))
+            a = amp * math.sin(2 * math.pi * fr / period) * env
+            if abs(a) < 1e-6:
+                continue
+            rots = list(frames[fr][0])
+            _world_turns(skel, rots, frames[fr][1], {i: deg_m(tuple(c * a for c in v)) for i, v in turns_of})
+            frames[fr] = (rots, frames[fr][1])
     return Clip(spec, frames, eases, [s[0] for s in solved])
 
 
@@ -1182,6 +1356,13 @@ def lint_one(d: dict, skel: Skeleton | None = None) -> list[str]:
     if kind == "game_clip":
         if not isinstance(d.get("clip"), str) or not d["clip"]:
             p.append(f"{eid}: a game_clip needs \"clip\": the game clip's name")
+        st = d.get("start", 0)
+        if not isinstance(st, int) or isinstance(st, bool) or not 0 <= st <= 254:
+            p.append(f"{eid}: start (the game clip's first frame to play) is 0 to 254")
+        if "end" in d:
+            en = d["end"]
+            if not isinstance(en, int) or isinstance(en, bool) or not (st if isinstance(st, int) else 0) < en <= 1000:
+                p.append(f"{eid}: end (the game clip's last frame to play) is after start, at most 1000")
         return p
     if kind == "game_set":
         if not isinstance(d.get("set"), str) or not d["set"]:
@@ -1246,8 +1427,27 @@ def lint_one(d: dict, skel: Skeleton | None = None) -> list[str]:
     for e in d.get("expect", []):
         p += _lint_expect(eid, e, frames)
     contact = d.get("contact", [])
-    if not isinstance(contact, list) or not all(c in ("Wrist_L", "Wrist_R") for c in contact):
-        p.append(f"{eid}: contact lists the hands that may touch the body (Wrist_L, Wrist_R)")
+    if not isinstance(contact, list) or not all(c in CONTACTS for c in contact):
+        p.append(f"{eid}: contact lists what may touch: Wrist_L, Wrist_R (that hand and the body), hands (the two "
+                 "hands each other), arms (the two forearms each other)")
+    if "ease" in d and d["ease"] not in EASES:
+        p.append(f"{eid}: ease (the default for every key) is one of {', '.join(EASES)}")
+    lag = d.get("lag", {})
+    if not isinstance(lag, dict) or not all(isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
+                                            and 0 <= v <= 12 for k, v in lag.items()):
+        p.append(f"{eid}: lag is {{bone: frames 0 to 12}}")
+    elif skel is None:
+        for k in lag:
+            if not any(fnmatch.fnmatchcase(x, k) for x in BODY_BONES):
+                p.append(f"{eid}: lag {k} matches none of Link's body bones")
+    br = d.get("breath")
+    if br is not None:
+        ok = (isinstance(br, list) and len(br) == 2 and all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                                                             for x in br) and 0 < br[0] <= 6 and 20 <= br[1] <= 240)
+        if not ok:
+            p.append(f"{eid}: breath is [degrees 0 to 6, frames per breath 20 to 240]")
+        elif d.get("loop") and isinstance(frames, int) and frames % br[1]:
+            p.append(f"{eid}: a loop's breath must fit it: frames ({frames}) a whole number of breaths ({br[1]})")
     return sorted(set(p), key=p.index)
 
 
@@ -1360,7 +1560,7 @@ def sanity(skel: Skeleton, clip: Clip, idle_P) -> list[str]:
     worst = (0.0, "", 0)
     for fr, (rots, trans) in enumerate(clip.frames):
         Wr, Wp = fk(skel, rots, trans)
-        if prevW is not None and clip.eases[fr] not in ("snap", "hold") and clip.eases[fr - 1] not in ("snap", "hold"):
+        if prevW is not None and clip.eases[fr] not in FAST_EASES and clip.eases[fr - 1] not in FAST_EASES:
             for n in names:
                 a = angle_between_m(prevW[skel.idx[n]], Wr[skel.idx[n]])
                 if a > worst[0]:
@@ -1394,7 +1594,7 @@ def sanity(skel: Skeleton, clip: Clip, idle_P) -> list[str]:
     ks = key_states(spec, skel)
 
     def planted(st: State) -> bool:
-        return st.feet == "planted" and not ({"Ankle_L", "Ankle_R"} & (set(st.step) | set(st.reach)))
+        return st.feet == "planted" and not st.heel and not ({"Ankle_L", "Ankle_R"} & (set(st.step) | set(st.reach)))
     for fr, (rots, trans) in enumerate(clip.frames):
         k0 = max((i for i, (f, _, _) in enumerate(ks) if f <= fr), default=0)
         k1 = min(k0 + 1, len(ks) - 1)
@@ -1622,8 +1822,8 @@ def header_text(emotes: list[dict]) -> str:
     return "\n".join([
         "// Generated by tools/emote_build.py header from tools/emotes/*.json: do not edit (tests check it).",
         "// The emotes the DLL knows: id, wheel name, animation set, the game set it plays when the anims package is",
-        "// missing (\"\": none), console aliases (| between), page (1 hello, 2 dances, 3 hyrule, 0 special), slot,",
-        "// loop, kind (0 our keyframes, 1 a game clip, 2 a copy of a game set).",
+        "// missing (\"\": none), console aliases (| between), page (1 hello, 2 dances, 3 hyrule, 4 poses,",
+        "// 0 special), slot, loop, kind (0 our keyframes, 1 a game clip, 2 a copy of a game set).",
         "#pragma once",
         "",
         "typedef struct {",
@@ -1642,6 +1842,7 @@ def header_text(emotes: list[dict]) -> str:
 MOD_TOML = os.path.join(REPO, "native", "examples", "emotes", "mod.toml")
 GEN_BEGIN = "# ---- generated by tools/emote_build.py header (the favourites and the Play page): do not edit below"
 GEN_END = "# ---- end of generated settings"
+PLAY_ROWS = 17                                 # Play buttons on one mod.toml page (the menu allows 30)
 FAV_KEYS = (("5", "thumbs_up"), ("6", "thumbs_down"), ("7", "six_seven"), ("8", "in_love"), ("9", "floss"),
             ("0", "ragdoll"))
 
@@ -1665,9 +1866,27 @@ def settings_block(emotes: list[dict]) -> str:
         out += ["", "[[settings]]", f'key = "fav_{key}"', "type = \"choice\"", f'label = "Key {key}"',
                 f'description = "The emote key {key} plays (the numpad\'s {key} too)."', f'default = "{default}"',
                 'applies = "live"', 'page = "keys"', "choices = [", choices, "]"]
+    # the Play buttons: a wheel page's emotes stay together; a mod.toml page holds at most 30 rows, so past PLAY_ROWS
+    # the next wheel pages go on more Play pages (play_2, ...), each with its [[pages]] entry made here
+    groups: list[list[dict]] = []
     for d in emotes:
-        out += ["", "[[settings]]", f'key = "play_{d["id"]}"', 'type = "button"', f'label = "{d["name"]}"',
-                'button = "Play"', f'description = "{button_text(d)}"', 'page = "play"']
+        if groups and groups[-1][-1]["page"] == d["page"]:
+            groups[-1].append(d)
+        else:
+            groups.append([d])
+    play: list[list[dict]] = [[]]
+    for g in groups:
+        if play[-1] and len(play[-1]) + len(g) > PLAY_ROWS:
+            play.append([])
+        play[-1] += g
+    for n, ds in enumerate(play):
+        key = "play" if n == 0 else f"play_{n + 1}"
+        if n:
+            out += ["", "[[pages]]", f'key = "{key}"', f'label = "Play an emote ({n + 1})"',
+                    'description = "More emotes: press Play, then close the menu."']
+        for d in ds:
+            out += ["", "[[settings]]", f'key = "play_{d["id"]}"', 'type = "button"', f'label = "{d["name"]}"',
+                    'button = "Play"', f'description = "{button_text(d)}"', f'page = "{key}"']
     out += [GEN_END]
     return "\n".join(out) + "\n"
 
@@ -1740,6 +1959,18 @@ def prepare(game: Game, log=None) -> tuple[Prepared, object]:
     return Prepared(skel, idle, template_from_clip(wait), Solver(skel, idle)), res
 
 
+def clipping_notes(skel: Skeleton, clips: dict) -> list[str]:
+    """The rough body check (not fatal: the body is a guess): the worst hit of each clip that has one."""
+    out = []
+    for eid, clip in clips.items():
+        hits = clip_collisions(skel, clip)
+        if hits:
+            fr, hs = max(hits.items(), key=lambda kv: max(h[1] for h in kv[1]))
+            worst = max(hs, key=lambda h: h[1])
+            out.append(f"{eid}: clipping? frame {fr}: {worst[0]} ({100 * worst[1]:.1f} cm; {len(hits)} frames)")
+    return out
+
+
 def solve_all(prep: Prepared, emotes: list[dict], log=None, checks: bool = True) -> tuple[dict, list[str]]:
     """Every keys emote solved; problems from expect and sanity checks."""
     clips, problems = {}, []
@@ -1785,6 +2016,7 @@ def build_package(game: Game, emotes: list[dict], out: str, *, log=None, strict:
         if strict:
             raise EmoteError("pose checks failed: " + "; ".join(probs[:6]))
         built.notes += probs
+    built.notes += clipping_notes(prep.skel, clips)
     faces = game.face_values()
 
     def face_value(d) -> str | None:
@@ -1802,13 +2034,27 @@ def build_package(game: Game, emotes: list[dict], out: str, *, log=None, strict:
     # game clips: a copy from the player's own Player_Animation goes into our archive under our name, so the emote
     # doesn't depend on what another mod puts in Player_Animation (The Linkle Mod's has 1-frame empty stand-ins for
     # Random_Nml_Wait_Kinnikujiman and the other random idles: daruk_flex ended at once in the Game check r2)
+    # a game clip with "start" plays from that frame (and with "end" up to that frame): its pose on every frame in
+    # between is written as our own clip (the game's frames left out, as victory's look down at the cooking pot)
     copies: dict[str, object] = {}
+    trimmed: dict[str, int] = {}
     for d in emotes:
         if d["kind"] == "game_clip":
             a = game_clips.get(d["clip"])
             if a is None:
                 raise EmoteError(f"{d['id']}: your game has no clip {d['clip']}")
-            copies[d["id"]] = a
+            if d.get("start") or d.get("end"):
+                nfr = struct.unpack_from("<i", a.head, 4)[0]
+                st, last = d.get("start", 0), d.get("end", nfr)
+                if st >= nfr or last > nfr:
+                    raise EmoteError(f"{d['id']}: your game's {d['clip']} has only {nfr} frames "
+                                     f"(start {st}, end {last})")
+                poses = [clip_pose(prep.skel, a, float(f)) for f in range(st, last + 1)]
+                datas.append(build_clip(prep.skel, prep.template, clip_from_poses(prep.skel, poses, d),
+                                        CLIP_PREFIX + d["id"]))
+                trimmed[d["id"]] = last - st
+            else:
+                copies[d["id"]] = a
     for d in emotes:
         if d["kind"] in ("keys", "game_clip") and CLIP_PREFIX + d["id"] in game_clips:
             raise EmoteError(f"Your game already has a clip called {CLIP_PREFIX}{d['id']}")
@@ -1844,9 +2090,8 @@ def build_package(game: Game, emotes: list[dict], out: str, *, log=None, strict:
             face = face_value(d)
             bas = make_bas(clip_name, d.get("morph", 6), face)
         elif d["kind"] == "game_clip":
-            a = copies[eid]
-            clip_name = CLIP_PREFIX + eid   # (our copy of d["clip"])
-            frames = struct.unpack_from("<i", a.head, 4)[0]
+            clip_name = CLIP_PREFIX + eid   # (our copy of d["clip"], or its frames from "start" to "end")
+            frames = trimmed[eid] if eid in trimmed else struct.unpack_from("<i", copies[eid].head, 4)[0]
             face = face_value(d)
             bas = make_bas(clip_name, d.get("morph", 6), face)
         else:
@@ -1858,6 +2103,8 @@ def build_package(game: Game, emotes: list[dict], out: str, *, log=None, strict:
         bas_files[f"Actor/AS/{BAS_PREFIX}{eid}.bas"] = bas
         record_sets.append({"id": eid, "name": d["name"], "set": SET_PREFIX + eid, "clip": clip_name,
                             **({"from_clip": d["clip"]} if d["kind"] == "game_clip" else {}),
+                            **({"from_frame": d["start"]} if d.get("start") else {}),
+                            **({"to_frame": d["end"]} if d.get("end") else {}),
                             "frames": frames, "loop": d["loop"], "kind": d["kind"], "page": d["page"],
                             "slot": d.get("slot", 0), "aliases": d.get("aliases", []), "face": face,
                             "fallback": d.get("fallback", ""), "bas_bytes": len(bas)})
@@ -2195,6 +2442,358 @@ def write_preview(skel, clip, path: str) -> None:
         _write(path, render_preview(skel, clip).png())
 
 
+# ---- body check: a rough body (metres) to find arms through the body, an arm through the other arm, legs through
+# each other. The torso and hips are elliptic cylinders, the head a ball, the limbs capsules; all a little inside
+# Link's outline, so what it reports is a real hit.
+TORSO = (("chest", "Spine_2", "Spine_2", -0.02, 0.26, 0.125, 0.095),     # name, base bone, frame bone, from, to (up),
+         ("belly", "Spine_1", "Spine_1", -0.03, 0.14, 0.11, 0.09),       # half width, half depth
+         ("hips", "Skl_Root", "Waist", -0.15, -0.03, 0.14, 0.10))
+HEAD_R = 0.10
+ARM_SEGS = (("upper arm", "Arm_1", "Arm_2", 0.042), ("forearm", "Arm_2", "Wrist", 0.036),
+            ("hand", "Wrist", "Finger_C_1", 0.03), ("fingers", "Finger_C_1", "Finger_C_3", 0.016))
+LEG_SEGS = (("thigh", "Leg_1", "Leg_2", 0.065), ("shin", "Leg_2", "Ankle", 0.048), ("foot", "Ankle", "Toe", 0.036))
+CLIP_CM = 1.5                                  # a hit deeper than this is reported
+
+
+def _rel_axes(skel: Skeleton, Wr, name: str):
+    """A bone's turn from its rest pose applied to the model's axes: (x, y, z) as the bone carries them now."""
+    i = skel.idx[name]
+    R = mmul(Wr[i], mT(skel.rest_W[i]))
+    return mvec(R, (1.0, 0.0, 0.0)), mvec(R, (0.0, 1.0, 0.0)), mvec(R, (0.0, 0.0, 1.0))
+
+
+def _seg_dist(p1, q1, p2, q2) -> float:
+    """The shortest distance between segments p1-q1 and p2-q2."""
+    d1, d2, r = vsub(q1, p1), vsub(q2, p2), vsub(p1, p2)
+    a, e, f = dot(d1, d1), dot(d2, d2), dot(d2, r)
+    if a < 1e-12 and e < 1e-12:
+        return vlen(r)
+    if a < 1e-12:
+        s, t = 0.0, max(0.0, min(1.0, f / e))
+    else:
+        c = dot(d1, r)
+        if e < 1e-12:
+            s, t = max(0.0, min(1.0, -c / a)), 0.0
+        else:
+            b = dot(d1, d2)
+            den = a * e - b * b
+            s = max(0.0, min(1.0, (b * f - c * e) / den)) if den > 1e-12 else 0.0
+            t = (b * s + f) / e
+            if t < 0:
+                s, t = max(0.0, min(1.0, -c / a)), 0.0
+            elif t > 1:
+                s, t = max(0.0, min(1.0, (b - c) / a)), 1.0
+    return vlen(vsub(vadd(p1, vscale(d1, s)), vadd(p2, vscale(d2, t))))
+
+
+def body_parts(skel: Skeleton, Wr, Wp) -> dict:
+    """The rough body of one pose: torso pieces (name, base, up, side, front, from, to, half width, half depth), the
+    head ball (centre, radius) and the limb capsules {(side, name): (a, b, radius)}."""
+    out = {"torso": [], "head": None, "limbs": {}}
+    for name, base, frame, h0, h1, a, b in TORSO:
+        if skel.has(base) and skel.has(frame):
+            x, y, z = _rel_axes(skel, Wr, frame)
+            out["torso"].append((name, Wp[skel.idx[base]], y, x, z, h0, h1, a, b))
+    if skel.has("Head"):
+        _, y, z = _rel_axes(skel, Wr, "Head")
+        out["head"] = (vadd(Wp[skel.idx["Head"]], vadd(vscale(y, 0.09), vscale(z, 0.02))), HEAD_R)
+    for s in "LR":
+        for name, a, b, r in ARM_SEGS + LEG_SEGS:
+            na, nb = f"{a}_{s}", f"{b}_{s}"
+            if skel.has(na) and skel.has(nb):
+                out["limbs"][(s, name)] = (Wp[skel.idx[na]], Wp[skel.idx[nb]], r)
+    return out
+
+
+def _in_torso(piece, p, r) -> float:
+    """How deep (m) a ball at p of radius r is in a torso piece (0: not in it)."""
+    _, base, up, side, front, h0, h1, a, b = piece
+    rel = vsub(p, base)
+    h = dot(rel, up)
+    if h < h0 - r or h > h1 + r:
+        return 0.0
+    A, B = a + r, b + r
+    x, z = dot(rel, side), dot(rel, front)
+    q = (x / A) ** 2 + (z / B) ** 2
+    if q >= 1.0:
+        return 0.0
+    return min((1.0 - math.sqrt(q)) * min(A, B), h - (h0 - r), (h1 + r) - h)
+
+
+def collisions(skel: Skeleton, Wr, Wp, contact=()) -> list[tuple[str, float, tuple]]:
+    """Hits in one pose deeper than CLIP_CM: (what, depth in metres, where). contact: Wrist_L/Wrist_R (that hand may
+    touch the body), hands (the hands may touch each other), arms (the forearms may rest on each other)."""
+    bp = body_parts(skel, Wr, Wp)
+    limbs, out = bp["limbs"], []
+    tol = CLIP_CM / 100.0
+
+    def add(what, depth, where):
+        if depth > tol:
+            out.append((what, depth, where))
+    for s in "LR":
+        side = "left" if s == "L" else "right"
+        for name in ("upper arm", "forearm", "hand", "fingers"):
+            if (s, name) not in limbs:
+                continue
+            if name in ("hand", "fingers") and f"Wrist_{s}" in contact:
+                continue
+            a, b, r = limbs[(s, name)]
+            t0 = 0.55 if name == "upper arm" else 0.0     # the upper arm starts inside the shoulder
+            best = (0.0, "", a)
+            for k in range(9):
+                t = t0 + (1.0 - t0) * k / 8
+                p = vadd(a, vscale(vsub(b, a), t))
+                for piece in bp["torso"]:
+                    d = _in_torso(piece, p, r)
+                    if d > best[0]:
+                        best = (d, piece[0], p)
+                if bp["head"]:
+                    c, hr = bp["head"]
+                    d = hr + r - vlen(vsub(p, c))
+                    if d > best[0]:
+                        best = (d, "head", p)
+            add(f"{side} {name} in the {best[1]}", best[0], best[2])
+            if name != "upper arm":
+                for ls in "LR":
+                    if (ls, "thigh") in limbs:
+                        la, lb, lr = limbs[(ls, "thigh")]
+                        add(f"{side} {name} in the {'left' if ls == 'L' else 'right'} thigh",
+                            r + lr - _seg_dist(a, b, la, lb), b)
+    for na in ("upper arm", "forearm", "hand", "fingers"):
+        for nb in ("upper arm", "forearm", "hand", "fingers"):
+            if ("L", na) not in limbs or ("R", nb) not in limbs:
+                continue
+            if {na, nb} <= {"hand", "fingers"} and "hands" in contact:
+                continue
+            if "arms" in contact and {na, nb} <= {"forearm", "hand", "fingers"}:
+                continue
+            a1, b1, r1 = limbs[("L", na)]
+            a2, b2, r2 = limbs[("R", nb)]
+            add(f"left {na} through the right {nb}", r1 + r2 - _seg_dist(a1, b1, a2, b2), b1)
+    for na in ("thigh", "shin", "foot"):
+        for nb in ("thigh", "shin", "foot"):
+            if ("L", na) in limbs and ("R", nb) in limbs:
+                a1, b1, r1 = limbs[("L", na)]
+                a2, b2, r2 = limbs[("R", nb)]
+                add(f"left {na} through the right {nb}", r1 + r2 - _seg_dist(a1, b1, a2, b2), b1)
+    return out
+
+
+def clip_collisions(skel: Skeleton, clip: Clip) -> dict[int, list]:
+    """Frame -> its hits (only frames that have any)."""
+    contact = tuple(clip.spec.get("contact", []))
+    out = {}
+    for fr, (rots, trans) in enumerate(clip.frames):
+        Wr, Wp = fk(skel, rots, trans)
+        hits = collisions(skel, Wr, Wp, contact)
+        if hits:
+            out[fr] = hits
+    return out
+
+
+MOTION_BONES = ("Skl_Root", "Spine_1", "Spine_2", "Head", "Clavicle_L", "Clavicle_R", "Arm_1_L", "Arm_2_L",
+                "Wrist_L", "Arm_1_R", "Arm_2_R", "Wrist_R", "Leg_1_L", "Leg_2_L", "Ankle_L", "Leg_1_R", "Leg_2_R",
+                "Ankle_R")
+STILL_DEG = 0.3                                # a frame where no body bone turns more than this is still
+POP_DEG = 12.0                                 # a bone's speed changing more than this in one frame is a pop
+
+
+def motion_stats(skel: Skeleton, clip: Clip) -> dict:
+    """Per frame: the fastest body bone's turn (degrees since the frame before) and the fastest hand (cm); the
+    longest still stretch (a loop wraps); pops (a bone's speed jumps by more than POP_DEG outside snap/hold/hit)."""
+    names = [n for n in MOTION_BONES if skel.has(n)]
+    W = [fk(skel, r, t) for r, t in clip.frames]
+    speed, hand = [0.0], [0.0]
+    per = {n: [0.0] for n in names}
+    for fr in range(1, len(W)):
+        best = 0.0
+        for n in names:
+            i = skel.idx[n]
+            a = angle_between_m(W[fr - 1][0][i], W[fr][0][i])
+            per[n].append(a)
+            best = max(best, a)
+        speed.append(best)
+        hand.append(max((vlen(vsub(W[fr][1][skel.idx[w]], W[fr - 1][1][skel.idx[w]])) * 100
+                         for w in ("Wrist_L", "Wrist_R") if skel.has(w)), default=0.0))
+    loop = bool(clip.spec.get("loop"))
+    run, start, longest = 0, 0, (0, 0)
+    for fr in list(range(1, len(W))) * (2 if loop else 1):
+        if speed[fr] < STILL_DEG and hand[fr] < 0.1:
+            if run == 0:
+                start = fr
+            run += 1
+            if longest[0] < run <= len(W) - 1:
+                longest = (run, start)
+        else:
+            run = 0
+    pops = []
+    for n, v in per.items():
+        for fr in range(2, len(v)):
+            if clip.eases[fr] in FAST_EASES or clip.eases[fr - 1] in FAST_EASES:
+                continue
+            if abs(v[fr] - v[fr - 1]) > POP_DEG:
+                pops.append((fr, n, v[fr - 1], v[fr]))
+    return {"speed": speed, "hand": hand, "still": longest, "pops": pops}
+
+
+def clip_from_poses(skel: Skeleton, poses: list, spec: dict) -> Clip:
+    """A Clip from clip_pose results (local Euler angles and translations per frame): a game clip to preview."""
+    frames = [([e2m(e) for e in eul], [tuple(t) for t in tr]) for eul, tr in poses]
+    return Clip(spec, frames, ["linear"] * len(frames), [0, len(frames) - 1])
+
+
+def game_clip_preview(game: Game, skel: Skeleton, d: dict) -> Clip:
+    """A game_clip emote as a Clip, from the player's own Player_Animation (read only), for the preview."""
+    a = next((x for x in game.anims().skel_anims if x.name == d["clip"]), None)
+    if a is None:
+        raise EmoteError(f"{d['id']}: your game has no clip {d['clip']}")
+    nfr = struct.unpack_from("<i", a.head, 4)[0]
+    last = min(nfr, int(d.get("end", nfr)))
+    poses = [clip_pose(skel, a, float(f)) for f in range(int(d.get("start", 0)), last + 1)]
+    return clip_from_poses(skel, poses, d)
+
+
+def _sheet_parts(skel: Skeleton, Wr, Wp) -> list:
+    """Drawable pieces of the rough body: (kind, a, b, radius or (half width, half depth), colour)."""
+    bp = body_parts(skel, Wr, Wp)
+    out = []
+    for name, base, up, side, front, h0, h1, a, b in bp["torso"]:
+        out.append(("torso", vadd(base, vscale(up, h0)), vadd(base, vscale(up, h1)), (a, b), (190, 190, 190)))
+    if bp["head"]:
+        out.append(("head", bp["head"][0], bp["head"][0], bp["head"][1], (225, 200, 170)))
+    if skel.has("Neck") and skel.has("Head"):
+        out.append(("limb", Wp[skel.idx["Neck"]], Wp[skel.idx["Head"]], 0.045, (200, 180, 160)))
+    col = {("L", "arm"): (70, 110, 230), ("R", "arm"): (225, 70, 60), ("L", "leg"): (120, 160, 235),
+           ("R", "leg"): (235, 130, 120)}
+    for (s, name), (a, b, r) in bp["limbs"].items():
+        kind = "leg" if name in ("thigh", "shin", "foot") else "arm"
+        out.append(("limb", a, b, r, col[(s, kind)]))
+    return out
+
+
+def render_sheet(skel: Skeleton, clip: Clip, path: str, step: int | None = None, cols: int = 8) -> dict:
+    """A contact sheet (JPEG, or PNG, through Pillow): the hand, foot and head paths over the whole clip and a speed
+    graph, then every step-th frame from the front and from Link's right with a rough body (clipping hits ringed in
+    magenta). Returns the checks: {"hits": clip_collisions, "stats": motion_stats}. Never opens a window."""
+    from PIL import Image, ImageDraw
+    nfr = len(clip.frames) - 1
+    step = step or max(1, round(nfr / 40))
+    picks = list(range(0, nfr + 1, step))
+    if picks[-1] != nfr:
+        picks.append(nfr)
+    hits = clip_collisions(skel, clip)
+    stats = motion_stats(skel, clip)
+    scale = 92.0
+    vw, vh = int(1.25 * scale), int(2.0 * scale)
+    cell_w, cell_h = 2 * vw + 6, vh + 22
+    rows = (len(picks) + cols - 1) // cols
+    top_h = 300
+    w_img, h_img = cols * cell_w, top_h + rows * cell_h + 4
+    img = Image.new("RGB", (w_img, h_img), (255, 255, 255))
+    dr = ImageDraw.Draw(img)
+    worlds = [fk(skel, r, t) for r, t in clip.frames]
+
+    def proj(p, view, ox, oy, sc):
+        return (ox + (p[0] if view == "front" else p[2]) * sc, oy - p[1] * sc)
+
+    def depth(p, view):
+        return p[2] if view == "front" else -p[0]
+
+    def draw_body(fr, view, ox, oy, sc, faint=False):
+        Wr, Wp = worlds[fr]
+        parts = _sheet_parts(skel, Wr, Wp)
+        parts.sort(key=lambda q: depth(vscale(vadd(q[1], q[2]), 0.5), view))
+        dr.line([(ox - 0.45 * sc, oy), (ox + 0.45 * sc, oy)], fill=(160, 160, 160), width=1)
+        for kind, a, b, r, c in parts:
+            if faint:
+                c = tuple(int(255 - (255 - v) * 0.25) for v in c)
+            A, B = proj(a, view, ox, oy, sc), proj(b, view, ox, oy, sc)
+            rad = ((r[0] if view == "front" else r[1]) if kind == "torso" else r) * sc
+            if kind == "head":
+                dr.ellipse([A[0] - rad, A[1] - rad, A[0] + rad, A[1] + rad], fill=c, outline=(90, 70, 60))
+                continue
+            dr.line([A, B], fill=c, width=max(1, int(2 * rad)))
+            for P in (A, B):
+                dr.ellipse([P[0] - rad, P[1] - rad, P[0] + rad, P[1] + rad], fill=c)
+        if skel.has("Head") and not faint:
+            _, y, z = _rel_axes(skel, Wr, "Head")
+            c = vadd(Wp[skel.idx["Head"]], vadd(vscale(y, 0.09), vscale(z, 0.02)))
+            dr.line([proj(c, view, ox, oy, sc), proj(vadd(c, vscale(z, 0.17)), view, ox, oy, sc)],
+                    fill=(20, 140, 60), width=3)
+
+    tsc = 120.0
+    for k, view in enumerate(("front", "side")):
+        ox, oy = 170 + k * 330, top_h - 18
+        draw_body(0, view, ox, oy, tsc, faint=True)
+        for bone, c in (("Wrist_L", (40, 80, 220)), ("Wrist_R", (220, 40, 30)), ("Ankle_L", (90, 140, 240)),
+                        ("Ankle_R", (240, 120, 100)), ("Head", (20, 140, 60))):
+            if not skel.has(bone):
+                continue
+            pts = [proj(worlds[f][1][skel.idx[bone]], view, ox, oy, tsc) for f in range(nfr + 1)]
+            dr.line(pts, fill=c, width=2)
+            for f in range(0, nfr + 1, step):
+                P = pts[f]
+                dr.ellipse([P[0] - 2, P[1] - 2, P[0] + 2, P[1] + 2], fill=c)
+        dr.text((ox - 150, 4), f"{view}: hand, foot and head paths", fill=(0, 0, 0))
+    gx, gy, gw, gh = 680, 30, w_img - 700, top_h - 80
+    dr.rectangle([gx, gy, gx + gw, gy + gh], outline=(150, 150, 150))
+    top = max(30.0, max(stats["speed"]) * 1.1)
+    for lvl, c in ((STILL_DEG, (160, 200, 160)), (10.0, (220, 220, 220)), (JUMP_DEG, (240, 170, 170))):
+        y = gy + gh - lvl / top * gh
+        dr.line([(gx, y), (gx + gw, y)], fill=c)
+    for fr in hits:
+        x = gx + fr / max(1, nfr) * gw
+        dr.line([(x, gy), (x, gy + gh)], fill=(240, 120, 240))
+    for kf in clip.key_frames:
+        x = gx + kf / max(1, nfr) * gw
+        dr.line([(x, gy + gh), (x, gy + gh + 6)], fill=(0, 0, 0), width=2)
+    dr.line([(gx + f / max(1, nfr) * gw, gy + gh - stats["speed"][f] / top * gh) for f in range(nfr + 1)],
+            fill=(30, 30, 30), width=2)
+    dr.line([(gx + f / max(1, nfr) * gw, gy + gh - min(top, stats["hand"][f] * 3) / top * gh)
+             for f in range(nfr + 1)], fill=(60, 120, 230), width=1)
+    lines = [f"{clip.spec['id']}: {nfr} frames, {'loop' if clip.spec.get('loop') else 'once'}; black: fastest "
+             f"joint (deg/frame, top {top:.0f}), blue: fastest hand (cm/frame x3), ticks: keys"]
+    lines += describe_checks(clip, {"hits": hits, "stats": stats})
+    for k, t in enumerate(lines):
+        dr.text((gx, gy + gh + 8 + 12 * k), t, fill=(0, 0, 0))
+    for n, fr in enumerate(picks):
+        cx, cy = (n % cols) * cell_w, top_h + (n // cols) * cell_h
+        if n % cols:
+            dr.line([(cx, cy), (cx, cy + cell_h)], fill=(225, 225, 225))
+        for k, view in enumerate(("front", "side")):
+            draw_body(fr, view, cx + 3 + vw * k + vw / 2, cy + cell_h - 6, scale)
+        dr.text((cx + 4, cy + 3), f"f{fr}" + (" key" if fr in clip.key_frames else ""), fill=(0, 0, 0))
+        if fr in hits:
+            dr.text((cx + 70, cy + 3), "CLIP", fill=(200, 0, 200))
+            for _what, _d, where in hits[fr]:
+                for k, view in enumerate(("front", "side")):
+                    P = proj(where, view, cx + 3 + vw * k + vw / 2, cy + cell_h - 6, scale)
+                    dr.ellipse([P[0] - 6, P[1] - 6, P[0] + 6, P[1] + 6], outline=(220, 0, 220), width=3)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    if path.lower().endswith((".jpg", ".jpeg")):
+        img.convert("RGB").save(path, "JPEG", quality=80, optimize=True)
+    else:
+        img.save(path)
+    return {"hits": hits, "stats": stats}
+
+
+def describe_checks(clip: Clip, res: dict) -> list[str]:
+    """Short lines about a clip's checks (the sheet's caption and the console)."""
+    hits, st = res["hits"], res["stats"]
+    out = []
+    if hits:
+        worst = max(((h[1], fr, h[0]) for fr, hs in hits.items() for h in hs))
+        out.append(f"clipping on {len(hits)} frames, worst {worst[0] * 100:.1f} cm at frame {worst[1]}: {worst[2]}")
+    else:
+        out.append("clipping: none")
+    out.append(f"longest still stretch {st['still'][0]} frames (from frame {st['still'][1]}); fastest joint "
+               f"{max(st['speed']):.1f} deg/frame")
+    if st["pops"]:
+        fr, n, a, b = st["pops"][0]
+        out.append(f"{len(st['pops'])} pops, first at frame {fr}: {n} {a:.1f} -> {b:.1f} deg/frame")
+    return out
+
+
 def preview_solver(install: str | None, library: str | None, demo: bool, log=None) -> Solver:
     if not demo:
         import modman as mm
@@ -2254,6 +2853,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("id", help="an emote id, or all")
     p.add_argument("--out", required=True, help="the file to write (with all: a folder)")
     p.add_argument("--demo", action="store_true", help="the made-up skeleton (no game files)")
+    p.add_argument("--sheet", action="store_true", help="a contact sheet (Pillow): paths, speeds, a rough body, "
+                   "clipping marked; a .jpg --out makes one too")
+    p.add_argument("--step", type=int, help="the sheet: every this many frames (default: about 40 frames in all)")
     sub.add_parser("list", help="the emotes")
     sub.add_parser("header", help="(developers) write native/examples/emotes/emote_list.h")
     args = ap.parse_args(argv)
@@ -2285,17 +2887,34 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Updated: {MOD_TOML}")
             return 0
         if args.cmd == "preview":
-            emotes = [d for d in load_emotes() if d["kind"] == "keys"]
+            emotes = [d for d in load_emotes() if d["kind"] in ("keys", "game_clip")]
             if args.id != "all":
                 emotes = [d for d in emotes if d["id"] == args.id]
                 if not emotes:
-                    raise EmoteError(f"no keyframed emote called {args.id}")
+                    raise EmoteError(f"no keyframed or game-clip emote called {args.id}")
+            game = None
             solver = preview_solver(args.game, args.library, args.demo, log=print)
+            sheet = args.sheet or args.out.lower().endswith((".jpg", ".jpeg"))
             for d in emotes:
-                clip = sample(solver, d)
-                path = os.path.join(args.out, f"{d['id']}.png") if args.id == "all" else args.out
-                write_preview(solver.skel, clip, path)
-                print(f"Written: {path}")
+                if d["kind"] == "game_clip":
+                    if args.demo or not sheet:
+                        continue
+                    if game is None:
+                        import modman as mm
+                        game = find_game(args.game, mm.Library.load(mm.resolve_library(args.library)))
+                    clip = game_clip_preview(game, solver.skel, d)
+                else:
+                    clip = sample(solver, d)
+                ext = ".jpg" if sheet else ".png"
+                path = os.path.join(args.out, f"{d['id']}{ext}") if args.id == "all" else args.out
+                if sheet:
+                    res = render_sheet(solver.skel, clip, path, step=args.step)
+                    print(f"Written: {path}")
+                    for line in describe_checks(clip, res):
+                        print(f"  {line}")
+                else:
+                    write_preview(solver.skel, clip, path)
+                    print(f"Written: {path}")
             return 0
         if args.cmd == "check":
             problems = check(args.game, args.library, log=print)

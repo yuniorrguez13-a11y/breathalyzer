@@ -1,17 +1,18 @@
 {
   "id": "shrug", "name": "Shrug", "aliases": ["idk", "dunno", "whatever"],
   "page": "hello", "slot": 6, "by": "giruka",
-  "about": "Palms up, shoulders up, a head tilt, elbows out.",
-  "kind": "keys", "frames": 45, "loop": false, "face": "surprise", "morph": 6,
+  "about": "Palms turn up, the shoulders pop up past the top and settle, elbows out, a head tilt and a lean back; then everything drops.",
+  "kind": "keys", "frames": 58, "loop": false, "face": "surprise", "morph": 6, "ease": "spline",
+  "lag": {"Head": 3, "Neck": 1, "Spine_2": 1, "Wrist_*": 2, "Finger_*": 3},
+  "breath": [1.5, 58],
   "keys": [
     {"f": 0},
-    {"f": 12,
-     "aim": {"Arm_1_R": [-0.45, -0.88, 0.15], "Arm_2_R": [-0.55, 0.05, 0.85], "Wrist_R": [-0.55, 0.2, 0.8],
-             "Arm_1_L": [0.45, -0.88, 0.15], "Arm_2_L": [0.55, 0.05, 0.85], "Wrist_L": [0.55, 0.2, 0.8]},
-     "palm": {"Wrist_R": [0, 1, 0], "Wrist_L": [0, 1, 0]}, "hand": {"R": "open", "L": "open"},
-     "turn": {"Clavicle_R": [0, 0, -14], "Clavicle_L": [0, 0, 14], "Head": [0, 0, 12]}},
-    {"f": 32},
-    {"f": 45, "reset": true}
+    {"f": 5, "reset": true, "hips": [-0.013, -0.004, 0], "turn": {"Skl_Root": [0.0, 0.0, -1.5], "Spine_1": [2.0, 0.0, 1.2], "Head": [3.0, 0.0, 0.0]}, "heel": {"L": 4.5}},
+    {"f": 15, "reset": true, "hips": [-0.026, -0.006, -0.012], "turn": {"Skl_Root": [0.0, 0.0, -3.0], "Spine_1": [-5.0, 0.0, 2.5], "Clavicle_R": [0.0, 0.0, -17.0], "Clavicle_L": [0.0, 0.0, 17.0], "Head": [-4.0, 0.0, 14.0]}, "heel": {"L": 9.0}, "aim": {"Arm_1_R": [-0.45, -0.88, 0.15], "Arm_2_R": [-0.6, 0.15, 0.8], "Wrist_R": [-0.55, 0.2, 0.8], "Arm_1_L": [0.45, -0.88, 0.15], "Arm_2_L": [0.6, 0.15, 0.8], "Wrist_L": [0.55, 0.2, 0.8]}, "palm": {"Wrist_R": [0, 1, 0], "Wrist_L": [0, 1, 0]}, "hand": {"R": "open", "L": "open"}},
+    {"f": 23, "reset": true, "hips": [-0.026, -0.008, -0.01], "turn": {"Skl_Root": [0.0, 0.0, -3.0], "Spine_1": [-4.0, 0.0, 2.5], "Clavicle_R": [0.0, 0.0, -13.0], "Clavicle_L": [0.0, 0.0, 13.0], "Head": [-2.0, 3.0, 11.0]}, "heel": {"L": 9.0}, "aim": {"Arm_1_R": [-0.45, -0.88, 0.15], "Arm_2_R": [-0.55, 0.05, 0.85], "Wrist_R": [-0.55, 0.2, 0.8], "Arm_1_L": [0.45, -0.88, 0.15], "Arm_2_L": [0.55, 0.05, 0.85], "Wrist_L": [0.55, 0.2, 0.8]}, "palm": {"Wrist_R": [0, 1, 0], "Wrist_L": [0, 1, 0]}, "hand": {"R": "open", "L": "open"}},
+    {"f": 34, "reset": true, "hips": [-0.023, -0.007, 0], "turn": {"Skl_Root": [0.0, 0.0, -2.7], "Spine_1": [-3.0, 0.0, 2.2], "Clavicle_R": [0.0, 0.0, -12.0], "Clavicle_L": [0.0, 0.0, 12.0], "Head": [-1.0, 5.0, 12.0]}, "heel": {"L": 8.1}, "aim": {"Arm_1_R": [-0.45, -0.88, 0.15], "Arm_2_R": [-0.55, 0.05, 0.85], "Wrist_R": [-0.55, 0.2, 0.8], "Arm_1_L": [0.45, -0.88, 0.15], "Arm_2_L": [0.55, 0.05, 0.85], "Wrist_L": [0.55, 0.2, 0.8]}, "palm": {"Wrist_R": [0, 1, 0], "Wrist_L": [0, 1, 0]}, "hand": {"R": "open", "L": "open"}},
+    {"f": 46, "reset": true, "hips": [-0.01, -0.003, 0], "turn": {"Skl_Root": [0.0, 0.0, -1.2], "Spine_1": [0.0, 0.0, 1.0], "Clavicle_R": [0.0, 0.0, 3.0], "Clavicle_L": [0.0, 0.0, -3.0], "Head": [3.0, 2.0, 4.0]}, "heel": {"L": 3.6}, "hand": {"R": "relaxed", "L": "relaxed"}},
+    {"f": 58, "reset": true}
   ],
   "expect": [
     {"f": 20, "above": ["Wrist_R", "Skl_Root"]},

@@ -24,6 +24,10 @@
 // commands and overrides only from its swmod_init and its own commands (the thread modhost's commands run on): from a
 // hook, a thread of its own or swmod_exit they are refused, so nothing it adds can escape the unload.
 //
+// Overlays (overlay.c, swmod_overlay.h): the export modhost_overlay_add lets a mod draw over the game with Savage Wind's
+// own ImGui and hold the game's input while it does. Only when a mod asks, modhost checks and points the exe's calls
+// of menu_render and menu_input_captured at its own functions (Savage Wind 0.4.1-alpha.4 only).
+//
 // Savage Wind changes the working directory to its data root before it loads the game code (runtime/paths.c), so
 // relative paths here are relative to the data root.
 #include <stdbool.h>
@@ -887,6 +891,10 @@ static void load_hooks(void) {
 
 static void join_args(int from, int argc, char **argv, char *out, size_t cap);
 #include "settings.c"
+
+// ------------------------------------------------------------------ the overlay host (swmod_overlay.h): overlay.c
+// (mods draw over the game with Savage Wind's ImGui; an export of modhost.dll, nothing is patched until one asks)
+#include "overlay.c"
 
 static void fill_api(SwModApi *a, const char *mod_name) {
     memset(a, 0, sizeof *a);

@@ -6,7 +6,9 @@ Without game files (a made-up skeleton with Link's bone names, in memory):
 - curves: the fit stays within 0.002 rad, the end and delta rules, the curve head bytes, the baked size formula;
 - flags: "rotation zero" is cleared on a bone that turns, a still bone gets base data only;
 - loops close (the last frame is the first), mirror swaps left and right with the right signs, hand presets curl;
-- data: every keyframe file lints clean; 24 wheel slots + ragdoll; unique ids and aliases; the header and mod.toml's
+- eases (spline keeps moving through keys, hit overshoots), heel (the ball of the foot stays down), lag, breath, the
+  rough-body clipping check, the contact sheet (JPEG); the robot holds 4 to 8 frames, the dances never stand still;
+- data: every keyframe file lints clean; 32 wheel slots (4 pages) + ragdoll; unique ids and aliases; the header and mod.toml's
   generated block are what `header` writes;
 - the animation list log: sorted, every name ZEmote_* after the game's last set; merged after a made-up game list and
   a Linkle-like log, it has 4 archives and a binary search finds every name;
@@ -170,15 +172,15 @@ class ClipTests(unittest.TestCase):
         self.assertTrue(tr["Arm_2_R"].curves)
         self.assertFalse(tr["Arm_2_R"].flags & eb.FLAG_ROT_ZERO)
         self.assertTrue(tr["Arm_2_R"].flags & 0xE00)
-        self.assertFalse(tr["Leg_1_L"].curves)       # still: base data only
+        self.assertFalse(tr["Finger_B_2_L"].curves)  # still: base data only
         self.assertEqual(struct.unpack_from("<I", cd.head())[0], 0x1200)
-        self.assertEqual(struct.unpack_from("<i", cd.head(), 4)[0], 64)
+        self.assertEqual(struct.unpack_from("<i", cd.head(), 4)[0], self.emotes["wave"]["frames"])
         firsts = [struct.unpack_from("<i", t.head, 8)[0] for t in cd.tracks]
         counts = [len(t.curves) for t in cd.tracks]
         self.assertEqual(firsts, [sum(counts[:i]) for i in range(len(counts))])
 
     def test_loops_close(self):
-        for i in ("floss", "six_seven", "in_love", "robot"):
+        for i in ("floss", "six_seven", "in_love", "robot", "moonwalk", "air_guitar", "hestu_shake", "revali_smug"):
             clip = eb.sample(self.solver, self.emotes[i])
             a, b = clip.frames[0], clip.frames[-1]
             worst = max(eb.angle_between_m(x, y) for x, y in zip(a[0], b[0]))
@@ -189,13 +191,14 @@ class ClipTests(unittest.TestCase):
     def test_floss_arms_and_hips_swing_opposite(self):
         clip = eb.sample(self.solver, self.emotes["floss"])
         ix = self.sk.idx
-        for fr, side in ((0, 1), (12, -1)):
+        half = self.emotes["floss"]["frames"] // 2
+        for fr, side in ((0, 1), (half, -1)):
             _, Wp = eb.fk(self.sk, *clip.frames[fr])
             self.assertGreater(Wp[ix["Wrist_R"]][0] * side, 0)          # both hands to one side
             self.assertGreater(Wp[ix["Wrist_L"]][0] * side, 0)
             self.assertLess(Wp[ix["Skl_Root"]][0] * side, 0)            # the hips to the other
         _, Wp0 = eb.fk(self.sk, *clip.frames[0])
-        _, Wp12 = eb.fk(self.sk, *clip.frames[12])
+        _, Wp12 = eb.fk(self.sk, *clip.frames[half])
         self.assertGreater(Wp0[ix["Wrist_R"]][2], Wp0[ix["Wrist_L"]][2])     # right arm in front, left behind
         self.assertGreater(Wp12[ix["Wrist_L"]][2], Wp12[ix["Wrist_R"]][2])   # then swapped
 
@@ -219,6 +222,91 @@ class ClipTests(unittest.TestCase):
                 clip = eb.sample(self.solver, d)
                 self.assertEqual(len(clip.frames), d["frames"] + 1, d["id"])
 
+    def wp(self, st):
+        rots, trans = self.solver.solve(st)
+        return eb.fk(self.sk, rots, trans)
+
+    def test_spline_keeps_moving_through_keys(self):
+        spec = {"id": "t", "frames": 30, "loop": False, "ease": "spline",
+                "keys": [{"f": 0}, {"f": 10, "aim": {"Arm_1_R": [-0.6, 0.0, 0.8]}},
+                         {"f": 20, "aim": {"Arm_1_R": [-0.6, 0.6, 0.5]}}, {"f": 30, "reset": True}]}
+        i = self.sk.idx["Arm_1_R"]
+
+        def speed(sp):
+            clip = eb.sample(self.solver, sp)
+            return [eb.angle_between_m(a[0][i], b[0][i]) for a, b in zip(clip.frames, clip.frames[1:])]
+        spl, smo = speed(spec), speed(dict(spec, ease="smooth"))
+        self.assertGreater(spl[9] + spl[10], 2.0)                 # no stop on the middle key
+        self.assertLess(smo[9] + smo[10], spl[9] + spl[10])       # smooth stops there
+        self.assertLess(spl[0], 0.5 * max(spl[:10]))               # it starts from rest (no jump to full speed)
+        stops = dict(spec, keys=[{"f": 0}, {"f": 10, "aim": {"Arm_1_R": [-0.6, 0.0, 0.8]}},
+                                 {"f": 20, "aim": {"Arm_1_R": [-0.6, 0.6, 0.5]}, "ease": "smooth"},
+                                 {"f": 30, "reset": True}])
+        two = speed(stops)[:10]                                   # spline between two stops: eases, not linear
+        self.assertLess(two[0], 0.5 * max(two))
+        self.assertLess(two[9], 0.5 * max(two))
+
+    def test_hit_overshoots_and_settles(self):
+        vals = [eb.ease_t("hit", u / 10, 0, 10) for u in range(11)]
+        self.assertGreater(max(vals), 1.02)
+        self.assertEqual(vals[-1], 1.0)
+        self.assertEqual(eb.ease_t("in", 0.5, 0, 10), 0.25)
+        self.assertEqual(eb.ease_t("out", 0.5, 0, 10), 0.75)
+
+    def test_heel_keeps_the_ball_of_the_foot_down(self):
+        _, Wp0 = self.wp(eb.State())
+        _, Wp = self.wp(eb.State(heel={"L": 35.0}, step={"Ankle_L": (0.0, 0.0, 0.05)}))
+        toe0, toe = Wp0[self.sk.idx["Toe_L"]], Wp[self.sk.idx["Toe_L"]]
+        self.assertLess(abs(toe[1] - toe0[1]), 0.002)              # the ball stays on the ground
+        self.assertLess(abs(toe[2] - toe0[2] - 0.05), 0.002)       # where the step puts it
+        self.assertGreater(Wp[self.sk.idx["Ankle_L"]][1] - Wp0[self.sk.idx["Ankle_L"]][1], 0.04)   # the heel is up
+        self.assertEqual(eb.mirror_state(eb.State(heel={"L": 20.0})).heel, {"R": 20.0})
+
+    def test_lag_delays_a_bone(self):
+        spec = {"id": "t", "frames": 20, "loop": True, "ease": "spline",
+                "keys": [{"f": 0}, {"f": 10, "turn": {"Head": [0, 30, 0]}}]}
+        base = eb.sample(self.solver, spec)
+        lagged = eb.sample(self.solver, dict(spec, lag={"Head": 3}))
+        i = self.sk.idx["Head"]
+        for fr in range(21):
+            self.assertLess(eb.angle_between_m(lagged.frames[fr][0][i], base.frames[(fr - 3) % 20][0][i]), 1e-6)
+
+    def test_breath_moves_the_chest_and_closes_a_loop(self):
+        spec = {"id": "t", "frames": 40, "loop": True, "breath": [2.0, 40], "keys": [{"f": 0}]}
+        clip = eb.sample(self.solver, spec)
+        i = self.sk.idx["Spine_2"]
+        self.assertGreater(eb.angle_between_m(clip.frames[0][0][i], clip.frames[10][0][i]), 0.5)
+        self.assertLess(eb.angle_between_m(clip.frames[0][0][i], clip.frames[40][0][i]), 1e-6)
+
+    def test_collisions_find_a_hand_in_the_chest(self):
+        _, Wp0 = self.wp(eb.State())
+        self.assertEqual(eb.collisions(self.sk, *self.wp(eb.State())), [])
+        inside = eb.vadd(Wp0[self.sk.idx["Spine_2"]], (0.0, 0.08, 0.0))
+        Wr, Wp = self.wp(eb.State(reach={"Wrist_R": inside}))
+        hits = eb.collisions(self.sk, Wr, Wp)
+        self.assertTrue(any("right" in h[0] and h[1] > 0.03 for h in hits), hits)
+        allowed = eb.collisions(self.sk, Wr, Wp, contact=("Wrist_R",))
+        self.assertFalse([h for h in allowed if "hand" in h[0] or "fingers" in h[0]])
+
+    def test_preview_sheet(self):
+        try:
+            import PIL  # noqa: F401
+        except ImportError:
+            self.skipTest("Pillow isn't installed")
+        clip = eb.sample(self.solver, self.emotes["robot"])
+        with tempfile.TemporaryDirectory() as t:
+            p = os.path.join(t, "robot.jpg")
+            res = eb.render_sheet(self.sk, clip, p)
+            with open(p, "rb") as f:
+                self.assertEqual(f.read(2), bytes([0xFF, 0xD8]))
+        self.assertGreaterEqual(res["stats"]["still"][0], 4)   # the robot holds dead still after each hit
+        self.assertLessEqual(res["stats"]["still"][0], 8)
+
+    def test_dances_never_stand_still(self):
+        for i in ("moonwalk", "air_guitar", "floss", "hestu_shake", "wave", "clap"):
+            st = eb.motion_stats(self.sk, eb.sample(self.solver, self.emotes[i]))
+            self.assertLessEqual(st["still"][0], 3, i)
+
     def test_preview_png(self):
         clip = eb.sample(self.solver, self.emotes["wave"])
         with tempfile.TemporaryDirectory() as t:
@@ -237,8 +325,8 @@ class DataTests(unittest.TestCase):
 
     def test_the_list(self):
         pages = [d for d in self.emotes if d["page"] in eb.PAGES]
-        self.assertEqual(len(pages), 24)
-        self.assertEqual(len({(d["page"], d["slot"]) for d in pages}), 24)
+        self.assertEqual(len(pages), 32)
+        self.assertEqual(len({(d["page"], d["slot"]) for d in pages}), 32)
         self.assertEqual([d["id"] for d in self.emotes if d["page"] == eb.SPECIAL], ["ragdoll"])
         ids = {d["id"] for d in self.emotes}
         for want in ("thumbs_up", "thumbs_down", "ragdoll", "six_seven", "in_love", "floss"):
@@ -253,6 +341,10 @@ class DataTests(unittest.TestCase):
         self.assertTrue(eb.lint_all([bad]))
         bad2 = dict(self.emotes[0], name="A really very long emote name here", _file="wave.json")
         self.assertTrue(eb.lint_one(bad2))
+        clip = {"id": "c", "name": "C", "page": "poses", "slot": 1, "by": "giruka", "about": "A test.",
+                "kind": "game_clip", "clip": "Nml_Wait", "loop": False, "_file": "c.json"}
+        self.assertFalse(eb.lint_one(dict(clip, start=10, end=40)))
+        self.assertTrue(eb.lint_one(dict(clip, start=40, end=10)))     # end comes after start
 
     def test_header_and_mod_toml_in_sync(self):
         with open(eb.HEADER, encoding="utf-8") as f:
@@ -342,7 +434,8 @@ class WithGameFiles(unittest.TestCase):
     def test_built(self):
         b = self.built
         self.assertEqual(b.clips, sum(1 for d in self.emotes if d["kind"] in ("keys", "game_clip")))
-        self.assertEqual(b.copied, {d["id"]: d["clip"] for d in self.emotes if d["kind"] == "game_clip"})
+        self.assertEqual(b.copied, {d["id"]: d["clip"] for d in self.emotes if d["kind"] == "game_clip"
+                                    and not d.get("start")})
         self.assertEqual(b.sets, len(self.emotes))
         self.assertLessEqual(b.readback_deg, eb.READBACK_DEG)
         for name in ("mod.toml", "info.json", "emotes.json", "logs/aslist.aamp", "logs/rstb.json",
@@ -367,7 +460,7 @@ class WithGameFiles(unittest.TestCase):
         ours = {a.name: a for a in nx_model.read(tb.child(f"Model/{eb.ARCHIVE}.sbfres").raw).skel_anims}
         game = {a.name: a for a in self.game.anims().skel_anims}
         for d in self.emotes:
-            if d["kind"] != "game_clip":
+            if d["kind"] != "game_clip" or d.get("start"):
                 continue
             with self.subTest(emote=d["id"]):
                 bas = eb.read_bas(tb.child(eb.PLAYER_PACK).child(f"Actor/AS/{eb.BAS_PREFIX}{d['id']}.bas").raw)
@@ -378,6 +471,14 @@ class WithGameFiles(unittest.TestCase):
         self.assertGreater(flex, 1, "daruk_flex must be the real clip, not a 1-frame stand-in")
         rec = {s["id"]: s for s in self.built.record["sets"]}
         self.assertEqual(rec["daruk_flex"]["from_clip"], "Random_Nml_Wait_Kinnikujiman")
+        # victory: the game clip from frame 112 on (no look down at the cooking pot), written as our own clip
+        vic = struct.unpack_from("<i", ours[eb.CLIP_PREFIX + "victory"].head, 4)[0]
+        self.assertEqual(rec["victory"]["from_frame"], 112)
+        self.assertEqual(vic, rec["victory"]["frames"])
+        # ... up to frame 151, the landing (the clip's last second looks down at the pot again)
+        self.assertEqual(rec["victory"]["to_frame"], 151)
+        self.assertEqual(vic, 151 - 112)
+        self.assertLess(vic, struct.unpack_from("<i", game["Demo_Get_Cooking_VeryGood"].head, 4)[0])
 
     @unittest.skipUnless(LINKLE_LOG.is_file(), "The Linkle Mod's log isn't in out/emotes-lib")
     def test_merge_with_linkle(self):
@@ -465,6 +566,14 @@ class Native(unittest.TestCase):
 
     def test_state(self):
         self.group("state", ["fields", "no_id_at_boot"])
+
+    def test_wheel(self):
+        # the emote wheel (wheel.c) through a made-up overlay host: hold G / D-pad Down, point, let go to play
+        self.group("wheel", ["slices", "pages", "extras_page", "no_world_no_wheel", "hold_opens", "mouse_points",
+                             "release_plays", "toast_names", "tap_then_digit", "keys_quiet", "cmd_opens",
+                             "page_turns", "keys_point_enter_plays", "draws", "esc_closes", "pad_hold",
+                             "pad_b_closes", "zero_ragdoll", "menu_closes", "idle_nothing", "toast_why",
+                             "state_field"])
 
     def test_nothing_else_failed(self):
         self.assertEqual(self.fails, 0, self.report)

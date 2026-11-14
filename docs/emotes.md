@@ -8,8 +8,9 @@ and a read-back of the file). In the game (Game check 2026-11-13, round 2) the e
 the whole clip and moving cancels it, but on screen Link still stood idle. The cause is found (the emote went on his
 legs only, see How it works) and a fix is built, not yet tried in the game. The ragdoll was only a lying pose (it
 looked like a crouch); version 0.2.0 makes it a real ragdoll (Link is thrown forward and tumbles), built from a
-study of the game's code, not yet tried in the game. The Emotes mod starts **off**, because it changes a game file
-(Link's animation list).
+study of the game's code, not yet tried in the game. Version 0.3.0 adds the **emote wheel** (hold G, or D-pad Down
+on a controller), checked offline only (its self-test and pictures of what it draws), not yet in the game. The Emotes
+mod starts **off**, because it changes a game file (Link's animation list).
 
 ## Turn it on
 
@@ -33,7 +34,9 @@ keeps both.
 
 | How | What |
 |---|---|
+| Hold **G** (controller: hold **D-pad Down** half a second) | the emote wheel: point at one, let go to play (below) |
 | Keys **5 6 7 8 9 0** (or the numpad's) | 5 thumbs up, 6 thumbs down, 7 six seven, 8 in love, 9 floss, 0 ragdoll |
+| Console: `emote wheel` | open the wheel (it stays open until you pick or press Esc) |
 | Console: `emote` | the numbered list |
 | Console: `emote floss`, `emote 9`, `emote 67`, `emote thrust` | play one (by name, number, nickname or the start of its name) |
 | Console: `emote stop` | stop; moving, jumping or attacking stops it too |
@@ -53,6 +56,42 @@ keeps both.
   Link lies down in that pose instead.
 - If the animations aren't built, the wave, thumbs up, photo pose and victory use the game's own moves; the others
   say "the emote animations are missing: turn on Emotes (animations) in the launcher, then Deploy".
+
+## The wheel
+
+A big round wheel in the middle of the screen, like Fortnite's: 8 slices, each with a picture and the emote's name
+in big white letters. The one you point at turns gold and pops out, and its name shows big in the middle.
+
+| | Keyboard and mouse | Controller |
+|---|---|---|
+| Open | hold **G** (a quick tap keeps it open) | hold **D-pad Down** for half a second |
+| Point | move the mouse toward a slice (back to the middle: none), or WASD / the arrow keys | either stick (the slice stays lit when you let go of the stick) |
+| Play | let go of **G**, or click, Enter, Space, E, or **1** to **8** at once | let go of **D-pad Down**, or A |
+| Page | the mouse wheel, **Q** / **R** (Tab: next) | L / R |
+| Ragdoll | **0** | Y |
+| Close | Esc, Backspace, right click, or G again | B |
+
+- **Pages:** 1 **Favourites** (your 8, Mods page > Emotes > **Wheel favourites**), 2 Hello, 3 Dances, 4 Hyrule, and
+  **Extras** when you put ids of your own emotes in the Extras setting (8 a page).
+- Left of the wheel: the page's name, "Page 1 of 4" and dots. Right of it: what each key does, and in orange why Link
+  can't emote now ("Link has to stand still"). On a narrow window these go above and below the wheel.
+- While the wheel is up, the game gets no input: Link stands still, the camera stops, a click doesn't swing a sword.
+  After it closes the game waits until you let go of every key and button (2 seconds at most), plus 0.4 s, so the
+  click or key that picked never reaches Link. The world is dimmed a little only, so friends stay visible.
+- At the bottom, for 2 seconds, the name of the emote that starts, or why it can't ("Link has to stand still").
+  This works for the number keys and the console too. **Show emote name** OFF hides it (for recording).
+- It doesn't open in a menu, the pause screen, a cutscene, on the title screen, while Savage Wind's menu or console
+  is up, or while the game window isn't in front; it closes when one of them comes up.
+- Holding D-pad Down makes Link whistle once before the wheel opens (that is the game's own D-pad Down). Turn
+  **Controller wheel** OFF if you don't want that.
+- Mods page > Emotes: **Emote wheel** (on/off), **Wheel key** (G), **Controller wheel** (Hold D-pad Down / Off),
+  **Wheel size** (100 to 200 percent, 150 at first), **Show emote name**, and the page **Wheel favourites** (slice 1
+  at the top, then clockwise; "(Empty)" leaves a slice empty).
+- It needs Savage Wind **0.4.1-alpha.4** and the modhost from this repo (it draws with Savage Wind's own ImGui through
+  modhost's overlay host). Anywhere else the wheel stays off (`emote state` says why: `wheel=off: ...`) and the keys,
+  the console and the Play page work as before.
+- Keys G, Q, R, E, Tab, WASD, 1-8 and 0 belong to the wheel only while it is up (the game is muted then). G is free in
+  Savage Wind's own keys and in our other mods.
 
 ## The list
 
@@ -208,7 +247,18 @@ nothing that can't be shared goes in `tools/emotes/`.
   action (`PlayerWait`, `PlayerMove`...). An AI node's current child index is its u16 at `+0x1c` (the game's
   getCurrentChild `0x70015377d0`); `+0x1e` is the one before it (0.1.0 read `+0x1e` by mistake). `PlayerNormal` has
   about 170 children (0.1.0 looked at the first 64 only, so it never found the slip-fall).
+- **The wheel (0.3.0, `wheel.c`):** drawn by modhost's overlay host (`native/modhost/swmod_overlay.h`, `overlay.c`):
+  the mod calls `swmod_overlay_add(api, wheel_update, wheel_draw, ...)` in `swmod_init`. That export of `modhost.dll`
+  checks savagewind.exe's 2 calls of `menu_render` and 13 calls of `menu_input_captured` byte for byte (0.4.1-alpha.4)
+  and points them at modhost (nothing else changes; on any other build nothing is patched). Each shown frame, on Savage
+  Wind's present thread, modhost reads SDL3's keyboard, mouse (an event watch adds up movement, wheel and clicks) and
+  the game's controller, calls `wheel_update`; only when it answers "draw" it makes one ImGui frame in its own context
+  (Savage Wind's FiraSans SemiBold at 64 px) and calls `wheel_draw`, before Savage Wind's own menu and console. While
+  the wheel answers "capture", `menu_input_captured` says yes, which is how Savage Wind's menu holds the game; then
+  modhost holds it until every key is up plus 400 ms. The mouse moves the wheel's own pointer from the middle (works
+  whether or not the game holds the cursor). The wheel only leaves requests (as the console does); Link's update
+  plays them. The tick keeps the number keys 5-0 quiet while the wheel is up and after, until they are all up. The
+  icons are our own shapes (lines, circles, polygons). `emote state` has `wheel` (`up`, `down`, `off: <why>`).
 - Tests: `python -m unittest tests.test_emote_build` (the math, the data, the list merge, a full build with your
-  files, and the DLL's own self-test).
-- Next: the emote wheel (hold a button, needs the in-game overlay), controller play, and emotes your friends see in
-  multiplayer.
+  files, and the DLL's own self-test, the wheel's 22 rows included).
+- Next: the wheel's first game check, and emotes your friends see in multiplayer.

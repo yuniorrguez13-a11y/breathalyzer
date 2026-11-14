@@ -1,0 +1,6 @@
+{
+  "id": "spear_pose", "name": "Spear pose", "aliases": ["spear", "lance"],
+  "page": "poses", "slot": 4, "by": "giruka",
+  "about": "A low, wide stance, one arm drawn back high as if about to throw a spear (the game's own photo pose).",
+  "kind": "game_clip", "clip": "SelfCameraPose_Spear", "loop": true, "face": "selfie", "morph": 8, "fallback": "SelfCameraPause"
+}
