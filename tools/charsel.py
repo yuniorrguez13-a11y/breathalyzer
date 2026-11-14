@@ -1775,7 +1775,7 @@ def make_copy_pack(cid: str, slot: str, profile: str, template: dict[str, bytes]
     import aamp
     from aamp import Param, name_hash
     from mp import ghost_link_pack as glp
-    if cid not in ("link", "linkle") or slot not in FREE_SLOTS:
+    if cid in RECIPES and RECIPES[cid].kind == "pack" or slot not in FREE_SLOTS:   # (link, linkle, an import-vrm id)
         raise CharselError(f"no model copy for {cid} on {slot}")
     _, tlt = glp.link_target(template, TEMPLATE)
     _, plt = glp.link_target(pause, glp.DONOR_LINK)
@@ -1970,6 +1970,11 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
     table.update(slots or {})
     lm = linkle_mod(library) if library else None    # (on or off: her costume comes from its files)
     on: dict[str, list[str]] = {}
+    imported = {k: v for k, v in (old.get("imported") or {}).items()   # (import-vrm's models: kept by every build)
+                if old.get("mod") == MOD_ID and isinstance(v, dict) and v.get("slot") in FREE_SLOTS
+                and (out / "romfs" / "Actor" / "Pack" / f"{v['slot']}.sbactorpack").is_file()}
+    for cid, info in imported.items():
+        on.setdefault(info["slot"], []).append(cid)
     for cid in ids:   # (Link gets a name of its own only with --model-copies; Linkle whenever her mod's files are here)
         if cid in table and (RECIPES[cid].kind == "pack" or model_copies or cid == "linkle" and lm):
             on.setdefault(table[cid], []).append(cid)
@@ -2010,6 +2015,8 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
                "notes": notes, "linkle": {"how": "missing"}, "link_modded": bool(pm),
                "model_copies": bool(model_copies) or any(RECIPES[k].kind != "pack" for k in keep),
                "monster_link_clips": bool(monster_link)}
+    if imported:
+        catalog["imported"] = imported
     if pm:
         catalog["player_model"] = {k: pm[k] for k in ("id", "name", "version", "fp", "linkle")}
         if pm["linkle"]:
@@ -2148,8 +2155,8 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
     # write: our files in the romfs folder (the kept characters' stay; every other pack or model of ours goes), the
     # catalog, and built.txt (made from the game's files: never exported as a .breath)
     top = out / "romfs"
-    keep_slots = {info["slot"] for info in keep.values()}
-    keep_models = {ours(cid) for cid in keep}
+    keep_slots = {info["slot"] for info in list(keep.values()) + list(imported.values())}
+    keep_models = {ours(cid) for cid in list(keep) + list(imported)}
     if top.is_dir():
         for p in sorted(top.rglob("*"), reverse=True):
             if p.is_file() and (p.name.endswith(".sbactorpack") and p.stem in FREE_SLOTS and p.stem not in keep_slots
@@ -3566,8 +3573,26 @@ def main(argv: list[str] | None = None) -> int:
     bo = sub.add_parser("bodies", help="measure each body's flesh for the costume's ragdoll (writes pup_bodies.h)")
     bo.add_argument("--romfs", type=Path, default=DEFAULT_ROMFS)
     bo.add_argument("--out", type=Path, default=BODY_HEADER)
+    iv = sub.add_parser("import-vrm", help="a VRM avatar (VRoid...) as a costume on Link's skeleton: iam custom")
+    iv.add_argument("vrm", type=Path)
+    iv.add_argument("--id", default="custom", help="its name in the files (SwChar_<id>)")
+    iv.add_argument("--romfs", type=Path, help=f"default: the library's Savage Wind with --library, else {DEFAULT_ROMFS}")
+    iv.add_argument("--out", type=Path, help=f"the characters mod folder (default {DEFAULT_OUT})")
+    iv.add_argument("--library", type=Path, help="put it in this mod library's characters mod instead")
     args = ap.parse_args(argv)
     try:
+        if args.cmd == "import-vrm":
+            import vrm_import as vi
+            _low_priority()
+            got = (vi.import_into_library(args.vrm, args.id, args.library, args.romfs) if args.library
+                   else vi.import_vrm(args.vrm, args.id, args.romfs, args.out))
+            print(f"Imported {args.vrm.name}: {got['shapes']} parts, {got['vertices']:,} vertices, {got['textures']} "
+                  f"textures, on {got['slot']}." + (f" Left out: {', '.join(got['left_out'])}." if got['left_out']
+                                                    else ""))
+            print(f"In the game (after modman deploy): iam {vi.IMPORT_ID}" +
+                  "".join(f" (or iam {a})" for a in vi.IMPORT_ALIASES) +
+                  ". Not done: spring bones, blend shapes, MToon outline.")
+            return 0
         if args.cmd == "playas":
             return _playas_cmd(args)
         if args.cmd == "bodies":

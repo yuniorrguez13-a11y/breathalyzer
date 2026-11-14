@@ -47,10 +47,15 @@ class Table(unittest.TestCase):
         packs = [r.id for r in charsel.RECIPES.values() if r.kind == "pack"]
         # Linkle's costume (charsel build, from the Linkle Mod's files, on or off) is on charsel's linkle name too,
         # once the DLL lists it (the native change of 2026-11-14)
-        self.assertEqual(sorted(set(slots) - {"linkle"}), sorted(packs))
+        self.assertEqual(sorted(set(slots) - {"linkle", "custom"}), sorted(packs))
+        import vrm_import
         for cid, (actor, name, playas) in slots.items():
             if cid == "linkle":
                 self.assertEqual((actor, name, playas), (charsel.SLOTS["linkle"], "Linkle", ""))
+                continue
+            if cid == vrm_import.IMPORT_ID:     # (charsel import-vrm's costume, on Link's skeleton)
+                self.assertEqual((actor, name, playas), (vrm_import.IMPORT_SLOT, "Custom", ""))
+                self.assertIn(actor, charsel.FREE_SLOTS)
                 continue
             with self.subTest(cid=cid):
                 r = charsel.RECIPES[cid]
@@ -63,7 +68,9 @@ class Table(unittest.TestCase):
 
     def test_aliases_match(self):
         on = set(dll_slots())
+        import vrm_import
         want = {a: r.id for r in charsel.RECIPES.values() if r.kind == "pack" or r.id in on for a in r.aliases}
+        want.update({a: vrm_import.IMPORT_ID for a in vrm_import.IMPORT_ALIASES})
         self.assertEqual(dll_aliases(), want)
 
     def test_weapon_swing_names(self):

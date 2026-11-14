@@ -1654,7 +1654,9 @@ static void check_puppet(void) {
     check("puppet", "ids", !strcmp(pup_id("daruk"), "goron") && !strcmp(pup_id("goron"), "goron") &&
           !*pup_id("link") && !strcmp(pup_id("linkle"), "linkle") && !strcmp(pup_id("linkel"), "linkle") &&
           !*pup_id("ganon") && pup_slot("zora") && !strcmp(pup_slot("goron")->actor, "Dm663_Npc_Assasin_A") &&
-          !strcmp(pup_slot("linkle")->actor, "Dm_Npc_UMii_Hylia_BodyS_M_012"), "daruk %s", pup_id("daruk"));
+          !strcmp(pup_slot("linkle")->actor, "Dm_Npc_UMii_Hylia_BodyS_M_012") &&
+          !strcmp(pup_id("custom"), "custom") && !strcmp(pup_slot("custom")->actor, "Dm_Npc_Handmaid_A"),
+          "daruk %s", pup_id("daruk"));
     PupStatus ps;
     memset(&ps, 0, sizeof ps);
     char line[300];
@@ -2623,6 +2625,7 @@ static void check_puppet_ragdoll(void) {
     int all = !strcmp(PUP_BODIES[0].id, "link");
     for (size_t i = 0; i < sizeof PUP_SLOTS / sizeof *PUP_SLOTS; i++)
         if (strcmp(PUP_SLOTS[i].id, "hylian") && strcmp(PUP_SLOTS[i].id, "linkle") &&  // (Linkle: Link's skeleton)
+            strcmp(PUP_SLOTS[i].id, "custom") &&                                       // (an import: Link's too)
             pup_body(PUP_SLOTS[i].id) == &PUP_BODIES[0])
             all = 0;
     check("puppet", "rd_bodies", all && pup_body("hylian") == &PUP_BODIES[0] && goron->has[2] &&

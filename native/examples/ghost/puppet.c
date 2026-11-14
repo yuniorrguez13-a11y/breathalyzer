@@ -208,13 +208,15 @@ static const PupSlot PUP_SLOTS[] = {
     // 0.9.4: Linkle, a costume charsel builds from The Linkle Mod's files (on or off in the library: charsel
     // linkle_costume), on Link's skeleton with Link's clips. No Linkle Mod: no pack, and `iam linkle` says so.
     {"linkle", "Dm_Npc_UMii_Hylia_BodyS_M_012", "Linkle", ""},
+    // 0.9.7: a VRM avatar `charsel import-vrm` put on Link's skeleton (tools/vrm_import.py IMPORT_SLOT), Link's clips
+    {"custom", "Dm_Npc_Handmaid_A", "Custom", ""},
 };
 static const struct {
     const char *alias, *id;
 } PUP_ALIASES[] = {  // (`iam daruk` with no client list keeps the word as typed: it still finds Daruk)
     {"princess", "zelda"}, {"hateno", "hylian"}, {"villager", "hylian"}, {"paya", "sheikah"}, {"urbosa", "gerudo"},
     {"daruk", "goron"},    {"revali", "rito"},   {"mipha", "zora"},      {"boko", "bokoblin"}, {"moriblin", "moblin"},
-    {"linkel", "linkle"},
+    {"linkel", "linkle"},  // (an imported costume is "custom"; vrm_import.py IMPORT_ALIASES lists any extra words)
 };
 
 enum { PS_OFF, PS_WAIT, PS_PENDING, PS_LIVE, PS_FAILED };
