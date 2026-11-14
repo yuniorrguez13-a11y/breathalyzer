@@ -2188,6 +2188,7 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
 # with logs/ for a BCML package and refuse to deploy it as it is (romfs_mods, mod_inspect); the entries are also in
 # charsel.json ("sizes").
 RSTB_REL = "System/Resource/ResourceSizeTable.product.srsizetable"
+SIZE_PACKS = False   # size entries for the packs broke every costume in game (see size_entries)
 SIZE_MODEL_REF = "Model/Link.bfres"        # Linkle's costume is Link's skeleton with more parts: his model is its twin
 SIZE_TEX_REF = "Model/Link.Tex.bfres"
 
@@ -2243,7 +2244,10 @@ def size_entries(romfs: Path, top: Path, rstb) -> tuple[dict[str, int], dict]:
             sizes[name] = max(want, have or 0)
 
     packs = top / "Actor" / "Pack"
-    for f in sorted(packs.glob("*.sbactorpack")) if packs.is_dir() else ():
+    # SIZE_PACKS off (2026-11-14 game check): with entries for the packs and the files inside them, EVERY costume
+    # failed to load ("could not create"), even the Hylian; without the table all of them loaded. Only the new models
+    # (Linkle's) get entries now.
+    for f in sorted(packs.glob("*.sbactorpack")) if packs.is_dir() and SIZE_PACKS else ():
         if f.stem not in FREE_SLOTS:
             continue
         data = f.read_bytes()

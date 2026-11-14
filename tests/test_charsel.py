@@ -563,9 +563,13 @@ class Build(unittest.TestCase):
         table = self.romfs / "System" / "Resource" / "ResourceSizeTable.product.srsizetable"
         table.parent.mkdir(parents=True)
         table.write_bytes(raw)
-        cat = charsel.build(self.romfs, self.out, ["goron"], cache=self.root / "cache.json", say=quiet)
-        sizes = cat["sizes"]["entries"]
         slot = charsel.SLOTS["goron"]
+        # default (2026-11-14 game check: pack entries broke every costume): no entries for the packs
+        cat = charsel.build(self.romfs, self.out, ["goron"], cache=self.root / "cache.json", say=quiet)
+        self.assertNotIn(f"Actor/Pack/{slot}.bactorpack", cat["sizes"]["entries"])
+        with mock.patch.object(charsel, "SIZE_PACKS", True):
+            cat = charsel.build(self.romfs, self.out, ["goron"], cache=None, say=quiet)
+        sizes = cat["sizes"]["entries"]
         self.assertIn(f"Actor/Pack/{slot}.bactorpack", sizes)
         self.assertIn("Actor/ASList/SwChar_goron.baslist", sizes)
         self.assertIn("Actor/AS/SwChar_goron_CutS1.bas", sizes)
