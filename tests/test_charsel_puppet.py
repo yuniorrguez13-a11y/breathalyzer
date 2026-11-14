@@ -252,16 +252,22 @@ class Selftest(unittest.TestCase):
         names = ["move_by_speed", "near_names", "missing_clip_no_link", "ids", "sentences", "spawns_and_swaps",
                  "at_link", "sprint_and_walk", "rehide", "climb_near_name", "horse_shows_link", "cutscene_shows_link",
                  "pause_keeps", "items_to_puppet", "items_grip", "stage_change", "iam_link_back", "self_off",
-                 "refused_gives_up", "no_tick_says_why"]
+                 "refused_gives_up", "no_tick_says_why",
+                 # 0.9.5 (the round-4 game check): the copies never sheathed by the game, Link's arrow hidden with him,
+                 # no tries spent while the game is busy (Game Over) and the costume back after a Continue
+                 "holder_in_hand", "arrow_hidden", "busy_no_tries", "gameover_comeback", "refused_stays_failed"]
         if ("puppet", "world") in self.rows:      # (the made-up globals' page was taken: the pure part only)
             names = names[:5]
         # 0.9.3 (pure): held copies per body, kept names, the guard, the hands, death, the ground clamp, the ball's dip
         names += ["grip_place", "items_kept", "guard_detect", "hands_overlay", "death_keeps_costume", "clamp_step",
                   "ball_dip_hold"]
+        # 0.9.5 (pure): the back place's tweak and the arm flag, a whole arm, an attack at once, the arrow's name
+        names += ["back_tweak", "arm_overlay", "attack_morph", "arrow_name"]
         # 0.9.1: the costume falls with Link's ragdoll (his pose, on the ground), pure and in the made-up world
         names += ["rd_detect", "rd_order_refuses_loop", "rd_pose", "rd_ground", "rd_lift", "rd_upright", "rd_bodies"]
         if ("puppet", "rd_world") not in self.rows:
-            names += ["rd_follow", "rd_getup", "rd_clip_and_off", "rd_removed", "ball_rolls", "clamp_world"]
+            names += ["rd_follow", "rd_getup", "rd_clip_and_off", "rd_removed", "ball_rolls", "clamp_world",
+                      "ball_drop_hold"]
         for name in names:
             with self.subTest(check=name):
                 status, detail = self.rows.get(("puppet", name), ("MISSING", "not run"))

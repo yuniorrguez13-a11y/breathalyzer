@@ -119,6 +119,21 @@ MOBLIN_CTRL = (("CutS1", 0.8, 17, 30), ("CutS2", 1.25, 37, 62), ("CutS3", 0.8, 2
                ("CutS1_Spear", 1.4, 22, None), ("CutS2_Spear", 1.4, 22, None), ("CutS3_Spear", 1.4, 22, None),
                ("CutSF_Spear", 0.8, 24, None), ("CutDash_Spear", 0.91, 22, None), ("SwimMove", 0.6, None, None),
                ("SwimDash", 0.8, None, None))
+# 0.9.5 (the round-4 game check: the Bokoblin's CutS1 came 0.59-0.89 s after the press, Link's 0.43-0.73 s; at Link's
+# hit it was still "winding up"): the rule above assumes the costume starts its set with Link's, but it starts a frame or
+# two later [V: puppet.c reads his set each frame], and it blended into the swing over the animation list's 6 frames
+# while Link's own attack nodes have Morph 0 [V: Player_CutS1.bas]. So every attack set now starts at once (Morph 0 on
+# its node, and puppet.c asks with no blend), and the monsters' swings start SWING_LEAD_S further into their clip, the
+# time the costume still starts after Link [G: 1-2 frames]. Applied to every row of both tables (frame_ctrl).
+SWING_LEAD_S = 0.05
+CLIP_FPS = 30.0
+ATTACK_MORPH = 0.0        # an attack set's node Morph, as Link's own attack nodes have it
+
+
+def is_attack(name: str) -> bool:
+    return name.startswith("Cut")
+
+
 # Names only the costume packs have (not the Link body's, ghost_link_pack.ANIMS): the monsters' swing for a spear's
 # third hit and the two-hander's and spear's dash attack (puppet.c PUP_SWINGS_OWN).
 EXTRA_NAMES = ("CutS3_Spear", "CutDash_Lsword", "CutDash_Spear")
@@ -184,10 +199,17 @@ RECIPES: dict[str, Recipe] = {r.id: r for r in (
     # file (v3 had it first: her stand and walk were a Gerudo guard's; the real Urbosa never loads it [V]). Her actor
     # also loads the men's file (5.1 MB unpacked) for a real sprint; left out to keep her light: her run, faster.
     # load_mb: 16.2 - 2.9 (the guards' file, unpacked) [V].
+    # v5 (the round-4 game check: ours stood straight, the spawned Dm_Npc_Gerdo_Hero hip-shot): her actor's Wait is
+    # UC_M_Wait and her Walk UC_M_Walk [V: its animation list], whose personality branch is Man_Active / Man_Deflated /
+    # default; her look file says Woman_Active [V], and what she plays is the Active branch [G: the hip-shot stand the
+    # user saw; the default branch is our straight Default_Wait]: Positive_Wait and Positive_Move_Walk, found first in
+    # the women's file [V: both there]. Her run has no personality branch (Common_Move_Run) [V].
     Recipe("gerudo", "Urbosa (Gerudo)", "Races", "pack", "Dm_Npc_Gerdo_Hero",
-           (("UMii_Common_Body_W_Animation", True), (PLAYER_ANIM, True)), _with(UMII_W, RunGear2="Common_Move_Run"),
-           load_mb=13.3, aliases=("urbosa",), v=4, ctrl=(("RunGear2", SPRINT_RATE, None, None),),
-           looks="Tall. Her game actor's own stand, walk and run (sprint: her run, faster); Link's moves for the rest."),
+           (("UMii_Common_Body_W_Animation", True), (PLAYER_ANIM, True)),
+           _with(UMII_W, Wait="Positive_Wait", Walk="Positive_Move_Walk", RunGear2="Common_Move_Run"),
+           load_mb=13.3, aliases=("urbosa",), v=5, ctrl=(("RunGear2", SPRINT_RATE, None, None),),
+           looks="Tall. Her game actor's own hip-shot stand, walk and run (sprint: her run, faster); Link's moves for "
+                 "the rest."),
     Recipe("goron", "Daruk (Goron)", "Races", "pack", "Dm_Npc_Goron_Hero",
            (("UMii_Goron_BodyC_M_Animation", True), (PLAYER_ANIM, True)),
            _with(UMII_M, RunGear2="Common_Move_Ball"), load_mb=10.9, aliases=("daruk",), v=3,
@@ -209,12 +231,12 @@ RECIPES: dict[str, Recipe] = {r.id: r for r in (
            looks="Her game size (shorter than Link). Swims with a Zora woman's swim clips (lying in the water when "
                  "she moves, upright when she treads)."),
     Recipe("bokoblin", "Bokoblin", "Monsters", "pack", "Enemy_Bokoblin_Junior",
-           (("Enemy_Bokoblin_Animation", False),), BOKO, rest="speed", load_mb=6.2, aliases=("boko",), v=2,
+           (("Enemy_Bokoblin_Animation", False),), BOKO, rest="speed", load_mb=6.2, aliases=("boko",), v=3,
            ctrl=BOKO_CTRL,
            looks="Its own clips; each swing timed to Link's hit and picked by his weapon. No climb or glide pose; "
                  "it wades in water."),
     Recipe("moblin", "Moblin", "Monsters", "pack", "Enemy_Moriblin_Junior",
-           (("Enemy_Moriblin_Animation", False),), MOBLIN, rest="speed", load_mb=7.8, aliases=("moriblin",), v=2,
+           (("Enemy_Moriblin_Animation", False),), MOBLIN, rest="speed", load_mb=7.8, aliases=("moriblin",), v=3,
            ctrl=MOBLIN_CTRL,
            looks="Its own clips; each swing timed to Link's hit and picked by his weapon. No climb or glide pose; "
                  "it wades in water. Big: may pop in at the screen's edges."),
@@ -1171,26 +1193,40 @@ def clip_map(r: Recipe, rest: str | None = None) -> dict[str, str]:
     return m
 
 
+def swing_start(start, rate) -> float | None:
+    """A monster swing's start frame with the lead (SWING_LEAD_S of game time, in clip frames at its rate)."""
+    if start is None:
+        return None
+    return float(round(start + SWING_LEAD_S * CLIP_FPS * (rate or 1.0)))
+
+
 def frame_ctrl(r: Recipe) -> dict[str, tuple]:
-    """{ghost name: (rate, start frame, end frame)} for the names whose set doesn't play its clip as it is."""
+    """{ghost name: (rate, start frame, end frame)} for the names whose set doesn't play its clip as it is. An attack's
+    start frame gets the lead (swing_start)."""
     m = clip_map(r)
     bad = [c[0] for c in r.ctrl if c[0] not in m]
     if bad:
         raise CharselError(f"{r.id}: frame control for {', '.join(bad)}, which it has no clip for")
-    return {n: (rate, start, end) for n, rate, start, end in r.ctrl}
+    return {n: (rate, swing_start(start, rate) if is_attack(n) else start, end) for n, rate, start, end in r.ctrl}
 
 
-def as_file(clip: str, rate=None, start=None, end=None) -> bytes:
+def as_file(clip: str, rate=None, start=None, end=None, morph=None) -> bytes:
     """An animation set with one clip node (ghost_link_pack.as_file), and the game's own frame control on the node
-    when given: Extend > FrameCtrl > Rate / StartFrame / EndFrame, as Link's Player_CutS1 has it [V]."""
+    when given: Extend > FrameCtrl > Rate / StartFrame / EndFrame, as Link's Player_CutS1 has it [V]. morph: the node's
+    Morph (blend-in frames; Link's attack nodes have 0 [V])."""
     import aamp
     from aamp import F32, INT, STRING64, PList, PObject, name_hash
     from mp import ghost_link_pack as glp
-    if rate is None and start is None and end is None:
+    if rate is None and start is None and end is None and morph is None:
         return glp.as_file(clip)
     params = PObject()
     params.set("TypeIndex", INT, 67)
     params.set("FileName", STRING64, clip)
+    if morph is not None:
+        params.set("Morph", F32, float(morph))
+    if rate is None and start is None and end is None:
+        element = PList(objects={name_hash("Parameters"): params})
+        return aamp.dump(PList(lists={name_hash("Elements"): PList(lists={name_hash("Element0"): element})}))
     fc = PObject()
     for key, v in (("Rate", rate), ("StartFrame", start), ("EndFrame", end)):
         if v is not None:
@@ -1497,8 +1533,9 @@ def _pack_files(cid: str, slot: str, profile: str, template: dict[str, bytes], m
     out[f"Actor/ASList/{name}.baslist"] = aamp.dump(PList(lists={name_hash("AddReses"): add,
                                                                  name_hash("ASDefines"): defines,
                                                                  name_hash("CFDefines"): cf}))
-    for n, clip in mapping.items():
-        out[f"Actor/AS/{name}_{n}.bas"] = as_file(clip, *(ctrl or {}).get(n, (None, None, None)))
+    for n, clip in mapping.items():   # (0.9.5: an attack's set starts at once, as Link's own)
+        out[f"Actor/AS/{name}_{n}.bas"] = as_file(clip, *(ctrl or {}).get(n, (None, None, None)),
+                                                  morph=ATTACK_MORPH if is_attack(n) else None)
     return out
 
 
@@ -1831,10 +1868,162 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
             t.unlink()       # (a new file, never written through a hard link the library may share)
         t.write_bytes(data)
     out.mkdir(parents=True, exist_ok=True)
+    catalog["sizes"] = write_sizes(romfs, out, say)   # (0.9.5: the size table, after every file of ours is in place)
+    if catalog["sizes"].get("note"):
+        notes.append(catalog["sizes"]["note"])
     (out / BUILT_MARK).write_text(BUILT_TEXT, encoding="utf-8")
     (out / "mod.toml").write_text(MOD_TOML, encoding="utf-8")
     (out / CATALOG).write_text(json.dumps(catalog, indent=1) + "\n", encoding="utf-8")
     return catalog
+
+
+# ------------------------------------------------------------------------------------------- size table (0.9.5)
+#
+# The round-4 game check: "Linkle did not load (the game could not create it)". Every other costume loads, and its pack
+# and the files in it have no size-table (RSTB) entry either; Linkle alone brings a new model file
+# (Model/SwChar_linkle.sbfres, 885 KB unpacked) and its textures, which a model needs more memory than its size for
+# (Link's own: his entry is 1.58 times his file [V: the game's table]). Since another mod in the library ships a size
+# table (the emotes' animations), Savage Wind leaves the table alone (docs/romfs-mods.md, issue #505), so nothing gives
+# her model an entry [G: the cause, from the facts above]. So the characters mod now ships its own table, the way a
+# BCML install writes one (tools/bnp.py, play-as's logs/rstb.json through modman add): the game's table with an entry
+# for every file of ours it lacks: each pack, each file inside a pack that isn't the game's own (its new animation sets,
+# lists, actor link), and Linkle's model and textures, each sized from a game file of the same kind as the emotes and
+# play-as builds do (ukmm.estimate_entry: the reference's overhead and its entry grown in proportion; a model from
+# Link's, the textures as play-as sizes Link's). modman deploy merges it with the other mods' tables (bnp.deploy_hook:
+# a table a mod ships is diffed against the game's). Not logs/rstb.json at the mod's top: modman would take a folder
+# with logs/ for a BCML package and refuse to deploy it as it is (romfs_mods, mod_inspect); the entries are also in
+# charsel.json ("sizes").
+RSTB_REL = "System/Resource/ResourceSizeTable.product.srsizetable"
+SIZE_MODEL_REF = "Model/Link.bfres"        # Linkle's costume is Link's skeleton with more parts: his model is its twin
+SIZE_TEX_REF = "Model/Link.Tex.bfres"
+
+
+def _raw(data: bytes) -> bytes:
+    return _unyaz(data) if data[:4] == b"Yaz0" else data
+
+
+def size_entries(romfs: Path, top: Path, rstb) -> tuple[dict[str, int], dict]:
+    """({canonical name: size}, info) for the files of ours under `top` (a built romfs folder) that the game's table
+    (`rstb`, bnp.Rstb) has no entry for, or one too small: Actor/Pack/<free name>.sbactorpack and the files inside,
+    Model/SwChar_*.sbfres. info: {"refs": {kind: reference}, "model_ratio": entry / size of Link's model}. Reads the
+    game's files only."""
+    import bnp
+    import ukmm
+    from mp import ghost_link_pack as glp
+    from wiiu_model.convert import RSTB_TEX_EXTRA
+    sizes: dict[str, int] = {}
+    info: dict = {"refs": {}}
+    # references: the template's own pack and the files inside it (the cutscene Sheikah man's: every kind our packs hold)
+    tpl_rel = f"Actor/Pack/{TEMPLATE}.sbactorpack"
+    tpl_data = glp.find_pack(Path(romfs), TEMPLATE)
+    tpl_data = tpl_data.read_bytes() if isinstance(tpl_data, Path) else tpl_data
+    refs: dict[str, list] = {}      # extension -> [(unpacked size, entry, name)] of the game's files of that kind
+    e = rstb.get(bnp.canon(tpl_rel, tpl_data))
+    if e:
+        refs["pack"] = [(len(_raw(tpl_data)), e, bnp.canon(tpl_rel, tpl_data))]
+    for n, d in sorted(glp.read_pack(tpl_data).items()):
+        e = rstb.get(bnp.canon(n, d))
+        if e:
+            refs.setdefault(n.rsplit(".", 1)[-1], []).append((len(_raw(d)), e, bnp.canon(n, d)))
+
+    def nearest(kind: str, raw_len: int):
+        """The game file of that kind nearest ours in size (an entry carries what the game makes from the file: a
+        one-clip set needs about what a small set of the game's needs, not what its 48 KB talk set does)."""
+        import math
+        c = refs.get(kind)
+        if not c and kind != "pack":   # (a kind its pack lacks: the nearest of its other parameter files)
+            c = [r for k, rs in refs.items() if k != "pack" for r in rs]
+        if not c:
+            return None
+        r = min(c, key=lambda x: (abs(math.log(max(x[0], 1) / max(raw_len, 1))), x[2]))
+        info["refs"].setdefault(kind, set()).add(r[2])
+        return r
+
+    def need(name: str, raw_len: int, ref, pack: bool) -> None:
+        if ref is None:
+            info.setdefault("no_reference", []).append(name)
+            return
+        want = ukmm.estimate_entry(ref[0], ref[1], raw_len, pack)
+        have = rstb.get(name)
+        if not have or have < want:
+            sizes[name] = max(want, have or 0)
+
+    packs = top / "Actor" / "Pack"
+    for f in sorted(packs.glob("*.sbactorpack")) if packs.is_dir() else ():
+        if f.stem not in FREE_SLOTS:
+            continue
+        data = f.read_bytes()
+        need(bnp.canon(f"Actor/Pack/{f.name}", data), len(_raw(data)), nearest("pack", len(_raw(data))), True)
+        for n, d in sorted(glp.read_pack(data).items()):
+            cn = bnp.canon(n, d)
+            if rstb.get(cn) and not Path(n).stem.startswith("SwChar_") and Path(n).stem != f.stem:
+                continue                     # (the game's own file, copied as it is: its entry is there)
+            need(cn, len(_raw(d)), nearest(n.rsplit(".", 1)[-1], len(_raw(d))), False)
+    models = top / "Model"
+    for f in sorted(models.glob("SwChar_*.sbfres")) if models.is_dir() else ():
+        data = f.read_bytes()
+        cn = bnp.canon(f"Model/{f.name}", data)
+        tex = f.name.endswith(".Tex.sbfres")
+        ref_name = SIZE_TEX_REF if tex else SIZE_MODEL_REF
+        ref_file = model_file(Path(romfs), ref_name[len("Model/"):-len(".bfres")])
+        e = rstb.get(ref_name)
+        ref = (len(_raw(ref_file)), e) if ref_file and e else None
+        if ref and not tex:
+            info["model_ratio"] = round(e / ref[0], 3)
+            info["refs"]["model"] = {ref_name}
+        raw_len = len(_raw(data))
+        need(cn, raw_len, ref, False)
+        if tex:   # (as play-as sizes Link's textures: the file plus the texture overhead, never less)
+            sizes[cn] = max(sizes.get(cn, 0), bnp.round32(raw_len) + RSTB_TEX_EXTRA)
+            info["refs"]["tex"] = {ref_name}
+    info["refs"] = {k: sorted(v) for k, v in info["refs"].items()}
+    return sizes, info
+
+
+def write_sizes(romfs, out, say=print) -> dict:
+    """Write the characters mod's size table (romfs/RSTB_REL: the game's own with size_entries' entries) or remove an
+    old one when there is nothing to add or the game's table isn't there. Returns {"entries": {name: size}, "table":
+    bool, "note": str}."""
+    import bnp
+    out = Path(out)
+    target = out / "romfs" / Path(RSTB_REL)
+    rstb = bnp.load_game_rstb(str(Path(romfs).parent))
+    if rstb is None:
+        if target.is_file():
+            target.unlink()
+        return {"entries": {}, "table": False,
+                "note": "The game's size table isn't in your extracted romfs: the characters have no size entries "
+                        "(Linkle's model may not load)."}
+    sizes, info = size_entries(Path(romfs), out / "romfs", rstb)
+    if not sizes:
+        if target.is_file():
+            target.unlink()
+        return {"entries": {}, "table": False, "note": "", **info}
+    rstb.apply(sizes)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        target.unlink()       # (a new file, never written through a hard link the library may share)
+    target.write_bytes(rstb.to_bytes())
+    say(f"  size table: {len(sizes)} entries for the characters' files")
+    return {"entries": dict(sorted(sizes.items())), "table": True, "note": "", **info}
+
+
+def check_sizes(out=DEFAULT_OUT) -> list[str]:
+    """The shipped size table read back (no game): it reads, and has the catalog's entries at their sizes or more."""
+    import bnp
+    out = Path(out)
+    cat = load_catalog(out)
+    want = ((cat.get("sizes") or {}).get("entries") or {}) if cat else {}
+    target = out / "romfs" / Path(RSTB_REL)
+    if not want:
+        return [] if not target.is_file() else [f"{RSTB_REL} is there but the catalog lists no entries"]
+    if not target.is_file():
+        return [f"{RSTB_REL} is missing ({len(want)} entries listed)"]
+    try:
+        t = bnp.Rstb(target.read_bytes())
+    except bnp.BnpError as e:
+        return [f"{RSTB_REL} doesn't read: {e}"]
+    return [f"{n}: {t.get(n)} in the table, {v} listed" for n, v in want.items() if (t.get(n) or 0) < v]
 
 
 def check(out=DEFAULT_OUT) -> dict:
@@ -1857,6 +2046,9 @@ def check(out=DEFAULT_OUT) -> dict:
             if rb["users"]["ModelUser"] != ours(cid) and RECIPES[cid].kind == "pack":
                 bad.append(f"model list {rb['users']['ModelUser']}")
         res[cid] = bad
+    sizes = check_sizes(out)            # (0.9.5: the size table, when the catalog lists entries)
+    if sizes:
+        res["sizes"] = sizes
     return res
 
 

@@ -1335,6 +1335,13 @@ static int pp_busy(uint64_t pi, uint64_t player, double t) {  // (0.9.2: "not fr
 }
 static int pp_paused(void) { return g_pp_paused; }
 static int pp_in_world(void) { return 1; }
+static float g_pp_stam = -1.0f;            // 0.9.5: Link's stamina (-1: unreadable); falls each frame while g_pp_drain
+static int g_pp_drain;
+static float pp_stamina(void) {
+    if (g_pp_drain && g_pp_stam < 0) g_pp_stam = 3000.0f;
+    if (g_pp_drain) g_pp_stam -= 5.0f;
+    return g_pp_stam;
+}
 static const char *const PACK33[] = {"Wait", "Walk", "Run", "RunGear2", "CutS1", "CutS2", "CutS3", "CutSF", "CutDash",
                                      "CutJumpSt", "CutCharge", "CutS1_Lsword", "CutSF_Lsword", "CutS1_Spear",
                                      "CutS2_Spear", "CutSF_Spear", "BowCharge", "BowShoot", "GuardJust", "Jump", "Fall",
@@ -1430,6 +1437,42 @@ static void pup_want(const char *word) {
 }
 static float pp_x(void) { return ((const float *)(uintptr_t)(g_pp_proc + ACTOR_MTX))[3]; }
 
+// 0.9.5 pure rows (the round-4 game check): the back place's tweak and the arm flag per body, a whole arm for the
+// overlay, an attack's set at once, the arrow's name.
+static void check_puppet_095(void) {
+    PupGrip g = *pup_grip("link");
+    const char *bone = NULL;
+    float G0[12], G1[12];
+    pup_grip_place(&g, pup_body("link"), 0, 1, &bone, G0);
+    g.back[0] = 0.02f, g.back[1] = -0.03f, g.back[2] = 0.05f;
+    pup_grip_place(&g, pup_body("link"), 0, 1, &bone, G1);
+    int moved = !strcmp(bone, "Spine_2") && __builtin_fabsf(G1[3] - G0[3] - 0.02f) < 1e-6f &&
+                __builtin_fabsf(G1[7] - G0[7] + 0.03f) < 1e-6f && __builtin_fabsf(G1[11] - G0[11] - 0.05f) < 1e-6f &&
+                G1[0] == 1 && G1[5] == 1 && G1[10] == 1 && G1[1] == 0 && G1[2] == 0;  // (not turned: Link's Pod_A rests
+                                                                                   // as his Spine_2, as every body's)
+    float back_dx = G1[3] - G0[3], back_dy = G1[7] - G0[7], back_dz = G1[11] - G0[11];
+    pup_grip_place(&g, pup_body("link"), 0, 0, &bone, G1);
+    int hand_same = !strcmp(bone, "Weapon_R") && G1[3] == 0 && G1[7] == 0 && G1[11] == 0;
+    int arms = pup_grip("sheikah")->arm && pup_grip("gerudo")->arm && !pup_grip("zelda")->arm && !pup_grip("goron")->arm &&
+               !pup_grip("bokoblin")->arm;
+    check("puppet", "back_tweak", moved && hand_same && arms, "moved %d (%.3f %.3f %.3f) hand %d arms %d", moved,
+          back_dx, back_dy, back_dz, hand_same, arms);
+    static const char nm[9][32] = {"Spine_2", "Clavicle_L", "Arm_1_L", "Wrist_L", "Clavicle_R", "Arm_1_R", "Wrist_R",
+                                   "Finger_A_1_R", "Head"};
+    static const int16_t par[9] = {-1, 0, 1, 2, 0, 4, 5, 6, 0};
+    uint8_t sel[9];
+    int nr = pup_ovl_pick(nm, par, 9, OVL_ARM_R, sel), r_ok = nr == 4 && sel[4] && sel[5] && sel[6] && sel[7] &&
+                                                             !sel[0] && !sel[1] && !sel[8];
+    int nl = pup_ovl_pick(nm, par, 9, OVL_ARM_L, sel), l_ok = nl == 3 && sel[1] && sel[2] && sel[3] && !sel[4];
+    int nb = pup_ovl_pick(nm, par, 9, OVL_ARM_R | OVL_GUARD, sel);
+    check("puppet", "arm_overlay", r_ok && l_ok && nb == 7, "right %d (%d) left %d (%d) both %d", r_ok, nr, l_ok, nl, nb);
+    check("puppet", "attack_morph", pup_as_morph("CutS1") == 0.0f && pup_as_morph("CutDash_Spear") == 0.0f &&
+          pup_as_morph("Walk") == -1.0f && pup_as_morph("BowCharge") == -1.0f && pup_as_morph(NULL) == -1.0f, "CutS1 %.0f",
+          pup_as_morph("CutS1"));
+    check("puppet", "arrow_name", pup_is_arrow("NormalArrow") && pup_is_arrow("BombArrow_A") &&
+          pup_is_arrow("AncientArrow") && !pup_is_arrow("Weapon_Bow_001") && !pup_is_arrow(NULL), "names");
+}
+
 // 0.9.3 pure rows: the held copies' place per body, the kept names, the guard, the hands' turns, death keeps the
 // costume, the ground clamp's easing, Daruk's ball through a sprint dip.
 static float t93_rot_err(const float a[9], const float b[9]) {
@@ -1513,13 +1556,53 @@ static void check_puppet_093(void) {
     float one = pup_clamp_step(0.0f, 0.3f, 1.0f / 30.0f), cap = pup_clamp_step(0.0f, 5.0f, 0.0f);
     check("puppet", "clamp_step", a == 0.3f && b > 0.29f && b <= 0.3f && one > 0.0f && one <= PUP_CLAMP_MPS / 30.0f + 1e-6f &&
           cap == PUP_CLAMP_MAX, "at once %.2f, 6 frames %.3f, one %.3f, cap %.2f", a, b, one, cap);
-    // Daruk's ball through a sprint dip: kept while it rolls, he still Moves, and the sprint was just now
-    int hold = pup_sprint_hold(1, "Move", 0.1) && !pup_sprint_hold(1, "Move", PUP_BALL_HOLD_S + 0.05) &&
-               !pup_sprint_hold(0, "Move", 0.1) && !pup_sprint_hold(2, "Move", 0.1) && !pup_sprint_hold(1, "Jump", 0.1);
-    check("puppet", "ball_dip_hold", hold, "hold %d", hold);
+    // Daruk's ball through a sprint dip (0.9.5: over a drop): kept while it rolls and Link was in his sprint less than
+    // PUP_SPRINT_LEAVE_S ago; he is in it while it is picked by his speed, or while he Moves and his stamina fell lately,
+    // whatever his speed (never a swim)
+    int hold = pup_sprint_hold(1, 0.1) && pup_sprint_hold(1, PUP_SPRINT_LEAVE_S - 0.01) &&
+               !pup_sprint_hold(1, PUP_SPRINT_LEAVE_S + 0.05) && !pup_sprint_hold(0, 0.1) && !pup_sprint_hold(2, 0.1) &&
+               !pup_sprint_hold(1, -1.0);
+    int in = pup_in_sprint(1, "Jump", -1.0) && pup_in_sprint(0, "Move", 0.1) && !pup_in_sprint(0, "Move", PUP_DRAIN_S + 0.1) &&
+             !pup_in_sprint(0, "Move", -1.0) && !pup_in_sprint(0, "Jump", 0.1) && !pup_in_sprint(0, "SwimDash", 0.1);
+    check("puppet", "ball_dip_hold", hold && in, "hold %d in sprint %d", hold, in);
+    check_puppet_095();
 }
 
 static void check_puppet_items_grip(void);
+
+// 0.9.5 in the made-up world: Link's nocked arrow (an actor named ...Arrow in his equipment slot 3) is hidden while the
+// costume shows, drawn again once it leaves the slot (shot) and when Link shows (a horse).
+static struct {
+    _Alignas(16) uint8_t mem[0x600];
+    FakeModel fm;
+    FakeLinkData ld;
+    char name[16];
+} g_arrow;
+static void check_puppet_arrow(void) {
+    memset(&g_arrow, 0, sizeof g_arrow);
+    snprintf(g_arrow.name, sizeof g_arrow.name, "NormalArrow");
+    W64(g_arrow.mem, PROC_NAME, g_arrow.name);
+    fake_model(g_arrow.mem, &g_arrow.fm, 1);
+    ld_new(&g_arrow.ld, P(g_arrow.mem));
+    uint64_t slot3 = ACTOR_EQUIP + EQUIP_LINKS + 3 * EQUIP_LINK_SIZE;
+    W64(g_pl.mem, ACTOR_EQUIP, EQUIP_VPTR), W64(g_pl.mem, ACTOR_EQUIP + EQUIP_OWNER, g_pl.mem);
+    W64(g_pl.mem, slot3, &g_arrow.ld), W32(g_pl.mem, slot3 + 8, g_arrow.ld.id);
+    pup_run("BowCharge", 0, 0.3);
+    int hidden = t_pup.shown && !fm_drawn(&g_arrow.fm) && t_pup.arrow_hidden && !strcmp(t_pup.arrow, "NormalArrow");
+    W64(g_pl.mem, slot3, 0);  // (shot: it leaves the slot)
+    pup_run("BowShoot", 0, 0.1);
+    int shot = fm_drawn(&g_arrow.fm) && !t_pup.arrow_hidden;
+    W64(g_pl.mem, slot3, &g_arrow.ld);  // (the next one nocked) ... then a horse: Link shows, and the arrow with him
+    pup_run("BowCharge", 0, 0.2);
+    int again = !fm_drawn(&g_arrow.fm);
+    pup_run("HorseRide", 5.0f, 0.5);
+    int link_shows = fm_drawn(&g_arrow.fm) && !t_pup.shown;
+    check("puppet", "arrow_hidden", hidden && shot && again && link_shows, "hidden %d shot %d again %d link shows %d",
+          hidden, shot, again, link_shows);
+    memset(g_pl.mem + ACTOR_EQUIP, 0, 0xa0);
+    pup_run("Wait", 0, 0.5);
+}
+
 static void check_puppet(void) {
     // the pure parts: picks, ids, sentences
     Missing *m = calloc(1, sizeof *m);
@@ -1605,7 +1688,7 @@ static void check_puppet(void) {
     float pp[3] = {100, 5, 200};
     memcpy(g_pl.pi + PI_POS, pp, sizeof pp);
     g_fake_vtable[2] = FAKE_ISA;
-    g_pup_busy = pp_busy, g_pup_paused = pp_paused, g_pup_check_files = 0;
+    g_pup_busy = pp_busy, g_pup_paused = pp_paused, g_pup_check_files = 0, g_pup_stamina = pp_stamina;
     g_pp_free = 1, g_pp_paused = 0, g_px = 100.0f;
     memset(&t_status.self, 0, sizeof t_status.self);
     t_status.wanted = 0, t_status.state = ST_IDLE;
@@ -1692,6 +1775,7 @@ static void check_puppet(void) {
           "holder %d, shield on its back %d, sheathed %d, with a friend's ghost %d", holder == g_pp_proc, on_back,
           sheathed, holder2 == g_pp_proc);
     check_puppet_items_grip();
+    check_puppet_arrow();
     // a stage change (a new spawn heap): forgotten without a call, spawned again
     static _Alignas(16) uint8_t heap2[0x40];
     uint64_t holder_obj = rd64(HEAP_HOLDER_PTR), heap1 = rd64(holder_obj + HEAP_OFF);
@@ -1719,6 +1803,42 @@ static void check_puppet(void) {
     pup_want("link");
     pup_run("Wait", 0, 0.1);
     check("puppet", "self_off", off_ok, "state %s", PS_NAMES[t_pup.state]);
+    // 0.9.5: Game Over (an event) for a minute: the costume the game removed then is asked for only once the game is
+    // free again; no try is spent meanwhile, and it comes back by itself
+    pup_want("daruk");
+    pup_run("Wait", 0, 1.0);
+    int was_live = t_pup.state == PS_LIVE;
+    int64_t waits0 = t_pup.busy_waits;
+    int reqs_go = g_requests;
+    g_pp_free = 0;
+    FakeLinkData *pld = ld_of(g_pp_proc);
+    if (pld) ld_kill(pld);  // (the game removes it during Game Over)
+    pup_run("Dead", 0, 60.0);
+    int waited = t_pup.state == PS_WAIT && t_pup.tries == 0 && t_pup.busy_waits == waits0 + 1 && g_requests == reqs_go &&
+                 strstr(t_pup.why, "waiting");
+    g_pp_free = 1;
+    pup_run("Wait", 0, PUP_RETRY_S + 1.0);
+    check("puppet", "busy_no_tries", was_live && pld && waited && t_pup.state == PS_LIVE && g_requests == reqs_go + 1 &&
+          t_pup.shown, "live %d, waited %d (tries %d waits +%lld requests +%d why %s), then %s", was_live, waited,
+          t_pup.tries, (long long)(t_pup.busy_waits - waits0), g_requests - reqs_go, t_pup.why, PS_NAMES[t_pup.state]);
+    // ... and one given up by the game's doing after it spawned comes back on a new stage (a Continue), fresh tries
+    static _Alignas(16) uint8_t heap3[0x40];
+    uint64_t hobj = rd64(HEAP_HOLDER_PTR), heap_was = rd64(hobj + HEAP_OFF);
+    pup_remove((struct Cpu *)(void *)g_cpu, P(g_pl.mem), g_pt);  // (as five removals in a row while free would end)
+    t_pup.state = PS_FAILED, t_pup.tries = PUP_TRIES, t_pup_soft_fail = 1;
+    t_pup_fail_heap = heap_was, t_pup_fail_player = P(g_pl.mem);
+    pup_run("Wait", 0, 0.2);
+    int stays = t_pup.state == PS_FAILED;
+    int64_t back0 = t_pup.comebacks;
+    W64((void *)(uintptr_t)hobj, HEAP_OFF, heap3);
+    pup_run("Wait", 0, PUP_RETRY_S + 1.0);
+    int came = t_pup.state == PS_LIVE && t_pup.comebacks == back0 + 1 && t_pup.tries == 0;
+    W64((void *)(uintptr_t)hobj, HEAP_OFF, heap_was);
+    pup_run("Wait", 0, PUP_RETRY_S + 1.0);
+    check("puppet", "gameover_comeback", stays && came && t_pup.state == PS_LIVE, "stays %d came back %d (%s)", stays,
+          came, PS_NAMES[t_pup.state]);
+    pup_want("link");
+    pup_run("Wait", 0, 0.2);
     // a pack the game refuses: given up after PUP_TRIES, Link stays, `iam` says to restart as Daruk
     const char *was = g_refuse_name;
     g_refuse_name = "Dm663_Npc_Assasin_A";
@@ -1732,6 +1852,14 @@ static void check_puppet(void) {
     check("puppet", "refused_gives_up", fin.state == PS_FAILED && g_requests - req == PUP_TRIES && fm_drawn(&g_pl.fm) &&
           strstr(line, "Restart the game to play as Daruk"), "state %s requests %d line %s", PS_NAMES[fin.state],
           g_requests - req, line);
+    // (never spawned: no coming back by itself on a new stage, as Linkle with no size entries)
+    static _Alignas(16) uint8_t heap4[0x40];
+    uint64_t hobj4 = rd64(HEAP_HOLDER_PTR), heap_was4 = rd64(hobj4 + HEAP_OFF);
+    W64((void *)(uintptr_t)hobj4, HEAP_OFF, heap4);
+    pup_run("Wait", 0, PUP_RETRY_S + 1.0);
+    int never = t_pup.state == PS_FAILED && g_requests - req == PUP_TRIES;
+    W64((void *)(uintptr_t)hobj4, HEAP_OFF, heap_was4);
+    check("puppet", "refused_stays_failed", never, "state %s requests %d", PS_NAMES[t_pup.state], g_requests - req);
     g_refuse_name = was;
     pup_want("link");
     pup_run("Wait", 0, 0.1);
@@ -1753,7 +1881,7 @@ static void check_puppet(void) {
     g_pup_in_world = pup_in_world_real;
     check("puppet", "no_tick_says_why", strstr(no_tick, "isn't running") && strstr(no_tick, "Infinite Stamina") &&
           !strstr(ticking, "isn't running"), "no tick: %s | ticking: %s", no_tick, ticking);
-    g_pup_busy = pup_busy_real, g_pup_paused = pup_paused_real, g_pup_check_files = 1;
+    g_pup_busy = pup_busy_real, g_pup_paused = pup_paused_real, g_pup_check_files = 1, g_pup_stamina = pup_stamina_real;
     lock();
     memset(&g_iam, 0, sizeof g_iam);
     unlock();
@@ -2058,10 +2186,21 @@ static void check_puppet_items_grip(void) {
         fake_skel(&g_pp_fm, &g_rd_pfs, 3, PPH, PPH_PAR, 0.1f);
         W64(g_pp_fm.unit, UNIT_ANIM, 0);
         t_items_ghost = 0;  // (its bones looked up again: it has hands now)
+        // 0.9.5: an NPC's own equipment holder in it, every slot "on the back" (as the NPC's set-up writes it)
+        uint8_t *hold = (uint8_t *)(uintptr_t)(g_pp_proc + PUP_NPC_HOLDER);
+        W64(hold, 0, EQUIP_VPTR), W64(hold, EQUIP_OWNER, g_pp_proc);
+        for (int k = 0; k < 3; k++) hold[EQUIP_LINKS + k * EQUIP_LINK_SIZE + EQUIP_BACK] = 1;
+        int64_t hw0 = t_pup.holder_writes;
         t_status.self.equip_ok = 1;
         snprintf(t_status.self.weapon, 64, "Weapon_Sword_001"), snprintf(t_status.self.shield, 64, "Weapon_Shield_001");
         t_status.self.back[0] = 0, t_status.self.back[1] = 1;
         pup_run("Wait", 0, 2.0);
+        uint8_t *hb = hold + EQUIP_LINKS + EQUIP_BACK;
+        int in_hand = t_pup.holder == 1 && hb[0] == 0 && hb[EQUIP_LINK_SIZE] == 0 && hb[2 * EQUIP_LINK_SIZE] == 1 &&
+                      t_pup.holder_writes == hw0 + 2;
+        hb[0] = 1;  // (the game's NPC code says "on the back" again: in hand again next frame)
+        pup_run("Wait", 0, 0.1);
+        in_hand = in_hand && hb[0] == 0 && t_pup.holder_writes == hw0 + 3;
         const ItemStatus *o0 = &t_status.items.slot[0], *o1 = &t_status.items.slot[1];
         uint64_t sw = o0->actor, sh = o1->actor;
         uint64_t f0 = sw ? R64((void *)(uintptr_t)sw, ACTOR_FOLLOW) : 0, f1 = sh ? R64((void *)(uintptr_t)sh, ACTOR_FOLLOW) : 0;
@@ -2085,6 +2224,14 @@ static void check_puppet_items_grip(void) {
         check("puppet", "items_grip", placed && kept && again && sheathed_back,
               "placed %d (%s/%s, ours %d %d), kept %d, ours again %d, sheathed on its back %d (%s)", placed, o0->place,
               o1->place, ours0, ours1, kept, again, sheathed_back, o0->place);
+        // 0.9.5: the slots holding our copies kept "in hand" (the item's AI never sheathes them over our follows: the
+        // game's NPC sheath place showed in the round-4 check), the empty one left alone; a body with no such holder: 0
+        int still_hand = hb[0] == 0;
+        memset(hold, 0, 0xa0);
+        pup_run("Wait", 0, 0.1);
+        check("puppet", "holder_in_hand", in_hand && still_hand && t_pup.holder == 0,
+              "in hand %d (bytes %d %d %d, writes +%lld), sheathed %d, no holder %d", in_hand, hb[0], hb[EQUIP_LINK_SIZE],
+              hb[2 * EQUIP_LINK_SIZE], (long long)(t_pup.holder_writes - hw0), still_hand, t_pup.holder);
         t_status.self.equip_ok = 0, t_status.self.weapon[0] = t_status.self.shield[0] = 0;
         t_status.self.back[0] = t_status.self.back[1] = 0;
         pup_run("Wait", 0, 1.0);  // (gone after the keep time: deleted)
@@ -2187,6 +2334,21 @@ static void rdt_world_092(float (*wl)[12], float (*wu)[12], const float hip_up[3
     pup_run("Wait", 0, 0.3);
     check("puppet", "ball_rolls", rolling && upright && off, "rolling %d (spin %.2f want %.2f, radius %.2f, low %.4f) "
           "upright %d (%s) off %d", rolling, spin, spin_want, r_, y_, upright, g_pp_current, off);
+    // 0.9.5: over a drop his speed falls to 2 m/s for 0.5 s while he still sprints (his stamina falls): the ball stays;
+    // out of his sprint (no more drain) it comes back upright once he has been out of it PUP_SPRINT_LEAVE_S
+    pup_run("Move", 8.0f, 1.0);
+    int rolled = t_pup.ball == 1;
+    g_pp_drain = 1;
+    pup_run("Move", 8.0f, 0.2);
+    pup_run("Move", 2.0f, 0.5);
+    int kept_drop = t_pup.ball == 1 && !strcmp(g_pp_current, "RunGear2");
+    g_pp_drain = 0;
+    pup_run("Move", 2.0f, PUP_DRAIN_S + PUP_SPRINT_LEAVE_S + PUP_BALL_END_MAX + 0.2);
+    int ended = t_pup.ball == 0 && strcmp(g_pp_current, "RunGear2");
+    g_pp_stam = -1.0f;
+    pup_run("Wait", 0, 0.3);
+    check("puppet", "ball_drop_hold", rolled && kept_drop && ended, "rolled %d kept through the drop %d (%s) ended %d (%s)",
+          rolled, kept_drop, g_pp_current, ended, g_pp_current);
 
     // 0.9.3: the ground clamp: standing, the costume's lowest foot (its pose in its own frame) at Link's lowest foot;
     // swimming, its head at his head's height; the lift applied to where it is put
@@ -2378,7 +2540,7 @@ static void check_puppet_ragdoll(void) {
     float pp[3] = {100, 5, 200};
     memcpy(g_pl.pi + PI_POS, pp, sizeof pp);
     g_fake_vtable[2] = FAKE_ISA;
-    g_pup_busy = pp_busy, g_pup_paused = pp_paused, g_pup_check_files = 0;
+    g_pup_busy = pp_busy, g_pup_paused = pp_paused, g_pup_check_files = 0, g_pup_stamina = pp_stamina;
     g_pp_free = 1, g_pp_paused = 0, g_px = 100.0f;
     memset(&t_status.self, 0, sizeof t_status.self);
     t_status.wanted = 0, t_status.state = ST_IDLE;
@@ -2466,7 +2628,7 @@ static void check_puppet_ragdoll(void) {
     unlock();
     W32(g_rd_mgr, RD_FLAGS, 0);
     W64(g_pl.mem, LINK_RAGDOLL, 0);
-    g_pup_busy = pup_busy_real, g_pup_paused = pup_paused_real, g_pup_check_files = 1;
+    g_pup_busy = pup_busy_real, g_pup_paused = pup_paused_real, g_pup_check_files = 1, g_pup_stamina = pup_stamina_real;
     lock();
     memset(&g_iam, 0, sizeof g_iam);
     unlock();

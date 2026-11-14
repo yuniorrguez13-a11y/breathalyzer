@@ -82,6 +82,13 @@
 // retarget (Mipha 0.24 m up, Urbosa 0.35 m down) are not lifted by a fixed amount here: the ground clamp
 // (pup_clamp_tick) already puts its posed feet at Link's each frame, and a fixed lift on top would count it twice.
 
+// 0.9.5 (the round-4 game check, 2026-11-14; docs/charsel.md "Round 5"): the copies on the back never sheathed by the
+// game (pup_holder_in_hand: what showed was the NPC's own sheath place, sideways at its Pod_A); Link's nocked arrow
+// hidden with him (pup_arrow_tick); Paya's and Urbosa's arm is Link's while that hand holds a drawn copy
+// (PupGrip.arm); Daruk's ball held while Link is in his sprint whatever his speed (his stamina falls: pup_in_sprint);
+// no tries spent while the game is busy (Game Over), and a pack given up then comes back after a Continue; an attack
+// starts at once, as Link's own (pup_as_morph: the Bokoblin's swing came 0.16 s late).
+
 #include "pup_bodies.h"
 
 #define LINK_RAGDOLL 0x1870            // 0.9.1: Link: his ragdoll manager (his vf 0x840 returns it; his actions reach it)
@@ -218,6 +225,8 @@ typedef struct {
     int hands_off;                 // 0.9.3 `ghost puppet hands off|on`: fists and the guard arm (on by default)
     int grip_set;                  // 0.9.3 `ghost puppet grip s [x y z]`: the held copies' size and grip (m) instead of
     float grip_scale, grip_hand[3];// the body's (PUP_GRIPS)
+    int back_set;                  // 0.9.5 `ghost puppet back x y z`: the back place's tweak (m) instead of the body's
+    float back[3];
 } PupReq;
 
 enum { RDM_POSE, RDM_CLIP, RDM_OFF };
@@ -277,6 +286,17 @@ typedef struct {
     int hand_bones;                // ... bones it poses
     int64_t hand_frames;
     float grip_scale, grip_hand[3];// ... the held copies' grip in use
+    // 0.9.5 (the round-4 game check)
+    float back[3];                 // the back place's tweak in use (m)
+    int holder;                    // the costume's own equipment holder (an NPC's): 1 found (its slots kept "in hand")
+    int64_t holder_writes;         // ... "on the back" bytes put back to 0 (the item's AI then never sheathes it)
+    char arrow[48];                // Link's nocked arrow ("" none seen)
+    int arrow_hidden;
+    int64_t arrow_hides;
+    float sprint_since;            // s since Link was last in his sprint (-1: not yet)
+    float stamina;                 // his stamina (-1: unreadable)
+    int64_t busy_waits;            // tries not spent because the game was busy (an event, Game Over, a load, no body)
+    int64_t comebacks;             // a pack given up after a busy time spawned again by itself (a Continue)
 } PupStatus;
 
 static PupReq g_pup_req;           // under lock()
@@ -303,6 +323,17 @@ static int (*g_pup_paused)(void) = pup_paused_real;
 static double t_pup_busy_since;                     // 0.9.2: a state that shows Link has lasted since then (0: none)
 static int t_pup_ev_zero;                           // ... the event manager's field was seen 0 (else it isn't trusted)
 static int g_pup_check_files = 1;                   // (the selftest has no overlay)
+// 0.9.5 (the round-4 game check: Game Over up for about a minute spent all 5 tries, "Mipha did not load ...: you stay
+// Link", and after Continue Link stayed): no request while the game is busy (an event such as Game Over, a load, Link
+// with no body), a try that fails while it is busy isn't counted, and a pack that spawned before and was given up
+// comes back by itself on a new stage or a new Link (a Continue)
+static float pup_stamina_real(void) { return botw_stamina_get(api); }
+static float (*g_pup_stamina)(void) = pup_stamina_real;  // (the selftest fakes it)
+static int t_pup_busy_now;                          // the game's own state this tick (PB_*, before pup_busy_keep)
+static int t_pup_try_busy;                          // ... busy since the last request: a failed try isn't counted
+static int t_pup_pick_spawned;                      // this pick spawned once (a soft give-up may come back)
+static int t_pup_soft_fail;                         // the give-up was the game's (refused, removed, couldn't create)
+static uint64_t t_pup_tick_player, t_pup_fail_heap, t_pup_fail_player;  // Link this tick; the stage and Link then
 
 // ---- pure parts (the selftest checks them)
 
@@ -982,19 +1013,33 @@ static int pup_ball_id(const char *id) { return !strcmp(id, "goron"); }
 // the middle of a 1.1 m palm ("clipped at his wrist", 2026-11-13). Spine_2 rests as Link's in every body (the
 // Bokoblin's and Moblin's 12-20 degrees forward). The sizes are a choice for big hands [G: to be looked at in the game;
 // `ghost puppet grip` changes them live].
+// 0.9.5 (the round-4 game check, 2026-11-14): `back` moves the back place per body (Spine_2's frame: x up its spine, y
+// forward, z its left; 0: Link's Pod_A place, as measured) [G: no body needed one yet, `ghost puppet back` tries one];
+// `arm`: while a hand holds a drawn copy, that whole arm takes Link's turns (the hand overlay), so the copy points
+// where his does. Paya's own stand holds her hands clasped at her chest: her sword pointed straight up in front of it
+// while walking [V: the game check]; Urbosa's own stand (v5: the game's hip-shot Positive_Wait) has a hand on her hip.
 typedef struct {
     const char *id;
     float scale;    // the held copy's size (1: as in Link's hand)
     float hand[3];  // m: the grip moved from the body's Weapon_R in its own frame (Weapon_L: y mirrored)
+    float back[3];  // 0.9.5: m: the back place moved in Spine_2's frame
+    int arm;        // 0.9.5: the arm of a hand holding a drawn copy is Link's
 } PupGrip;
 static const PupGrip PUP_GRIPS[] = {
-    {"link", 1.0f, {0.0f, 0.0f, 0.0f}},          // (and every body not listed: their own hand bone as it is)
-    {"goron", 1.8f, {-0.24f, 0.025f, 0.02f}},     // Daruk: 1.8 times, at his finger roots
-    {"moblin", 2.0f, {0.0f, 0.0f, 0.0f}},
-    {"bokoblin", 1.3f, {0.0f, 0.0f, 0.0f}},
+    {"link", 1.0f, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, 0},       // (and every body not listed: as it is)
+    {"goron", 1.8f, {-0.24f, 0.025f, 0.02f}, {0.0f, 0.0f, 0.0f}, 0},  // Daruk: 1.8 times, at his finger roots
+    {"moblin", 2.0f, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, 0},
+    {"bokoblin", 1.3f, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, 0},
+    {"sheikah", 1.0f, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, 1},     // Paya: her shy stand's hands (above)
+    {"gerudo", 1.0f, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, 1},      // Urbosa: a hand on her hip when she stands
 };
 #define PUP_ITEM_KEEP_S 0.4   // a held item Link's equipment read loses for less than this stays (no respawn: no flicker)
-#define PUP_BALL_HOLD_S 0.35  // Daruk's ball keeps rolling through a sprint dip this short (a frame hitch)
+// 0.9.5: the ball through a drop (the game check: his speed fell to 2 m/s for 0.5 s while he still sprinted): Link is
+// "in his sprint" while the costume's sprint is picked by his speed, or while he Moves and his stamina falls (only a
+// sprint drains it on foot); the ball ends only once he has been out of it this long
+#define PUP_SPRINT_LEAVE_S 0.3
+#define PUP_DRAIN_S 0.3       // his stamina fell this recently: he still sprints
+#define PUP_DRAIN_MIN 0.01f   // ... by more than this (stamina units: 1000 a wheel)
 #define PUP_CLAMP_MAX 1.2f    // m: the ground clamp's range either way
 #define PUP_CLAMP_UP_S 0.05   // ... up fast, down a little slower, at most so many m/s
 #define PUP_CLAMP_DOWN_S 0.12
@@ -1019,6 +1064,7 @@ static void pup_grip_place(const PupGrip *g, const PupBody *b, int slot, int bac
         const short *box = b->has[2] ? b->box[2] : PUP_BODIES[0].box[2];  // (Spine_2's: x up, y forward, z its left)
         *bone = PUP_BONE_BACK;
         G[3] = (float)box[1] * 0.00525f, G[7] = (float)box[2] * 0.01f - 0.032f, G[11] = -PUP_BACK_SIDE * g->scale;
+        G[3] += g->back[0], G[7] += g->back[1], G[11] += g->back[2];  // (0.9.5: the body's tweak)
         return;
     }
     *bone = slot ? PUP_BONE_L : PUP_BONE_R;
@@ -1066,17 +1112,19 @@ static void pup_ovl_local(const float L[9], const float Rl_prest[9], const float
 }
 
 // The hand overlay's bones (a mask per kind): the fingers of a hand that holds a copy (a closed fist, as Link's), and
-// Link's whole left arm while he guards (his shield up). out: bone b selected; returns how many.
-enum { OVL_FIST_R = 1, OVL_FIST_L = 2, OVL_GUARD = 4 };
+// Link's whole left arm while he guards (his shield up). 0.9.5: a whole arm (from its clavicle down) for a body whose
+// own stand holds its hands elsewhere (PupGrip.arm) while that hand holds a drawn copy. out: bone b selected; returns
+// how many.
+enum { OVL_FIST_R = 1, OVL_FIST_L = 2, OVL_GUARD = 4, OVL_ARM_R = 8, OVL_ARM_L = 16 };
 static int pup_ovl_pick(const char (*names)[32], const int16_t *parent, int n, int kinds, uint8_t *out) {
-    int cnt = 0;
+    int cnt = 0, left = kinds & (OVL_GUARD | OVL_ARM_L), right = kinds & OVL_ARM_R;
     for (int b = 0; b < n; b++) {
         const char *s = names[b];
         size_t l = strlen(s);
         int fin = pup_prefix(s, "Finger_") && l > 2 && s[l - 2] == '_';
         int sel = fin && (((kinds & OVL_FIST_R) && s[l - 1] == 'R') || ((kinds & OVL_FIST_L) && s[l - 1] == 'L'));
-        for (int p = b, hops = 0; !sel && (kinds & OVL_GUARD) && p >= 0 && hops < PUP_MAXB; p = parent[p], hops++)
-            if (!strcmp(names[p], "Clavicle_L")) sel = 1;
+        for (int p = b, hops = 0; !sel && (left || right) && p >= 0 && hops < PUP_MAXB; p = parent[p], hops++)
+            if ((left && !strcmp(names[p], "Clavicle_L")) || (right && !strcmp(names[p], "Clavicle_R"))) sel = 1;
         out[b] = (uint8_t)sel;
         cnt += sel;
     }
@@ -1104,11 +1152,31 @@ static float pup_clamp_step(float shown, float want, float dt) {
 }
 
 // 0.9.3: Daruk's ball keeps rolling through a short dip of the sprint (a frame hitch: the speed from his place dips
-// under PUP_SPRINT_BELOW for a frame or two and the ball popped upright): while it rolls, Link still Moves and the sprint
-// was picked less than PUP_BALL_HOLD_S ago.
-static int pup_sprint_hold(int rolling, const char *link_anim, double since_sprint) {
-    return rolling == 1 && link_anim && !strcmp(link_anim, "Move") && since_sprint >= 0 && since_sprint < PUP_BALL_HOLD_S;
+// under PUP_SPRINT_BELOW for a frame or two and the ball popped upright). 0.9.5 (over a drop his speed fell to 2 m/s for
+// 0.5 s while he still sprinted, and the ball was out): Link is in his sprint while it is picked by his speed
+// (picked), or while he still Moves (his walk/run/sprint name; or a sprint name, should his file have one) and his
+// stamina fell less than PUP_DRAIN_S ago (since_drain; negative: never), whatever his speed.
+static int pup_in_sprint(int picked, const char *link_anim, double since_drain) {
+    if (picked) return 1;
+    int moves = link_anim && (!strcmp(link_anim, "Move") || !strcmp(link_anim, "RunGear2") || strstr(link_anim, "Dash"));
+    return moves && strncmp(link_anim, "Swim", 4) && since_drain >= 0 && since_drain < PUP_DRAIN_S;
 }
+// ... and the ball keeps rolling until he has been out of his sprint PUP_SPRINT_LEAVE_S (since: since he was last in it).
+static int pup_sprint_hold(int rolling, double since) {
+    return rolling == 1 && since >= 0 && since < PUP_SPRINT_LEAVE_S;
+}
+
+// 0.9.5: an attack's set starts at once, as Link's own attack sets do (their clip nodes have Morph 0 [V: Player_CutS1]):
+// the costume's sets blended into a swing over the animation list's 6 frames, which read as a wind-up and put the
+// Bokoblin's hit about 0.16 s after Link's (the game check, 2026-11-14). Morph frames for AS_PLAY: 0 for an attack,
+// -1 (the set's own) for the rest.
+static float pup_as_morph(const char *name) { return name && pup_prefix(name, "Cut") ? 0.0f : -1.0f; }
+
+// 0.9.5: the nocked arrow. With the bow drawn, Link's arrow stayed where his hidden hand is (it doesn't copy his model's
+// hide as his items do) and floated next to the costume's head [V: the game check]. An equipment slot from 3 up whose
+// actor is an arrow (NormalArrow, FireArrow, ... [G: which slot holds it]) is hidden with Link and shown again once it
+// leaves the slot (shot) or Link shows.
+static int pup_is_arrow(const char *name) { return name && strstr(name, "Arrow") != NULL; }
 
 // ---- the game side (the tick only)
 
@@ -1254,11 +1322,23 @@ static void pup_remove(struct Cpu *c, uint64_t player, double t) {
     pup_anim_forget();
 }
 
-// A try ended without a puppet: again PUP_RETRY_S later, at most PUP_TRIES in a row; then Link stays.
-static void pup_try_failed(const char *why, double t) {
+// A try ended without a puppet: again PUP_RETRY_S later, at most PUP_TRIES in a row; then Link stays. hard: no use
+// trying again (the last try). 0.9.5: a try that failed while the game was busy (or was busy since the request: Game
+// Over, a load) isn't counted.
+static void pup_try_failed(const char *why, double t, int hard) {
     t_pup.proc = 0, t_pup_proc = 0;
+    if (!hard && (t_pup_try_busy || t_pup_busy_now != PB_FREE)) {
+        t_pup.busy_waits++;
+        t_pup.state = PS_WAIT;
+        t_pup_retry_at = t + PUP_RETRY_S;
+        snprintf(t_pup.why, sizeof t_pup.why, "%s: %s while the game was busy; again once it's free", t_pup.name, why);
+        return;
+    }
+    if (hard) t_pup.tries = PUP_TRIES - 1;
     if (++t_pup.tries >= PUP_TRIES) {
         t_pup.state = PS_FAILED;
+        t_pup_soft_fail = !hard;
+        t_pup_fail_heap = spawn_heap(), t_pup_fail_player = t_pup_tick_player;
         snprintf(t_pup.why, sizeof t_pup.why, "%s did not load (%s): you stay Link", t_pup.name, why);
         note("puppet: %s", t_pup.why);
     } else {
@@ -1277,8 +1357,7 @@ static void pup_request(struct Cpu *c, uint64_t pi, uint64_t player, double t) {
     }
     const char *name = intern(t_pup.actor);
     if (!name) {
-        t_pup.tries = PUP_TRIES - 1;
-        pup_try_failed("too many actor names used; restart the game", t);
+        pup_try_failed("too many actor names used; restart the game", t, 1);
         return;
     }
     float r[9];
@@ -1292,9 +1371,10 @@ static void pup_request(struct Cpu *c, uint64_t pi, uint64_t player, double t) {
     g_key_m.vptr = STRING_OBJ_VPTR, g_key_m.str = KEY_M;
     gcall(c, PACK_ADD, P(g_pup_pack.buf), P(g_pup_mtx), P(&g_key_m), 0x30, 7, 0, 0);
     t_pup.requests++;
+    t_pup_try_busy = t_pup_busy_now != PB_FREE;  // (0.9.5: busy from here on: a failure isn't counted)
     if (!(gcall(c, REQUEST_CREATE, creator, P(name), heap, P(&g_pup_handle), P(&g_pup_pack), 0, 1) & 1)) {
         GCALL1(c, HANDLE_CLEAR, &g_pup_handle);
-        pup_try_failed("the game refused the request", t);
+        pup_try_failed("the game refused the request", t, 0);
         return;
     }
     t_pup.state = PS_PENDING;
@@ -1314,8 +1394,7 @@ static void pup_pending(struct Cpu *c, double t) {
         uint64_t info = proc ? gcall(c, ACTOR_TYPEINFO, 0, 0, 0, 0, 0, 0, 0) : 0;
         if (!(proc && info && (GCALL2(c, rd64(rd64(proc) + 0x10), proc, info) & 1))) {
             GCALL1(c, HANDLE_RELEASE, &g_pup_handle);
-            t_pup.tries = PUP_TRIES - 1;
-            pup_try_failed("not an actor", t);
+            pup_try_failed("not an actor", t, 1);
             return;
         }
         GCALL3(c, SET_MTX, proc, g_pup_mtx, 0);
@@ -1324,6 +1403,7 @@ static void pup_pending(struct Cpu *c, double t) {
         t_pup.proc = t_pup_proc = proc;
         t_pup.state = PS_LIVE;
         t_pup.spawned++;
+        t_pup_pick_spawned = 1;  // (0.9.5: this pack can be made: a soft give-up may come back)
         t_pup_live_since = t;  // (the tries in a row end once it stayed PUP_STABLE_S: pup_live)
         pup_anim_forget();
         pup_draw(c, proc, 0, t);  // (hidden until it is placed and animated: Link shows meanwhile)
@@ -1334,11 +1414,11 @@ static void pup_pending(struct Cpu *c, double t) {
     if (GCALL1(c, HANDLE_FAILED, &g_pup_handle) & 1) {
         GCALL1(c, HANDLE_RELEASE_FAILED, &g_pup_handle);
         GCALL1(c, HANDLE_CLEAR, &g_pup_handle);
-        pup_try_failed("the game could not create it", t);
+        pup_try_failed("the game could not create it", t, 0);
     } else if (t - t_pup_pending_since > PUP_PENDING_S) {
         GCALL1(c, HANDLE_RELEASE, &g_pup_handle);
         GCALL1(c, HANDLE_CLEAR, &g_pup_handle);
-        pup_try_failed("not ready in time", t);
+        pup_try_failed("not ready in time", t, 0);
     }
 }
 
@@ -1800,7 +1880,7 @@ static const char *pup_rd_clip(const Missing *mi, int autoc) {
 
 static void pup_as_play(struct Cpu *c, uint64_t proc, const char *name) {
     g_pup_action[0] = 0, g_pup_action[1] = proc;
-    swmod_set_s(c, 0, -1.0f);  // (morph frames: the ASList's own)
+    swmod_set_s(c, 0, pup_as_morph(name));  // (morph frames: the set's own; 0.9.5: an attack at once)
     gcall(c, AS_PLAY, P(g_pup_action), P(name), 1, 0, 0, 0, 0);
     t_pup.as_calls++;
 }
@@ -1906,6 +1986,10 @@ static double t_pup_now;           // this tick's time (pup_items_holder)
 static int t_pup_clamp_off, t_pup_hands_off;  // the request's (pup_tick copies them)
 static PupGrip t_pup_grip_use = {"link", 1.0f, {0, 0, 0}};  // the grip in use: the body's, or `ghost puppet grip`
 static double t_pup_sprint_t;      // when the sprint (RunGear2) was last picked
+static double t_pup_in_sprint_t;   // 0.9.5: when Link was last in his sprint (pup_in_sprint; 0: not yet)
+static double t_stam_drain_t;      // ... when his stamina last fell (0: not yet)
+static float t_stam_last;          // ... and what it was last frame (t_stam_ok: read)
+static int t_stam_ok;
 static PupKeep t_pit[3];           // the held names kept through a short loss (pup_items_holder)
 static struct {
     float lift;
@@ -1918,7 +2002,67 @@ static int t_ovl_on;               // the hand overlay published a pose (taken b
 static void pup_093_forget(void) {
     memset(&t_clamp, 0, sizeof t_clamp);
     t_ovl_on = 0, t_pup_sprint_t = 0;
+    t_pup_in_sprint_t = t_stam_drain_t = 0, t_stam_ok = 0;  // (0.9.5)
     t_pup.clamp = t_pup.clamp_want = 0, t_pup.clamp_by[0] = 0, t_pup.hands = t_pup.hand_bones = 0;
+    t_pup.sprint_since = -1.0f;
+}
+
+// 0.9.5: the costume's own equipment holder, an NPC's (vf_98 returns this+PUP_NPC_HOLDER: the class of Link's,
+// EQUIP_VPTR, its owner at +EQUIP_OWNER [S: out/research/ghost-items-game-attach.md]). Its slot byte "on the back"
+// (EQUIP_BACK; the NPC's own set-up writes 1) is what a held item's AI asks each frame (Weapon vf_153), and while it says
+// "on the back" the item's AI is in its sheathed state: the game's own place, the NPC's Pod_A with the item's NPC
+// offsets. That is exactly what the round-4 check saw [V: Urbosa's Pod_A rests 28 cm under her Spine_2 (1.26 m, her
+// hips), a spear's NPCHoldTransOffset is (0, 0, -0.85) with no turn: sideways across her hips; a sword's is 0: sticking
+// out sideways at Paya's and Revali's Pod_A, shoulder height]. A DemoNPC holder (Zelda, Daruk, the Bokoblin) has no
+// such byte: always "in hand", and our own back follow held there (the Link-body ghost's back, 2026-11-11). So for each
+// slot holding one of our copies the byte is kept 0 ("in hand"): the item stays in its drawn state and our follow (its
+// hand grip, or Link's back place on its Spine_2) is never sheathed over. 1: the holder is there; 0: none.
+#define PUP_NPC_HOLDER 0xd00
+static int pup_holder_in_hand(uint64_t proc, double t) {
+    uint64_t h = proc + PUP_NPC_HOLDER;
+    if (!proc || !mem_ok(h, EQUIP_OWNER + 8, t) || rd64(h) != EQUIP_VPTR || rd64(h + EQUIP_OWNER) != proc) return 0;
+    for (int i = 0; i < 3 && i < ITEM_SLOTS; i++) {
+        if (t_items_ghost != proc || (t_items[i].state != IS_GRAB && t_items[i].state != IS_HELD)) continue;
+        volatile uint8_t *b = (volatile uint8_t *)(uintptr_t)(h + EQUIP_LINKS + (uint64_t)i * EQUIP_LINK_SIZE + EQUIP_BACK);
+        if (*b) *b = 0, t_pup.holder_writes++;
+    }
+    return 1;
+}
+
+// 0.9.5: Link's nocked arrow, hidden while the costume shows (pup_is_arrow). The actor a link names (data, id), 0: gone.
+static struct {
+    uint64_t actor, data;
+    uint32_t id;
+} t_arrow;
+static uint64_t pup_link_proc(uint64_t data, uint32_t id, double t) {
+    if (!data || id == 0xffffffffu || self_u32(data + LINKDATA_ID, t) != id) return 0;
+    uint64_t p = self_u64(data + LINKDATA_PROC, t);
+    return p && mem_ok(p + PROC_STATE, 1, t) && rd8(p + PROC_STATE) != PROC_DELETING ? p : 0;
+}
+static void pup_arrow_tick(struct Cpu *c, uint64_t player, int hide, double t) {
+    uint64_t a = 0, data = 0;
+    uint32_t id = 0xffffffffu;
+    char nm[64] = "";
+    if (hide && player && self_u64(player + ACTOR_EQUIP, t) == EQUIP_VPTR &&
+        self_u64(player + ACTOR_EQUIP + EQUIP_OWNER, t) == player)
+        for (int k = 3; k < 6 && !a; k++) {  // (slots 3-5: past the weapon, the shield and the bow)
+            uint64_t w = self_item(player, k, nm, NULL, t);
+            if (w && pup_is_arrow(nm)) {
+                uint64_t l = player + ACTOR_EQUIP + EQUIP_LINKS + (uint64_t)k * EQUIP_LINK_SIZE;
+                a = w, data = self_u64(l, t), id = self_u32(l + 8, t);
+                snprintf(t_pup.arrow, sizeof t_pup.arrow, "%s", nm);
+            }
+        }
+    if (t_arrow.actor && t_arrow.actor != a) {  // (shot, or Link shows: drawn again if it is still there)
+        uint64_t still = pup_link_proc(t_arrow.data, t_arrow.id, t);
+        if (still == t_arrow.actor) pup_draw(c, still, 1, t);
+        memset(&t_arrow, 0, sizeof t_arrow);
+    }
+    if (a) {
+        if (pup_draw(c, a, 0, t)) t_pup.arrow_hides++;
+        t_arrow.actor = a, t_arrow.data = data, t_arrow.id = id;
+    }
+    t_pup.arrow_hidden = t_arrow.actor != 0;
 }
 
 // For ghost.c's items part: the self puppet's copy in slot `slot` (on its back or in its hand): the bone, the grip, the
@@ -1996,6 +2140,7 @@ static void pup_ovl_tick(uint64_t player, uint64_t proc, int ok, int rd, double 
         const SelfState *se = &t_status.self;
         kinds = (r ? OVL_FIST_R : 0) | (l ? OVL_FIST_L : 0) |
                 (pup_is_guard(se->body, se->upper_w > SELF_WEIGHT_MIN ? se->upper : "", sh) ? OVL_GUARD : 0);
+        if (t_pup_grip_use.arm) kinds |= (r ? OVL_ARM_R : 0) | (l ? OVL_ARM_L : 0);  // (0.9.5: Paya, Urbosa)
     }
     if (kinds && pup_rd_link(player, t) && t_rd.link.rest && pup_rd_worlds(&t_rd.link, t_rd.wl, t_rd.xl, t) &&
         pup_rd_puppet(proc, t)) {
@@ -2083,10 +2228,17 @@ static int pup_live(struct Cpu *c, uint64_t player, const SelfState *self, doubl
         pick = pup_weapon_pick(pick, self->equip_ok ? self->weapon : "", pup_own_swings(t_pup.id), &t_pup_missing, swing,
                                sizeof swing);
     // 0.9.2: Daruk's sprint ball rolls (and keeps its clip while it comes back upright); 0.9.3: also through a short
-    // dip of the sprint (a frame hitch popped it upright)
+    // dip of the sprint (a frame hitch popped it upright); 0.9.5: as long as Link is in his sprint, whatever his speed
+    // (his stamina falls while he Moves), until he has been out of it PUP_SPRINT_LEAVE_S
+    float st = g_pup_stamina();
+    t_pup.stamina = st;
+    if (st >= 0 && t_stam_ok && st < t_stam_last - PUP_DRAIN_MIN) t_stam_drain_t = t;
+    t_stam_last = st, t_stam_ok = st >= 0;
     int sprinting = rd == RD_NONE && pick && !strcmp(pick, "RunGear2");
     if (sprinting) t_pup_sprint_t = t;
-    else if (rd == RD_NONE && pick && pup_sprint_hold(t_ball.on, t_pup.link_anim, t - t_pup_sprint_t))
+    if (pup_in_sprint(sprinting, t_pup.link_anim, t_stam_drain_t > 0 ? t - t_stam_drain_t : -1.0)) t_pup_in_sprint_t = t;
+    t_pup.sprint_since = t_pup_in_sprint_t > 0 ? (float)(t - t_pup_in_sprint_t) : -1.0f;
+    if (!sprinting && rd == RD_NONE && pick && pup_sprint_hold(t_ball.on, t_pup_in_sprint_t > 0 ? t - t_pup_in_sprint_t : -1.0))
         pick = "RunGear2", sprinting = 1;
     int ball = rd == RD_NONE && pup_ball_tick(c, player, proc, m, sprinting, t);
     if (ball) {
@@ -2208,8 +2360,10 @@ static void pup_tick(struct Cpu *c, uint64_t pi, uint64_t player, double t) {
         t_pup_grip_use.scale = rq.grip_scale;
         memcpy(t_pup_grip_use.hand, rq.grip_hand, sizeof t_pup_grip_use.hand);
     }
+    if (rq.back_set) memcpy(t_pup_grip_use.back, rq.back, sizeof t_pup_grip_use.back);  // 0.9.5
     t_pup.grip_scale = t_pup_grip_use.scale;
     memcpy(t_pup.grip_hand, t_pup_grip_use.hand, sizeof t_pup.grip_hand);
+    memcpy(t_pup.back, t_pup_grip_use.back, sizeof t_pup.back);
     if (strcmp(id, t_pup.id) || (actor && strcmp(actor, t_pup.actor)) || (!actor && t_pup.state != PS_OFF) ||
         (rq.retry_seq != t_pup_retry_seq && t_pup.state == PS_FAILED)) {  // a new pick: start over
         t_pup_retry_seq = rq.retry_seq;
@@ -2220,6 +2374,7 @@ static void pup_tick(struct Cpu *c, uint64_t pi, uint64_t player, double t) {
         memcpy(t_pup.id, id, strlen(id));
         t_pup.name[0] = t_pup.playas[0] = t_pup.actor[0] = t_pup.why[0] = 0, t_pup.tries = 0;
         t_pup.state = PS_OFF;
+        t_pup_pick_spawned = t_pup_soft_fail = t_pup_try_busy = 0;  // (0.9.5)
         if (actor) {
             snprintf(t_pup.name, sizeof t_pup.name, "%s", slot->name);
             snprintf(t_pup.playas, sizeof t_pup.playas, "%s", slot->playas);
@@ -2253,10 +2408,31 @@ static void pup_tick(struct Cpu *c, uint64_t pi, uint64_t player, double t) {
         }
     }
     if (t_pup.link_hidden && player != t_pup_hidden_for) t_pup.link_hidden = 0, t_pup_hidden_for = 0;
+    // 0.9.5: the game's own state (an event such as Game Over, a load, no body of his own), before the costume's
+    // death rule: no request while it is busy, and a try that fails then isn't counted (pup_try_failed)
+    t_pup_tick_player = player;
+    int want = t_pup.state == PS_WAIT || t_pup.state == PS_PENDING || t_pup.state == PS_LIVE;
+    t_pup_busy_now = !want ? PB_FREE : player ? g_pup_busy(pi, player, t) : PB_WORLD;
+    if (t_pup_busy_now != PB_FREE && (t_pup.state == PS_PENDING || t_pup.state == PS_LIVE)) t_pup_try_busy = 1;
+    // ... and a pack given up by the game's doing that spawned before comes back on a new stage or a new Link (a
+    // Continue after Game Over), with fresh tries
+    if (t_pup.state == PS_FAILED && t_pup_soft_fail && t_pup_pick_spawned && player &&
+        (spawn_heap() != t_pup_fail_heap || player != t_pup_fail_player)) {
+        t_pup.tries = 0, t_pup_soft_fail = 0, t_pup.comebacks++;
+        t_pup.state = PS_WAIT, t_pup_retry_at = t + PUP_RETRY_S;
+        snprintf(t_pup.why, sizeof t_pup.why, "%s: trying again (a new stage)", t_pup.name);
+        note("puppet: %s", t_pup.why);
+    }
     int mirror = 0;
     switch (t_pup.state) {
     case PS_WAIT:
-        if (player && t >= t_pup_retry_at) pup_request(c, pi, player, t);
+        if (player && t >= t_pup_retry_at && t_pup_busy_now != PB_FREE) {  // (0.9.5: not while the game is busy)
+            t_pup_retry_at = t + 0.5;
+            snprintf(t_pup.why, sizeof t_pup.why, "%s: waiting (%s)", t_pup.name,
+                     PB_WHY[t_pup_busy_now >= PB_FREE && t_pup_busy_now <= PB_BODY ? t_pup_busy_now : PB_BODY]);
+        } else if (player && t >= t_pup_retry_at) {
+            pup_request(c, pi, player, t);
+        }
         break;
     case PS_PENDING:
         pup_pending(c, t);
@@ -2269,7 +2445,7 @@ static void pup_tick(struct Cpu *c, uint64_t pi, uint64_t player, double t) {
             t_pup.drops++;
             pup_show_link(c, player, t);
             pup_anim_forget();
-            pup_try_failed("the game removed it", t);
+            pup_try_failed("the game removed it", t, 0);
             break;
         }
         mirror = pup_live(c, player, &t_status.self, t);
@@ -2279,7 +2455,7 @@ static void pup_tick(struct Cpu *c, uint64_t pi, uint64_t player, double t) {
     // 0.9.2: "not free" is one of the game's own states (pup_busy_real), held PUP_BUSY_S first: a fast slide's frame of
     // doubt no longer shows Link for 0.4 s.
     if (t_pup.state == PS_LIVE && player) {
-        int paused = g_pup_paused(), busy = g_pup_busy(pi, player, t);
+        int paused = g_pup_paused(), busy = t_pup_busy_now;
         // Dying starts the Game Over event 0.1-0.2 s into DeadRagdoll: keep the costume while it follows his ragdoll
         // (it showed Link for the whole death in the round-3 game check); 0.9.3: also while he plays a death clip, and
         // if his body goes (pup_busy_keep)
@@ -2311,6 +2487,9 @@ static void pup_tick(struct Cpu *c, uint64_t pi, uint64_t player, double t) {
     } else if (t_pup.link_hidden) {
         pup_show_link(c, player, t);
     }
+    // 0.9.5: its copies never sheathed by the game (an NPC holder's slots kept "in hand"); Link's arrow hidden with him
+    t_pup.holder = t_pup.state == PS_LIVE && t_pup.proc ? pup_holder_in_hand(t_pup.proc, t) : 0;
+    pup_arrow_tick(c, player, t_pup.state == PS_LIVE && t_pup.shown, t);
     t_pup.items = t_pup.state == PS_LIVE && t_items_ghost == t_pup.proc && t_pup.proc;
     lock();
     g_pup = t_pup;
@@ -2469,6 +2648,22 @@ static void cmd_puppet(int argc, char **argv, SwModReply *r) {
         api->reply_str(r, "grip", g_pup_req.grip_set ? "set" : "the body's own");
         return;
     }
+    if ((argc == 4 && !strcmp(argv[2], "back") && !strcmp(argv[3], "-")) ||
+        (argc == 6 && !strcmp(argv[2], "back"))) {  // 0.9.5: back <x y z cm> (Spine_2's frame) | back - (the body's own)
+        float v[3] = {0, 0, 0};
+        int ok = 1;
+        for (int k = 0; argc == 6 && k < 3; k++) ok = ok && parse_float(argv[3 + k], &v[k]) && v[k] >= -100 && v[k] <= 100;
+        if (!ok) {
+            api->reply_fail(r, "usage: ghost puppet back <x up y forward z left: cm, -100 to 100> | back -");
+            return;
+        }
+        lock();
+        g_pup_req.back_set = argc == 6;
+        for (int k = 0; k < 3; k++) g_pup_req.back[k] = v[k] * 0.01f;
+        unlock();
+        api->reply_str(r, "back", argc == 6 ? "set" : "the body's own");
+        return;
+    }
     if (argc == 4 && !strcmp(argv[2], "map")) {  // id=Actor,id=Actor (only the ids above; "-" clears)
         PupReq tmp;
         memset(&tmp, 0, sizeof tmp);
@@ -2511,7 +2706,7 @@ static void cmd_puppet(int argc, char **argv, SwModReply *r) {
     if (argc != 2) {
         api->reply_fail(r, "usage: ghost puppet [off | on | retry | lift m | ragdoll pose|clip|off | girth x | "
                            "limp x | ball on|off | clamp on|off | hands on|off | grip size [x y z] | grip - | "
-                           "map id=Actor,... | -]");
+                           "back x y z | back - | map id=Actor,... | -]");
         return;
     }
     PupStatus p;
@@ -2581,9 +2776,10 @@ static void cmd_puppet(int argc, char **argv, SwModReply *r) {
     api->reply_str(r, "clamp", q.clamp_off ? "off" : p.clamp_by);
     api->reply_num(r, "clamp_m", p.clamp);
     api->reply_num(r, "clamp_want_m", p.clamp_want);
-    char hands[40];
-    snprintf(hands, sizeof hands, "%s%s%s%s", q.hands_off ? "off" : "", p.hands & OVL_FIST_R ? "fist_r " : "",
-             p.hands & OVL_FIST_L ? "fist_l " : "", p.hands & OVL_GUARD ? "guard" : "");
+    char hands[64];
+    snprintf(hands, sizeof hands, "%s%s%s%s%s%s", q.hands_off ? "off" : "", p.hands & OVL_FIST_R ? "fist_r " : "",
+             p.hands & OVL_FIST_L ? "fist_l " : "", p.hands & OVL_ARM_R ? "arm_r " : "",
+             p.hands & OVL_ARM_L ? "arm_l " : "", p.hands & OVL_GUARD ? "guard" : "");
     api->reply_str(r, "hands", hands);
     api->reply_int(r, "hand_bones", p.hand_bones);
     api->reply_int(r, "hand_frames", p.hand_frames);
@@ -2592,6 +2788,19 @@ static void cmd_puppet(int argc, char **argv, SwModReply *r) {
     snprintf(grip, sizeof grip, "%.1f %.1f %.1f", p.grip_hand[0] * 100.0f, p.grip_hand[1] * 100.0f,
              p.grip_hand[2] * 100.0f);
     api->reply_str(r, "grip_cm", grip);
+    // 0.9.5
+    char back[48];
+    snprintf(back, sizeof back, "%.1f %.1f %.1f", p.back[0] * 100.0f, p.back[1] * 100.0f, p.back[2] * 100.0f);
+    api->reply_str(r, "back_cm", back);
+    api->reply_bool(r, "holder", p.holder != 0);
+    api->reply_int(r, "holder_writes", p.holder_writes);
+    api->reply_str(r, "arrow", p.arrow);
+    api->reply_bool(r, "arrow_hidden", p.arrow_hidden != 0);
+    api->reply_int(r, "arrow_hides", p.arrow_hides);
+    api->reply_num(r, "sprint_since", p.sprint_since);
+    api->reply_num(r, "stamina", p.stamina);
+    api->reply_int(r, "busy_waits", p.busy_waits);
+    api->reply_int(r, "comebacks", p.comebacks);
     char line[300];
     pup_sentence(&p, NULL, line, sizeof line);
     api->reply_text(r, "puppet %s%s%s: %s", PS_NAMES[p.state >= 0 && p.state <= PS_FAILED ? p.state : 0],

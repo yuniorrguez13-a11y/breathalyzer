@@ -181,7 +181,9 @@ class Recipes(unittest.TestCase):
         # Urbosa: no Gerudo guards' file any more (the real Urbosa never loads it): her actor's women's file first
         urbosa = charsel.RECIPES["gerudo"]
         self.assertEqual([f for f, _ in urbosa.anims], ["UMii_Common_Body_W_Animation", charsel.PLAYER_ANIM])
-        self.assertEqual(dict(urbosa.own)["Wait"], "Default_Wait")
+        # v5 (the round-4 game check): her actor's hip-shot stand and walk, the Active branch of its sets
+        self.assertEqual((dict(urbosa.own)["Wait"], dict(urbosa.own)["Walk"]), ("Positive_Wait", "Positive_Move_Walk"))
+        self.assertEqual(urbosa.v, 5)
         # the women's sprint: their run, faster (not the panic run)
         for cid in ("zelda", "sheikah", "gerudo", "zora"):
             r = charsel.RECIPES[cid]
@@ -209,6 +211,13 @@ class Recipes(unittest.TestCase):
             self.assertEqual((own["SwimWait"], own["SwimMove"]), ("Wait", "Walk"))
         moblin = dict(charsel.RECIPES["moblin"].own)                            # no stab for a sword any more
         self.assertNotEqual(moblin["CutS1"], moblin["CutS1_Spear"])
+        # 0.9.5: every swing starts SWING_LEAD_S further into its clip (the costume starts a frame or two after Link;
+        # the Bokoblin's hit came 0.16 s late in the round-4 check), the sprint's frame control untouched
+        boko = charsel.frame_ctrl(charsel.RECIPES["bokoblin"])
+        self.assertEqual(boko["CutS1"], (1.21, 25.0, None))                    # (23 + 0.05 s x 30 x 1.21)
+        self.assertEqual(charsel.frame_ctrl(charsel.RECIPES["moblin"])["CutS1"], (0.8, 18.0, 30))
+        self.assertEqual(boko["SwimMove"], (0.6, None, None))
+        self.assertEqual((charsel.RECIPES["bokoblin"].v, charsel.RECIPES["moblin"].v), (3, 3))
         bad = charsel.Recipe("bad", "Bad", "Monsters", "pack", "X", (), (("Wait", "W"),), rest="speed",
                              ctrl=(("CutS1", 1.0, 0, None),))
         with self.assertRaises(charsel.CharselError):                           # frame control for a name it lacks
@@ -225,6 +234,11 @@ class Recipes(unittest.TestCase):
         self.assertEqual((start, end), (23.0, None))
         self.assertEqual(charsel.as_file("Wait"), glp.as_file("Wait"))         # no control: as before
         self.assertEqual(charsel.as_ctrl(glp.as_file("Wait")), (None, None, None))
+        # 0.9.5: an attack set starts at once (its node's Morph 0, as Link's own attack nodes)
+        for bas in (charsel.as_file("Sword_Attack_S1", morph=0.0), charsel.as_file("Attack_Small", 1.21, 25, None, 0.0)):
+            p = aamp.load(bas).list("Elements").list("Element0").object("Parameters")
+            self.assertEqual((p.get_value("Morph"), p.get_value("TypeIndex")), (0.0, 67))
+        self.assertAlmostEqual(charsel.as_ctrl(charsel.as_file("Attack_Small", 1.21, 25, None, 0.0))[0], 1.21, places=5)
 
     def test_find_id(self):
         cases = {"zelda": "zelda", "ZELDA": "zelda", " Daruk ": "goron", "paya": "sheikah", "Urbosa": "gerudo",
@@ -524,6 +538,78 @@ class Build(unittest.TestCase):
             glp.build(self.romfs, link_out, say=quiet)
         shutil.copytree(link_out, lib / "mods" / "botw-mod-loader.ghost-link-body")
         self.assertTrue(breath.game_made(str(lib), {"id": "botw-mod-loader.ghost-link-body"}))
+
+    def test_size_table_2026_11_14(self):
+        """0.9.5: the characters mod ships a size table: the game's own with an entry for each pack of ours and each
+        file of ours inside it (sized from the game's file of that kind nearest in size), the game's own files left
+        alone; Linkle's model from Link's (his entry over his size), her textures as play-as sizes Link's. No game
+        table: no table, said."""
+        import struct
+        import zlib
+        import bnp
+        donors = {"Dm_Npc_Goron_Hero": donor_pack("Dm_Npc_Goron_Hero", "Npc_Goron_Hero")}
+        fake_romfs(self.romfs, donors)
+        tpl = (self.romfs / "Actor" / "Pack" / f"{charsel.TEMPLATE}.sbactorpack").read_bytes()
+        files = template_pack()
+        link_model, link_tex = b"L" * 1000, b"T" * 2000
+        (self.romfs / "Model" / "Link.sbfres").write_bytes(link_model)
+        (self.romfs / "Model" / "Link.Tex.sbfres").write_bytes(link_tex)
+        game = {f"Actor/Pack/{charsel.TEMPLATE}.bactorpack": len(charsel._unyaz(tpl)) + 512,
+                "Model/Link.bfres": 1576, "Model/Link.Tex.bfres": 2000 + 8208}
+        for n, d in files.items():
+            game[n] = len(d) * 3 + 100
+        raw = b"RSTB" + struct.pack("<II", len(game), 0) + b"".join(
+            struct.pack("<II", c, v) for c, v in sorted((zlib.crc32(n.encode()), v) for n, v in game.items()))
+        table = self.romfs / "System" / "Resource" / "ResourceSizeTable.product.srsizetable"
+        table.parent.mkdir(parents=True)
+        table.write_bytes(raw)
+        cat = charsel.build(self.romfs, self.out, ["goron"], cache=self.root / "cache.json", say=quiet)
+        sizes = cat["sizes"]["entries"]
+        slot = charsel.SLOTS["goron"]
+        self.assertIn(f"Actor/Pack/{slot}.bactorpack", sizes)
+        self.assertIn("Actor/ASList/SwChar_goron.baslist", sizes)
+        self.assertIn("Actor/AS/SwChar_goron_CutS1.bas", sizes)
+        self.assertNotIn("Actor/AIProgram/DemoDummy.baiprog", sizes)            # (the game's own, copied as it is)
+        pack = (self.out / "romfs" / "Actor" / "Pack" / f"{slot}.sbactorpack").read_bytes()
+        import ukmm
+        self.assertEqual(sizes[f"Actor/Pack/{slot}.bactorpack"],
+                         ukmm.estimate_entry(len(charsel._unyaz(tpl)), game[f"Actor/Pack/{charsel.TEMPLATE}.bactorpack"],
+                                             len(charsel._unyaz(pack)), True))
+        shipped = bnp.Rstb((self.out / "romfs" / charsel.RSTB_REL).read_bytes())
+        for n, v in sizes.items():
+            self.assertEqual(shipped.get(n), v, n)
+        self.assertEqual(shipped.get("Model/Link.bfres"), 1576)               # (the game's entries kept)
+        self.assertEqual(charsel.check(self.out), {"goron": []})
+        # Linkle's model and textures, sized from Link's
+        lm = {"name": "The Linkle Mod", "version": "3.0.1", "fp": "f" * 16, "enabled": False, "where": "x",
+              "member": "y"}
+        with mock.patch.object(charsel, "linkle_mod", lambda lib: lm), \
+                mock.patch.object(charsel, "linkle_costume",
+                                  lambda w, m: (yaz0_compress(b"M" * 3000), yaz0_compress(b"X" * 5000),
+                                                {"parts": [], "left_out": []})):
+            fake_romfs(self.root / "romfs3", {glp.DONOR_LINK: pause_pack(), **donors})
+            r3 = self.root / "romfs3"
+            for n in ("Link.sbfres", "Link.Tex.sbfres"):
+                shutil.copy(self.romfs / "Model" / n, r3 / "Model" / n)
+            (r3 / "System" / "Resource").mkdir(parents=True)
+            shutil.copy(table, r3 / "System" / "Resource" / table.name)
+            cat = charsel.build(r3, self.out, ["linkle", "goron"], library=self.root, cache=None, say=quiet)
+        sizes = cat["sizes"]
+        self.assertEqual(sizes["model_ratio"], 1.576)
+        self.assertEqual(sizes["entries"]["Model/SwChar_linkle.bfres"], bnp.round32(3000 * 1576 // 1000 + 1))
+        self.assertEqual(sizes["entries"]["Model/SwChar_linkle.Tex.bfres"],
+                         max(ukmm.estimate_entry(2000, 2000 + 8208, 5000, False), bnp.round32(5000) + 8208))
+        self.assertEqual(charsel.check(self.out), {"goron": [], "linkle": []})
+        # a table that lost an entry is named by check; no game table: no table shipped, and said
+        t = bnp.Rstb((self.out / "romfs" / charsel.RSTB_REL).read_bytes())
+        t.apply({"Model/SwChar_linkle.bfres": 0})
+        (self.out / "romfs" / charsel.RSTB_REL).write_bytes(t.to_bytes())
+        self.assertIn("sizes", charsel.check(self.out))
+        table.unlink()
+        cat = charsel.build(self.romfs, self.out, ["goron"], cache=self.root / "cache.json", say=quiet)
+        self.assertFalse((self.out / "romfs" / charsel.RSTB_REL).exists())
+        self.assertFalse(cat["sizes"]["table"])
+        self.assertTrue(any("size table" in n for n in cat["notes"]))
 
     def test_skips_say_why(self):
         donors = {"Dm_Npc_Goron_Hero": donor_pack("Dm_Npc_Goron_Hero", "Npc_Goron_Hero")}

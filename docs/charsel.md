@@ -97,7 +97,11 @@ the keys. All text is 18 pt or larger, white on dark green, blue and red (contra
   or run** (the memories are videos), so Zelda, Urbosa and Mipha walk like the game's own Zelda, Urbosa and Mipha
   do, which is the same women's walk [V].
 - **Urbosa (v4)** no longer loads the Gerudo guards' file first (v3: her stand and walk were a generic Gerudo
-  guard's; the real Urbosa never loads that file [V]). 2.9 MB lighter.
+  guard's; the real Urbosa never loads that file [V]). 2.9 MB lighter. **v5:** the game check showed the real one
+  (`Dm_Npc_Gerdo_Hero`) standing hip-shot and ours straight. Her actor's `Wait`/`Walk` are `UC_M_Wait`/`UC_M_Walk`,
+  whose personality branch is `Man_Active`/`Man_Deflated`/default, and her look file says `Woman_Active` [V]; she
+  plays the Active branch [G: from the hip-shot stand]: `Positive_Wait` and `Positive_Move_Walk` (women's file). Her
+  run has no such branch.
 - **Sprint** for Zelda, Urbosa, Mipha, Paya: their own run at 1.3x (the women's file has only a panic run, which v3
   used). Set in the animation set's own frame control (`FrameCtrl` `Rate`, as the game's sets do [V]).
 - **Paya:** her own shy stand (her own file). **Mipha:** a Zora woman's swim: moving, the clip lies her down in the
@@ -379,6 +383,41 @@ blades clipped at his wrist, Urbosa sinking while attacking, the Moblin turning 
 - **Death:** an event or his body gone keeps the costume while it follows his ragdoll or he plays a death clip.
 - Selftest rows: `grip_place`, `items_kept`, `guard_detect`, `hands_overlay`, `death_keeps_costume`, `clamp_step`,
   `ball_dip_hold`, `missing_clip_no_link`, `items_grip`, `clamp_world`.
+
+### Round 5 (the round-4 game check, 2026-11-14; ghost still 0.9.1 by number; not yet checked in the game)
+
+- **Back items lay sideways** (Urbosa's spear across her hips, the sword sticking out at Paya's and Revali's
+  shoulders): that was the game's own NPC sheath place, not ours [V numbers: Urbosa's `Pod_A` rests 28 cm under her
+  `Spine_2`, at 1.26 m; a spear's `NPCHoldTransOffset` is (0, 0, -0.85) with no turn, a sword's all 0]. Our back
+  place (Link's `Pod_A` place on the body's `Spine_2`, every body's `Spine_2` turned as Link's [V], with the item's own
+  `PlayerHold` offsets: Link's) was sheathed over. Now each NPC holder slot that holds one of our copies keeps its "on
+  the back" byte at 0 ("in hand", as a DemoNPC holder always is), so the item's AI never sheathes it (`holder`,
+  `holder_writes` in `ghost puppet`; `items.N.place` back/grip). `ghost puppet back x y z` (cm, `Spine_2`'s frame)
+  tries a per-body move, `back -` goes back; the table's `back` is 0 for every body [G].
+- **The arrow floated next to her head:** Link's own nocked arrow stays at his hidden hand. An equipment slot from 3
+  up holding an actor named `...Arrow` is now hidden while the costume shows and shown again once shot or when Link
+  shows (`arrow`, `arrow_hidden`) [G: which slot holds it].
+- **Paya's sword pointed straight up in front of her chest:** her own stand holds her hands at her chest. For Paya and
+  Urbosa (hand on hip in her new stand), the arm of a hand holding a drawn copy now takes Link's turns (`hands`
+  shows `arm_r`/`arm_l`).
+- **Daruk's ball over a drop:** Link counts as sprinting while the sprint is picked by speed, or while he Moves and
+  his stamina falls (only a sprint drains it on foot), whatever his speed; the ball ends only after 0.3 s out of it
+  (`sprint_since`, `stamina`).
+- **Game Over for a minute spent the 5 tries:** no request while the game is busy (an event such as Game Over, a
+  load, no body); a try that fails while it is busy isn't counted (`busy_waits`); a pack given up by the game's doing
+  that spawned before comes back on a new stage or a new Link, after a Continue (`comebacks`).
+- **The Bokoblin's swing came 0.16 s late:** the costume blended 6 frames into a swing (Link's own attack nodes have
+  Morph 0 [V]) and starts a frame or two after him. Attack sets now start at once (node Morph 0, and the puppet asks
+  with no blend) and the monsters' swings start 0.05 s further into their clips (Bokoblin `Attack_Small` from frame
+  25, Moblin's first swing from 18) [G: the remaining lag].
+- **Linkle did not load:** her new model file had no size-table entry while another mod ships a table [G: the cause].
+  The characters mod now ships its own table (`romfs/System/Resource/ResourceSizeTable.product.srsizetable`: the
+  game's, plus an entry for each pack, each new file in a pack, and her model and textures; listed in `charsel.json`
+  `sizes`); `modman deploy` merges it with the other mods' tables. Her model is sized from Link's (his entry is 1.58x
+  his file [V]): 884,592 bytes -> 1,393,696. Not `logs/rstb.json`: modman refuses a mod folder with `logs/` as an
+  unmerged BCML package. Her slot's heap (1,004,792 bytes) is like the other NPC slots that load [V ActorInfo].
+- Selftest rows: `back_tweak`, `arm_overlay`, `attack_morph`, `arrow_name`, `holder_in_hand`, `arrow_hidden`,
+  `busy_no_tries`, `gameover_comeback`, `refused_stays_failed`, `ball_drop_hold`.
 
 **Big bodies and knockback (designed, not built) [G].** A big body (Daruk, the Moblin) could shrug off small knocks
 (a bomb, a small hit) and still take the damage. Big hits (a Guardian beam, a big explosion, a Lynel) and death would
