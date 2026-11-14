@@ -89,6 +89,15 @@
 // no tries spent while the game is busy (Game Over), and a pack given up then comes back after a Continue; an attack
 // starts at once, as Link's own (pup_as_morph: the Bokoblin's swing came 0.16 s late).
 
+// 0.9.6 (2026-11-14, not yet in the game; docs/charsel.md "Cloth and hair"): the packs now carry their character's own
+// cloth physics, cloth only (tools/charsel.py cloth_physics: no rigid body, no character controller, no contact). The
+// bones that physics moves (the skirt, the hair, the scarf: PUP_CLOTH in pup_bodies.h, by name, never one named as
+// Link's) are the physics' alone: the ragdoll pose (pup_rd_write, the after-step write) and the hands overlay never
+// write them, so the pose and the cloth don't fight (jitter). The puppet's physics is never moved by the physics call
+// (PHYS_SET_MTX: no rigid body to move; `ghost puppet physmtx warp|on` tries it). A new pick, a stage change and a
+// respawn spawn a new puppet (a fresh cloth); a jump of more than PUP_WARP_M in one frame without one (a teleport on
+// the same stage) is counted (`warps`): no cloth reset is known, so the skirt may whip once there [G].
+
 #include "pup_bodies.h"
 
 #define LINK_RAGDOLL 0x1870            // 0.9.1: Link: his ragdoll manager (his vf 0x840 returns it; his actions reach it)
@@ -178,6 +187,7 @@
 #define PUP_REASSERT_S 1.0             // ... and asked again at most this often
 #define PUP_LIFT_MAX 3.0f              // m: `ghost puppet lift` range (either way)
 #define PUP_MAP_MAX 16                 // `ghost puppet map` entries
+#define PUP_WARP_M 6.0f                // 0.9.6: m Link may move in one frame and still be "moving" (a warp beyond)
 
 // The characters you can see yourself as, on the actor names tools/charsel.py builds them on (its SLOTS), with their
 // names and the word `charsel playas` takes (people only: monsters can't be played as at a restart). The ids and
@@ -227,7 +237,30 @@ typedef struct {
     float grip_scale, grip_hand[3];// the body's (PUP_GRIPS)
     int back_set;                  // 0.9.5 `ghost puppet back x y z`: the back place's tweak (m) instead of the body's
     float back[3];
+    int physmtx;                   // 0.9.6 `ghost puppet physmtx off|warp|on`: PM_* (off by default)
 } PupReq;
+
+// 0.9.6: the physics call on the puppet (PHYS_SET_MTX: moves an actor's rigid bodies): never (its pack's physics is
+// cloth only: no body to move), once after each warp (whether it resets the cloth: [G]), or every frame (as the ghost
+// does for actors with rigid bodies). Not known in the game: whether the cloth needs it to follow [G].
+enum { PM_OFF, PM_WARP, PM_ON };
+static const char *const PM_NAMES[] = {"off", "warp", "on"};
+
+// 0.9.6: the free actor names charsel builds its packs on (tools/charsel.py FREE_SLOTS; the test checks the two):
+// any pack of ours, wherever `--slot` put it. Their physics is cloth only or none, so the ghost never moves it with
+// the physics call either (ghost.c).
+static const char *const PUP_FREE_NAMES[] = {
+    "Dm_Npc_Sheiker_Searcher_M_000", "Dm663_Npc_Assasin_A", "Dm663_Npc_Assasin_B",
+    "Dm_Npc_UMii_Hylia_BodyS_M_001", "Dm_Npc_UMii_Hylia_BodyS_M_002", "Dm_Npc_UMii_Hylia_BodyS_M_003",
+    "Dm_Npc_UMii_Hylia_BodyS_M_011", "Dm_Npc_UMii_Hylia_BodyS_M_012", "Dm_Npc_Handmaid_A", "Dm_Npc_Handmaid_B",
+    "Dm663_Npc_Gerudo_S_A", "Dm663_Npc_Gerudo_S_B", "Dm663_Npc_Gerudo_S_C", "Dm663_Npc_Gerudo_S_D",
+    "Dm663_Npc_Gerudo_S_E", "Dm663_Npc_Gerudo_S_F",
+};
+static int pup_free_name(const char *actor) {
+    for (size_t i = 0; actor && i < sizeof PUP_FREE_NAMES / sizeof *PUP_FREE_NAMES; i++)
+        if (!strcmp(PUP_FREE_NAMES[i], actor)) return 1;
+    return 0;
+}
 
 enum { RDM_POSE, RDM_CLIP, RDM_OFF };
 static const char *const RDM_NAMES[] = {"pose", "clip", "off"};
@@ -297,6 +330,11 @@ typedef struct {
     float stamina;                 // his stamina (-1: unreadable)
     int64_t busy_waits;            // tries not spent because the game was busy (an event, Game Over, a load, no body)
     int64_t comebacks;             // a pack given up after a busy time spawned again by itself (a Continue)
+    // 0.9.6 (cloth)
+    int cloth_bones;               // bones of its posed units its own physics moves (never written by the pose, hands)
+    int physics;                   // it has physics (its pack's cloth: an actor physics object)
+    int64_t warps;                 // jumps of more than PUP_WARP_M in one frame on the same stage (a whip risk)
+    int64_t phys_moves;            // PHYS_SET_MTX calls (`ghost puppet physmtx warp|on`)
 } PupStatus;
 
 static PupReq g_pup_req;           // under lock()
@@ -505,7 +543,38 @@ typedef struct {
     int rest;                         // 0.9.2: its rest pose was read (pup_rest_set): rw, rl
     float rw[PUP_MAXB][9];            // ... each bone's turn at rest in model space (rows)
     float rl[PUP_MAXB][12];           // ... its rest local (3x4 rows: turn and place, no scale)
+    uint8_t cloth[PUP_MAXB];          // 0.9.6: 1: its own physics moves this bone (PUP_CLOTH): never written here
+    int ncloth;
 } PupSkel;
+
+// 0.9.6: the bones body `id`'s own cloth and support-bone physics move (PUP_CLOTH; NULL: none).
+static const char *pup_cloth_list(const char *id) {
+    for (int i = 0; id && PUP_CLOTH[i].id; i++)
+        if (!strcmp(PUP_CLOTH[i].id, id)) return PUP_CLOTH[i].bones;
+    return NULL;
+}
+// 1: `name` is one of the list's names (each followed by one space).
+static int pup_cloth_has(const char *list, const char *name) {
+    size_t n = name ? strlen(name) : 0;
+    for (const char *p = list; n && p && *p;) {
+        const char *e = strchr(p, ' ');
+        if (!e) break;
+        if ((size_t)(e - p) == n && !strncmp(p, name, n)) return 1;
+        p = e + 1;
+    }
+    return 0;
+}
+// Mark skeleton s's bones (names) that body id's physics moves and that aren't named as Link's (map < 0). Returns
+// how many.
+static int pup_cloth_mark(PupSkel *s, const char (*names)[32], const char *id) {
+    const char *list = pup_cloth_list(id);
+    s->ncloth = 0;
+    for (int b = 0; b < s->n && b < PUP_MAXB; b++) {
+        s->cloth[b] = (uint8_t)(list && s->map[b] < 0 && pup_cloth_has(list, names[b]));
+        s->ncloth += s->cloth[b];
+    }
+    return s->ncloth;
+}
 
 static const char *const PUP_LIMBS[PUP_LIMP_N] = {"Arm_1_L", "Arm_1_R", "Leg_1_L", "Leg_1_R"};
 
@@ -1240,6 +1309,7 @@ static void pup_rd_forget(void) {
     memset(&t_rd.limp, 0, sizeof t_rd.limp);
     t_pup.rd = RD_NONE, t_pup.rd_lift = 0, t_pup.rd_units = t_pup.rd_mapped = 0, t_pup.rd_rest = 0;
     t_pup.rd_why[0] = t_pup.rd_anim[0] = t_pup.rd_src[0] = 0, t_pup.rd_up = t_pup.rd_want = 0;  // (0.9.2: no stale why)
+    t_pup.cloth_bones = 0;  // (0.9.6: read again with its skeleton)
     pup_ball_forget();
 }
 
@@ -1438,7 +1508,8 @@ static uint64_t pup_unit(uint64_t a, int u, double t) {
 // Unit u's skeleton as PupSkel: parents (the resource's bone array, each bone's own index checked), an order, the
 // names into names, the body box bones, the hips and head. 0: not readable.
 static int pup_skel_read(uint64_t a, int u, PupSkel *s, char (*names)[32], double t) {
-    s->sk = s->unit = 0, s->n = s->nmap = 0, s->hip = s->head = -1, s->uidx = u, s->rest = 0;
+    s->sk = s->unit = 0, s->n = s->nmap = 0, s->hip = s->head = -1, s->uidx = u, s->rest = 0, s->ncloth = 0;
+    memset(s->cloth, 0, sizeof s->cloth);
     for (int k = 0; k < PUP_NBODY_BONES; k++) s->keyidx[k] = -1;
     for (int k = 0; k < PUP_LIMP_N; k++) s->limb[k] = -1;
     uint64_t unit = pup_unit(a, u, t), sk = unit ? model_skel(a, u, NULL, t) : 0;
@@ -1522,8 +1593,11 @@ static int pup_rd_puppet(uint64_t proc, double t) {
                     s->map[b] = (int16_t)j, s->nmap++;
                     break;
                 }
+        pup_cloth_mark(s, (const char (*)[32])t_rd.names, t_pup.id);  // (0.9.6: its physics' bones, never written)
         if (s->nmap >= PUP_RD_MIN_MAP && s->hip >= 0 && s->map[s->hip] == t_rd.link.hip) t_rd.npu++;
     }
+    t_pup.cloth_bones = 0;
+    for (int i = 0; i < t_rd.npu; i++) t_pup.cloth_bones += t_rd.pu[i].ncloth;
     return t_rd.npu > 0;
 }
 
@@ -1644,8 +1718,9 @@ static void pup_locals_changed(uint64_t sk, uint64_t unit) {
     __atomic_fetch_or((uint8_t *)(uintptr_t)(unit + UNIT_DIRTY), (uint8_t)UNIT_LOCALS_NEW, __ATOMIC_SEQ_CST);
 }
 
-// The bones the pose sets: those named as Link's; 0.9.2: with its rest read, every bone (the others at their rest).
-static int pup_rd_sets(const PupSkel *s, int b) { return s->map[b] >= 0 || s->rest; }
+// The bones the pose sets: those named as Link's; 0.9.2: with its rest read, every bone (the others at their rest);
+// 0.9.6: never one its own physics moves (the cloth's: the pose and the cloth would fight).
+static int pup_rd_sets(const PupSkel *s, int b) { return !s->cloth[b] && (s->map[b] >= 0 || s->rest); }
 
 // Write the bones the pose sets (as the game's own set-local does) and the "locals changed" bits; the scale and every
 // other bone stay.
@@ -1695,18 +1770,36 @@ static void unit_step_wrapper(struct Cpu *c) {
     }
 }
 
-// Put the puppet at matrix m (rows), dy higher (its rigid bodies too, for a pack with physics: as the ghost).
+// 0.9.6: the physics call's mode (the request's: pup_tick copies it), and a warp seen since the last placing.
+static int t_pup_physmtx, t_pup_warp_pending;
+static float t_warp_at[3];
+static int t_warp_ok;
+
+// Put the puppet at matrix m (rows), dy higher. 0.9.6: its physics (its pack's cloth) is not moved with the physics
+// call unless `ghost puppet physmtx` says so (PM_*): a cloth-only physics has no rigid body to move.
 static void pup_place(struct Cpu *c, uint64_t proc, const float m[12], float dy) {
     g_pup_pos[0] = m[3], g_pup_pos[1] = m[7] + dy, g_pup_pos[2] = m[11];
     float rot[9] = {m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]};
     memcpy(g_pup_rot, rot, sizeof rot);
     gcall(c, SET_TRANSFORM, proc, P(g_pup_pos), P(g_pup_rot), 0, 0, 0, 0);
-    if (rd64(proc + ACTOR_PHYSICS)) {
+    t_pup.physics = rd64(proc + ACTOR_PHYSICS) != 0;
+    if (t_pup.physics && (t_pup_physmtx == PM_ON || (t_pup_physmtx == PM_WARP && t_pup_warp_pending))) {
         float pm[12] = {rot[0], rot[1], rot[2], g_pup_pos[0], rot[3], rot[4], rot[5], g_pup_pos[1],
                         rot[6], rot[7], rot[8], g_pup_pos[2]};
         memcpy(g_pup_phys, pm, sizeof pm);
         GCALL2(c, PHYS_SET_MTX, proc, g_pup_phys);
+        t_pup.phys_moves++;
     }
+    t_pup_warp_pending = 0;
+}
+
+// 0.9.6: Link moved more than PUP_WARP_M since the last frame (a teleport on the same stage: a load or a new pick
+// spawns a new puppet, a fresh cloth). Pure: (where he is, the last place and whether there is one); 1: a warp.
+static int pup_warp_step(const float at[3], float last[3], int *ok) {
+    float d[3] = {at[0] - last[0], at[1] - last[1], at[2] - last[2]};
+    int warp = *ok && !(pup_len3(d) <= PUP_WARP_M);
+    memcpy(last, at, 3 * sizeof *at), *ok = 1;
+    return warp;
 }
 
 // The follow ends: its animations run again, its clip is asked again.
@@ -2005,6 +2098,7 @@ static void pup_093_forget(void) {
     t_pup_in_sprint_t = t_stam_drain_t = 0, t_stam_ok = 0;  // (0.9.5)
     t_pup.clamp = t_pup.clamp_want = 0, t_pup.clamp_by[0] = 0, t_pup.hands = t_pup.hand_bones = 0;
     t_pup.sprint_since = -1.0f;
+    t_warp_ok = 0, t_pup_warp_pending = 0, t_pup.physics = 0;  // (0.9.6: a new puppet: no warp from the last place)
 }
 
 // 0.9.5: the costume's own equipment holder, an NPC's (vf_98 returns this+PUP_NPC_HOLDER: the class of Link's,
@@ -2154,7 +2248,7 @@ static void pup_ovl_tick(uint64_t player, uint64_t proc, int ok, int rd, double 
             if (s->rest && pup_ovl_pick((const char (*)[32])nm, s->parent, s->n, kinds, sel)) {
                 for (int b = 0; b < s->n; b++) {
                     int lb = s->map[b], p = s->parent[b], lp = lb >= 0 ? t_rd.link.parent[lb] : -1;
-                    if (!sel[b] || lb < 0 || lp < 0 || p < 0) {
+                    if (!sel[b] || lb < 0 || lp < 0 || p < 0 || s->cloth[b]) {  // (0.9.6: not the cloth's)
                         sel[b] = 0;
                         continue;
                     }
@@ -2196,6 +2290,7 @@ static int pup_live(struct Cpu *c, uint64_t player, const SelfState *self, doubl
     }
     float at[3] = {m[3], m[7], m[11]};
     pup_vel_sample(at, t);  // (0.9.2: his velocity: the ground's slope, the ball)
+    if (pup_warp_step(at, t_warp_at, &t_warp_ok)) t_pup.warps++, t_pup_warp_pending = 1;  // (0.9.6: a cloth whip risk)
     // 0.9.1: his ragdoll: followed (his pose) or its lying clip, placed on the ground under him; else at his place
     // (0.9.2: or rolled, Daruk's sprint ball: below, once its clip is picked)
     int was_rd = t_pup.rd != RD_NONE;
@@ -2355,6 +2450,7 @@ static void pup_tick(struct Cpu *c, uint64_t pi, uint64_t player, double t) {
     t_pup_rd_mode = rq.rd_mode, t_pup_girth = rq.girth;
     t_pup_limp = rq.limp_set ? rq.limp : PUP_LIMP, t_pup_ball_off = rq.ball_off;
     t_pup_now = t, t_pup_clamp_off = rq.clamp_off, t_pup_hands_off = rq.hands_off;  // 0.9.3
+    t_pup_physmtx = rq.physmtx >= PM_OFF && rq.physmtx <= PM_ON ? rq.physmtx : PM_OFF;  // 0.9.6
     t_pup_grip_use = *pup_grip(id);
     if (rq.grip_set) {
         t_pup_grip_use.scale = rq.grip_scale;
@@ -2664,6 +2760,20 @@ static void cmd_puppet(int argc, char **argv, SwModReply *r) {
         api->reply_str(r, "back", argc == 6 ? "set" : "the body's own");
         return;
     }
+    if (argc == 4 && !strcmp(argv[2], "physmtx")) {  // 0.9.6: off (the default), warp, on
+        int mode = -1;
+        for (int i = 0; i <= PM_ON; i++)
+            if (!strcmp(argv[3], PM_NAMES[i])) mode = i;
+        if (mode < 0) {
+            api->reply_fail(r, "usage: ghost puppet physmtx off | warp | on");
+            return;
+        }
+        lock();
+        g_pup_req.physmtx = mode;
+        unlock();
+        api->reply_str(r, "physmtx", PM_NAMES[mode]);
+        return;
+    }
     if (argc == 4 && !strcmp(argv[2], "map")) {  // id=Actor,id=Actor (only the ids above; "-" clears)
         PupReq tmp;
         memset(&tmp, 0, sizeof tmp);
@@ -2706,7 +2816,7 @@ static void cmd_puppet(int argc, char **argv, SwModReply *r) {
     if (argc != 2) {
         api->reply_fail(r, "usage: ghost puppet [off | on | retry | lift m | ragdoll pose|clip|off | girth x | "
                            "limp x | ball on|off | clamp on|off | hands on|off | grip size [x y z] | grip - | "
-                           "back x y z | back - | map id=Actor,... | -]");
+                           "back x y z | back - | physmtx off|warp|on | map id=Actor,... | -]");
         return;
     }
     PupStatus p;
@@ -2801,6 +2911,12 @@ static void cmd_puppet(int argc, char **argv, SwModReply *r) {
     api->reply_num(r, "stamina", p.stamina);
     api->reply_int(r, "busy_waits", p.busy_waits);
     api->reply_int(r, "comebacks", p.comebacks);
+    // 0.9.6
+    api->reply_int(r, "cloth_bones", p.cloth_bones);
+    api->reply_bool(r, "physics", p.physics != 0);
+    api->reply_str(r, "physmtx", PM_NAMES[q.physmtx >= PM_OFF && q.physmtx <= PM_ON ? q.physmtx : PM_OFF]);
+    api->reply_int(r, "phys_moves", p.phys_moves);
+    api->reply_int(r, "warps", p.warps);
     char line[300];
     pup_sentence(&p, NULL, line, sizeof line);
     api->reply_text(r, "puppet %s%s%s: %s", PS_NAMES[p.state >= 0 && p.state <= PS_FAILED ? p.state : 0],

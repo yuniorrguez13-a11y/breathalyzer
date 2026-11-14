@@ -11,6 +11,7 @@ its own game files; only the character's id goes over the network.
         --slot ID=ACTOR  put a character on another free actor name (if the in-game check says one doesn't load)
         --model-copies   also Link and Linkle side by side (renamed model copies; not yet tried in the game)
         --monster-link-clips   monsters climb, glide and swim with Link's clips (not yet tried in the game)
+        --cloth off      no cloth physics (skirts, hair and capes stiff, as before 2026-11-14)
     python tools/charsel.py check [--out DIR]         read every built pack back, no game: sorted animation lists, one
                                                       clip each, sizes, the actor link
     python tools/charsel.py wheel                     the Who am I wheel in a window (arrow keys or a controller)
@@ -24,11 +25,12 @@ its own game files; only the character's id goes over the network.
     python tools/charsel.py playas off                back to Link (and Linkle back on) from the next start
     python tools/charsel.py playas check              read the built play-as mod back, no game
 
-A character pack is a tiny actor pack (14-19 KB unpacked, 6-8 KB packed) that names the game's own model and
-animation files: the donor's
-model list, an animation list with one small animation set per ghost name (the 33 names of the Link
-body, tools/mp/ghost_link_pack.py), no AI (the cutscene dummy's), no physics. People's models use Link's bone names, so
-Link's clips fill every move they don't have (through the game's own retarget); monsters use their own clips.
+A character pack is a small actor pack (14-19 KB unpacked without cloth, 45-140 KB with) that names the game's own
+model and animation files: the donor's model list, an animation list with one small animation set per ghost name
+(the 33 names of the Link body, tools/mp/ghost_link_pack.py), no AI (the cutscene dummy's), and cloth-only physics:
+the character's own skirt, hair, scarf or fur parts (its game actor's cloth file, copied from your game into the pack;
+nothing that blocks, pushes or can be hit). People's models use Link's bone names, so Link's clips fill every move
+they don't have (through the game's own retarget); monsters use their own clips.
 Each pack goes on a free actor name the game knows but never uses (a cutscene name with no pack), so the ghost mod
 spawns it with `ghost spawn <name>`. Nothing from the game is in this repo: recipes are names only. Keep the output
 in out\\ (never committed) or your own mod library, and never share it: your friend builds their own. The build
@@ -166,6 +168,23 @@ class Recipe:
     v: int = 1                # bump when the recipe changes: a build keeps an older pack only while its v matches
     #                           (it also travels in the look message, for the log; receivers don't compare it)
     ctrl: tuple = ()          # (ghost name, rate, start frame, end frame): how its set plays the clip (None: as is)
+    cloth: tuple = ()         # the donor's cloth parts (names in its physics file), most important first: the pack
+    #                           gets them as cloth-only physics (cloth_physics), the last ones left out when the heap
+    #                           estimate is short (fit_cloth). (): no physics
+
+
+# Cloth and hair physics per character (2026-11-14, the user: "if there's no skirt or hair physics you can't do the
+# Shorts"): the stock actor's own cloth parts [V: its Actor/Physics file], most important first (a skirt, a sash, a
+# scarf, long hair before an earring or a fin). out/research/charsel-anims-physics.md section 3.
+CLOTH_URBOSA = ("Skart_Havok", "Hair_B_Havok", "Hair_A_Havok", "Accs_D_Havok", "Earring_Havok")
+CLOTH_ZELDA = ("Skirt_Havok", "Hair_C_Havok", "Necklace_Havok")
+CLOTH_MIPHA = ("Cloth_A_Havok", "Cloth_B_Havok", "Cloth_C_Havok", "Head_Fin_Havok", "Ear_Havok", "Leg_Fin_Havok",
+               "Arm_Fin_R_Havok", "Parts_B_Havok", "Parts_D_Havok")
+CLOTH_REVALI = ("ScarfA_Havok", "ScarfB_Havok", "Braid_Havok", "ShoulderPlume_Havok")
+CLOTH_DARUK = ("Tophair_Havok", "Beard_Havok", "Mustache_Havok", "Cloths_Havok", "ArmFur_Havok", "Seta_Havok")
+CLOTH_PAYA = ("Hair_02_Havok", "Hair_Side_Havok")
+CLOTH_BOKO = ("Apron_Havok", "Ear_L_Havok", "Ear_R_Havok", "Necklace_Havok")
+CLOTH_MOBLIN = ("Cloth_A_Havok", "Cloth_B_Havok", "Cloth_C_Havok")
 
 
 RECIPES: dict[str, Recipe] = {r.id: r for r in (
@@ -181,9 +200,10 @@ RECIPES: dict[str, Recipe] = {r.id: r for r in (
     # run, which v3 used).
     Recipe("zelda", "Zelda", "Hylians", "pack", "Dm_Npc_Zelda_Sibyl",
            (("UMii_Common_Body_W_Animation", True), (PLAYER_ANIM, True)), _with(UMII_W, RunGear2="Common_Move_Run"),
-           load_mb=10.6, aliases=("princess",), v=4, ctrl=(("RunGear2", SPRINT_RATE, None, None),),
+           load_mb=10.6, aliases=("princess",), v=5, ctrl=(("RunGear2", SPRINT_RATE, None, None),),
+           cloth=CLOTH_ZELDA,
            looks="Her game actor's own stand, walk, run (sprint: her run, faster); Link's moves for the rest. "
-                 "The dress is stiff."),
+                 "Her dress, hair and necklace swing (cloth physics, not yet tried in the game)."),
     Recipe("hylian", "Hylian", "Hylians", "pack", "Npc_HatenoVillage004",
            (("UMii_Common_Body_M_Animation", True), (PLAYER_ANIM, True)), UMII_M, load_mb=11.5,
            aliases=("hateno", "villager"), looks="A Hateno villager: his own walk, Link's moves for the rest."),
@@ -193,8 +213,9 @@ RECIPES: dict[str, Recipe] = {r.id: r for r in (
     Recipe("sheikah", "Paya (Sheikah)", "Races", "pack", "Npc_Kakariko002",
            (("Npc_Shiekah_Heir_Animation", False), ("UMii_Common_Body_W_Animation", True), (PLAYER_ANIM, True)),
            _with(UMII_W, Wait="Npc_Shiekah_Heir_Talk_Shy_Wait", RunGear2="Common_Move_Run"), load_mb=6.8,
-           aliases=("paya",), v=3, ctrl=(("RunGear2", SPRINT_RATE, None, None),),
-           looks="Her own shy stand; the game's walk and run for her; Link's moves for the rest."),
+           aliases=("paya",), v=4, ctrl=(("RunGear2", SPRINT_RATE, None, None),), cloth=CLOTH_PAYA,
+           looks="Her own shy stand; the game's walk and run for her; Link's moves for the rest. Her hair swings "
+                 "(cloth physics, not yet tried in the game)."),
     # Urbosa (v4): the women's file, where her game actor finds her stand, walk and run, no longer the Gerudo guards'
     # file (v3 had it first: her stand and walk were a Gerudo guard's; the real Urbosa never loads it [V]). Her actor
     # also loads the men's file (5.1 MB unpacked) for a real sprint; left out to keep her light: her run, faster.
@@ -207,18 +228,22 @@ RECIPES: dict[str, Recipe] = {r.id: r for r in (
     Recipe("gerudo", "Urbosa (Gerudo)", "Races", "pack", "Dm_Npc_Gerdo_Hero",
            (("UMii_Common_Body_W_Animation", True), (PLAYER_ANIM, True)),
            _with(UMII_W, Wait="Positive_Wait", Walk="Positive_Move_Walk", RunGear2="Common_Move_Run"),
-           load_mb=13.3, aliases=("urbosa",), v=5, ctrl=(("RunGear2", SPRINT_RATE, None, None),),
+           load_mb=13.3, aliases=("urbosa",), v=6, ctrl=(("RunGear2", SPRINT_RATE, None, None),),
+           cloth=CLOTH_URBOSA,
            looks="Tall. Her game actor's own hip-shot stand, walk and run (sprint: her run, faster); Link's moves for "
-                 "the rest."),
+                 "the rest. Her skirt, hair and earring swing (cloth physics, not yet tried in the game)."),
     Recipe("goron", "Daruk (Goron)", "Races", "pack", "Dm_Npc_Goron_Hero",
            (("UMii_Goron_BodyC_M_Animation", True), (PLAYER_ANIM, True)),
-           _with(UMII_M, RunGear2="Common_Move_Ball"), load_mb=10.9, aliases=("daruk",), v=3,
-           looks="Sprints as a rolling ball. Link's climb and glide on a Goron body may look odd [G]."),
+           _with(UMII_M, RunGear2="Common_Move_Ball"), load_mb=10.9, aliases=("daruk",), v=4, cloth=CLOTH_DARUK,
+           looks="Sprints as a rolling ball. Link's climb and glide on a Goron body may look odd [G]. His hair, beard "
+                 "and cloth swing (cloth physics, not yet tried in the game)."),
     Recipe("rito", "Revali (Rito)", "Races", "pack", "Dm_Npc_Rito_Hero",
            (("UMii_Rito_Body_M_Animation", True), ("UMii_Common_Body_M_Animation", True),
             ("Npc_Rito_Teba_Animation", True), (PLAYER_ANIM, True)),
-           _with(UMII_M, ParashawlGlide="Npc_Rito_Teba_BattleFly"), load_mb=10.6, aliases=("revali",), v=3,
-           looks="Glides with real wings (a Rito flying clip)."),
+           _with(UMII_M, ParashawlGlide="Npc_Rito_Teba_BattleFly"), load_mb=10.6, aliases=("revali",), v=4,
+           cloth=CLOTH_REVALI,
+           looks="Glides with real wings (a Rito flying clip). His scarf, braids and plume swing (cloth physics, not "
+                 "yet tried in the game)."),
     # Mipha: the stand, walk and run her game pack plays (the Hylian women's file, retargeted to her), and a Zora
     # WOMAN's swim (UMii_Zora_BodyC_W; v3 had the Zora men's file, whose Default_Wait is a man's stance too). Her
     # size is her game model's, scale 1 (hips 0.75 m, legs 0.54 m: her own game clip Gift_Healing has her hips at
@@ -226,20 +251,22 @@ RECIPES: dict[str, Recipe] = {r.id: r for r in (
     Recipe("zora", "Mipha (Zora)", "Races", "pack", "Dm_Npc_Zora_Hero",
            (("UMii_Common_Body_W_Animation", True), ("UMii_Zora_BodyC_W_Animation", True), (PLAYER_ANIM, True)),
            _with(UMII_W, SwimWait="Common_Swim_Wait", SwimMove="Common_Move_Swim_Walk",
-                 SwimDash="Common_Move_Swim_Run", RunGear2="Common_Move_Run"), load_mb=11.2, aliases=("mipha",), v=5,
-           ctrl=(("RunGear2", SPRINT_RATE, None, None),),
+                 SwimDash="Common_Move_Swim_Run", RunGear2="Common_Move_Run"), load_mb=11.2, aliases=("mipha",), v=6,
+           ctrl=(("RunGear2", SPRINT_RATE, None, None),), cloth=CLOTH_MIPHA,
            looks="Her game size (shorter than Link). Swims with a Zora woman's swim clips (lying in the water when "
-                 "she moves, upright when she treads)."),
+                 "she moves, upright when she treads). Her sash and fins swing (cloth physics, not yet tried in the "
+                 "game)."),
     Recipe("bokoblin", "Bokoblin", "Monsters", "pack", "Enemy_Bokoblin_Junior",
-           (("Enemy_Bokoblin_Animation", False),), BOKO, rest="speed", load_mb=6.2, aliases=("boko",), v=3,
-           ctrl=BOKO_CTRL,
+           (("Enemy_Bokoblin_Animation", False),), BOKO, rest="speed", load_mb=6.2, aliases=("boko",), v=4,
+           ctrl=BOKO_CTRL, cloth=CLOTH_BOKO,
            looks="Its own clips; each swing timed to Link's hit and picked by his weapon. No climb or glide pose; "
-                 "it wades in water."),
+                 "it wades in water. Apron and ears swing (cloth physics, not yet tried in the game)."),
     Recipe("moblin", "Moblin", "Monsters", "pack", "Enemy_Moriblin_Junior",
-           (("Enemy_Moriblin_Animation", False),), MOBLIN, rest="speed", load_mb=7.8, aliases=("moriblin",), v=3,
-           ctrl=MOBLIN_CTRL,
+           (("Enemy_Moriblin_Animation", False),), MOBLIN, rest="speed", load_mb=7.8, aliases=("moriblin",), v=4,
+           ctrl=MOBLIN_CTRL, cloth=CLOTH_MOBLIN,
            looks="Its own clips; each swing timed to Link's hit and picked by his weapon. No climb or glide pose; "
-                 "it wades in water. Big: may pop in at the screen's edges."),
+                 "it wades in water. Big: may pop in at the screen's edges. Its loincloth swings (cloth physics, not "
+                 "yet tried in the game)."),
 )}
 
 CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -1431,12 +1458,204 @@ def fit_heap(files: list[tuple[str, bool]], bones: int | None, heap: int | None,
     return off, heap_need(off, bones, count)
 
 
+# ------------------------------------------------------------------------------------------------ cloth (2026-11-14)
+#
+# Skirt, hair, scarf and fur physics: the pack's PhysicsUser is SwChar_<id>, a copy of the donor's physics file made
+# CLOTH ONLY, the way every armor piece of the game does it [V: 3 armors read, Armor_001_Upper's below]: no rigid body
+# (the donor's 'Tgt' sensor capsule), no character controller (its 60 kg capsule on EntityNPC would push Link), no
+# contact info, no ragdoll (the monsters'), only the cloth parts and the support bones (helper bones turned by others).
+# The cloth (.hkcl) and support-bone (.bphyssb) files are the donor's own, copied from the player's game into the pack
+# at build time, at the paths the physics file names (Physics/Cloth/<path>, Physics/SupportBone/<path>) [V: the
+# donors' packs]. They name the donor's bones, and the pack draws the donor's model: the same bones.
+# Not seen in the game [V: 0 of the game's NPC and DemoNPC actors use cloth with no rigid body; the Great Fairies keep a
+# 'Tgt' capsule on SensorNoHit with no controller]: whether an NPC-class actor runs with no rigid body at all [G].
+# Fallback: `charsel build --cloth off` (the packs as before: no physics). Every game physics file lists every part of
+# its cloth file (508 read [V]); leaving parts out (fit_cloth, only when the heap estimate is short) is [G].
+PHYS_HEADER = "ParamSetHeader"     # (its hash 0x4b0843d2, as in the game's files [V])
+PHYS_OFF = {"use_rigid_body_set_num": 0, "use_ragdoll": False, "use_character_controller": False,
+            "use_contact_info": False, "use_edge_rigid_body_num": 0}
+CLOTH_HEAP_X = 1.5                 # actor heap per byte of the cloth and support-bone files [G: no game number]
+PACK_LIMIT_CLOTH = 256 * 1024      # bytes unpacked, a pack with physics (the cloth files: 27-95 KB [V])
+CLOTH_SWITCH = ("on", "off")       # charsel build --cloth
+
+
+def donor_physics(r: Recipe, donor: dict[str, bytes]) -> tuple[str, object] | None:
+    """(the donor's physics file name, its parameters) or None (no physics)."""
+    import aamp
+    from mp import ghost_link_pack as glp
+    _, dlt = glp.link_target(donor, r.donor)
+    pu = dlt.get_value("PhysicsUser")
+    data = donor.get(f"Actor/Physics/{pu}.bphysics") if isinstance(pu, str) and pu not in ("", "Dummy") else None
+    return (pu, aamp.load(data)) if data else None
+
+
+def cloth_parts(phys) -> list[str]:
+    """The cloth part names a physics file lists (Cloth > Cloth_0, Cloth_1...), in its order; [] none."""
+    from aamp import name_hash
+    ps = phys.list("ParamSet")
+    cl = ps.list("Cloth") if ps else None
+    hdr = ps.object(PHYS_HEADER) if ps else None
+    if not cl or not hdr or not hdr.get_value("use_cloth"):
+        return []
+    n = cl.object("ClothHeader").get_value("cloth_num") if cl.object("ClothHeader") else 0
+    out = []
+    for i in range(int(n or 0)):
+        o = cl.objects.get(name_hash(f"Cloth_{i}"))
+        name = o.get_value("name") if o else None
+        if isinstance(name, str) and name:
+            out.append(name)
+    return out
+
+
+def physics_paths(phys) -> dict[str, str]:
+    """{"cloth": "Physics/Cloth/<path>", "support": "Physics/SupportBone/<path>"}: the files a physics file names (only
+    the kinds it uses)."""
+    ps = phys.list("ParamSet")
+    hdr = ps.object(PHYS_HEADER) if ps else None
+    out = {}
+    cl = ps.list("Cloth") if ps else None
+    if hdr and hdr.get_value("use_cloth") and cl and cl.object("ClothHeader"):
+        p = cl.object("ClothHeader").get_value("cloth_setup_file_path")
+        if isinstance(p, str) and p:
+            out["cloth"] = f"Physics/Cloth/{p}"
+    sb = ps.object("SupportBone") if ps else None
+    if hdr and hdr.get_value("use_support_bone") and sb:
+        p = sb.get_value("support_bone_setup_file_path")
+        if isinstance(p, str) and p:
+            out["support"] = f"Physics/SupportBone/{p}"
+    return out
+
+
+def cloth_physics(phys, keep) -> bytes:
+    """The donor's physics file made cloth only (the armor pattern above): its header with PHYS_OFF, its support bones,
+    and the cloth parts in `keep` (in the file's own order, numbered again; the cloth list's other objects as they
+    are). Nothing else: no rigid bodies, no character controller, no contact info, no ragdoll."""
+    import aamp
+    from aamp import BOOL, INT, PList, PObject, Param, name_hash
+    ps = phys.list("ParamSet")
+    hdr = ps.object(PHYS_HEADER) if ps else None
+    cl = ps.list("Cloth") if ps else None
+    if not hdr or not cl or not cl.object("ClothHeader"):
+        raise CharselError("the donor's physics has no cloth")
+    keep = set(keep)
+    new_hdr = PObject(hdr)
+    for k, v in PHYS_OFF.items():
+        new_hdr[name_hash(k)] = Param(INT if isinstance(v, int) and not isinstance(v, bool) else BOOL, v)
+    new_hdr[name_hash("use_cloth")] = Param(BOOL, True)
+    paths = physics_paths(phys)
+    new_hdr[name_hash("use_support_bone")] = Param(BOOL, "support" in paths)
+    objects = {name_hash(PHYS_HEADER): new_hdr}
+    if "support" in paths:
+        objects[name_hash("SupportBone")] = PObject(ps.object("SupportBone"))
+    parts = [n for n in cloth_parts(phys) if n in keep]
+    if not parts:
+        raise CharselError("no cloth part left")
+    by_name = {o.get_value("name"): o for h, o in cl.objects.items() if o.get_value("name")}
+    cloth = PList()
+    for h, o in cl.objects.items():   # (the header and the cloth's own settings: as they are, then the parts)
+        if o.get_value("name") is None:
+            cloth.objects[h] = PObject(o)
+    ch = PObject(cloth.objects[name_hash("ClothHeader")])
+    ch[name_hash("cloth_num")] = Param(INT, len(parts))
+    cloth.objects[name_hash("ClothHeader")] = ch
+    for i, n in enumerate(parts):
+        cloth.objects[name_hash(f"Cloth_{i}")] = PObject(by_name[n])
+    return aamp.dump(PList(lists={name_hash("ParamSet"): PList(objects=objects,
+                                                                 lists={name_hash("Cloth"): cloth})}))
+
+
+def cloth_only_problems(data: bytes) -> list[str]:
+    """What makes a physics file more than cloth: [] = cloth (and support bones) only."""
+    import aamp
+    try:
+        ps = aamp.load(data).list("ParamSet")
+        hdr = ps.object(PHYS_HEADER)
+    except Exception as e:   # (any read failure is the answer)
+        return [f"its physics doesn't read ({type(e).__name__})"]
+    if hdr is None:
+        return ["its physics has no header"]
+    bad = [f"physics {k} = {hdr.get_value(k)!r}" for k, v in PHYS_OFF.items() if hdr.get_value(k, v) != v]
+    for name in ("RigidBodySet", "CharacterController", "RigidContactInfo"):
+        if ps.list(name) is not None:
+            bad.append(f"physics has {name}")
+    if ps.object("Ragdoll") is not None:
+        bad.append("physics has a ragdoll")
+    return bad
+
+
+def cloth_bytes(files: dict[str, bytes], parts: int, of: int) -> int:
+    """The heap estimate of a pack's cloth: CLOTH_HEAP_X per byte of its cloth and support-bone files, the cloth's
+    share by parts kept [G: no game number; the instances live in the actor heap]."""
+    cloth = sum(len(d) for n, d in files.items() if n.startswith("Physics/Cloth/"))
+    support = sum(len(d) for n, d in files.items() if n.startswith("Physics/SupportBone/"))
+    share = parts / of if of else 0.0
+    return int(CLOTH_HEAP_X * (cloth * share + support))
+
+
+def fit_cloth(want: list[str], files: dict[str, bytes], all_parts: int, room: int | None
+              ) -> tuple[list[str], list[str], int]:
+    """(parts kept, parts left out, their heap estimate): the last ones of `want` (least important) left out until the
+    rest fit `room` (bytes of heap left after the model and animations); never the first. No room known: all."""
+    kept = list(want)
+    need = cloth_bytes(files, len(kept), all_parts)
+    while room is not None and need > room and len(kept) > 1:
+        kept.pop()
+        need = cloth_bytes(files, len(kept), all_parts)
+    return kept, [p for p in want if p not in kept], need
+
+
+def pack_cloth(r: Recipe, donor: dict[str, bytes]) -> tuple[object, dict[str, bytes], list[str], str]:
+    """(the donor's physics parameters, its cloth and support-bone files, the recipe's parts it has (in the recipe's
+    order), a note) for a recipe with cloth; (None, {}, [], why) when the donor has none to give."""
+    if not r.cloth:
+        return None, {}, [], ""
+    got = donor_physics(r, donor)
+    if got is None:
+        return None, {}, [], f"{r.donor} has no physics file"
+    phys = got[1]
+    have = cloth_parts(phys)
+    paths = physics_paths(phys)
+    files = {p: donor[p] for p in paths.values() if p in donor}
+    if "cloth" not in paths or paths["cloth"] not in files:
+        return None, {}, [], f"{r.donor}'s cloth file isn't in its pack"
+    if "support" in paths and paths["support"] not in files:
+        return None, {}, [], f"{r.donor}'s support-bone file isn't in its pack"
+    parts = [p for p in r.cloth if p in have]
+    missing = [p for p in r.cloth if p not in have]
+    if not parts:
+        return None, {}, [], f"none of the cloth parts is in {r.donor}'s physics"
+    return phys, files, parts, (f"not in its physics: {', '.join(missing)}" if missing else "")
+
+
+def physics_bones(files: dict[str, bytes], bones, link_bones) -> list[str]:
+    """The bones a pack's cloth and support bones move: the names in its cloth file and its support-bone file that are
+    bones of its model, less the ones named as Link's (the ones the costume's pose sets: the cloth's anchors, the arms
+    the support bones read). Sorted. A cloth file is a Havok packfile: its bone names are plain strings in it [V]."""
+    import aamp
+    names: set[str] = set()
+    for n, d in files.items():
+        if n.startswith("Physics/Cloth/"):
+            names.update(m.decode("ascii") for m in re.findall(rb"[A-Za-z_][A-Za-z0-9_]{0,63}", d))
+        elif n.startswith("Physics/SupportBone/"):
+            def walk(pl):
+                for o in pl.objects.values():
+                    for p in o.values():
+                        if isinstance(p.value, str):
+                            names.add(p.value)
+                for sub in pl.lists.values():
+                    walk(sub)
+            walk(aamp.load(d))
+    return sorted((names & set(bones)) - set(link_bones))
+
+
 def make_pack(r: Recipe, slot: str, profile: str, template: dict[str, bytes], donor: dict[str, bytes],
-              rest: str | None = None, files: list[tuple[str, bool]] | None = None, bones=None) -> dict[str, bytes]:
+              rest: str | None = None, files: list[tuple[str, bool]] | None = None, bones=None,
+              physics: tuple[bytes, dict[str, bytes]] | None = None) -> dict[str, bytes]:
     """The files of a character's pack, from the template's pack (the game's cutscene Sheikah man: actor link, AI
     program, animation targets when the donor's can't be used: body_targets) and the donor's (its model list, its
     animation list's flags, its look file). files: the animation files and their retarget (default pack_anim_files;
-    build passes fit_heap's). bones: the body's bone names, when known."""
+    build passes fit_heap's). bones: the body's bone names, when known. physics: (our cloth-only physics file, the
+    donor's cloth and support-bone files) (cloth_physics, pack_cloth); None: no physics."""
     import aamp
     from mp import ghost_link_pack as glp
     if r.kind != "pack":
@@ -1458,16 +1677,18 @@ def make_pack(r: Recipe, slot: str, profile: str, template: dict[str, bytes], do
         files = pack_anim_files(r, donor, rest)
     look = (d_umii, donor[f"Actor/UMii/{d_umii}.bumii"]) if umii else None
     model_list, _swapped = body_targets(donor[ml_name], template, bones)
-    return _pack_files(r.id, slot, profile, template, model_list, look, files, clip_map(r, rest), frame_ctrl(r))
+    return _pack_files(r.id, slot, profile, template, model_list, look, files, clip_map(r, rest), frame_ctrl(r),
+                       physics)
 
 
 def _pack_files(cid: str, slot: str, profile: str, template: dict[str, bytes], model_list: bytes,
                 look: tuple[str, bytes] | None, files: list[tuple[str, bool]], mapping: dict[str, str],
-                ctrl: dict[str, tuple] | None = None) -> dict[str, bytes]:
-    """The pack: the template's actor link with our users (no AI but the cutscene dummy's, no physics), the files the
-    kept users need, our model list, the look file (bodies the game puts together from one), our animation list
-    (files, sorted names, blend frames) and one animation set per name. Every name of ours is SwChar_<id>, so two
-    packs never share a path with different contents."""
+                ctrl: dict[str, tuple] | None = None, physics: tuple[bytes, dict[str, bytes]] | None = None
+                ) -> dict[str, bytes]:
+    """The pack: the template's actor link with our users (no AI but the cutscene dummy's; no physics, or our
+    cloth-only physics), the files the kept users need, our model list, the look file (bodies the game puts together
+    from one), our animation list (files, sorted names, blend frames) and one animation set per name. Every name of
+    ours is SwChar_<id>, so two packs never share a path with different contents."""
     import aamp
     from aamp import F32, STRING32, STRING64, PList, PObject, Param, name_hash
     from mp import ghost_link_pack as glp
@@ -1485,7 +1706,8 @@ def _pack_files(cid: str, slot: str, profile: str, template: dict[str, bytes], m
     if tmpl is None:
         raise CharselError(f"{TEMPLATE}'s animation list has no retarget entry to copy")
     name = ours(cid)
-    users = {"ModelUser": name, "ASUser": name, "PhysicsUser": "Dummy", "AnimationInfo": "Dummy",
+    users = {"ModelUser": name, "ASUser": name, "PhysicsUser": name if physics else "Dummy",
+             "AnimationInfo": "Dummy",
              "UMiiUser": look[0] if look else "Dummy", "AIProgramUser": "DemoDummy", "ProfileUser": profile}
     for k, v in users.items():
         p = lt.get(name_hash(k))
@@ -1499,6 +1721,12 @@ def _pack_files(cid: str, slot: str, profile: str, template: dict[str, bytes], m
     if "Actor/AIProgram/DemoDummy.baiprog" not in out:
         raise CharselError(f"{TEMPLATE}'s pack has no DemoDummy AI program")
     out[f"Actor/ModelList/{name}.bmodellist"] = model_list
+    if physics:   # (2026-11-14: cloth only; its cloth and support-bone files at the paths it names)
+        out[f"Actor/Physics/{name}.bphysics"] = physics[0]
+        for n, b in physics[1].items():
+            if not n.startswith(("Physics/Cloth/", "Physics/SupportBone/")):
+                raise CharselError(f"{n} isn't a cloth or support-bone file")
+            out[n] = b
     if look:
         out[f"Actor/UMii/{look[0]}.bumii"] = look[1]
     add = PList()
@@ -1600,14 +1828,28 @@ def read_back(data: bytes) -> dict:
         if md and md.lists:
             folder = next(iter(md.lists.values())).object("Base").get_value("Folder")
         targets = target_types(mlp)
+    physics = None   # (2026-11-14: our cloth-only physics: its parts, the files it names and whether they are there)
+    pu = users["PhysicsUser"]
+    if isinstance(pu, str) and pu not in ("", "Dummy"):
+        pd = files.get(f"Actor/Physics/{pu}.bphysics")
+        physics = {"file": pd is not None, "cloth": [], "paths": {}, "missing": [], "bad": []}
+        if pd is not None:
+            try:
+                ph = aamp.load(pd)
+                physics.update(cloth=cloth_parts(ph), paths=physics_paths(ph))
+            except Exception as e:   # (any read failure: said by check_pack)
+                physics["bad"].append(f"its physics doesn't read ({type(e).__name__})")
+            physics["missing"] = [v for v in physics["paths"].values() if v not in files]
+            physics["bad"] += cloth_only_problems(pd)
     return {"slot": slot, "users": users, "names": names, "clips": clips, "ctrl": ctrls, "missing_sets": missing,
-            "adds": adds,
+            "adds": adds, "physics": physics,
             "folder": folder, "targets": targets, "files": len(files), "unpacked": len(raw), "packed": len(data)}
 
 
 # The actor link's users that would make a ghost or the self puppet something Link can lock on to, talk to or hit
-# (the attention list: lock-on and talk targets; the damage parameters). The template's are Dummy (none), as its
-# physics: check_pack keeps it so (a missing user is none too).
+# (the attention list: lock-on and talk targets; the damage parameters). The template's are Dummy (none): check_pack
+# keeps it so (a missing user is none too). Physics: none, or ours with cloth only (no rigid body, no character
+# controller, no contact info, no ragdoll: nothing that blocks, pushes or is hit; cloth_only_problems).
 UNTOUCHABLE = ("AttentionUser", "DamageParamUser")
 
 
@@ -1631,8 +1873,19 @@ def check_pack(data: bytes, expect_slot: str | None = None) -> list[str]:
     u = r["users"]
     if u["AIProgramUser"] != "DemoDummy":
         bad.append(f"AI program {u['AIProgramUser']}, not the cutscene dummy")
-    if u["PhysicsUser"] != "Dummy":
-        bad.append(f"physics {u['PhysicsUser']}")
+    ph = r["physics"]
+    if u["PhysicsUser"] not in (None, "Dummy"):   # (2026-11-14: only ours, cloth only, with the files it names)
+        if u["PhysicsUser"] != u["ModelUser"] or not str(u["PhysicsUser"]).startswith("SwChar_"):
+            bad.append(f"physics {u['PhysicsUser']}")
+        elif not ph or not ph["file"]:
+            bad.append(f"no physics file for {u['PhysicsUser']}")
+        else:
+            bad += ph["bad"]
+            if not ph["cloth"]:
+                bad.append("physics with no cloth part")
+            if "cloth" not in ph["paths"]:
+                bad.append("physics with no cloth file")
+            bad += [f"{m} is missing (the physics names it)" for m in ph["missing"]]
     for k in UNTOUCHABLE:
         if u[k] not in (None, "Dummy"):
             bad.append(f"{k} {u[k]} (it could be locked on, talked to or hit)")
@@ -1640,8 +1893,9 @@ def check_pack(data: bytes, expect_slot: str | None = None) -> list[str]:
         bad.append(f"profile {u['ProfileUser']}")
     if u["ProfileUser"] != SLOT_PROFILE.get(r["slot"], u["ProfileUser"]):
         bad.append(f"profile {u['ProfileUser']} on a {SLOT_PROFILE.get(r['slot'])} name")
-    if r["unpacked"] >= PACK_LIMIT:
-        bad.append(f"{r['unpacked']:,} bytes unpacked (limit {PACK_LIMIT:,})")
+    limit = PACK_LIMIT_CLOTH if ph else PACK_LIMIT
+    if r["unpacked"] >= limit:
+        bad.append(f"{r['unpacked']:,} bytes unpacked (limit {limit:,})")
     if not r["adds"]:
         bad.append("no animation files")
     if any(t in SWAP_TARGET_TYPES for t in r["targets"]):
@@ -1679,9 +1933,10 @@ def parse_slots(items) -> dict[str, str]:
 
 
 def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots=None, model_copies=False,
-          monster_link=False, link_retarget="auto", cache=DEFAULT_CACHE, say=print) -> dict:
+          monster_link=False, link_retarget="auto", cache=DEFAULT_CACHE, cloth="on", say=print) -> dict:
     """Build the mod folder (mod.toml, romfs\\Actor\\Pack\\<free name>.sbactorpack, charsel.json). Returns the catalog.
-    link_retarget: Link's file retargeted by the heap estimate ("auto"), always ("on") or never ("off")."""
+    link_retarget: Link's file retargeted by the heap estimate ("auto"), always ("on") or never ("off"). cloth: the
+    recipes' cloth physics ("on") or none ("off": the packs as before 2026-11-14)."""
     from mp import ghost_link_pack as glp
     from wiiu_convert import FormatError
     import aamp
@@ -1692,6 +1947,8 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
         raise CharselError(f"{romfs} isn't the game's extracted romfs (no Actor\\Pack)")
     if link_retarget not in LINK_RETARGET:
         raise CharselError(f"--link-retarget is {', '.join(LINK_RETARGET)}")
+    if cloth not in CLOTH_SWITCH:
+        raise CharselError(f"--cloth is {', '.join(CLOTH_SWITCH)}")
     all_ids = not ids
     ids = list(dict.fromkeys(find_id(i) or i for i in (ids or order())))
     bad = [i for i in ids if i not in RECIPES]
@@ -1703,7 +1960,10 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
     for cid, info in ((old.get("built") or {}).items() if old.get("mod") == MOD_ID and not all_ids else ()):
         r = RECIPES.get(cid)
         slot = info.get("slot") if isinstance(info, dict) else None
+        cl_then = (info.get("cloth") or {}) if isinstance(info, dict) else {}
+        off_then = cl_then.get("off") == "charsel build --cloth off"
         if (r is not None and cid not in ids and slot in FREE_SLOTS and info.get("v") == r.v
+                and off_then == (cloth == "off" and bool(r.cloth))   # (the same --cloth as this build)
                 and (out / "romfs" / "Actor" / "Pack" / f"{slot}.sbactorpack").is_file()):
             keep[cid] = info
     table = dict(SLOTS)
@@ -1763,6 +2023,7 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
         rest = None
         need = heap = bones = None
         link_rt, swap = True, False
+        cl_info: dict | None = None
         try:
             if r.kind == "pack":
                 rest = "link" if (monster_link and r.cat == "Monsters") else None
@@ -1784,16 +2045,43 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
 
                 def count(f):
                     return len(clips.clips(f) or ()) or (PLAYER_CLIPS if f == PLAYER_ANIM else 0)
+                # 2026-11-14: its cloth (the recipe's parts the donor has), counted in the heap first: Link's file
+                # loses its retarget before a cloth part is left out, and the last parts go when even that is short
+                phys, cfiles, cparts, cnote = pack_cloth(r, donor) if cloth == "on" else (None, {}, [], "")
+                call = len(cloth_parts(phys)) if phys is not None else 0
+                cneed = cloth_bytes(cfiles, len(cparts), call) if phys is not None else 0
+                room = heap - cneed if heap else heap
                 if link_retarget == "auto":
-                    anims, need = fit_heap(anims, bones, heap, count)
+                    anims, need = fit_heap(anims, bones, room, count)
                 else:
                     anims = [(f, rt and (f != PLAYER_ANIM or link_retarget == "on")) for f, rt in anims]
                     need = heap_need(anims, bones, count) if bones and heap else None
                 link_rt = any(rt for f, rt in anims if f == PLAYER_ANIM)
+                physics = None
+                if phys is not None:
+                    base = need if need else HEAP_BASE
+                    kept, dropped, cneed = fit_cloth(cparts, cfiles, call, heap - base if heap else None)
+                    if heap and base + cneed > heap:   # (even its most important part alone: no cloth)
+                        cl_info = {"off": f"not even {kept[0]} fits the heap estimate", "parts": [], "dropped": cparts}
+                        notes.append(f"{r.name}: no cloth physics (the heap estimate is short even for {kept[0]})")
+                    else:
+                        physics = (cloth_physics(phys, kept), cfiles)
+                        cl_info = {"parts": kept, "dropped": dropped, "bytes": cneed,
+                                   "file": physics_paths(phys)["cloth"]}
+                        if dropped:
+                            notes.append(f"{r.name}: cloth parts left out for the heap: {', '.join(dropped)}")
+                        if cnote:
+                            cl_info["note"] = cnote
+                        need = base + cneed if heap else need
+                elif r.cloth and cloth == "on":
+                    cl_info = {"off": cnote or "no cloth", "parts": [], "dropped": list(r.cloth)}
+                    notes.append(f"{r.name}: no cloth physics ({cnote})")
+                elif r.cloth:
+                    cl_info = {"off": "charsel build --cloth off", "parts": [], "dropped": list(r.cloth)}
                 if need and heap and need > heap:
                     notes.append(f"{r.name} may not fit {slot}'s heap (about {need:,} of {heap:,} bytes): if it "
                                  "doesn't load, move it to a bigger free name with --slot.")
-                files = make_pack(r, slot, profile, template, donor, rest, anims, names)
+                files = make_pack(r, slot, profile, template, donor, rest, anims, names, physics)
             elif cid == "linkle" and lm or model_copies and cid == "link" and pm:
                 slot = table[cid]
                 profile, problems = check_slot(romfs, slot, ainfo)
@@ -1843,14 +2131,20 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
                                  "link": len(res["link"]), "names": len(res["own"]) + len(res["link"]),
                                  "rest": (rest or r.rest) if r.kind == "pack" else "link", "load_mb": r.load_mb}
         if r.kind == "pack" and need:
-            catalog["built"][cid].update(heap={"need": need, "have": heap, "bones": bones},
+            catalog["built"][cid].update(heap={"need": need, "have": heap, "bones": bones,
+                                               "cloth": (cl_info or {}).get("bytes", 0)},
                                          link_retarget=link_rt)
+        if cl_info is not None:
+            catalog["built"][cid]["cloth"] = cl_info
         if r.kind == "pack" and swap:
             catalog["built"][cid]["anim_targets"] = "link-body"
         say(f"  {r.name:16} on {slot:31} {len(files):3} files, {unpacked:6,} B unpacked, own clips "
             f"{len(res['own']):2}, Link's {len(res['link']):2}"
             + (f"{'' if link_rt else ' (not retargeted)'}" if r.kind == "pack" and res["link"] else "")
-            + (" (Link body's anim targets)" if r.kind == "pack" and swap else ""))
+            + (" (Link body's anim targets)" if r.kind == "pack" and swap else "")
+            + (f", cloth {len(cl_info['parts'])} parts" + (f" ({len(cl_info['dropped'])} left out)"
+                                                          if cl_info["dropped"] else "")
+               if cl_info and cl_info.get("parts") else ""))
     # write: our files in the romfs folder (the kept characters' stay; every other pack or model of ours goes), the
     # catalog, and built.txt (made from the game's files: never exported as a .breath)
     top = out / "romfs"
@@ -2935,7 +3229,8 @@ def _build_add(args) -> int:
         print("Building the characters from your own game files (a few minutes)...")
         cat = build(romfs, out, args.ids, library=lib.root, slots=parse_slots(args.slot),
                     model_copies=args.model_copies, monster_link=args.monster_link_clips,
-                    link_retarget=args.link_retarget, cache=args.cache or tmp / "cache.json")
+                    link_retarget=args.link_retarget, cache=args.cache or tmp / "cache.json",
+                    cloth=getattr(args, "cloth", "on"))
         if not cat["built"]:
             print(f"No character could be built ({len(cat['skipped'])} skipped).")
             return 1
@@ -3140,8 +3435,34 @@ def hands_header(hands: dict[str, dict]) -> str:
     return "\n".join(lines)
 
 
-def bodies_header(boxes: dict[str, dict[str, list[int]]], hands: dict[str, dict] | None = None) -> str:
-    """pup_bodies.h: the C table puppet.c reads ({id: {bone: box}}; link first), then (hands given) the hand bones."""
+def cloth_header(cloth: dict[str, list[str]]) -> str:
+    """The bones each body's own physics moves, as C (an addition to pup_bodies.h, after the hands): PUP_CLOTH, one
+    string of names per body, each name followed by one space (puppet.c pup_cloth_has), then an end entry."""
+    lines = ["",
+             "// Bones each body's own cloth and support-bone physics move (charsel.py bodies: the names in its pack's",
+             "// Physics files that are bones of its model, less the ones named as Link's: the anchors its pose sets).",
+             "// puppet.c leaves them to the physics: the ragdoll pose and the hands never write them (no fight, no",
+             "// jitter). Names only.",
+             "typedef struct {", "    const char *id;", "    const char *bones;  // each name followed by one space",
+             "} PupCloth;", "static const PupCloth PUP_CLOTH[] = {"]
+    for cid in sorted(cloth):
+        rows, row = [], ""
+        for n in cloth[cid]:
+            if row and len(row) + len(n) + 1 > 96:
+                rows.append(row)
+                row = ""
+            row += n + " "
+        rows = rows + [row] if row else rows
+        lines.append(f'    {{"{cid}",')
+        lines += [f'     "{r}"' for r in rows[:-1]] + ([f'     "{rows[-1]}"}},'] if rows else ['     ""},'])
+    lines += ["    {0, 0},", "};", ""]
+    return "\n".join(lines)
+
+
+def bodies_header(boxes: dict[str, dict[str, list[int]]], hands: dict[str, dict] | None = None,
+                  cloth: dict[str, list[str]] | None = None) -> str:
+    """pup_bodies.h: the C table puppet.c reads ({id: {bone: box}}; link first), then (hands given) the hand bones,
+    then (cloth given) the bones each body's physics moves."""
     lines = ["// Made by python tools\\charsel.py bodies from the game's own models (numbers only): each body's flesh around",
              "// its main bones, the box its vertices fill in the bone's own frame at rest, cm (x-, x+, y-, y+, z-, z+).",
              "// puppet.c turns them with the bones during a ragdoll to keep the costume's lowest point on the ground.",
@@ -3161,16 +3482,20 @@ def bodies_header(boxes: dict[str, dict[str, list[int]]], hands: dict[str, dict]
             lines.append("        " + ", ".join(rows[k:k + 3]) + ",")
         lines.append("    }},")
     lines.append("};")
-    return "\n".join(lines) + "\n" + (hands_header(hands) if hands else "")
+    return "\n".join(lines) + "\n" + (hands_header(hands) if hands else "") + (cloth_header(cloth) if cloth else "")
 
 
-def build_bodies(romfs: Path = DEFAULT_ROMFS, out: Path = BODY_HEADER, hands: dict | None = None
-                 ) -> dict[str, dict[str, list[int]]]:
+def build_bodies(romfs: Path = DEFAULT_ROMFS, out: Path = BODY_HEADER, hands: dict | None = None,
+                 cloth: dict | None = None) -> dict[str, dict[str, list[int]]]:
     """Measure Link and every pack body from the game's files and write pup_bodies.h (the body boxes, then the hand
-    bones). Read-only on the game. hands: a dict to fill with each body's hand_bones()."""
+    bones, then the bones each body's own physics moves). Read-only on the game. hands, cloth: dicts to fill with each
+    body's hand_bones() and physics_bones()."""
     from wiiu_model import nx_model
+    from mp import ghost_link_pack as glp
     got: dict[str, dict[str, list[int]]] = {}
     hand: dict[str, dict] = {} if hands is None else hands
+    moved: dict[str, list[str]] = {} if cloth is None else cloth
+    link_bones: list[str] = []
     for cid in ["link"] + [c for c, r in RECIPES.items() if r.kind == "pack"]:
         where = body_model(romfs, cid)
         data = model_file(romfs, where[0]) if where else None
@@ -3180,9 +3505,17 @@ def build_bodies(romfs: Path = DEFAULT_ROMFS, out: Path = BODY_HEADER, hands: di
         model = next((m for m in res.models if m.name == where[1]), res.models[0])
         got[cid] = body_boxes(model)
         hand[cid] = hand_bones(model)
+        if cid == "link":
+            link_bones = [b.name for b in model.skeleton.bones]
+        elif RECIPES[cid].cloth:   # (the donor's cloth and support-bone files: the bones they move on this model)
+            r = RECIPES[cid]
+            donor = glp.read_pack(glp.find_pack(Path(romfs), r.donor))
+            phys, files, _parts, _note = pack_cloth(r, donor)
+            if phys is not None:
+                moved[cid] = physics_bones(files, [b.name for b in model.skeleton.bones], link_bones)
     if "link" not in got:
         raise CharselError("Link's model isn't in your game files: nothing written")
-    Path(out).write_text(bodies_header(got, hand), encoding="utf-8", newline="\n")
+    Path(out).write_text(bodies_header(got, hand, moved), encoding="utf-8", newline="\n")
     return got
 
 
@@ -3204,6 +3537,8 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--link-retarget", choices=LINK_RETARGET, default="auto",
                    help="fit Link's clips to each body: by the heap estimate (auto), always (on) or never (off)")
     b.add_argument("--cache", type=Path, help=f"default {DEFAULT_CACHE} (with --add: none kept)")
+    b.add_argument("--cloth", choices=CLOTH_SWITCH, default="on",
+                   help="skirts, hair and capes swing (the characters' own cloth physics, cloth only), or off: none")
     c = sub.add_parser("check", help="read every built pack back")
     c.add_argument("--out", type=Path, default=DEFAULT_OUT)
     w = sub.add_parser("wheel", help="pick who you are on the wheel (a window)")
@@ -3233,13 +3568,15 @@ def main(argv: list[str] | None = None) -> int:
             return _playas_cmd(args)
         if args.cmd == "bodies":
             hands: dict = {}
-            got = build_bodies(args.romfs, args.out, hands)
+            moved: dict = {}
+            got = build_bodies(args.romfs, args.out, hands, moved)
             for cid, b in got.items():
                 h = hands.get(cid, {"bones": {}, "fingers": {"L": [], "R": []}})
                 print(f"  {cid:9} {len(b)} bones; hands: " + ", ".join(
                     f"{n} (on {v['parent']})" for n, v in h["bones"].items())
                       + f"; fingers L {len(h['fingers']['L'])}, R {len(h['fingers']['R'])}; hips at "
-                      f"{h.get('hip', 0.0):.3f} m")
+                      f"{h.get('hip', 0.0):.3f} m"
+                      + (f"; its physics moves {len(moved[cid])} bones" if cid in moved else ""))
             print(f"Written: {args.out}. Rebuild the ghost mod: python tools\\build_native.py build")
             return 0
         if args.cmd == "list":
@@ -3252,7 +3589,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Building from {args.romfs} into {args.out}:")
             cat = build(args.romfs, args.out, args.ids, library=args.library, slots=parse_slots(args.slot),
                         model_copies=args.model_copies, monster_link=args.monster_link_clips,
-                        link_retarget=args.link_retarget, cache=args.cache or DEFAULT_CACHE)
+                        link_retarget=args.link_retarget, cache=args.cache or DEFAULT_CACHE, cloth=args.cloth)
             print(f"Built {len(cat['built']) - len(cat['kept'])}, kept {len(cat['kept'])}, skipped "
                   f"{len(cat['skipped'])}. Linkle: {cat['linkle']['how']}.")
             print(f"Next: python tools\\modman.py add {args.out} (once), then Play or deploy: only deployed "

@@ -2115,6 +2115,7 @@ static const char *item_place(struct Cpu *c, int i, uint64_t item, uint64_t ghos
 // once whenever the game puts its own follow back (its AI's enter does). Returns the place: "grip" (in the hand),
 // "back", or the game's.
 static int pup_item_grip(int slot, int back, const char **bone, float G[12], float *scale);
+static int pup_free_name(const char *actor);  // (0.9.6, puppet.c: one of charsel's free names: a pack of ours)
 static const char *item_place_pup(struct Cpu *c, int i, uint64_t item, uint64_t holder, int want_back, double t) {
     ItemSlot *s = &t_items[i];
     ItemStatus *o = &t_status.items.slot[i];
@@ -2819,9 +2820,10 @@ static void tick_live(struct Cpu *c, uint64_t pi, uint64_t player, double t) {
         t_status.pulled_back = t_moved ? dist3(was, t_last_moved) : 0.0f;
         gcall(c, SET_TRANSFORM, proc, P(g_pos), P(g_rot), 0, 0, 0, 0);
         // An actor with physics (the people's cutscene copies have it) gets its matrix back from its rigid body every
-        // frame: move the bodies too, or it stays where it was spawned.
+        // frame: move the bodies too, or it stays where it was spawned. 0.9.6: not a character pack of ours (on one of
+        // charsel's free names): its physics is cloth only (or none), with no rigid body to move (puppet.c).
         t_status.physics = rd64(proc + ACTOR_PHYSICS) != 0;
-        if (t_status.physics) {
+        if (t_status.physics && !pup_free_name(t_status.name)) {
             float m[12] = {g_rot[0], g_rot[1], g_rot[2], g_pos[0], g_rot[3], g_rot[4], g_rot[5], g_pos[1],
                            g_rot[6], g_rot[7], g_rot[8], g_pos[2]};
             memcpy(g_move_mtx, m, sizeof m);

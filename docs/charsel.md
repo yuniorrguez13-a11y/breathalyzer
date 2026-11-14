@@ -167,7 +167,8 @@ files, and the four that load have no pack entry either.
   death. No climb, glide or swim pose: Link's clips on their skeletons may twist (their spine and neck start 20-60
   degrees off Link's) [G], so they are left out; the mod then shows Wait, Walk or Run by speed. `build
   --monster-link-clips` puts Link's clips in, for the game check to judge.
-- **Everyone:** feet slide a little (clips play in place); skirts, capes and hair are stiff (no physics); faces don't
+- **Everyone:** feet slide a little (clips play in place); skirts, capes and hair swing with the character's own cloth
+  physics since 2026-11-14 ([cloth and hair](#cloth-and-hair-2026-11-14), not yet tried in the game); faces don't
   move; held items need the hand bones `Weapon_R` and `Weapon_L`, which every body here has [V], but holding is only
   checked on the Link body. Big bodies (Moblin, Urbosa) keep a person-sized box, so they may pop in at the screen's
   edges; every ghost is removed at about 75 m.
@@ -181,19 +182,22 @@ files, and the four that load have no pack entry either.
 
 ## How it works
 
-- **A character pack** is a tiny actor pack (14-19 KB, 6-8 KB packed) built from your own files
+- **A character pack** is a small actor pack (14-19 KB unpacked, 45-140 KB with cloth) built from your own files
   (`tools/charsel.py`), like the Link body (`tools/mp/ghost_link_pack.py`): the cutscene Sheikah man's actor link with
   our model list (the donor's own), our animation list (the family's animation files, then Link's, sorted names,
   blend times) and one small animation set per ghost name (the 33 of the Link body). No AI but the cutscene dummy's,
-  no physics. Bodies the game puts together from a look file (the Hylian) keep that file. Each pack sits on one free
+  and cloth-only physics ([cloth and hair](#cloth-and-hair-2026-11-14)). Bodies the game puts together from a look
+  file (the Hylian) keep that file. Each pack sits on one free
   actor name: in the game's ActorInfo, with no pack anywhere in the game (checked at build against your ActorInfo:
   class, heap of 500 KB or more, no pack). The profile matches the name's class (DemoNPC or NPC).
 - **Recipes are names only** (the game's file and clip names, as `ghost_link_pack.ANIMS`). Every clip a character
   uses as its own is looked up in your files at build; a missing one or a clash with one of Link's (a family file
   that has a Link clip name too) skips that character, with the reason. `charsel.json` in the output says what was
   built where, and why anything was skipped. `charsel check` reads every pack back: one actor link on the right
-  name, sorted animation names, one clip each, the cutscene dummy's AI, no physics, no attention list and no damage
-  parameters (so a ghost or your puppet can never be locked on to, talked to or hit), the right profile, under 64 KB.
+  name, sorted animation names, one clip each, the cutscene dummy's AI, no physics but cloth (no rigid body, no
+  character controller, no contact info, no ragdoll), no attention list and no damage parameters (so a ghost or your
+  puppet can never be locked on to, talked to, hit or pushed against), the right profile, under 64 KB (256 KB with
+  cloth).
 - **On the network** only the id travels (feature `look`, protocol version 1, [multiplayer](multiplayer.md)): the
   hello carries `"look":{"id":"zelda","v":1,"name":"Zelda"}`, a new pick goes as a `look` message (the client sends
   at most one every 2 s; the relay takes one 1.5 s after the last, for network jitter, and if it still says "too
@@ -248,8 +252,8 @@ How it works:
   carries on his back onto its back ([held items](#held-items-the-ground-the-hands)). With a friend's ghost up, the
   puppet's hands are empty. Link's own items are hidden with him (each weapon's frame update copies its holder's draw
   flags [V code]).
-- The puppet can't be locked on to, talked to or hit (no attention list, no damage, no physics in its pack). The
-  green ring that shows next to it while you sprint or climb is Link's own stamina wheel, where it always is.
+- The puppet can't be locked on to, talked to or hit (no attention list, no damage, no physics but cloth in its
+  pack). The green ring that shows next to it while you sprint or climb is Link's own stamina wheel, where it always is.
 - **Link shows instead** while he can't be mirrored: loading, cutscenes, riding a horse, a shield surf. A state the
   character has no clip for no longer shows Link (0.9.3): it stands or walks there (a glide: it falls), and swimming
   its head is kept at Link's head height. The pause menu keeps what was shown. After a load or a death the puppet is
@@ -429,6 +433,58 @@ the ragdoll by hand splits the body from Link's capsule. So the hook has to sit 
 with the hit's strength known there. That place isn't found yet. The emotes mod also wraps Link's update
 (`0x7000cd1ee8`, only the first wrap runs). So nothing is hooked: size-based knockback waits for a study of the
 damage reaction and for modhost to chain wraps.
+
+## Cloth and hair (2026-11-14)
+
+The user: "if there's no skirt or hair physics you can't do the Shorts" (the non-Link characters). Not yet tried in
+the game. Research: out/research/charsel-anims-physics.md section 3.
+
+- **The pack:** `PhysicsUser` is ours (`SwChar_<id>`): `Actor/Physics/SwChar_<id>.bphysics` is the stock actor's own
+  physics file made **cloth only**, the way every armor piece of the game has it [V: `Armor_001_Upper` and others]:
+  `use_rigid_body_set_num 0`, `use_character_controller False`, `use_contact_info False`, `use_ragdoll False`; the
+  rigid bodies (its `Tgt` sensor capsule), the character controller (a 60 kg capsule on `EntityNPC` that would push
+  Link), the contact info and the monsters' ragdoll are gone; its support bones and cloth parts stay as they are. The
+  stock actor's `Physics/Cloth/<x>.hkcl` and `Physics/SupportBone/<x>.bphyssb` are copied from your own game into the
+  pack at build time, at the paths the physics file names; the game's size table already has entries for them [V].
+  `AttentionUser` and `DamageParamUser` stay Dummy: no lock-on, no talk, no damage. `charsel check` refuses a pack
+  whose physics is more than cloth.
+- **Per character** (the stock actor's own parts [V: its physics file], most important first; `charsel.json`
+  `built.<id>.cloth`):
+
+  | Character | Cloth parts | Heap estimate: need / slot's heap (cloth part) |
+  |---|---|---|
+  | Urbosa | skirt `Skart`, hair `Hair_B`, `Hair_A`, waist `Accs_D`, `Earring` | 661,314 / 902,392 (177,738) |
+  | Zelda | `Skirt`, hair `Hair_C`, `Necklace` | 654,672 / 831,520 (152,808) |
+  | Mipha | sash `Cloth_A/B/C`, `Head_Fin`, `Ear`, `Leg_Fin`, `Arm_Fin_R`, `Parts_B`, `Parts_D` | 684,274 / 1,127,672 (161,934) |
+  | Revali | `ScarfA`, `ScarfB`, `Braid`, `ShoulderPlume` | 578,540 / 1,012,984 (77,100) |
+  | Daruk | `Tophair`, `Beard`, `Mustache`, `Cloths`, `ArmFur`, `Seta` | 544,316 / 1,028,128 (121,788) |
+  | Paya | `Hair_02`, `Hair_Side` | 916,090 / 1,099,000 (44,742) |
+  | Bokoblin | `Apron`, `Ear_L`, `Ear_R`, `Necklace` | 384,728 / 1,007,648 (64,728) |
+  | Moblin | loincloth `Cloth_A/B/C` | 367,736 / 554,232 (47,736) |
+
+  (all `_Havok`). The Hylian (a Mii-style body), Link and Linkle have none here.
+- **The heap [G]:** the cloth is counted first: 1.5 bytes of heap per byte of the cloth and support-bone files (no
+  game number exists; the game's size table gives these files about 2x and 4.6x their size, but that is the resource
+  heap). Then Link's file loses its retarget if needed (as before), then the least important parts are left out, never
+  the first; if even that one doesn't fit, the character has no cloth. Today every character fits with all its parts.
+  A part left out is [G]: every one of the game's 508 cloth physics files lists every part of its cloth file [V].
+- **`charsel build --cloth off`** builds the packs as before 2026-11-14 (no physics): the fallback if a cloth pack
+  doesn't load or costs too many frames.
+- **The puppet (ghost 0.9.6 by comment, still 0.9.1 by number):** the bones each body's physics moves (`PUP_CLOTH` in
+  `pup_bodies.h`, written by `charsel.py bodies`: the names in its cloth and support-bone files that are bones of its
+  model, less those named as Link's, which are the anchors; 15-72 per body) are never written by the ragdoll pose,
+  the after-step write or the hands, so the pose and the cloth don't fight (`cloth_bones` in `ghost puppet`). The
+  ground clamp and the ball only move the whole costume.
+- **The physics call:** the puppet's physics is not moved with `PHYS_SET_MTX` (it has no rigid body), and the ghost
+  skips it for any actor on charsel's free names. `ghost puppet physmtx warp` calls it once after each warp, `on` every
+  frame (the old way), `off` (the default) never: for the game check if the cloth stays behind.
+- **Warps:** a new pick, a stage change, a fast travel and a respawn spawn a new puppet, so its cloth starts fresh.
+  A jump of more than 6 m in one frame on the same stage (a teleport command) is counted (`warps`); no cloth reset is
+  known, so a skirt may whip once there [G].
+- **Not known until the game run [G]:** whether an NPC-class actor runs with physics and no rigid body at all (none of
+  the game's NPC or DemoNPC actors does: the Great Fairies keep a `Tgt` capsule on `SensorNoHit`, the next thing to
+  try); the frame cost (an older note: 3-8 frames a second for Zelda's dress); whether the cloth follows without the
+  physics call.
 
 ## Play as, at the next start (the restart way)
 

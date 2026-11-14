@@ -1703,6 +1703,39 @@ static void check_puppet(void) {
           PS_NAMES[t_pup.state], g_requests, fm_drawn(&g_pl.fm), fm_drawn(&g_pp_fm), t_pup.shown, g_pp_current,
           (long long)t_pup.hides, t_pup.why);
     check("puppet", "at_link", g_pp_proc && pp_x() == g_px, "puppet x %.2f, Link %.2f", g_pp_proc ? pp_x() : -1, g_px);
+    // 0.9.6: its physics (a cloth pack's) is never moved by the physics call unless asked (`ghost puppet physmtx`); a
+    // jump of 50 m in one frame is a warp (counted); `warp` moves it once after one, `on` every frame
+    {
+        static _Alignas(16) uint8_t phys[0x40];
+        float px0 = g_px;
+        W64((void *)(uintptr_t)g_pp_proc, ACTOR_PHYSICS, phys);
+        int64_t m0 = t_pup.phys_moves, w0 = t_pup.warps;
+        pup_run("Wait", 0, 0.3);
+        int off_still = t_pup.phys_moves == m0 && t_pup.physics && t_pup.warps == w0;
+        g_px += 50.0f;
+        pup_run("Wait", 0, 0.3);
+        int counted = t_pup.warps == w0 + 1 && t_pup.phys_moves == m0 && pp_x() == g_px;
+        lock();
+        g_pup_req.physmtx = PM_WARP;
+        unlock();
+        g_px += 50.0f;
+        pup_run("Wait", 0, 0.3);
+        int once = t_pup.warps == w0 + 2 && t_pup.phys_moves == m0 + 1;
+        lock();
+        g_pup_req.physmtx = PM_ON;
+        unlock();
+        pup_run("Wait", 0, 0.2);
+        int every = t_pup.phys_moves >= m0 + 6;
+        lock();
+        g_pup_req.physmtx = PM_OFF;
+        unlock();
+        W64((void *)(uintptr_t)g_pp_proc, ACTOR_PHYSICS, 0);
+        g_px = px0;
+        pup_run("Wait", 0, 0.2);
+        check("puppet", "physmtx_warp", off_still && counted && once && every && g_pup_req.physmtx == PM_OFF,
+              "off %d (physics %d), warp counted %d (warps +%lld), once %d, every frame %d (moves +%lld)", off_still,
+              t_pup.physics, counted, (long long)(t_pup.warps - w0), once, every, (long long)(t_pup.phys_moves - m0));
+    }
     // Daruk's sprint: Link's Move at 8 m/s is RunGear2 (his rolling ball); walking is Walk
     pup_run("Move", 8.0f, 1.5);
     int sprint_ok = !strcmp(g_pp_current, "RunGear2");
@@ -2144,6 +2177,77 @@ static void rdt_pure_092(const PupSkel *ls0, const PupSkel *ps0, float (*wl)[12]
           !pup_ball_id("zelda"), "radius %.4f middle y %.3f, off %.5f; on a slope middle %.3f", r, mid[1], worst, cy_s);
 }
 
+// 0.9.6 pure rows: the bones each body's own physics moves (PUP_CLOTH, from charsel.py bodies) are found by exact name;
+// a costume's bone on that list (and not named as Link's) is never written by the tick's pose nor published for the
+// after-step write, the bones named as Link's still are; a jump of more than PUP_WARP_M in one frame is a warp.
+static void check_puppet_cloth(void) {
+    const char *g = pup_cloth_list("gerudo"), *z = pup_cloth_list("zora");
+    int look = g && pup_cloth_has(g, "Skirt_A_1") && pup_cloth_has(g, "Hair_B_10") && pup_cloth_has(g, "Hair_B_1") &&
+               !pup_cloth_has(g, "Hair_B") && !pup_cloth_has(g, "Skirt_A_") && !pup_cloth_has(g, "kirt_A_1") &&
+               !pup_cloth_has(g, "Waist") && !pup_cloth_has(g, "") && !pup_cloth_has(g, NULL) && z &&
+               pup_cloth_has(z, "Cloth_A_1") && !pup_cloth_list("link") && !pup_cloth_list("hylian") &&
+               !pup_cloth_list("linkle") && !pup_cloth_list(NULL) && !pup_cloth_list("nobody");
+    int bodies = 0, link_named = 0;   // (every body with cloth has a list; no list names one of the main bones)
+    for (int i = 0; PUP_CLOTH[i].id; i++) {
+        bodies += pup_body(PUP_CLOTH[i].id) != &PUP_BODIES[0];
+        for (int k = 0; k < PUP_NBODY_BONES; k++) link_named += pup_cloth_has(PUP_CLOTH[i].bones, PUP_BODY_BONES[k]);
+    }
+    check("puppet", "cloth_lookup", look && bodies >= 8 && !link_named, "lookups %d, bodies %d, main bones listed %d",
+          look, bodies, link_named);
+
+    // a costume with its rest read: the made-up one with its extra bone named as one of Urbosa's skirt bones, and a
+    // second one where that name is one of Link's (map >= 0: never the physics')
+    static const char *const CL[] = {"Root", "Skl_Root", "Leg_1_R", "Leg_2_R", "Spine_1", "Skirt_A_1",
+                                     "Spine_2", "Neck", "Head", "Leg_1_L", "Leg_2_L"};
+    static const char *const CL_LINK[] = {"Root", "Skl_Root", "Spine_1", "Spine_2", "Neck",
+                                          "Head", "Leg_1_L", "Leg_2_L", "Leg_1_R", "Skirt_A_1"};
+    static PupSkel ps, p2;
+    static char nm[11][32];
+    rdt_skel(&ps, 11, CL, RDT_PUP_PAR, RDT_LINK);
+    rdt_rest(&ps, CL, RDT_PUP_PAR, 11, 0.2f, NULL, 0);
+    for (int b = 0; b < 11; b++) snprintf(nm[b], sizeof nm[b], "%s", CL[b]);
+    int marked = pup_cloth_mark(&ps, (const char (*)[32])nm, "gerudo");
+    int sets = ps.rest && ps.cloth[5] && !pup_rd_sets(&ps, 5) && pup_rd_sets(&ps, 4) && pup_rd_sets(&ps, 1) &&
+               pup_rd_sets(&ps, 0);
+    rdt_skel(&p2, 11, CL, RDT_PUP_PAR, CL_LINK);
+    int not_link = pup_cloth_mark(&p2, (const char (*)[32])nm, "gerudo") == 0 &&
+                   pup_cloth_mark(&ps, (const char (*)[32])nm, "zelda") == 0;
+    pup_cloth_mark(&ps, (const char (*)[32])nm, "gerudo");
+    // the tick's write onto a made-up skeleton: the skirt bone's local as it was, every other bone written
+    static FakeSkel fs;
+    static _Alignas(16) uint8_t unit[0x200];
+    memset(&fs, 0, sizeof fs);
+    W64(fs.sk, SKEL_LOCAL, fs.locals);
+    for (int b = 0; b < 11; b++)
+        for (int k = 0; k < 24; k++) fs.locals[b][k] = 7.0f;
+    ps.sk = P(fs.sk), ps.unit = P(unit);
+    static float out[11][12];
+    for (int b = 0; b < 11; b++)
+        for (int k = 0; k < 12; k++) out[b][k] = 1.0f;
+    pup_rd_write(&ps, (const float (*)[12])out);
+    int kept = 1, written = 1;
+    for (int k = LOCAL_COLS / 4; k < 24; k++) kept &= fs.locals[5][k] == 7.0f;
+    for (int b = 0; b < 11; b++)
+        if (b != 5) written &= fs.locals[b][LOCAL_COLS / 4] == 1.0f;
+    // ... and published for the after-step write without it
+    pup_ov_publish(0, &ps, (const float (*)[12])out);
+    const PupOvPose *pp = &g_pup_ov_pose[0][__atomic_load_n(&g_pup_ov_pub[0], __ATOMIC_ACQUIRE) % 3];
+    int pub = pp->n == 10;
+    for (int j = 0; j < pp->n; j++) pub &= pp->bone[j] != 5;
+    pup_ov_clear();
+    check("puppet", "cloth_left_alone", marked == 1 && sets && not_link && kept && written && pub,
+          "marked %d, sets %d, not when named as Link's %d, its local kept %d, others written %d, published %d "
+          "(%d bones)", marked, sets, not_link, kept, written, pub, pp->n);
+
+    // a warp: none at first, 0.3 m a frame is moving, 7 m is a warp, then moving from there
+    float last[3] = {0, 0, 0}, a0[3] = {10, 0, 0}, a1[3] = {10.3f, 0, 0}, a2[3] = {17.3f, 0, 0}, a3[3] = {17.5f, 0, 0};
+    int ok = 0;
+    int w0 = pup_warp_step(a0, last, &ok), w1 = pup_warp_step(a1, last, &ok), w2 = pup_warp_step(a2, last, &ok);
+    int w3 = pup_warp_step(a3, last, &ok);
+    check("puppet", "warp_step", !w0 && !w1 && w2 && !w3 && ok && last[0] == 17.5f, "warps %d %d %d %d", w0, w1, w2,
+          w3);
+}
+
 // 0.9.2: the game's unit step, made up: the costume's clip goes into its locals (every bone turned 40 degrees about x,
 // 0.3 m along y: a walk's frame), as the game did before each frame's world matrices while the tick's pose was lost.
 static int g_rdt_clip_writes;
@@ -2525,6 +2629,7 @@ static void check_puppet_ragdoll(void) {
           goron->box[2][3] - goron->box[2][2] > 150, "goron Spine_2 y %d..%d", goron->box[2][2], goron->box[2][3]);
 
     rdt_pure_092(&ls, &ps, wl, cur, base, hip);
+    check_puppet_cloth();  // (0.9.6)
 
     if (!g_items_world_ok) {
         check("puppet", "rd_world", 1, "SKIP: the made-up globals' page is taken in this process");

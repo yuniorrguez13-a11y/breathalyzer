@@ -255,7 +255,9 @@ class Selftest(unittest.TestCase):
                  "refused_gives_up", "no_tick_says_why",
                  # 0.9.5 (the round-4 game check): the copies never sheathed by the game, Link's arrow hidden with him,
                  # no tries spent while the game is busy (Game Over) and the costume back after a Continue
-                 "holder_in_hand", "arrow_hidden", "busy_no_tries", "gameover_comeback", "refused_stays_failed"]
+                 "holder_in_hand", "arrow_hidden", "busy_no_tries", "gameover_comeback", "refused_stays_failed",
+                 # 0.9.6: a cloth pack's physics never moved by the physics call unless asked; a warp counted
+                 "physmtx_warp"]
         if ("puppet", "world") in self.rows:      # (the made-up globals' page was taken: the pure part only)
             names = names[:5]
         # 0.9.3 (pure): held copies per body, kept names, the guard, the hands, death, the ground clamp, the ball's dip
@@ -263,6 +265,8 @@ class Selftest(unittest.TestCase):
                   "ball_dip_hold"]
         # 0.9.5 (pure): the back place's tweak and the arm flag, a whole arm, an attack at once, the arrow's name
         names += ["back_tweak", "arm_overlay", "attack_morph", "arrow_name"]
+        # 0.9.6 (pure): the bones each body's own physics moves are never written by the pose or the hands; warps
+        names += ["cloth_lookup", "cloth_left_alone", "warp_step"]
         # 0.9.1: the costume falls with Link's ragdoll (his pose, on the ground), pure and in the made-up world
         names += ["rd_detect", "rd_order_refuses_loop", "rd_pose", "rd_ground", "rd_lift", "rd_upright", "rd_bodies"]
         if ("puppet", "rd_world") not in self.rows:

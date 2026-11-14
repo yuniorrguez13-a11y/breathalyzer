@@ -172,18 +172,18 @@ class Recipes(unittest.TestCase):
         paya = charsel.RECIPES["sheikah"]
         self.assertEqual(dict(paya.own)["Wait"], "Npc_Shiekah_Heir_Talk_Shy_Wait")
         self.assertEqual(paya.anims[0], ("Npc_Shiekah_Heir_Animation", False))
-        self.assertEqual(paya.v, 3)
+        self.assertEqual(paya.v, 4)                       # (v4: her hair's cloth, 2026-11-14)
         # Mipha: a Zora woman's swim; the Zora men's file (and its man's Default_Wait) is gone
         mipha = charsel.RECIPES["zora"]
         self.assertEqual([f for f, _ in mipha.anims],
                          ["UMii_Common_Body_W_Animation", "UMii_Zora_BodyC_W_Animation", charsel.PLAYER_ANIM])
-        self.assertEqual(mipha.v, 5)
+        self.assertEqual(mipha.v, 6)                      # (v6: her sash and fins' cloth)
         # Urbosa: no Gerudo guards' file any more (the real Urbosa never loads it): her actor's women's file first
         urbosa = charsel.RECIPES["gerudo"]
         self.assertEqual([f for f, _ in urbosa.anims], ["UMii_Common_Body_W_Animation", charsel.PLAYER_ANIM])
         # v5 (the round-4 game check): her actor's hip-shot stand and walk, the Active branch of its sets
         self.assertEqual((dict(urbosa.own)["Wait"], dict(urbosa.own)["Walk"]), ("Positive_Wait", "Positive_Move_Walk"))
-        self.assertEqual(urbosa.v, 5)
+        self.assertEqual(urbosa.v, 6)                     # (v6: her skirt and hair's cloth)
         # the women's sprint: their run, faster (not the panic run)
         for cid in ("zelda", "sheikah", "gerudo", "zora"):
             r = charsel.RECIPES[cid]
@@ -217,7 +217,7 @@ class Recipes(unittest.TestCase):
         self.assertEqual(boko["CutS1"], (1.21, 25.0, None))                    # (23 + 0.05 s x 30 x 1.21)
         self.assertEqual(charsel.frame_ctrl(charsel.RECIPES["moblin"])["CutS1"], (0.8, 18.0, 30))
         self.assertEqual(boko["SwimMove"], (0.6, None, None))
-        self.assertEqual((charsel.RECIPES["bokoblin"].v, charsel.RECIPES["moblin"].v), (3, 3))
+        self.assertEqual((charsel.RECIPES["bokoblin"].v, charsel.RECIPES["moblin"].v), (4, 4))   # (v4: their cloth)
         bad = charsel.Recipe("bad", "Bad", "Monsters", "pack", "X", (), (("Wait", "W"),), rest="speed",
                              ctrl=(("CutS1", 1.0, 0, None),))
         with self.assertRaises(charsel.CharselError):                           # frame control for a name it lacks
@@ -248,7 +248,7 @@ class Recipes(unittest.TestCase):
             self.assertEqual(charsel.find_id(text), want, text)
 
     def test_look_message_and_display(self):
-        self.assertEqual(charsel.look_message("goron"), {"id": "goron", "v": 3, "name": "Daruk (Goron)"})
+        self.assertEqual(charsel.look_message("goron"), {"id": "goron", "v": 4, "name": "Daruk (Goron)"})
         self.assertEqual(charsel.display({"id": "goron"}), "Daruk (Goron)")
         self.assertEqual(charsel.display({"id": "newer-one", "name": "Ganon"}), "Ganon")
         self.assertEqual(charsel.display(None), "Link")

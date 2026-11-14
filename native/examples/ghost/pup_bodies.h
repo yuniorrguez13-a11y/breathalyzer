@@ -142,3 +142,65 @@ static const PupHands PUP_HANDS[] = {
      {15, 15}, 0.751f},
 };
 #endif
+
+// Bones each body's own cloth and support-bone physics move (charsel.py bodies: the names in its pack's
+// Physics files that are bones of its model, less the ones named as Link's: the anchors its pose sets).
+// puppet.c leaves them to the physics: the ragdoll pose and the hands never write them (no fight, no
+// jitter). Names only.
+typedef struct {
+    const char *id;
+    const char *bones;  // each name followed by one space
+} PupCloth;
+static const PupCloth PUP_CLOTH[] = {
+    {"bokoblin",
+     "Apron_B_1 Apron_B_2 Apron_F_1 Apron_F_2 Ear_1_L Ear_1_R Ear_2_L Ear_2_R Earlobe_In_1_L "
+     "Earlobe_In_1_R Earlobe_In_2_L Earlobe_In_2_R Earlobe_Out_1_L Earlobe_Out_1_R Earlobe_Out_2_L "
+     "Earlobe_Out_2_R Necklace_1 Necklace_2 Necklace_3 "},
+    {"gerudo",
+     "Accs_D_1 Armparts_L Armparts_R Earring_A_1 Earring_B_1 Hair_A_1 Hair_A_2 Hair_B_1 Hair_B_10 "
+     "Hair_B_11 Hair_B_12 Hair_B_13 Hair_B_14 Hair_B_15 Hair_B_16 Hair_B_17 Hair_B_18 Hair_B_19 "
+     "Hair_B_2 Hair_B_20 Hair_B_21 Hair_B_22 Hair_B_23 Hair_B_24 Hair_B_3 Hair_B_4 Hair_B_5 Hair_B_6 "
+     "Hair_B_7 Hair_B_8 Hair_B_9 Leg_Assist_L Leg_Assist_R Skirt_A_1 Skirt_A_2 Skirt_A_3 Skirt_B_1 "
+     "Skirt_B_2 Skirt_B_3 Skirt_C_1 Skirt_C_2 Skirt_C_3 Skirt_C_4 Skirt_D_1 Skirt_D_2 Skirt_D_3 "
+     "Skirt_D_4 Skirt_D_5 Skirt_E_1 Skirt_E_2 Skirt_E_3 Skirt_E_4 Skirt_E_5 Skirt_F_1 Skirt_F_2 "
+     "Skirt_F_3 Skirt_F_4 Skirt_G_1 Skirt_G_2 Skirt_G_3 Skirt_G_4 Skirt_H_1 Skirt_H_2 Skirt_H_3 "},
+    {"goron",
+     "ArmFur_1_L ArmFur_1_R ArmFur_2_L ArmFur_2_R BacKhair_1 BacKhair_2 BacKhair_3 ChestHair_Help_1 "
+     "ChestHair_Help_2 Cloths_A_1 Cloths_A_2 Cloths_B_1 Cloths_B_2 Cloths_C_1 Cloths_C_2 Cloths_D_1 "
+     "Cloths_D_2 Cloths_E_1 Cloths_E_2 FrontBeard_1 FrontBeard_2 Mustache_L_1 Mustache_L_2 "
+     "Mustache_L_3 Mustache_R_1 Mustache_R_2 Mustache_R_3 Seta_1_L Seta_1_R Seta_2_L Seta_2_R "
+     "SideBeard_1_L SideBeard_1_R SideBeard_2_L SideBeard_2_R Sidehair_A_1_L Sidehair_A_1_R "
+     "Sidehair_A_2_L Sidehair_A_2_R Sidehair_A_3_L Sidehair_A_3_R Sidehair_B_1_L Sidehair_B_1_R "
+     "Sidehair_B_2_L Sidehair_B_2_R Sidehair_B_3_L Sidehair_B_3_R Tophair_1 Tophair_2 Tophair_3 "},
+    {"moblin",
+     "Apron_1_B Apron_1_F Apron_2_B Apron_2_F Apron_3_B Apron_3_F Apron_4_F Cloth_1_B Cloth_1_F "
+     "Cloth_2_B Cloth_2_F Cloth_3_B Cloth_3_F Cloth_4_F Cloth_L Cloth_R "},
+    {"rito",
+     "BraidA_1_L BraidA_1_R BraidA_2_L BraidA_2_R BraidA_3_L BraidA_3_R BraidA_4_L BraidA_4_R "
+     "BraidA_5_L BraidA_5_R BraidB_1_L BraidB_1_R BraidB_2_L BraidB_2_R BraidB_3_L BraidB_3_R "
+     "BraidB_4_L BraidB_4_R BraidB_5_L BraidB_5_R ScarfA_1 ScarfA_2 ScarfA_3 ScarfA_4 ScarfA_5 "
+     "ScarfA_6 ScarfB_1 ScarfB_2 ScarfB_3 ShoulderPlume_1_L ShoulderPlume_1_R "},
+    {"sheikah",
+     "Hair_C_1 Hair_C_2 Hair_C_3 Hair_L_1 Hair_L_2 Hair_L_3 Hair_R_1 Hair_R_2 Hair_R_3 Hair_S_L_1 "
+     "Hair_S_L_2 Hair_S_L_3 Hair_S_R_1 Hair_S_R_2 Hair_S_R_3 "},
+    {"zelda",
+     "Hair_1_C Hair_1_C_L Hair_1_C_R Hair_1_Cl_L Hair_1_Cr_R Hair_1_L Hair_1_R Hair_2_C Hair_2_C_L "
+     "Hair_2_C_R Hair_2_L Hair_2_R Hair_3_C Hair_3_C_L Hair_3_C_R Hair_3_L Hair_3_R Hair_4_C "
+     "Hair_4_C_L Hair_4_C_R Hair_5_C Hair_Help_1 Necklace_C_1 Necklace_C_2 Necklace_L_1 Necklace_L_2 "
+     "Necklace_R_1 Necklace_R_2 Necklace_Root Skirt_1_C_B Skirt_1_C_B_L Skirt_1_C_B_R Skirt_1_C_F "
+     "Skirt_1_C_F_L Skirt_1_C_F_R Skirt_1_L Skirt_1_R Skirt_2_C_B Skirt_2_C_B_L Skirt_2_C_B_R "
+     "Skirt_2_C_F Skirt_2_C_F_L Skirt_2_C_F_R Skirt_2_L Skirt_2_R Skirt_3_C_B Skirt_3_C_B_L "
+     "Skirt_3_C_B_R Skirt_3_C_F Skirt_3_C_F_L Skirt_3_C_F_R Skirt_3_L Skirt_3_R Skirt_4_C_B "
+     "Skirt_4_C_B_L Skirt_4_C_B_R Skirt_4_C_F Skirt_4_C_F_L Skirt_4_C_F_R Skirt_4_L Skirt_4_R "
+     "Skirt_5_C_B Skirt_5_C_B_L Skirt_5_C_B_R Skirt_5_C_F Skirt_5_C_F_L Skirt_5_C_F_R Skirt_5_L "
+     "Skirt_5_R Skirt_6_C_F Skirt_6_C_F_L Skirt_6_C_F_R "},
+    {"zora",
+     "Arm_Fin_1_L Arm_Fin_1_R Arm_Fin_2_L Arm_Fin_2_R Arm_Fin_3_L Arm_Fin_3_R Arm_Fin_4_L Arm_Fin_4_R "
+     "Arm_Fin_5_L Arm_Fin_5_R Cloth_A_1 Cloth_A_2 Cloth_A_3 Cloth_A_4 Cloth_B_1 Cloth_B_2 Cloth_B_3 "
+     "Cloth_C_1 Cloth_C_2 Ear_L_1 Ear_L_2 Ear_L_3 Ear_R_1 Ear_R_2 Ear_R_3 Head_Fin_1 Head_Fin_2 "
+     "Head_Fin_3 Head_Fin_4 Head_Fin_5 Jewel_A_1 Jewel_A_2 Jewel_A_3 Jewel_A_4 Jewel_B_1 Jewel_B_2 "
+     "Jewel_B_3 Jewel_B_4 Jewel_B_5 Jewel_B_6 Jewel_B_7 Leg_Fin_C Leg_Fin_L Leg_Fin_R Leg_Fin_U_C "
+     "Leg_Fin_U_L Leg_Fin_U_R Parts_B_1 Parts_B_2 Parts_B_3 Spine_ClothA_1_C Spine_ClothA_1_L "
+     "Spine_ClothA_1_R Spine_ClothA_2_C Spine_ClothA_2_L Spine_ClothA_2_R "},
+    {0, 0},
+};
