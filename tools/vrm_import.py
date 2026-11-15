@@ -446,6 +446,7 @@ def import_vrm(vrm: Path, cid: str, romfs=None, out=None, say=print) -> dict:
         raise CharselError("--out must be a folder of your own, not inside the game's files")
     say(f"Reading {Path(vrm).name} and Link's model...")
     model, tex, info = vrm_costume(Path(vrm).read_bytes(), romfs, Path(vrm).name, say)
+    model, tex, _ = charsel.own_names(model, tex, charsel.ours(cid))   # (named as their files, not "Link": docs/room.md)
     try:
         ainfo = charsel.read_actorinfo(romfs)
     except Exception:

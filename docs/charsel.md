@@ -414,7 +414,14 @@ blades clipped at his wrist, Urbosa sinking while attacking, the Moblin turning 
   Morph 0 [V]) and starts a frame or two after him. Attack sets now start at once (node Morph 0, and the puppet asks
   with no blend) and the monsters' swings start 0.05 s further into their clips (Bokoblin `Attack_Small` from frame
   25, Moblin's first swing from 18) [G: the remaining lag].
-- **Linkle did not load:** her new model file had no size-table entry while another mod ships a table [G: the cause].
+- **Linkle (and the VRM import) did not load, the real cause (2026-11-15, [More Room](room.md)) [V]:** not the size
+  table and not the heap (her actor heap took 12 small allocations, none failed; 64 MB more changed nothing). Her model
+  file was Link's file with new shapes, still named "Link" inside (and its textures "Link.Tex", the model list's unit
+  "Link"). Named as their own files (`own_names`: `SwChar_linkle`, its model, `SwChar_linkle.Tex`, the unit), Linkle
+  and Custom were created at once. `charsel build` does it, repairs a kept import, and `charsel check` refuses a unit
+  that isn't its folder.
+- **Linkle did not load (round 4):** her new model file had no size-table entry while another mod ships a table [G: the
+  cause; wrong, see above].
   The characters mod now ships its own table (`romfs/System/Resource/ResourceSizeTable.product.srsizetable`: the
   game's, plus an entry for each pack, each new file in a pack, and her model and textures; listed in `charsel.json`
   `sizes`); `modman deploy` merges it with the other mods' tables. Her model is sized from Link's (his entry is 1.58x

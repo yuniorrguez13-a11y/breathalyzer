@@ -1784,11 +1784,99 @@ def make_copy_pack(cid: str, slot: str, profile: str, template: dict[str, bytes]
     if tml not in template or pml not in pause:
         raise CharselError("a model list is missing")
     ml = aamp.load(glp.model_list(aamp.load(pause[pml]), aamp.load(template[tml]), "sheikah"))
-    base = ml.list("ModelData").list("ModelData_0").object("Base")
+    md0 = ml.list("ModelData").list("ModelData_0")
+    base = md0.object("Base")
     f = base.get(name_hash("Folder"))
     base[name_hash("Folder")] = Param(f.type, ours(cid))
+    _own_units(md0, ours(cid))   # (the model file's own name: own_names)
     mapping = {n: c for n, c, _f in glp.ANIMS}
     return _pack_files(cid, slot, profile, template, aamp.dump(ml), None, [(PLAYER_ANIM, False)], mapping)
+
+
+# ---- our own model files carry their own name (2026-11-15, the More Room probe; docs/room.md)
+#
+# "Linkle / Custom did not load (the game could not create it)": both costume model files were Link's model file with
+# new shapes, still named "Link" inside (the file's name, its one model's name, and "Link.Tex" for the textures), with
+# the model list's unit "Link". Every model file of the game is named as its file (Npc_Gerudo_Hero.sbfres holds model
+# Npc_Gerudo_Hero; Npc_Gerudo_Hero.Tex.sbfres is named Npc_Gerudo_Hero.Tex). In the game [V 2026-11-15]: the actor heap
+# was not the cause (12 small allocations, none failed; 64 MB more heap changed nothing), and the same two costumes with
+# their files renamed SwChar_linkle / SwChar_yuniar (file, model, textures, unit) were created at once.
+# [G: which one the game checks: a clash with the player's own loaded "Link", or the name against the file.]
+
+def _own_units(md0, folder: str) -> int:
+    """Every unit of a model list's ModelData entry named folder (our model files hold one model, named as the file).
+    Returns how many changed."""
+    from aamp import Param, name_hash
+    ul = md0.lists.get(name_hash("Unit"))
+    n = 0
+    for o in ul.objects.values() if ul else ():
+        p = o.get(name_hash("UnitName"))
+        if p is not None and p.value != folder:
+            o[name_hash("UnitName")] = Param(p.type, folder)
+            n += 1
+    return n
+
+
+def own_names(model: bytes, tex: bytes, folder: str) -> tuple[bytes, bytes, bool]:
+    """A model file of ours (Model/<folder>.sbfres, one model) and its textures (<folder>.Tex.sbfres) named as their
+    own files: the file and its model <folder>, the textures <folder>.Tex. Returns (model, tex, changed); the same
+    bytes when they already are."""
+    from wiiu_model import checks, nx_bfres, nx_model
+    res = nx_model.read(_unyaz(model))
+    if len(res.models) != 1:
+        raise CharselError(f"Model/{folder}.sbfres has {len(res.models)} models, expected 1")
+    ts = nx_bfres.read_textures(_unyaz(tex))
+    if res.name == folder and res.models[0].name == folder and ts.name == folder:
+        return model, tex, False
+    res.name = res.models[0].name = folder
+    ts.name = folder
+    raw = nx_model.write(res)
+    bad = checks.switch_model_problems(raw)
+    if bad:
+        raise CharselError(f"Model/{folder}.sbfres fails the self-check after its rename: {bad[:3]}")
+    return _yaz(raw), _yaz(nx_bfres.write_textures(ts)), True
+
+
+def own_pack_units(pack: bytes, folder: str) -> tuple[bytes, bool]:
+    """A pack of ours whose model list (ModelUser = folder) names a unit other than folder, with it renamed."""
+    import aamp
+    from mp import ghost_link_pack as glp
+    files = glp.read_pack(pack)
+    rel = f"Actor/ModelList/{folder}.bmodellist"
+    if rel not in files:
+        return pack, False
+    ml = aamp.load(files[rel])
+    md = ml.list("ModelData")
+    if not md or not md.lists or not _own_units(next(iter(md.lists.values())), folder):
+        return pack, False
+    files[rel] = aamp.dump(ml)
+    return glp.pack_bytes(files)[0], True
+
+
+def repair_own_names(top: Path, cids, slot_of: dict[str, str], say=print) -> list[str]:
+    """Kept models of ours (an import-vrm costume, which a build keeps as it is) still named "Link" inside: renamed in
+    place, with their pack's unit. Returns the ids repaired."""
+    done = []
+    for cid in cids:
+        name = ours(cid)
+        mp, tp = top / "Model" / f"{name}.sbfres", top / "Model" / f"{name}.Tex.sbfres"
+        pp = top / "Actor" / "Pack" / f"{slot_of.get(cid, '')}.sbactorpack"
+        if not (mp.is_file() and tp.is_file()):
+            continue
+        try:
+            model, tex, changed = own_names(mp.read_bytes(), tp.read_bytes(), name)
+            pack, pchanged = own_pack_units(pp.read_bytes(), name) if pp.is_file() else (b"", False)
+        except Exception as e:   # (any read failure: left as it is, said)
+            say(f"  {cid}: its model couldn't be named as its own file ({str(e)[:100]})")
+            continue
+        for path, data, ch in ((mp, model, changed), (tp, tex, changed), (pp, pack, pchanged)):
+            if ch:
+                path.unlink()   # (a new file, never written through a hard link the library may share)
+                path.write_bytes(data)
+        if changed or pchanged:
+            done.append(cid)
+            say(f"  {cid}: its model files and unit renamed {name} (they were still named Link inside)")
+    return done
 
 
 def read_back(data: bytes) -> dict:
@@ -1821,12 +1909,15 @@ def read_back(data: bytes) -> dict:
             ctrls[n] = fc
     adds =[(o.get_value("Anim"), o.get_value("RetargetModel")) for o in asl.list("AddReses").objects.values()]
     ml = files.get(f"Actor/ModelList/{users['ModelUser']}.bmodellist")
-    folder, targets = None, []
+    folder, targets, units = None, [], []
     if ml:
         mlp = aamp.load(ml)
         md = mlp.list("ModelData")
         if md and md.lists:
-            folder = next(iter(md.lists.values())).object("Base").get_value("Folder")
+            md0 = next(iter(md.lists.values()))
+            folder = md0.object("Base").get_value("Folder")
+            ul = md0.lists.get(aamp.name_hash("Unit"))
+            units = [o.get_value("UnitName") for o in ul.objects.values()] if ul else []
         targets = target_types(mlp)
     physics = None   # (2026-11-14: our cloth-only physics: its parts, the files it names and whether they are there)
     pu = users["PhysicsUser"]
@@ -1843,7 +1934,8 @@ def read_back(data: bytes) -> dict:
             physics["bad"] += cloth_only_problems(pd)
     return {"slot": slot, "users": users, "names": names, "clips": clips, "ctrl": ctrls, "missing_sets": missing,
             "adds": adds, "physics": physics,
-            "folder": folder, "targets": targets, "files": len(files), "unpacked": len(raw), "packed": len(data)}
+            "folder": folder, "units": units, "targets": targets, "files": len(files), "unpacked": len(raw),
+            "packed": len(data)}
 
 
 # The actor link's users that would make a ghost or the self puppet something Link can lock on to, talk to or hit
@@ -1900,6 +1992,9 @@ def check_pack(data: bytes, expect_slot: str | None = None) -> list[str]:
         bad.append("no animation files")
     if any(t in SWAP_TARGET_TYPES for t in r["targets"]):
         bad.append("a type-2 animation target (the game can't create it without a look file: rebuild)")
+    if str(r["folder"] or "").startswith("SwChar_") and r["units"] != [r["folder"]]:
+        bad.append(f"its model {r['folder']} is unit {', '.join(map(str, r['units'])) or 'none'} (our own model files "
+                   "are named as their file: the game can't create it otherwise; rebuild)")
     return bad
 
 
@@ -2112,6 +2207,11 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
                     model, tex = model_file(romfs, "Link"), model_file(romfs, "Link.Tex")
                 if not model or not tex:
                     raise CharselError("Link's model or textures not found")
+                try:   # (named as their files, not "Link": the game can't create it otherwise)
+                    model, tex, _ = own_names(model, tex, ours(cid))
+                except Exception as e:   # (any read failure: kept as it is, said)
+                    notes.append(f"{RECIPES[cid].name if cid in RECIPES else cid}'s model couldn't be named as its "
+                                 f"own file ({str(e)[:100]}): the game may not create it.")
                 models[f"Model/{ours(cid)}.sbfres"], models[f"Model/{ours(cid)}.Tex.sbfres"] = model, tex
                 files = make_copy_pack(cid, slot, profile, template, pause)
                 res = {"own": {}, "link": {n: c for n, c, _ in glp.ANIMS}}
@@ -2169,6 +2269,10 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
             t.unlink()       # (a new file, never written through a hard link the library may share)
         t.write_bytes(data)
     out.mkdir(parents=True, exist_ok=True)
+    repaired = repair_own_names(top, list(imported), {k: v["slot"] for k, v in imported.items()}, say)
+    if repaired:
+        notes.append(f"{', '.join(repaired)}: the model was still named Link inside, so the game couldn't create it; "
+                     "renamed as its own file.")
     catalog["sizes"] = write_sizes(romfs, out, say)   # (0.9.5: the size table, after every file of ours is in place)
     if catalog["sizes"].get("note"):
         notes.append(catalog["sizes"]["note"])

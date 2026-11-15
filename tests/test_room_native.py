@@ -1,0 +1,78 @@
+"""More Room's bookkeeping in C (native/examples/room/room_core.h), without the game.
+
+It builds native/examples/room/selftest/room_selftest.c with the zig that ships with Savage Wind, at below-normal
+priority, and runs it. Skipped when Savage Wind's zig isn't there (SWMOD_INSTALL, else Documents/SavageWind/Savage Wind).
+
+Checks: watched names (the modded actors), the cap from the PC's RAM and graphics memory (a 16 GB gaming PC, the 8 GB
+laptop, a nearly full one), an actor's need from its own failed try and the extra its next creation gets (never for a
+game actor, never past the cap), a fixed boost, and the plain-words texts.
+"""
+import ctypes
+import sys
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "tools"))
+import build_native as bn  # noqa: E402
+import modmenu  # noqa: E402  (its low-priority runner)
+
+SRC = REPO / "native" / "examples" / "room" / "selftest" / "room_selftest.c"
+OUT = REPO / "build" / "native" / "room-selftest"
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows only (a Windows DLL)")
+class RoomNative(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        try:
+            tc = bn.find_toolchain(bn.default_install())
+        except bn.BuildError as e:
+            raise unittest.SkipTest(str(e))
+        t = bn.Target("room_selftest", (SRC,), runtime=False, out_name="room_selftest.dll", export="room_selftest")
+        built = bn.build(tc, OUT, [t], runner=modmenu.low_priority_runner)
+        bn.check_exports(zip(built, [t]))
+        dll = ctypes.CDLL(str(built[0]))
+        buf = ctypes.create_string_buffer(16384)
+        dll.room_selftest.argtypes = (ctypes.c_char_p, ctypes.c_int)
+        dll.room_selftest.restype = ctypes.c_int
+        cls.fails = dll.room_selftest(buf, len(buf))
+        cls.report = buf.value.decode("utf-8", "replace")
+        cls.rows = {}
+        for line in cls.report.splitlines():
+            group, name, status, detail = (line.split(" ", 3) + ["", "", "", ""])[:4]
+            cls.rows[(group, name)] = (status, detail)
+
+    def group(self, group: str, names: list[str]) -> None:
+        for name in names:
+            with self.subTest(check=f"{group} {name}"):
+                status, detail = self.rows.get((group, name), ("MISSING", "not run"))
+                self.assertEqual(status, "PASS", detail)
+
+    def test_watched_names(self):
+        self.group("watch", ["add", "twice", "other", "long_refused", "full_stops"])
+
+    def test_cap_from_the_machine(self):
+        self.group("cap", ["gaming_pc", "gaming_vram", "laptop", "laptop_vram_shared", "floor", "text"])
+
+    def test_need_from_the_failure(self):
+        self.group("need", ["logged", "from_failure", "next_creation", "class_extra_counted", "unwatched_none",
+                            "game_heap_no_need", "grows", "repeats_quiet"])
+
+    def test_boost(self):
+        self.group("boost", ["fixed", "fixed_unwatched", "capped", "off", "auto_nothing_needed"])
+
+    def test_texts(self):
+        self.group("text", ["fail", "report", "textures_fit", "textures_warn", "report_small_buffer"])
+
+    def test_model_names(self):
+        """A model file named as its file (the cause of the Linkle and Custom failures, 2026-11-15)."""
+        self.group("names", ["yaz0", "fres_name", "link_inside_costume", "own_name_ok", "tex_misnamed", "not_yaz0",
+                             "name_out_of_range"])
+
+    def test_no_failures(self):
+        self.assertEqual(self.fails, 0, self.report)
+
+
+if __name__ == "__main__":
+    unittest.main()

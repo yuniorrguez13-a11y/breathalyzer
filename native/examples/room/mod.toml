@@ -1,0 +1,19 @@
+# room: "More Room" (docs/room.md). Gives the costumes (and any modded actor) the memory they need at run time.
+# Install it with the mod manager (docs/mod-manager.md):
+#   python tools/build_native.py build
+#   python tools/modman.py add native/examples/room
+# room.dll isn't in this folder: modman takes it from build\native\ghost-mods, where build_native.py puts it.
+# It needs no hook slots: it wraps the game's heap allocators and the actor heap's size through hle_override.
+
+[mod]
+id = "botw-mod-loader.room"
+name = "More Room"
+version = "0.1.0"
+authors = ["giruka"]
+description = "Lifts the game's memory limits for modded actors at run time: a costume or model that needs more heap than its actor slot has gets it (sized from what the game itself asked for), within a cap from this PC's real RAM. When a model won't fit, the log says why in plain words (needed so many bytes, had so many) instead of a quiet 'could not create'. Part of multiplayer (the costumes)."
+game_versions = ["1.9.0"]   # it wraps game functions by their 1.9.0 addresses
+loader_api = 2
+part_of = "botw-mod-loader.ghost"
+
+[code]
+windows = "room.dll"

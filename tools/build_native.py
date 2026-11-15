@@ -83,6 +83,9 @@ HOOK_EXAMPLES = (
 GHOST_EXAMPLES = (
     Target("ghost", (NATIVE / "examples" / "ghost" / "ghost.c",), runtime=False, subdir="ghost-mods",
            export="swmod_init"),
+    # More Room (docs/room.md): part of multiplayer (the costumes), so it sits with the ghost mod.
+    Target("room", (NATIVE / "examples" / "room" / "room.c",), runtime=False, subdir="ghost-mods",
+           export="swmod_init"),
 )
 # The basics examples (docs/game-basics.md): small mods on native/modhost/botw.h (1.9.0 only), built into their own
 # folder and not copied by `install`.

@@ -300,10 +300,12 @@ class Commands(unittest.TestCase):
     def test_ghost_example_is_built_but_not_installed(self):
         out = Path(r"C:\build\native")
         plan = bn.plan_build(TC, out, bn.GHOST_EXAMPLES)
-        self.assertEqual([t.name for t, _ in plan], ["ghost"])
+        self.assertEqual([t.name for t, _ in plan], ["ghost", "room"])   # (More Room sits with it: docs/room.md)
         self.assertEqual(bn.GHOST_EXAMPLES[0].export, "swmod_init")
         self.assertIn(f"-OUT:{out / 'ghost-mods' / 'ghost.dll'}", plan[0][1][1])
+        self.assertIn(f"-OUT:{out / 'ghost-mods' / 'room.dll'}", plan[1][1][1])
         self.assertNotIn(str(TC.implib), plan[0][1][1])  # (a mod links nothing from Savage Wind)
+        self.assertNotIn(str(TC.implib), plan[1][1][1])
         self.assertNotIn("ghost", [t.name for t in (*bn.EXAMPLES, *bn.HOOK_EXAMPLES)])
         examples = [p.name for p in bn.install_paths(Path(r"C:\made\up\root"))["examples"]]
         self.assertEqual(examples, ["hello.dll"])   # (install copies hello only)
@@ -321,8 +323,8 @@ class Commands(unittest.TestCase):
                 mock.patch.object(bn, "describe", lambda p, rel=None: str(Path(p).relative_to(rel))), \
                 redirect_stdout(io.StringIO()) as text:
             self.assertEqual(bn.main(["build", "--out", str(out)]), 0)
-        self.assertEqual(seen, ["modhost", "hello", "stamina_hook", "ghost", "basics_show_pos", "basics_inf_stamina",
-                                "basics_teleport_up", *(["settings_demo"] if bn.SETTINGS_EXAMPLES else []),
+        self.assertEqual(seen, ["modhost", "hello", "stamina_hook", "ghost", "room", "basics_show_pos",
+                                "basics_inf_stamina", "basics_teleport_up", *(["settings_demo"] if bn.SETTINGS_EXAMPLES else []),
                                 *(t.name for t in bn.EMOTES_EXAMPLES)])
         self.assertIn(str(Path("ghost-mods") / "ghost.dll"), text.getvalue())
         self.assertIn("docs/ghost.md", text.getvalue())
