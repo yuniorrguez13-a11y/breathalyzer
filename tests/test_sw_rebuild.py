@@ -618,8 +618,23 @@ FAKE_SWGEN = textwrap.dedent(r'''
     import os, struct, sys
     log = os.environ.get("FAKE_GEN_LOG")
     if log:
-        with open(log, "a") as f:
-            f.write(sys.argv[1] + " " + " ".join(a for a in sys.argv[2:] if a == "--hle") + "\n")
+        # The modules' generators run at once: on Windows two appends at the same moment can lose a line (it did
+        # on the GitHub runner), so each takes a lock file first.
+        import time
+        fd = None
+        for _ in range(1000):
+            try:
+                fd = os.open(log + ".lock", os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except OSError:
+                time.sleep(0.01)
+        try:
+            with open(log, "a") as f:
+                f.write(sys.argv[1] + " " + " ".join(a for a in sys.argv[2:] if a == "--hle") + "\n")
+        finally:
+            if fd is not None:
+                os.close(fd)
+                os.remove(log + ".lock")
     if sys.argv[1] == "layout":
         exefs, out = sys.argv[2], sys.argv[3]
         base, lines = 0x7000000000, ["# fake layout\n"]
