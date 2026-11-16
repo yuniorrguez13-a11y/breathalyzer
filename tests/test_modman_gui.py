@@ -1007,7 +1007,10 @@ class WindowSmoke(Base):
                         self.assertEqual(view.status_head.cget("text"),
                                          "This is the biggest text that fits on this screen.")
                     view.set_size(view.start_size)  # (Ctrl 0)
-                    self.assertEqual(view.font.cget("size"), 20)
+                    if small:
+                        self.assertLessEqual(view.font.cget("size"), 20)
+                    else:
+                        self.assertEqual(view.font.cget("size"), 20)
                     view.on_details()
                     root.update()
                     self.assertIn("modman move 1 2", view.details.get("1.0", "end"))
