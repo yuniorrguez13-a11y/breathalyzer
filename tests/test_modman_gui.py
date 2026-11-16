@@ -992,12 +992,17 @@ class WindowSmoke(Base):
                     self.assertEqual(view.status_head.cget("text"), "Alpha is now number 2.")
                     self.assertEqual(view.tree.get_children(), ("b", "a", "c"))
                     self.assertEqual(view.tree.selection(), ("a",))
+                    # (a small screen, like the GitHub runner's 1024x768, can't fit 22 pt: then the biggest that fits)
+                    small = root.winfo_screenheight() < 900
                     view.set_size(22)
                     root.update()
-                    self.assertEqual(view.font.cget("size"), 22)
+                    if small:
+                        self.assertLessEqual(view.font.cget("size"), 22)
+                    else:
+                        self.assertEqual(view.font.cget("size"), 22)
                     view.set_size(99)  # (the biggest that fits on this screen, up to MAX_SIZE)
                     root.update()
-                    self.assertTrue(22 <= view.font.cget("size") <= gui.MAX_SIZE)
+                    self.assertTrue((1 if small else 22) <= view.font.cget("size") <= gui.MAX_SIZE)
                     if view.font.cget("size") < gui.MAX_SIZE:
                         self.assertEqual(view.status_head.cget("text"),
                                          "This is the biggest text that fits on this screen.")

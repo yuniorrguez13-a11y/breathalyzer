@@ -54,10 +54,13 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         guest = asyncio.create_task(coop_agent.join_session(
             self.guest_lib, "Ben", "127.0.0.1", self.coop, self.sl, game=guest_game, code=guest_code, port=p,
             share=share, stop=gstop, log=quiet, processes=[]))
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(2.0)   # (a slow PC, like the GitHub runner, needs more than 1 s to join)
         if flip is not None:
             host_game.bits.add(flip)
-            await asyncio.sleep(1.0)
+            for _ in range(80):     # (up to 8 s for the live change to reach the friend's game)
+                await asyncio.sleep(0.1)
+                if flip in guest_game.bits:
+                    break
         stop.set()
         out = await asyncio.wait_for(guest, 5)
         counts = await asyncio.wait_for(host, 5)

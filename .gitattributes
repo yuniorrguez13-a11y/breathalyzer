@@ -1,0 +1,4 @@
+# tools/packaging/starter.lock.json records the SHA-256 of these files as they are in the repo (LF). Without this,
+# a Windows checkout with core.autocrlf turns them into CRLF and test_packaging's lock check fails (it did on GitHub).
+tools/packaging/starter/start.c -text
+tools/packaging/build_starter.py -text
