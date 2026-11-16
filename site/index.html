@@ -89,7 +89,8 @@
         </h1>
         <p class="lead">
           Breathalyzer runs your Switch and Wii&nbsp;U mods on <strong>Savage Wind</strong>, the native PC version of
-          <cite>Breath of the Wild</cite>. One big Play button, an in-game Mods page, and LAN multiplayer with a friend.
+          <cite>Breath of the Wild</cite>. One big Play button and an in-game Mods page. LAN multiplayer with a friend
+          comes with the beta.
         </p>
         <div class="hero-actions">
           <a class="btn btn-primary" href="#download">
@@ -260,7 +261,7 @@
             See your friend as Link in your world. Their moves, attacks and held items are synced: swords, shields
             and bows. One of you hosts; there are no accounts and no servers of ours in the middle.
           </p>
-          <p class="note">Tested on one PC so far. A test between two PCs comes before release.</p>
+          <p class="note">Not in the early version: it comes with the beta. Tested on one PC so far.</p>
         </div>
       </article>
 
@@ -284,7 +285,7 @@
 
       <div class="coming" data-reveal>
         <h3>Coming next</h3>
-        <p class="coming-sub">Being built now. Not in the beta yet.</p>
+        <p class="coming-sub">Being built now. Not in the early version yet.</p>
         <ul class="coming-list" role="list">
           <li><span>Play the story together in <span class="nowrap">co-op</span></span></li>
           <li><span>Shared enemies</span></li>
@@ -354,12 +355,11 @@
       <div class="section-head" data-reveal>
         <p class="eyebrow"><span class="eyebrow-num">03</span> Download</p>
         <h2 id="download-title">Pick your download</h2>
-        <p class="section-lead">All three are free and for Windows. None of them has game files. You can switch later: they share your mod list.</p>
+        <p class="section-lead">Both are free and for Windows. Neither has game files. You can switch later: they share your mod list.</p>
       </div>
 
-      <!-- TODO downloads: the three links below are PLACEHOLDERS. Replace OWNER (and the repo name if it changes)
-           once the GitHub repo exists, or point each card at its own release file, e.g.
-           https://github.com/OWNER/breathalyzer/releases/latest/download/breathalyzer-plus-0.2.0-beta.1.zip -->
+      <!-- Downloads: direct links to the files of one release (a pre-release is never "latest", so no /latest/ links).
+           For a new release, change the tag and the file names in both links and in the version line below. -->
       <ul class="downloads" role="list">
         <li class="dl card" data-reveal>
           <p class="dl-tag">Just the essentials</p>
@@ -370,7 +370,7 @@
             <li>Mod manager for Switch and Wii&nbsp;U mods</li>
             <li>No Python to install</li>
           </ul>
-          <a class="btn btn-ghost dl-btn" href="https://github.com/OWNER/breathalyzer/releases/latest">Download<span class="sr-only"> Breathalyzer</span></a>
+          <a class="btn btn-ghost dl-btn" href="https://github.com/yuniorrguez13-a11y/breathalyzer/releases/download/v0.3.0-early.1/breathalyzer-0.3.0-early.1.zip">Download<span class="sr-only"> Breathalyzer</span></a>
         </li>
         <li class="dl card dl-featured" data-reveal>
           <p class="dl-tag">Recommended</p>
@@ -381,24 +381,13 @@
             <li>Mods that change how the game plays start off</li>
             <li>Change your picks any time</li>
           </ul>
-          <a class="btn btn-primary dl-btn" href="https://github.com/OWNER/breathalyzer/releases/latest">Download<span class="sr-only"> Breathalyzer + Mods</span></a>
-        </li>
-        <li class="dl card" data-reveal>
-          <p class="dl-tag">For streamers</p>
-          <h3>Breathalyzer <span class="plus">+ Mods + Streamer Pack</span></h3>
-          <!-- TODO streamer pack: say what is in the pack once its mod list is final. -->
-          <p>Everything in Breathalyzer + Mods, plus the Streamer Pack.</p>
-          <ul class="ticks">
-            <li>All of our own mods</li>
-            <li>The Streamer Pack</li>
-            <li>Same picker: choose before you play</li>
-          </ul>
-          <a class="btn btn-ghost dl-btn" href="https://github.com/OWNER/breathalyzer/releases/latest">Download<span class="sr-only"> Breathalyzer + Mods + Streamer Pack</span></a>
+          <a class="btn btn-primary dl-btn" href="https://github.com/yuniorrguez13-a11y/breathalyzer/releases/download/v0.3.0-early.1/breathalyzer-plus-0.3.0-early.1.zip">Download<span class="sr-only"> Breathalyzer + Mods</span></a>
         </li>
       </ul>
       <p class="dl-note" data-reveal>
-        Version <span class="nowrap">0.2.0-beta.1</span>. Needs your own game and
-        <span class="nowrap">Savage Wind 0.4.1-alpha.4</span>.
+        Early version <span class="nowrap">0.3.0-early.1</span> (<a href="https://github.com/yuniorrguez13-a11y/breathalyzer/releases/tag/v0.3.0-early.1">release notes</a>).
+        Needs your own game and <span class="nowrap">Savage Wind 0.4.1-alpha.4</span> (newer Savage Wind versions
+        come after the beta).
       </p>
     </div>
   </section>
@@ -437,10 +426,9 @@
           <summary>Will my existing mods work?</summary>
           <p>
             Most will. Switch mods work, including .bnp packages (with log merging) and, in part, UKMM packages.
-            Wii&nbsp;U mods are converted on your PC: data, and new this beta, models and textures (not audio yet).
+            Wii&nbsp;U mods are converted on your PC: data, and (still being tested) models and textures, not audio yet.
             If a mod can't be used, Breathalyzer tells you why. See the
-            <!-- TODO links: placeholder repo address, like the download links above (replace OWNER). -->
-            <a href="https://github.com/OWNER/breathalyzer/blob/main/docs/MOD-COMPAT.md">mod compatibility list</a>.
+            <a href="https://github.com/yuniorrguez13-a11y/breathalyzer/blob/main/docs/MOD-COMPAT.md">mod compatibility list</a>.
           </p>
         </details></div>
         <div class="qa card"><details>
@@ -458,8 +446,8 @@
         <div class="qa card"><details>
           <summary>Can we play the story together yet?</summary>
           <p>
-            Not yet. Today you see your friend as Link, with synced moves, attacks and held items (tested on one PC so
-            far). Playing the story together, shared enemies, a character selector and emotes are coming.
+            Not yet. Multiplayer comes with the beta: first you see your friend as Link, with synced moves, attacks and
+            held items. Playing the story together, shared enemies, a character selector and emotes come with it.
           </p>
         </details></div>
         <div class="qa card"><details>
