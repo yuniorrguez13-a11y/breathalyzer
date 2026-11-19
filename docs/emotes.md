@@ -3,14 +3,13 @@
 Link can dance, wave, give a thumbs up or down, and go flying like a ragdoll. 24 emotes on 3 pages, plus the
 ragdoll. A mod by giruka.
 
-**Status:** experimental, **not working in the game yet**. The animations are built and checked offline (every pose,
-and a read-back of the file). In the game (Game check 2026-11-13, round 2) the emote now stays on Link's body slot for
-the whole clip and moving cancels it, but on screen Link still stood idle. The cause is found (the emote went on his
-legs only, see How it works) and a fix is built, not yet tried in the game. The ragdoll was only a lying pose (it
-looked like a crouch); version 0.2.0 makes it a real ragdoll (Link is thrown forward and tumbles), built from a
-study of the game's code, not yet tried in the game. Version 0.3.0 adds the **emote wheel** (hold G, or D-pad Down
-on a controller), checked offline only (its self-test and pictures of what it draws), not yet in the game. The Emotes
-mod starts **off**, because it changes a game file (Link's animation list).
+**Status:** experimental, and it **works in the game** (on one PC). Emotes play on Link's body and moving cancels
+them (Game check 2026-11-13, round 3). The ragdoll (version 0.2.0) throws Link forward so he tumbles (game check
+2026-11-13). The **emote wheel** (version 0.3.0: hold G, or D-pad Down on a controller) worked in the game when the
+Emotes Short was recorded (finished 2026-11-15), with six seven, the floss, the Goron flex and the Korok hop.
+Not done yet: some dances look wrong and are being redone, and friends can't see your emotes in multiplayer yet.
+Emotes are **not in a download yet** (the Plus zip of 0.3.0-early.1 doesn't have them). The Emotes mod starts
+**off**, because it changes a game file (Link's animation list).
 
 ## Turn it on
 
