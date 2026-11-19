@@ -42,22 +42,30 @@ void mm_unlock(void) { ReleaseSRWLockExclusive(&g_lock); }
 // ------------------------------------------------------------------ small helpers
 
 // The game's Caption_00 font (the rows' names and the description line) has no # $ % @ ^ ` { | } ~: the game test
-// showed a gap for each. tools/modmenu.py writes them as words or look-alikes; any left become one here.
-static char shown(unsigned char c) {
-    switch (c) {
-    case '{': return '(';
-    case '}': return ')';
-    case '|': return '/';
-    case '`': case '^': return '\'';
-    case '~': return '-';
-    case '#': case '$': case '%': case '@': return '?';
+// showed a gap for each. The texts keep them; what shows them decides: path A+ draws them in the game's font tag 3
+// (it has every ASCII symbol), or as they are once menu.txt says "symbols full" (font.py fix-symbols); path B, which
+// takes plain text, gets look-alikes (mm_plain).
+bool mm_font_lacks(char c) { return c && strchr("#$%@^`{|}~", c) != NULL; }
+
+void mm_plain(char *s) {
+    for (; *s; s++) {
+        switch (*s) {
+        case '{': *s = '('; break;
+        case '}': *s = ')'; break;
+        case '|': *s = '/'; break;
+        case '`': case '^': *s = '\''; break;
+        case '~': *s = '-'; break;
+        case '#': case '$': case '%': case '@': *s = '?'; break;
+        }
     }
-    return c >= 0x20 && c < 0x7f ? (char)c : '?';
 }
 
 void mm_copy(char *dst, size_t cap, const char *src) {
     size_t i = 0;
-    for (; src && src[i] && i + 1 < cap; i++) dst[i] = shown((unsigned char)src[i]);
+    for (; src && src[i] && i + 1 < cap; i++) {
+        unsigned char c = (unsigned char)src[i];
+        dst[i] = c >= 0x20 && c < 0x7f ? (char)c : '?';
+    }
     if (cap) dst[i] = 0;
 }
 
@@ -221,12 +229,65 @@ static void config_stamp(char *out, size_t cap) {
     snprintf(out, cap, "%llu:%llu", (unsigned long long)size, (unsigned long long)ns);
 }
 
+static int to_int(const char *s, int lo, int hi, int bad) {  // a whole number in lo..hi, else bad
+    char *end;
+    long v = s && *s ? strtol(s, &end, 10) : 0;
+    return s && *s && !*end && v >= lo && v <= hi ? (int)v : bad;
+}
+
+// The records menu.txt has beyond v1's (docs/mod-menu.md "menu.txt"); each is skipped when it doesn't fit.
+static void menu_extra(char **f, int n) {
+    if (!strcmp(f[0], "symbols") && n >= 2) {
+        g_mm.symbols_full = !strcmp(f[1], "full");
+    } else if (!strcmp(f[0], "changed") && n >= 2) {
+        mm_copy(g_mm.changed, sizeof g_mm.changed, f[1]);
+        g_mm.crashed = n >= 3 && !strcmp(f[2], "crash");
+    } else if (!strcmp(f[0], "profile") && n >= 2 && f[1][0] && g_mm.nprofiles < MM_PROFILES) {
+        mm_copy(g_mm.profiles[g_mm.nprofiles], MM_PROFILE_MAX, f[1]);
+        if (n >= 3 && !strcmp(f[2], "now")) g_mm.profile_now = g_mm.profile_want = g_mm.nprofiles;
+        g_mm.nprofiles++;
+    } else if (!strcmp(f[0], "font") && n >= 3 && f[1][0] && g_mm.nfonts < MM_FONTS) {
+        MmFont *x = &g_mm.fonts[g_mm.nfonts];
+        mm_copy(x->key, sizeof x->key, f[1]);
+        mm_copy(x->label, sizeof x->label, f[2]);
+        if (n >= 4 && !strcmp(f[3], "now")) g_mm.font_now = g_mm.font_want = g_mm.nfonts;
+        g_mm.nfonts++;
+    } else if (!strcmp(f[0], "picgrid") && n >= 6 && g_mm.ngrids < MM_GRIDS) {
+        MmGrid *gr = &g_mm.grids[g_mm.ngrids];
+        mm_copy(gr->tex, sizeof gr->tex, f[1]);
+        gr->w = to_int(f[2], 8, 8192, 0), gr->h = to_int(f[3], 8, 8192, 0);
+        gr->cols = to_int(f[4], 1, 64, 0), gr->rows = to_int(f[5], 1, 64, 0);
+        if (gr->w && gr->h && gr->cols && gr->rows) g_mm.ngrids++;
+    } else if (!strcmp(f[0], "pic") && n >= 4) {
+        int m = find_mod(f[1]);
+        int icon = to_int(f[2], -1, 4095, -1), bg = to_int(f[3], -1, 4095, -1);
+        if (!strcmp(f[1], "_mods-page")) g_mm.page_bg = bg;
+        else if (m >= 0) g_mm.mods[m].icon = icon, g_mm.mods[m].bg = bg;
+    } else if (!strcmp(f[0], "files") && n >= 5) {
+        int m = find_mod(f[1]);
+        if (m < 0) return;
+        MmMod *x = &g_mm.mods[m];
+        x->files = to_int(f[2], 0, 1 << 30, -1);
+        x->wins = to_int(f[3], 0, 1 << 30, 0);
+        x->loses = to_int(f[4], 0, 1 << 30, 0);
+        mm_copy(x->rival, sizeof x->rival, n >= 6 ? f[5] : "");
+    } else if (!strcmp(f[0], "about") && n >= 4) {
+        int m = find_mod(f[1]);
+        if (m < 0 || g_mm.mods[m].nfields >= MM_FIELDS || !f[3][0]) return;
+        MmField *x = &g_mm.mods[m].fields[g_mm.mods[m].nfields++];
+        mm_copy(x->field, sizeof x->field, f[2]);
+        mm_copy(x->text, sizeof x->text, f[3]);
+    }
+}
+
 static void load_menu(void) {
     wchar_t path[PATH_W];
     bool missing = true;
     char *text = lib_file(L"menu\\menu.txt", path) ? read_all(path, &missing) : NULL;
     memset(&g_mm, 0, sizeof g_mm);
     g_mm.list = MM_LIST_OK;
+    g_mm.profile_now = g_mm.profile_want = g_mm.font_now = g_mm.font_want = -1;
+    g_mm.page_bg = -1;
     if (!text) {
         g_mm.list = missing ? MM_LIST_MISSING : MM_LIST_DAMAGED;
         return;
@@ -265,16 +326,23 @@ static void load_menu(void) {
             mm_copy(m->about, sizeof m->about, n >= 6 ? f[5] : "");
             mm_copy(m->extra, sizeof m->extra, n >= 7 ? f[6] : "");
             m->pos = hidden ? -1 : g_mm.nlisted;
+            m->files = -1, m->icon = m->bg = -1, m->sm = -2;
             if (!hidden) g_mm.order[g_mm.nlisted++] = g_mm.n;
             g_mm.n++;
+        } else {
+            menu_extra(f, n);
         }  // (other lines: a newer writer's; skipped)
     }
     free(text);
     if (first) g_mm.list = MM_LIST_DAMAGED;  // (an empty file)
     if (g_mm.list != MM_LIST_OK) {
         g_mm.n = g_mm.nlisted = 0;
+        g_mm.nprofiles = g_mm.nfonts = g_mm.ngrids = 0;
+        g_mm.profile_now = g_mm.profile_want = g_mm.font_now = g_mm.font_want = -1;
         return;
     }
+    if (g_mm.nprofiles && g_mm.profile_now < 0) g_mm.nprofiles = 0;  // (a list without the set in use: no row)
+    if (g_mm.nfonts && g_mm.font_now < 0) g_mm.nfonts = 0;
     char now[64];
     config_stamp(now, sizeof now);
     g_mm.stale = config[0] && now[0] && strcmp(config, now) != 0;
@@ -388,7 +456,7 @@ static void load_pending(void) {
     char *text = g_mm.list == MM_LIST_OK && lib_file(L"menu\\pending.txt", path) ? read_all(path, &missing) : NULL;
     if (!text) return;
     char *p = text, *line, *f[4], serial[24] = "";
-    int pm[MM_MAX_MODS], np = 0;
+    int pm[MM_MAX_MODS], np = 0, profile = -1, font = -1;
     bool pon[MM_MAX_MODS], first = true, good = false;
     while ((line = next_line(&p))) {
         int n = split_tabs(line, f, 4);
@@ -402,12 +470,20 @@ static void load_pending(void) {
             int m = find_mod(f[1]);
             if (m < 0 || g_mm.mods[m].hidden || np >= MM_MAX_MODS) continue;
             pm[np] = m, pon[np++] = !strcmp(f[2], "on");
+        } else if (!strcmp(f[0], "profile") && n >= 2) {  // (a mod set or font that is gone: no change)
+            for (int i = 0; i < g_mm.nprofiles; i++)
+                if (!strcmp(g_mm.profiles[i], f[1])) profile = i;
+        } else if (!strcmp(f[0], "font") && n >= 2) {
+            for (int i = 0; i < g_mm.nfonts; i++)
+                if (!strcmp(g_mm.fonts[i].key, f[1])) font = i;
         }
     }
     free(text);
     Base b;
     if (good && good_serial(serial) && load_base(serial, &b)) {
         rebase(&b, pm, pon, np);
+        if (profile >= 0) g_mm.profile_want = profile;
+        if (font >= 0) g_mm.font_want = font;
         if (strcmp(serial, g_mm.serial))
             g_api->log("modmenu: pending.txt was made from an older mod list; its changes were moved onto this one");
         return;
@@ -428,13 +504,18 @@ static void load_pending(void) {
     }
 }
 
-// pending.txt: every listed mod in the wanted order; deleted when nothing differs from now.
+// pending.txt: every listed mod in the wanted order, then the mod set and the font when they change; deleted when
+// nothing differs from now.
 static int pending_text(char *out, size_t cap) {
     size_t n = (size_t)snprintf(out, cap, "swmodmenu-pending\t1\nserial\t%s\n", g_mm.serial);
     for (int k = 0; k < g_mm.nlisted && n < cap; k++) {
         const MmMod *m = &g_mm.mods[g_mm.order[k]];
         n += (size_t)snprintf(out + n, cap - n, "mod\t%s\t%s\n", m->id, m->wanted ? "on" : "off");
     }
+    if (n < cap && g_mm.profile_want >= 0 && g_mm.profile_want != g_mm.profile_now)
+        n += (size_t)snprintf(out + n, cap - n, "profile\t%s\n", g_mm.profiles[g_mm.profile_want]);
+    if (n < cap && g_mm.font_want >= 0 && g_mm.font_want != g_mm.font_now)
+        n += (size_t)snprintf(out + n, cap - n, "font\t%s\n", g_mm.fonts[g_mm.font_want].key);
     return n < cap ? (int)n : -1;
 }
 
@@ -458,7 +539,7 @@ static bool write_pending(const char *text, int len) {
 // The writer: pending.txt after every change, at most once per WRITE_MS. It never runs on the game thread.
 static DWORD WINAPI writer_main(void *arg) {
     (void)arg;
-    static char text[MM_MAX_MODS * 96 + 128];
+    static char text[MM_MAX_MODS * 96 + 256];
     uint64_t next = 0;
     while (!__atomic_load_n(&g_stop, __ATOMIC_ACQUIRE)) {
         Sleep(20);
@@ -511,12 +592,26 @@ void mm_move(int m, int pos) {
     changed();
 }
 
+void mm_set_profile(int p) {
+    if (p < 0 || p >= g_mm.nprofiles || p == g_mm.profile_want) return;
+    g_mm.profile_want = p;
+    changed();
+}
+
+void mm_set_font(int f) {
+    if (f < 0 || f >= g_mm.nfonts || f == g_mm.font_want) return;
+    g_mm.font_want = f;
+    changed();
+}
+
 bool mm_undo(void) {
     if (!mm_changes()) return false;
     for (int i = 0; i < g_mm.n; i++) {
         g_mm.mods[i].wanted = g_mm.mods[i].on;
         if (g_mm.mods[i].pos >= 0) g_mm.order[g_mm.mods[i].pos] = i;
     }
+    g_mm.profile_want = g_mm.profile_now;
+    g_mm.font_want = g_mm.font_now;
     changed();
     return true;
 }
@@ -527,169 +622,31 @@ int mm_changes(void) {
         const MmMod *m = &g_mm.mods[g_mm.order[k]];
         n += m->wanted != m->on || m->pos != k;
     }
-    return n;
+    return n + (g_mm.profile_want != g_mm.profile_now) + (g_mm.font_want != g_mm.font_now);
 }
 
-// ------------------------------------------------------------------ the pages (locked)
-
-void mm_ordinal(int n, char *out, size_t cap) {
-    const char *s = n % 100 >= 10 && n % 100 <= 20 ? "th" : n % 10 == 1 ? "st" : n % 10 == 2 ? "nd" : n % 10 == 3 ? "rd"
-                                                                                                                   : "th";
-    snprintf(out, cap, "%d%s", n, s);
+// modhost's settings (mod API 3, with a deployed settings.txt), or NULL: then a mod's page shows only its info
+const SwModSettingsUi *mm_ui(void) {
+    if (!SWMOD_HAS(g_api, settings_ui) || !g_api->settings_ui) return NULL;
+    const SwModSettingsUi *ui = g_api->settings_ui();
+    return SWMOD_UI_HAS(ui, reset) ? ui : NULL;
 }
 
-static int page_mods(void) { return g_mm.nlisted < MM_PAGE_MODS ? g_mm.nlisted : MM_PAGE_MODS; }
-
-int mm_page(int page, PageRow *out, int cap) {
-    int n = 0;
-#define ROW(k, m)                                              \
-    do {                                                       \
-        if (n < cap) out[n++] = (PageRow){(k), (m)};           \
-    } while (0)
-    if (page == PG_MODS && g_mm.list == MM_LIST_OK && g_mm.stale) ROW(RK_STALE, -1);
-    if (page == PG_MODS && g_mm.note[0]) ROW(RK_NOTE, -1);
-    if (g_mm.list != MM_LIST_OK || !g_mm.nlisted) {
-        ROW(RK_INFO, -1);
-        return n;
-    }
-    int shown = page_mods();
-    for (int k = 0; k < shown; k++) ROW(page == PG_ORDER ? RK_ORDER : RK_MOD, g_mm.order[k]);
-    if (g_mm.nlisted > shown || g_mm.more) ROW(RK_MORE, -1);
-    if (page == PG_MODS) {
-        if (g_mm.nlisted >= 2) ROW(RK_ORDER_BUTTON, -1);
-        ROW(RK_HOWTO, -1);
-    }
-#undef ROW
-    return n;
-}
-
-static bool row_mod_ok(const PageRow *r) { return r->mod >= 0 && r->mod < g_mm.n; }
-
-int mm_row_widget(const PageRow *r) {
-    return r->kind == RK_MOD ? 0 : r->kind == RK_ORDER ? 1 : 2;
-}
-
-int mm_row_value(const PageRow *r) {
-    if (!row_mod_ok(r)) return 0;
-    if (r->kind == RK_MOD) return g_mm.mods[r->mod].wanted;
-    if (r->kind == RK_ORDER) return mm_wanted_pos(r->mod) < 0 ? 0 : mm_wanted_pos(r->mod);
-    return 0;
-}
-
-// An Order row's places: only those the page shows (a mod moved past them would leave the page for good)
-int mm_row_max(const PageRow *r) {
-    return r->kind == RK_ORDER ? (page_mods() > 1 ? page_mods() - 1 : 0) : r->kind == RK_MOD ? 1 : 0;
-}
-
-bool mm_row_set(const PageRow *r, int value) {
-    if (!row_mod_ok(r)) return false;
-    if (r->kind == RK_MOD) mm_set_wanted(r->mod, value != 0);
-    if (r->kind == RK_ORDER) {
-        mm_move(r->mod, value > mm_row_max(r) ? mm_row_max(r) : value);
-        return true;
-    }
-    return false;
-}
-
-void mm_row_title(const PageRow *r, char *out, size_t cap) {
-    const char *s = "";
-    switch (r->kind) {
-    case RK_MOD:
-    case RK_ORDER: s = row_mod_ok(r) ? g_mm.mods[r->mod].name : "?"; break;
-    case RK_NOTE: s = "Last change not used"; break;
-    case RK_INFO: s = g_mm.list == MM_LIST_MISSING ? "Mod list missing" : g_mm.list == MM_LIST_DAMAGED
-                                                                                ? "Mod list damaged"
-                                                                                : "No mods yet"; break;
-    case RK_MORE: s = "More mods in Mod Manager"; break;
-    case RK_ORDER_BUTTON: s = "Change order"; break;
-    case RK_HOWTO: s = "How to use changes"; break;
-    case RK_STALE: s = "This list may be old"; break;
-    }
-    mm_copy(out, cap, s);
-}
-
-// A mod's description line: what it does, then what changes at the next start (or Mod Manager's warnings). The game
-// shows about 82 characters of it (the game test: longer lines are cut at a word), so it is kept to 80 (MM_TEXT_MAX):
-// what it does is shortened, never the change.
-// When the changes apply: "at your next start" only once Play in Mod Manager uses them (menu.txt "use modman")
-static const char *when(void) { return g_mm.use_modman ? " at your next start." : " once you use changes."; }
-
-static void mod_desc(const MmMod *m, int k, char *out, size_t cap) {
-    char tail[MM_TEXT_MAX] = "";
-    if (m->wanted != m->on) mm_copy(tail, sizeof tail, m->wanted ? "Turns on" : "Turns off");
-    else if (m->pos != k) mm_copy(tail, sizeof tail, "Moves");
-    if (tail[0]) mm_cat(tail, sizeof tail, when());
-    if (tail[0] && m->rebuild) mm_cat(tail, sizeof tail, " Next start takes 10-20 minutes.");
-    if (!tail[0]) mm_copy(tail, sizeof tail, m->extra);
-    size_t room = cap > MM_TEXT_MAX ? MM_TEXT_MAX : cap;
-    size_t want = strlen(tail) + (tail[0] ? 1 : 0);
-    char about[MM_ABOUT_MAX];
-    mm_copy(about, sizeof about, m->about);
-    if (want + strlen(about) + 1 > room) {  // (too long for the line: shorten what it does)
-        size_t keep = room > want + 4 ? room - want - 4 : 0;
-        if (keep < strlen(about)) {
-            size_t sp = keep;
-            while (sp > keep / 2 && about[sp] != ' ') sp--;  // (at the end of a word, when one ends in the second half)
-            if (about[sp] == ' ') keep = sp;
-            while (keep && strchr(" ,;:", about[keep - 1])) keep--;
-            about[keep] = 0;
-            if (keep) mm_cat(about, sizeof about, "...");
+int mm_settings_of(int m) {
+    if (m < 0 || m >= g_mm.n) return -1;
+    MmMod *x = &g_mm.mods[m];
+    if (x->sm == -2) {  // (settings.txt is read once, at the start: the answer doesn't change)
+        const SwModSettingsUi *ui = mm_ui();
+        x->sm = -1;
+        for (int i = 0, n = ui ? ui->mods() : 0; i < n; i++) {
+            const char *id = ui->mod_lib_id(i);
+            if (id && !strcmp(id, x->id) && ui->count(i) > 0) {
+                x->sm = i;
+                break;
+            }
         }
     }
-    mm_copy(out, room, about);
-    if (about[0] && tail[0]) mm_cat(out, room, " ");
-    mm_cat(out, room, tail);
-}
-
-void mm_row_desc(const PageRow *r, char *out, size_t cap) {
-    char a[16];
-    out[0] = 0;
-    switch (r->kind) {
-    case RK_MOD:
-        if (row_mod_ok(r)) mod_desc(&g_mm.mods[r->mod], mm_wanted_pos(r->mod), out, cap);
-        break;
-    case RK_ORDER:
-        if (row_mod_ok(r) && g_mm.mods[r->mod].pos != mm_wanted_pos(r->mod)) {  // ("Was 12th. Moves once...")
-            mm_ordinal(g_mm.mods[r->mod].pos + 1, a, sizeof a);
-            snprintf(out, cap, "Was %s. Moves", a);
-            mm_cat(out, cap, when());
-        } else {
-            mm_copy(out, cap, "Later mods win when two mods change the same file.");
-        }
-        break;
-    case RK_NOTE: mm_copy(out, cap, g_mm.note); break;
-    case RK_INFO:
-        mm_copy(out, cap,
-                g_mm.list == MM_LIST_OK ? "Add mods in Mod Manager on your PC."
-                                        : "Close the game. Then on your PC run: python tools/modmenu.py sync");
-        break;
-    case RK_MORE:
-        snprintf(out, cap, "This page shows the first %d. Mod Manager on your PC shows all of them.", MM_PAGE_MODS);
-        break;
-    case RK_ORDER_BUTTON: mm_copy(out, cap, "Pick which mod wins when two mods change the same file."); break;
-    case RK_HOWTO:
-        mm_copy(out, cap, g_mm.use_modman ? "Close the game. Then press Play in Mod Manager."
-                                          : "Close the game. Then on your PC run: python tools/modmenu.py play");
-        break;
-    case RK_STALE:
-        mm_copy(out, cap, "Mod Manager changed mods after this list was made. ON/OFF may be wrong.");
-        break;
-    }
-}
-
-void mm_row_button(const PageRow *r, char *out, size_t cap) {
-    mm_copy(out, cap, r->kind == RK_ORDER_BUTTON ? TXT_OPEN : TXT_SEE_BELOW);
-}
-
-void mm_mods_button_desc(char *out, size_t cap) {
-    int n = mm_changes();
-    mm_copy(out, cap, "Turn mods on or off, and change their order.");
-    if (n) {
-        char more[48];
-        snprintf(more, sizeof more, " %d change%s wait%s.", n, n == 1 ? "" : "s", n == 1 ? "s" : "");
-        mm_cat(out, cap, more);
-    }
-    if (g_mm.stale) mm_cat(out, cap, " List may be old.");  // (80 characters at most, with 64 changes)
+    return x->sm;
 }
 
 // ------------------------------------------------------------------ commands
@@ -732,8 +689,18 @@ static void cmd_modmenu(int argc, char **argv, SwModReply *r) {
         FIELD(int, "position", m->pos + 1);
         FIELD(int, "wanted_position", k + 1);
         FIELD(bool, "rebuild", m->rebuild);
+        FIELD(int, "settings", mm_settings_of(i) >= 0 ? mm_ui()->count(mm_settings_of(i)) : 0);
+        FIELD(int, "icon", m->icon);
 #undef FIELD
     }
+    g_api->reply_bool(r, "symbols_full", g_mm.symbols_full);
+    g_api->reply_str(r, "profile", g_mm.profile_now >= 0 ? g_mm.profiles[g_mm.profile_now] : "");
+    g_api->reply_str(r, "profile_next", g_mm.profile_want >= 0 ? g_mm.profiles[g_mm.profile_want] : "");
+    g_api->reply_str(r, "font", g_mm.font_now >= 0 ? g_mm.fonts[g_mm.font_now].key : "");
+    g_api->reply_str(r, "font_next", g_mm.font_want >= 0 ? g_mm.fonts[g_mm.font_want].key : "");
+    g_api->reply_int(r, "pictures", g_mm.ngrids);
+    g_api->reply_bool(r, "settings_ui", mm_ui() != NULL);
+    if (g_page.on && !strcmp(g_page.path, "A+")) page_a_status(r);
     if (g_page.on)
         g_api->reply_text(r, "Mod menu on: %d mod%s, %d change%s wait%s for your next start.", g_mm.nlisted,
                           g_mm.nlisted == 1 ? "" : "s", changes, changes == 1 ? "" : "s", changes == 1 ? "s" : "");
@@ -793,12 +760,28 @@ static void cmd_undo(int argc, char **argv, SwModReply *r) {
     g_api->reply_bool(r, "undone", any);
 }
 
+// modmenu_key <key>: a key for the key capture that runs now, as if it was pressed on the keyboard (for scripts and the
+// self-test; the capture still refuses Savage Wind's own keys). "Backspace" clears; "wait" lets the capture run out.
+static void cmd_key(int argc, char **argv, SwModReply *r) {
+    char why[120] = "";
+    if (argc != 2) {
+        g_api->reply_fail(r, "usage: modmenu_key <key name, as in mod.toml, or Backspace>");
+        return;
+    }
+    if (!page_a_inject_key(argv[1], why, sizeof why)) {
+        g_api->reply_fail(r, "%s", why);
+        return;
+    }
+    g_api->reply_str(r, "key", argv[1]);
+}
+
 static const SwModCommand commands[] = {
     {"modmenu", "", "The Mod menu: is it on, and the mods with the changes for your next start", cmd_modmenu,
      SWMOD_CMD_PLAYER},
     {"modmenu_set", "<id or number> on|off", "Turn a mod on or off at your next start", cmd_set, 0},
     {"modmenu_move", "<id or number> <position>", "Move a mod in the order for your next start", cmd_move, 0},
     {"modmenu_undo", "", "Undo every change for your next start", cmd_undo, 0},
+    {"modmenu_key", "<key>", "Press a key for the Mods page's key capture (Backspace clears)", cmd_key, 0},
 };
 
 // ------------------------------------------------------------------ start

@@ -21,7 +21,8 @@ The files that tie the game and Mod Manager together (all in the mod library):
     menu\\pending.txt        what the player wants at the next start; the game writes it while it runs
     menu\\apply.json         only while apply runs: config.json as it was (a cut-off apply is finished next time)
 The menu files are UTF-8 text, one record per line, fields split by tabs. Nothing in them can name a path or a
-command: pending.txt holds only mod ids, on/off and their order. apply uses only what the player changed in the game
+command: pending.txt holds only mod ids, on/off and their order, and the mod set and the font the player picked on the
+More page (both checked against the library's own lists before they are used). apply uses only what the player changed in the game
 (pending.txt against the list it was made from), so changes made in Mod Manager meanwhile stay.
 """
 from __future__ import annotations
@@ -51,7 +52,7 @@ MOD_ID = "botw-mod-loader.modmenu"   # the Mod menu mod's id (its mod.toml): nev
 MOD_NAME = "Mod menu"
 MOD_DLL = "modmenu.dll"
 MOD_SRC = os.path.join(REPO, "native", "examples", "modmenu")
-MOD_SOURCES = ("modmenu.c", "opt_page_a.c", "opt_page_b.c")
+MOD_SOURCES = ("modmenu.c", "mm_pages.c", "opt_page_a.c", "opt_page_b.c")
 MOD_OUT = os.path.join(mm.MODHOST_DIR, "modmenu-mods", "modmenu")  # the built DLL and the mod.toml setup adds
 MANIFEST = f"""# The Mod menu: a Mods page in the game's Options (docs/mod-menu.md). Written by tools/modmenu.py setup.
 [mod]
@@ -105,11 +106,12 @@ FONT_MISSING = {"{": "(", "}": ")", "|": "/", "`": "'", "^": "'", "~": "-", "%":
                 "@": " at ", "$": "?"}
 
 
-def ascii_text(s, n: int) -> str:
+def ascii_text(s, n: int, symbols: bool = False) -> str:
     """s as one line of plain ASCII, at most n characters: accents dropped, other letters made '?', tabs and line
     breaks made spaces, runs of spaces made one, and "..." at the end when it was cut. The game's option fonts miss
     many letters, and also # $ % @ ^ ` { | } ~ (the game test showed a gap for each): those become words or look-alikes
-    (FONT_MISSING). The mod treats all of it as plain text."""
+    (FONT_MISSING), unless symbols is true: menu.txt keeps them, and the Mod menu mod draws them in the game's font
+    tag 3 (or as they are, once the menu font has them: "symbols full"). The mod treats all of it as plain text."""
     s = unicodedata.normalize("NFKD", str(s or ""))
     out = []
     for c in s:
@@ -117,7 +119,7 @@ def ascii_text(s, n: int) -> str:
             continue
         if c.isspace() or unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp"):
             out.append(" ")
-        elif c in FONT_MISSING:
+        elif c in FONT_MISSING and not symbols:
             out.append(FONT_MISSING[c])
         elif 32 <= ord(c) < 127:
             out.append(c)
@@ -241,6 +243,8 @@ def _parse_menu(path: str) -> Menu | None:
 class Pending:
     serial: str = ""
     wanted: list[tuple[str, bool]] = field(default_factory=list)   # (id, on), in the wanted order
+    profile: str = ""   # the mod set picked on the More page ("" none)
+    font: str = ""      # the font picked there: "game", "easy-read" or "mod:<id>" ("" none)
 
 
 def read_pending(lib: mm.Library) -> Pending | None:
@@ -262,6 +266,10 @@ def read_pending(lib: mm.Library) -> Pending | None:
             if ln[1] not in seen:
                 seen.add(ln[1])
                 p.wanted.append((ln[1], ln[2] == "on"))
+        elif ln[0] == "profile" and len(ln) >= 2 and mm.profile_name_ok(ln[1]):
+            p.profile = ln[1]
+        elif ln[0] == "font" and len(ln) >= 2 and FONT_KEY_RE.fullmatch(ln[1]):
+            p.font = ln[1]
     if not p.wanted:
         raise MenuError("pending.txt lists no mods")
     return p
@@ -391,8 +399,8 @@ def describe_mods(lib: mm.Library) -> list[Row]:
             extra.append("Wii U mod: may look wrong.")
         if not hidden:
             pos += 1
-        rows.append(Row(m["id"], ascii_text(names[m["id"]], NAME_MAX) or m["id"][:NAME_MAX],
-                        ascii_text(_about(m, man), ABOUT_MAX), ascii_text(" ".join(extra), EXTRA_MAX),
+        rows.append(Row(m["id"], ascii_text(names[m["id"]], NAME_MAX, True) or m["id"][:NAME_MAX],
+                        ascii_text(_about(m, man), ABOUT_MAX, True), ascii_text(" ".join(extra), EXTRA_MAX, True),
                         bool(m.get("enabled")), bool(m.get("enabled")), None if hidden else pos,
                         None if hidden else pos, rebuild, hidden, wiiu))
     return rows
@@ -430,9 +438,194 @@ def modman_applies() -> bool:
 def menu_text(lib: mm.Library, note: str = "", serial: str | None = None) -> str:
     lines = [f"{MENU_MAGIC}\t{FORMAT}", f"serial\t{serial or secrets.token_hex(8)}", f"config\t{config_stamp(lib)}",
              f"note\t{ascii_text(note, NOTE_MAX)}", f"use\t{'modman' if modman_applies() else 'command'}"]
-    for r in describe_mods(lib):
+    rs = describe_mods(lib)
+    for r in rs:
         lines.append("\t".join(("mod", r.id, "on" if r.on else "off", r.flags, r.name, r.about, r.extra)))
+    for part in (_font_lines, _profile_lines, _changed_lines, _files_lines, _about_lines, _picture_lines):
+        try:  # (each part is extra: one that fails leaves only its own rows out)
+            lines += part(lib, rs)
+        except Exception as e:  # noqa: BLE001
+            say(f"Mod menu: {part.__name__[1:].replace('_', ' ')} left out ({_first_line(e)})")
     return "\n".join(lines) + "\n"
+
+
+# The v2 records (docs/mod-menu.md "menu.txt"). Old Mod menu builds skip them.
+FONT_KEY_RE = re.compile(r"(game|easy-read|mod:[A-Za-z0-9][A-Za-z0-9._-]{0,63})")
+MAX_PROFILES, MAX_FONTS, MAX_FIELDS = 16, 16, 4   # (modmenu.c MM_PROFILES, MM_FONTS, MM_FIELDS)
+
+
+def _font_lines(lib: mm.Library, rs: list[Row]) -> list[str]:
+    """symbols full (the deployed menu font has every ASCII symbol: font.py fix-symbols), then the Font row's choices:
+    font <key> <label> [now]. No font rows without tools/font.py."""
+    out = []
+    try:
+        launch = mm.read_launch(lib)
+    except (mm.ModmanError, OSError, ValueError):
+        launch = {}
+    if (((launch or {}).get("made") or {}).get("fonts") or {}).get("symbols_full"):
+        out.append("symbols\tfull")
+    try:
+        import font
+    except ImportError:
+        return out
+    opts = [c for c in font.choices(lib) if FONT_KEY_RE.fullmatch(c.key)][:MAX_FONTS]
+    if len(opts) < 2:
+        return out
+    now = font.current(lib)[0].key
+    if now not in {c.key for c in opts}:
+        return out  # (the row needs the font in use among its values)
+    for c in opts:
+        out.append("\t".join(["font", c.key, ascii_text(c.label, NAME_MAX)] + (["now"] if c.key == now else [])))
+    return out
+
+
+def _profile_lines(lib: mm.Library, rs: list[Row]) -> list[str]:
+    """The Mod set row's values: profile <name> [now] (Default first; the set in use is marked)."""
+    now = (getattr(lib, "profile", None) or mm.DEFAULT_PROFILE).lower()
+    names = [n for n in mm.profile_names(lib) if mm.profile_name_ok(n)]
+    if now not in {n.lower() for n in names}:
+        return []
+    keep = names[:MAX_PROFILES]
+    if now not in {n.lower() for n in keep}:
+        keep[-1] = next(n for n in names if n.lower() == now)
+    return ["\t".join(["profile", n] + (["now"] if n.lower() == now else [])) for n in keep]
+
+
+def _changed_lines(lib: mm.Library, rs: list[Row]) -> list[str]:
+    """changed <text> [crash]: what is new since the last start (history.jsonl), and whether it ended with an error.
+    Never "caused by": the game says what is new, the player decides."""
+    hist = mm.read_history(lib)
+    last = max((k for k, h in enumerate(hist) if h.get("type") == "start"), default=None)
+    if last is None:
+        return []
+    start = hist[last]
+    dep = next((h for h in reversed(hist[:last + 1]) if h.get("type") == "deploy" and h.get("hash") == start.get("hash")),
+               None)
+    crash = any(h.get("type") == "result" and h.get("result") == "crash" for h in hist[last + 1:])
+    listed = {r.id: r for r in rs if not r.hidden}
+    new, off = [], []
+    if dep is not None:
+        before = {m.get("id"): m for m in dep.get("mods") or [] if isinstance(m, dict) and m.get("enabled")}
+        versions = {m["id"]: m.get("version") for m in lib.mods}
+        for i, r in listed.items():
+            if r.on and (i not in before or (before[i].get("version") and versions.get(i)
+                                             and before[i].get("version") != versions.get(i))):
+                new.append(r.name)
+            elif not r.on and i in before:
+                off.append(r.name)
+    parts = []
+    if crash:
+        parts.append("The game stopped with an error last time.")
+        if new:
+            parts.append(f"New since then: {', '.join(new)}.")
+    else:
+        if new:
+            parts.append(f"New since your last start: {', '.join(new)}.")
+        if off:
+            parts.append(f"Off since then: {', '.join(off)}.")
+    if not parts:
+        return []
+    return ["\t".join(["changed", ascii_text(" ".join(parts), NOTE_MAX, symbols=True)] + (["crash"] if crash else []))]
+
+
+def _files_lines(lib: mm.Library, rs: list[Row]) -> list[str]:
+    """files <id> <n> <used> <replaced> <by whom>: each mod's game files in the last deploy, and how many a later mod
+    replaces (romfs_mods' deploy record)."""
+    import romfs_mods as rm
+    man = mm.read_json(os.path.join(lib.deploy_dir, "overlay", rm.MARKER))
+    if not isinstance(man, dict) or not isinstance(man.get("mods"), list):
+        return []
+    names = {m["id"]: m["name"] for m in lib.mods}
+
+    def owner(path) -> str | None:  # (the library mod a deployed folder belongs to)
+        p = os.path.normcase(os.path.abspath(str(path or "")))
+        for i in names:
+            root = os.path.normcase(os.path.abspath(os.path.join(lib.mods_dir, i)))
+            if p == root or p.startswith(root + os.sep):
+                return i
+        return None
+
+    by_name: dict[str, str] = {}
+    count: dict[str, list[int]] = {}
+    for m in man["mods"]:
+        if not isinstance(m, dict):
+            continue
+        i = owner(m.get("path"))
+        if i is None:
+            continue
+        by_name[str(m.get("name"))] = i
+        c = count.setdefault(i, [0, 0])
+        c[0] += int(m.get("files") or 0)
+        c[1] += int(m.get("deployed") or 0)
+    rivals: dict[str, dict[str, int]] = {}
+    # (only files another library mod wins: not packs merged or files made at deploy, like a size table rebuilt by
+    # generated:pictures; files - deployed would count those as "replaced by a later mod")
+    for c in mm.overlay_conflicts(lib):
+        w = by_name.get(str(c.get("winner")))
+        for i in {by_name.get(str(n)) for n in c.get("mods") or []}:
+            if i and w and i != w:
+                rivals.setdefault(i, {}).setdefault(w, 0)
+                rivals[i][w] += 1
+    out = []
+    listed = {r.id: r for r in rs if not r.hidden}
+    for i, (n, used) in count.items():
+        if i not in listed or n <= 0:
+            continue
+        rival = max(rivals.get(i, {}).items(), key=lambda kv: kv[1], default=(None, 0))[0]
+        rname = listed[rival].name if rival in listed else ""
+        lost = min(n, sum(rivals.get(i, {}).values()))
+        out.append("\t".join(("files", i, str(n), str(used), str(lost), rname)))
+    return out
+
+
+def _picture_lines(lib: mm.Library, rs: list[Row]) -> list[str]:
+    """picgrid <texture> <w> <h> <cols> <rows> (icons first, then backgrounds) and pic <id or _mods-page> <icon cell>
+    <background cell>, from the last deploy's deploy/pictures/atlas.json (tools/mod_pictures.py; only when the player
+    turned pictures in the game on). The Mod menu reads them; drawing them is still to come (docs/mod-menu.md)."""
+    atlas = mm.read_json(os.path.join(lib.deploy_dir, "pictures", "atlas.json"))
+    if not isinstance(atlas, dict) or atlas.get("format") != 1 or not isinstance(atlas.get("grids"), list):
+        return []
+    out = []
+    for g in atlas["grids"][:2]:
+        tex = str(g.get("tex", "")) if isinstance(g, dict) else ""
+        nums = [g.get(k) for k in ("w", "h", "cols", "rows")] if isinstance(g, dict) else []
+        if not tex or len(tex) > 31 or not tex.isprintable() or \
+                not all(isinstance(n, int) and 0 < n <= 8192 for n in nums):
+            return []
+        out.append("\t".join(["picgrid", tex, *map(str, nums)]))
+    listed = {r.id for r in rs if not r.hidden} | {mm.MODS_PAGE_PICK}
+    for k, c in (atlas.get("cells") or {}).items():
+        if k in listed and isinstance(c, dict):
+            icon, bg = c.get("icon", -1), c.get("bg", -1)
+            if isinstance(icon, int) and isinstance(bg, int) and -1 <= icon < 4096 and -1 <= bg < 4096:
+                out.append(f"pic\t{k}\t{icon}\t{bg}")
+    return out
+
+
+def _about_lines(lib: mm.Library, rs: list[Row]) -> list[str]:
+    """about <id> <field> <text>: a mod's info page (desc, version, authors, settings), from its mod.toml. Websites
+    are shown in Mod Manager only."""
+    mans = _manifests(lib)
+    out = []
+    for r in rs:
+        if r.hidden:
+            continue
+        man = mans.get(r.id)
+        m = next((x for x in lib.mods if x["id"] == r.id), {})
+        fields = []
+        desc = ascii_text(_about(m, man), NOTE_MAX, symbols=True)
+        if desc and len(desc) > len(r.about):
+            fields.append(("desc", desc))
+        version = (man.version if man else "") or m.get("version") or ""
+        if version:
+            fields.append(("version", ascii_text(version, 30)))
+        if man and man.authors:
+            fields.append(("authors", ascii_text(", ".join(man.authors), NOTE_MAX, symbols=True)))
+        if man and man.settings:
+            n = len(man.settings)
+            fields.append(("settings", f"{n} setting{'s' if n != 1 else ''}"))
+        out += ["\t".join(("about", r.id, f, t)) for f, t in fields[:MAX_FIELDS] if t]
+    return out
 
 
 def _reload(lib: mm.Library) -> None:
@@ -446,16 +639,38 @@ def _listed_now(lib: mm.Library) -> list[tuple[str, bool]]:
     return [(r.id, r.on) for r in describe_mods(lib) if not r.hidden]
 
 
-def _put_pending(lib: mm.Library, serial: str, wanted: list[tuple[str, bool]]) -> str | None:
-    """pending.txt with these (id, on), in this order, made from menu.txt `serial`; deleted when that is how the
-    library is now. Returns its path, or None when it was deleted."""
+def _profile_now(lib: mm.Library) -> str:
+    return getattr(lib, "profile", None) or mm.DEFAULT_PROFILE
+
+
+def _still_wanted(lib: mm.Library, profile: str, font_key: str) -> tuple[str, str]:
+    """A pending mod set and font, without the ones that are in use already or are gone."""
+    if profile and (profile.lower() == _profile_now(lib).lower()
+                    or profile.lower() not in {n.lower() for n in mm.profile_names(lib)}):
+        profile = ""
+    if font_key:
+        try:
+            import font
+            if font_key == font.current(lib)[0].key or font_key not in {c.key for c in font.choices(lib)}:
+                font_key = ""
+        except Exception:  # noqa: BLE001 (no font tool, or it can't tell: the pick waits for apply's own check)
+            pass
+    return profile, font_key
+
+
+def _put_pending(lib: mm.Library, serial: str, wanted: list[tuple[str, bool]], profile: str = "",
+                 font_key: str = "") -> str | None:
+    """pending.txt with these (id, on), in this order, made from menu.txt `serial`, and the mod set and font picked;
+    deleted when that is how the library is now. Returns its path, or None when it was deleted."""
     path = menu_path(lib, PENDING)
-    if wanted == _listed_now(lib):
+    profile, font_key = _still_wanted(lib, profile, font_key)
+    if wanted == _listed_now(lib) and not profile and not font_key:
         if os.path.exists(path):
             os.remove(path)
         return None
     write_text(path, f"{PENDING_MAGIC}\t{FORMAT}\nserial\t{serial}\n" + "".join(
-        f"mod\t{i}\t{'on' if on else 'off'}\n" for i, on in wanted))
+        f"mod\t{i}\t{'on' if on else 'off'}\n" for i, on in wanted)
+        + (f"profile\t{profile}\n" if profile else "") + (f"font\t{font_key}\n" if font_key else ""))
     return path
 
 
@@ -498,7 +713,8 @@ def sync(lib: mm.Library, note=KEEP) -> str:
     if base is not None:
         hidden = {r.id for r in describe_mods(lib) if r.hidden}
         new, _ = merge(lib.mods, base, pending.wanted, hidden)
-        _put_pending(lib, serial, [(m["id"], bool(m.get("enabled"))) for m in new if m["id"] not in hidden])
+        _put_pending(lib, serial, [(m["id"], bool(m.get("enabled"))) for m in new if m["id"] not in hidden],
+                     pending.profile, pending.font)
     _prune_bases(lib)
     return path
 
@@ -510,6 +726,25 @@ def library_changed(lib: mm.Library) -> bool:
         return False
     sync(lib)
     return True
+
+
+def menu_mod_on(lib: mm.Library) -> bool:
+    """The Mod menu mod is in the library and on (its library id or its mod.toml id)."""
+    return any(m.get("enabled") and mm.is_modmenu(lib, m) for m in lib.mods)
+
+
+def before_start(lib: mm.Library) -> bool:
+    """For modman run, right before the game starts (after the crash check of the last start): write the game's mod
+    list again, so "New since your last start" and "Last start had an error" are about this start, and a mod set
+    switched outside the game is listed. Only when the Mod menu mod is on and the game is closed; never stops a
+    start. True when it wrote the list."""
+    try:
+        if not menu_mod_on(lib) or mm.game_running():
+            return False
+        sync(lib)
+        return True
+    except (mm.ModmanError, MenuError, OSError, ValueError):
+        return False
 
 
 def _ensure_menu(lib: mm.Library) -> Menu:
@@ -725,6 +960,47 @@ def _restore_config(lib: mm.Library, old: bytes, saved: bytes) -> bool:
     return True
 
 
+def _snapshot_values(lib: mm.Library) -> dict[str, bytes | None]:
+    """settings\\*.json and font.json as they are now (path -> bytes; None: not there)."""
+    out: dict[str, bytes | None] = {}
+    sdir = os.path.join(lib.root, mm.SETTINGS_DIR)
+    names = [os.path.join(sdir, n) for n in (os.listdir(sdir) if os.path.isdir(sdir) else []) if n.endswith(".json")]
+    for p in names + [os.path.join(lib.root, "font.json")]:
+        try:
+            with open(p, "rb") as f:
+                out[p] = f.read()
+        except FileNotFoundError:
+            out[p] = None
+    out[sdir] = None  # (a settings file made later, by the picked set, is removed again)
+    return out
+
+
+def _restore_values(kept: dict[str, bytes | None]) -> None:
+    """Put setting values and the font back as _snapshot_values found them (after a failed deploy: the set in use
+    again must not keep the picked set's values)."""
+    sdir = next((p for p, b in kept.items() if b is None and os.path.isdir(p)), None)
+    if sdir:
+        for n in os.listdir(sdir):
+            p = os.path.join(sdir, n)
+            if n.endswith(".json") and p not in kept:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+    for p, b in kept.items():
+        try:
+            if b is None:
+                if os.path.isfile(p):
+                    os.remove(p)
+                continue
+            tmp = f"{p}.tmp-{os.getpid()}"
+            with open(tmp, "wb") as f:
+                f.write(b)
+            os.replace(tmp, p)
+        except OSError:
+            pass
+
+
 def _deploy_out_of_date(lib: mm.Library) -> bool:
     """The last deploy wasn't made from the library as it is now (modman run would warn and start the old one)."""
     try:
@@ -799,26 +1075,56 @@ def apply(lib: mm.Library, deploy=None) -> Applied:
         return Applied(status, note=note)
     hidden = {r.id for r in describe_mods(lib) if r.hidden}
     new, changes = merge(lib.mods, base, pending.wanted, hidden) if pending else (lib.mods, [])
+    profile, font_key = _still_wanted(lib, pending.profile, pending.font) if pending else ("", "")
+    mod_changes = list(changes)
+    if profile:
+        changes.append(f"Mod set: {profile}")
+    if font_key:
+        changes.append(f"Font: {font_key}")
     if not changes and before is None and not _deploy_out_of_date(lib):
         os.remove(menu_path(lib, PENDING))
         sync(lib, "")
         return Applied("same")
     old = before if before is not None else _config_bytes(lib)
     _write_marker(lib, old)  # (before config.json changes: a cut-off apply is finished next time)
-    if changes:
+    if mod_changes and not profile:
         lib.mods = new
         lib.save()
+    kept = _snapshot_values(lib)  # (use_profile and font.choose rewrite these: put back when the deploy fails)
+    switched = False
+    try:  # (the mod set first: the Mods page's mod changes were made on the list of the set in use; then the font)
+        if profile:
+            for n in mm.use_profile(lib, profile):
+                say(n)
+            switched = True
+            if mod_changes:  # (they'd go to the set that isn't used next, quietly: not used, and said)
+                note = ascii_text(f"Mod changes not used: the mod set is now {profile}. Change its mods now.",
+                                  NOTE_MAX)
+                changes = [c for c in changes if c not in mod_changes]
+        if font_key:
+            import font
+            for n in font.choose(lib, font_key)[1]:
+                say(n)
+    except Exception as e:  # noqa: BLE001 (font.FontError, ModmanError: not used, said on the Mods page)
+        note = _reason(e, lib) if isinstance(e, (mm.ModmanError, OSError, ValueError)) else _first_line(e)
+        changes = [c for c in changes if not c.startswith(("Mod set: ", "Font: "))]
+        if profile and not switched and mod_changes:  # (the set in use stays: its mod changes are used)
+            _reload(lib)
+            lib.mods = merge(lib.mods, base, pending.wanted, hidden)[0]
+            lib.save()
     saved = _config_bytes(lib)
     try:
         launch = deploy(lib)
     except (mm.ModmanError, OSError, ValueError) as e:
-        _restore_config(lib, old, saved)
+        if _restore_config(lib, old, saved):
+            _restore_values(kept)
         _clear_marker(lib)
         note = _reason(e, lib)
         sync(lib, note)  # (pending.txt stays, moved onto the list as it is again)
         return Applied("failed", changes, note)
     except BaseException:
-        _restore_config(lib, old, saved)
+        if _restore_config(lib, old, saved):
+            _restore_values(kept)
         _clear_marker(lib)
         raise
     if pending:
@@ -904,6 +1210,16 @@ def show_lines(lib: mm.Library) -> list[str]:
         moved = f" (was {r.position})" if r.position != r.wanted_position else ""
         slow = "  next start: 10-20 minutes" if r.rebuild and r.changed else ""
         out.append(f"  {r.wanted_position:>2}  {state:<10} {r.name}{moved}{slow}")
+    try:
+        pending = read_pending(lib)
+    except MenuError:
+        pending = None
+    if pending:
+        profile, font_key = _still_wanted(lib, pending.profile, pending.font)
+        if profile:
+            out.append(f"Mod set at your next start: {profile}")
+        if font_key:
+            out.append(f"Font at your next start: {font_key}")
     if menu and menu.note:
         out.append(f"Last change not used: {menu.note}")
     _, base = _pending_and_base(lib)

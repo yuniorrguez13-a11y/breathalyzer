@@ -147,9 +147,23 @@ static void text_of(uint32_t id, char *out, size_t cap) {
         uint32_t len, pad;
     } m = {0, 0, 0};
     if (rt_opt_msg(id, ADDR(&m))) {
+        // (the game's message tags, 0x0e group type size params, show as <font N>, </font>, <grey>, </grey>, <tag>)
         const uint16_t *s = (const uint16_t *)(uintptr_t)m.s;
         size_t n = 0;
-        for (; s && n + 1 < cap && n + 1 < m.len && s[n]; n++) out[n] = s[n] < 0x80 ? (char)s[n] : '?';
+        for (uint32_t i = 0; s && i + 1 < m.len && n + 1 < cap; i++) {
+            char tag[24] = "";
+            if (s[i] == 0x0e && i + 4 < m.len) {
+                uint16_t type = s[i + 2], size = s[i + 3], v = size >= 2 ? s[i + 4] : 0;
+                if (type == 1) snprintf(tag, sizeof tag, v == 0xffff ? "</font>" : "<font %u>", v);
+                else if (type == 3) snprintf(tag, sizeof tag, v == 0xffff ? "</grey>" : "<grey>");
+                else snprintf(tag, sizeof tag, "<tag>");
+                i += 3 + size / 2u;
+                for (const char *t = tag; *t && n + 1 < cap; t++) out[n++] = *t;
+                continue;
+            }
+            if (!s[i]) break;
+            out[n++] = s[i] < 0x80 ? (char)s[i] : '?';
+        }
         out[n] = 0;
     } else {
         snprintf(out, cap, "Game text %04u", id);

@@ -3,8 +3,10 @@
 // unused: the mod looks for the function first and uses it when it is there. Then Savage Wind owns the rows, so the
 // mouse and its own later changes keep working, and no import slot or code of Savage Wind is touched.
 //
-// The page model is the one opt_page_a.c uses (modmenu.c mm_page). One page: Mods. Its "Change order" button asks
-// for the page again, which then lists the Order rows once.
+// The page model is the one opt_page_a.c uses (mm_pages.c). One page in Savage Wind's list: Mods. A button that opens
+// another page (Change order, More, Mod settings and info, a mod's page) asks for the page again, which then lists
+// that page's rows once. Texts are plain: the symbols the menu font lacks become look-alikes (mm_plain). Key rows are
+// shown, but set on the PC (this path has no key capture).
 #include "opt_page.h"
 
 // The proposed runtime/ui/game_options.h (sizes first, so either side can grow them later)
@@ -32,14 +34,16 @@ typedef bool (*AddPageFn)(const SwOptionsPage *page);
 
 static PageRow g_rows[MM_PAGE_ROWS];
 static int g_n;
-static bool g_order_next;  // the next opening lists the Order rows
+static PageRef g_next = {PG_MODS, -1, -1};  // the page the next opening lists
+static PageRef g_cur = {PG_MODS, -1, -1};   // the page listed now
 static char g_title[MM_PAGE_ROWS][MM_NAME_MAX + 8], g_desc[MM_PAGE_ROWS][MM_TEXT_MAX + 8], g_label[32];
 
 static int b_rows(void *user) {
     (void)user;
     mm_lock();
-    g_n = mm_page(g_order_next ? PG_ORDER : PG_MODS, g_rows, MM_PAGE_ROWS);
-    g_order_next = false;
+    g_n = mm_page(g_next, g_rows, MM_PAGE_ROWS);
+    g_cur = g_next;
+    g_next = (PageRef){PG_MODS, -1, -1};
     mm_unlock();
     return g_n;
 }
@@ -51,6 +55,8 @@ static void b_row(void *user, int i, SwOptionRow *out) {
     const PageRow *r = &g_rows[i];
     mm_row_title(r, g_title[i], sizeof g_title[i]);
     mm_row_desc(r, g_desc[i], MM_TEXT_MAX);
+    mm_plain(g_title[i]);
+    mm_plain(g_desc[i]);
     out->kind = mm_row_widget(r);
     out->title = g_title[i];
     out->desc = g_desc[i];
@@ -64,7 +70,9 @@ static const char *b_label(void *user, int i, int value) {
     (void)user;
     mm_lock();
     if (value < 0 && i >= 0 && i < g_n) mm_row_button(&g_rows[i], g_label, sizeof g_label);
+    else if (i >= 0 && i < g_n && mm_row_own_values(&g_rows[i])) mm_row_value_text(&g_rows[i], value, g_label, sizeof g_label);
     else mm_ordinal(value + 1, g_label, sizeof g_label);
+    mm_plain(g_label);
     mm_unlock();
     return g_label;
 }
@@ -78,11 +86,15 @@ static void b_set(void *user, int i, int value) {
 
 static int b_press(void *user, int i) {
     (void)user;
+    PageRef open = {PG_NONE, -1, -1};
+    unsigned ch = 0;
+    int act = ACT_DONE;
     mm_lock();
-    bool order = i >= 0 && i < g_n && g_rows[i].kind == RK_ORDER_BUTTON;
+    if (i >= 0 && i < g_n) act = mm_row_press(&g_rows[i], &open, &ch);
     mm_unlock();
-    if (!order) return 0;
-    g_order_next = true;
+    if (ch) mm_flush_soon();
+    if (act != ACT_OPEN && !(ch & CH_OTHERS)) return 0;
+    g_next = act == ACT_OPEN ? open : g_cur;  // (other rows changed: list the page again)
     mm_flush_soon();
     return 1;
 }

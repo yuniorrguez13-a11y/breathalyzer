@@ -8,6 +8,8 @@ The library it uses is made up, in a temp folder.
 """
 import json
 import os
+import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -18,6 +20,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
 import build_native as bn  # noqa: E402
 import modman as mm  # noqa: E402
+import mod_settings as ms  # noqa: E402
 import modmenu  # noqa: E402
 
 ST = REPO / "native" / "examples" / "modmenu" / "selftest"
@@ -28,7 +31,97 @@ VARIANTS = {"sw": (), "other_version": ("FAKE_OTHER_VERSION",), "other_bytes": (
 ENV = {"FAKE_MAX_CMDS": "32", "SWMOD_MODMENU_WRITE_MS": "0"}
 
 FIRST_PAGE = ["Fake page one", "Fake page two", "Mods", "Quit game"]
-MODS_PAGE = ["Better Sprint", "Hyrule Map Fix", "Stamina Hook", "Change order", "How to use changes"]
+MODS_PAGE = ["Better Sprint", "Hyrule Map Fix", "Stamina Hook", "Change order", "Mod settings and info", "More",
+             "How to use changes"]
+TUNER_TOML = """[mod]
+id = "tuner"
+name = "Tuner"
+version = "1.0"
+authors = ["giruka"]
+description = "Tunes sprint #1."
+loader_api = 3
+
+[code]
+windows = "tuner.dll"
+
+[[pages]]
+key = "more"
+label = "More options"
+description = "A text row."
+
+[[settings]]
+key = "glow"
+type = "toggle"
+label = "Glow"
+description = "An ON/OFF row."
+default = true
+applies = "live"
+
+[[settings]]
+key = "mode"
+type = "choice"
+label = "Sprint mode"
+description = "Fast also sets the speed to 150."
+default = "classic"
+applies = "live"
+choices = [
+  { value = "classic", label = "Classic" },
+  { value = "fast", label = "Fast", sets = { speed = 150 } },
+  { value = "custom", label = "Custom" },
+]
+
+[[settings]]
+key = "speed"
+type = "slider"
+label = "Sprint speed"
+description = "Shown only when Sprint mode is Custom."
+min = 50
+max = 200
+step = 10
+default = 100
+unit = " percent"
+applies = "live"
+show_if = "mode == 'custom'"
+
+[[settings]]
+key = "drain"
+type = "slider"
+label = "Stamina use"
+description = "Locked while Sprint mode is Classic."
+min = 0.5
+max = 2.0
+step = 0.5
+default = 1.0
+unit = "x"
+applies = "live"
+enable_if = "mode != 'classic'"
+
+[[settings]]
+key = "hotkey"
+type = "key"
+label = "Tuner key"
+description = "Press A, then the key."
+default = "F6"
+applies = "live"
+
+[[settings]]
+key = "hello"
+type = "button"
+label = "Say hello"
+button = "Say it"
+description = "A button."
+
+[[settings]]
+key = "greeting"
+type = "text"
+label = "Greeting"
+description = "Change it on your PC."
+default = "Hello"
+max_length = 20
+applies = "restart"
+page = "more"
+"""
+
 OPEN_MODS = ["g boot", "g open pause", "g sel 2", "g a", "g frame 3"]  # (the pause menu's Options, then Mods)
 
 
@@ -65,6 +158,11 @@ def make_library(root: Path) -> mm.Library:
     lib.save()
     modmenu.sync(lib)
     return lib
+
+
+def plain(text: str) -> str:
+    """A text as the player reads it: without the game's message tags (the fake game shows them as <font 3> ...)."""
+    return re.sub(r"</?font[^>]*>|</?grey>|<tag>", "", text or "")
 
 
 def names(reply: dict) -> list[str]:
@@ -161,7 +259,7 @@ class ModMenuNative(unittest.TestCase):
         self.assertEqual(self.d("f1")["opened"], 1)
         self.assertEqual(names(self.s["rows_mods"]), MODS_PAGE)
         self.assertEqual(values(self.s["rows_mods"])[:3], ["ON", "ON", "OFF"])
-        self.assertEqual(values(self.s["rows_mods"])[3:], ["Open", "See below"])
+        self.assertEqual(values(self.s["rows_mods"])[3:], ["Open", "Open", "Open", "See below"])
 
     def test_toggle_and_descriptions(self):
         self.assertEqual(self.d("sel0")["desc"], "Sprint for longer.")
@@ -173,11 +271,13 @@ class ModMenuNative(unittest.TestCase):
                          "Keeps stamina up. Turns on once you use changes. Next start takes 10-20 minutes.")
         self.assertTrue(self.d("status2")["mods.2.rebuild"])
         self.assertEqual(self.d("sel_o0b")["desc"], "Was 1st. Moves once you use changes.")
-        self.assertEqual(self.d("sel_o2")["desc"], "Later mods win when two mods change the same file.")
+        self.assertEqual(self.d("sel_o2")["desc"], "When two mods change the same file, the later one in the list is "
+                                                   "used.")
 
     def test_the_description_line_fits(self):
         """The game test: the game shows about 82 characters of the line and cuts the rest at a word, and its font has
-        no { or }. A long "what it does" is shortened, never the change; { } become ( )."""
+        no { or }. A long "what it does" is shortened, never the change; { } are drawn in the game's font tag 3 (the
+        early game check: it has all of ASCII)."""
         with tempfile.TemporaryDirectory() as d:
             lib = self.library(d)
             p = Path(modmenu.menu_path(lib))
@@ -187,13 +287,14 @@ class ModMenuNative(unittest.TestCase):
             p.write_text(text.replace("Sprint for longer.", note), encoding="utf-8")
             steps, _ = self.run_fake("sw", OPEN_MODS + ["g sel 2", "g a", "g sel 2", "g sel 4", "g sel 0", "g a",
                                                         "g sel 0"], library=lib.root)
-        self.assertEqual(steps[5]["data"]["desc"], long_about.replace("{", "(").replace("}", ")"))
-        self.assertEqual(steps[7]["data"]["desc"],
+        self.assertEqual(steps[5]["data"]["desc"], long_about.replace("{", "<font 3>{</font>")
+                         .replace("}", "<font 3>}</font>"))
+        self.assertEqual(plain(steps[7]["data"]["desc"]),
                          "Keeps stamina... Turns on once you use changes. Next start takes 10-20 minutes.")
         self.assertEqual(steps[9]["data"]["desc"], note)
         self.assertEqual(steps[11]["data"]["desc"], "Adds one new text file... Turns off once you use changes.")
         for k in (5, 7, 8, 9, 11):
-            self.assertLessEqual(len(steps[k]["data"]["desc"]), 80)
+            self.assertLessEqual(len(plain(steps[k]["data"]["desc"])), 80)
 
     def test_savage_winds_pages_still_work(self):
         self.assertEqual(names(self.s["rows_first"]), FIRST_PAGE)  # (B on the Mods page: back to the first page)
@@ -208,7 +309,7 @@ class ModMenuNative(unittest.TestCase):
         self.assertEqual(self.d("sw_click1")["kinds"], "2222")  # (Savage Wind's rows and Mods, with our table in)
         self.assertEqual(names(self.s["rows_mods2"]), MODS_PAGE)
         self.assertEqual(values(self.s["rows_mods2"])[0], "OFF")  # (kept while the game runs)
-        self.assertEqual(self.d("sw_click2")["kinds"], "00022")
+        self.assertEqual(self.d("sw_click2")["kinds"], "0002222")
         self.assertEqual(values(self.s["rows_mods3"])[1], "OFF")
         self.assertEqual(values(self.s["click_held"]), values(self.s["rows_mods6"]))  # (a key capture holds the mouse)
 
@@ -359,7 +460,7 @@ class ModMenuNative(unittest.TestCase):
         "at your next start" only once menu.txt says Mod Manager uses the changes."""
         with tempfile.TemporaryDirectory() as d:
             lib = self.library(d)
-            lines = OPEN_MODS + ["g sel 4", "g sel 0", "g a", "g sel 0", "!sleep 100"]
+            lines = OPEN_MODS + ["g sel 6", "g sel 0", "g a", "g sel 0", "!sleep 100"]
             steps, _ = self.run_fake("sw", lines, library=lib.root)
             self.assertEqual(steps[5]["data"]["desc"], "Close the game. Then on your PC run: python tools/modmenu.py play")
             menu = Path(modmenu.menu_path(lib))
@@ -416,6 +517,148 @@ class ModMenuNative(unittest.TestCase):
             self.assertEqual(steps[0]["data"]["count"], 4)
             self.assertEqual(steps[0]["data"]["mods.3.id"], long_id)
             self.assertEqual(self.pending_mods(lib)[long_id], "off")
+
+    # ---- v2: More, Mod settings and info, a mod's pages, key capture (docs/mod-menu.md)
+
+    def settings_library(self, d: str) -> tuple[mm.Library, Path]:
+        """The made-up library plus Tuner (a mod with one of each kind of setting, and a sub-page), menu.txt, and a run
+        folder whose settings.txt modhost reads (as deploy writes it). Returns (library, the run's mods folder)."""
+        lib = make_library(Path(d) / "lib")
+        root = Path(lib.root) / "mods" / "tuner"
+        root.mkdir(parents=True)
+        (root / "mod.toml").write_text(TUNER_TOML, encoding="utf-8")
+        (root / "tuner.dll").write_bytes(b"")
+        lib.mods.append({"id": "tuner", "name": "Tuner", "enabled": True, "kinds": ["native"], "version": "1.0"})
+        lib.save()
+        modmenu.sync(lib)
+        run = Path(d) / "run"
+        with mock.patch.object(ms, "_check_game", lambda refuse: None):
+            ms.write_settings_txt(lib, lib.enabled(), str(run))
+        (run / "native" / "mods").mkdir(parents=True)
+        shutil.copy2(OUT / "mods" / "modmenu.dll", run / "native" / "mods" / "modmenu.dll")
+        return lib, run / "native" / "mods"
+
+    def run_mods(self, mods: Path, lines, library) -> tuple[list, str]:
+        extra = dict(ENV, SWMOD_LIBRARY=str(library), SWMOD_SETTINGS_WRITE_MS="0")
+        result, log = bn._run_fake_game(OUT / "sw", OUT / "fake" / "fake_swgame.dll", mods, list(lines), extra,
+                                        host=OUT / "modhost.dll")
+        return result.get("steps", []), log
+
+    def test_mod_settings_pages(self):
+        """Mod settings and info: a row per mod; a mod's page has its info (any modhost), its settings (mod API 3) with
+        live enable_if (locked rows refuse changes, grey, "Locked: needs ..."), show_if as a grey "Not used now" row,
+        a sub-page, a key capture, a button; B goes back one page; changes reach settings\\<id>.json."""
+        with tempfile.TemporaryDirectory() as d:
+            lib, mods = self.settings_library(d)
+            lines = {}
+            seq = OPEN_MODS + []
+            names_ = ["list_sel", "list_a", "list_f", "list_rows", "tuner_sel", "tuner_a", "tuner_f", "tuner_rows",
+                      "speed_sel", "drain_sel", "drain_right", "mode_sel", "mode_right", "mode_f", "mode_rows",
+                      "drain_sel2", "drain_right2", "key_sel", "key_a", "status_cap", "key_f", "key_sel2",
+                      "key_k", "key_f2", "key_rows", "key_sel3", "key_a2", "key_esc", "key_f3", "key_sel4",
+                      "key_wait", "key_f4", "key_sel5", "hello_sel", "hello_a", "sub_sel", "sub_a", "sub_f",
+                      "sub_rows", "b1", "bf1", "b1_rows", "status_page", "b2", "bf2", "b2_rows", "b3", "bf3",
+                      "b3_rows", "sleep"]
+            cmds = ["g sel 5", "g a", "g frame 3", "g rows", "g sel 3", "g a", "g frame 3", "g rows",
+                    "g sel 5", "g sel 6", "g right", "g sel 4", "g right", "g frame 12", "g rows",
+                    "g sel 6", "g right", "g sel 7", "g a", "modmenu", "g frame 1", "g sel 7",
+                    "modmenu_key K", "g frame 4", "g rows", "g sel 7", "g a", "modmenu_key Esc", "g frame 1",
+                    "g sel 7", "modmenu_key wait", "g frame 4", "g sel 7", "g sel 8", "g a", "g sel 9", "g a",
+                    "g frame 3", "g rows", "g b", "g frame 3", "g rows", "modmenu", "g b", "g frame 3", "g rows",
+                    "g b", "g frame 3", "g rows", "!sleep 400"]
+            steps, log = self.run_mods(mods, seq + cmds, lib.root)
+            s = dict(zip(names_, steps[len(seq):]))
+            values_file = Path(lib.root) / "settings" / "tuner.json"
+            saved = json.loads(values_file.read_text(encoding="utf-8")) if values_file.exists() else {}
+
+        def dd(k):
+            return s[k].get("data", {})
+
+        self.assertEqual(names(s["list_rows"]), ["Better Sprint", "Hyrule Map Fix", "Stamina Hook", "Tuner"], log)
+        self.assertEqual(dd("tuner_sel")["desc"], "Tunes sprint <font 3>#</font>1. 7 settings.")
+        self.assertEqual([plain(t) for t in names(s["tuner_rows"])],
+                         ["Tuner", "Version", "Made by", "Glow", "Sprint mode", "Sprint speed", "Stamina use",
+                          "Tuner key", "Say hello", "More options", "Reset settings"])
+        vals = values(s["tuner_rows"])
+        self.assertEqual(vals[1:2] + vals[3:9], ["1.0", "ON", "Classic", "<grey>100 percent</grey>",
+                                                 "<grey>1.0x</grey>", "F6", "Say it"])
+        self.assertEqual(names(s["tuner_rows"])[6], "<grey>Stamina use</grey>")  # (locked: grey)
+        self.assertEqual(dd("speed_sel")["desc"], "Not used now: other settings turn it off.")
+        self.assertEqual(dd("drain_sel")["desc"], "Locked: needs Sprint mode not Classic.")
+        self.assertEqual(dd("drain_right")["value"], "<grey>1.0x</grey>")  # (refused: unchanged)
+        self.assertEqual(dd("mode_right")["value"], "Fast")
+        self.assertGreaterEqual(dd("mode_f")["redraws"], 2)  # (the rows it unlocked and the speed it set)
+        self.assertEqual(values(s["mode_rows"])[5:7], ["<grey>150 percent</grey>", "1.0x"])
+        self.assertEqual(dd("drain_sel2")["desc"], "Locked while Sprint mode is Classic.")
+        self.assertEqual(dd("drain_right2")["value"], "1.5x")
+        # the key capture: 10 s, a countdown on the line, no input for the page meanwhile, Savage Wind's keys refused
+        self.assertEqual(dd("key_a")["result"], "done")
+        self.assertTrue(dd("status_cap")["capture"])
+        self.assertEqual(dd("key_sel2")["desc"], "Press a key now. 10 s left. Backspace clears.")
+        self.assertEqual(values(s["key_rows"])[7], "K")
+        self.assertEqual(dd("key_sel3")["desc"], "Got K.")
+        self.assertEqual(dd("key_sel4")["desc"], "Press a key now. 10 s left. Backspace clears. Esc is Savage Wind's.")
+        self.assertEqual(dd("key_sel5")["desc"], "No key in 10 s: nothing changed.")
+        self.assertEqual(dd("hello_a")["result"], "done")
+        self.assertEqual(names(s["sub_rows"]), ["Greeting"])
+        self.assertEqual(values(s["sub_rows"]), ["Hello"])
+        self.assertEqual(names(s["b1_rows"])[0], "Tuner")  # (B: back to Tuner's page; its first row is its name)
+        self.assertEqual((dd("status_page")["page"], dd("status_page")["page_mod"]), ("mod", "tuner"))
+        self.assertEqual(names(s["b2_rows"])[3], "Tuner")  # (then Mod settings and info)
+        self.assertEqual(names(s["b3_rows"])[:4], ["Better Sprint", "Hyrule Map Fix", "Stamina Hook", "Tuner"])
+        self.assertEqual(saved.get("values", {}).get("mode"), "fast", saved)
+        self.assertEqual(saved["values"].get("hotkey"), "K")
+        self.assertEqual(saved["values"].get("drain"), 1.5)
+
+    def test_info_page_without_settings(self):
+        """A mod's info page needs no settings (no settings.txt here: modhost has none to show)."""
+        with tempfile.TemporaryDirectory() as d:
+            lib = make_library(Path(d) / "lib")
+            steps, log = self.run_fake("sw", OPEN_MODS + ["g sel 4", "g a", "g frame 3", "g sel 0", "g a", "g frame 3",
+                                                          "g rows", "g sel 0", "modmenu"], library=lib.root)
+        k = len(OPEN_MODS)
+        self.assertEqual(names(steps[k + 6]), ["Better Sprint", "Version"], log)
+        self.assertEqual(values(steps[k + 6]), ["See below", "1.0"])
+        self.assertEqual(steps[k + 7]["data"]["desc"], "Sprint for longer.")
+        self.assertEqual(steps[k + 8]["data"]["page"], "mod")
+        self.assertEqual(steps[k + 8]["data"]["page_mod"], "better-sprint")
+
+    def test_more_page_and_picks_for_the_next_start(self):
+        """More: Mod set and Font (picked here, used at the next start), Turn all mods off / on, What changed; Y undoes
+        it all. pending.txt carries the picks; apply switches the set and the font."""
+        with tempfile.TemporaryDirectory() as d:
+            lib = make_library(Path(d) / "lib")
+            mm.new_profile(lib, "Quiet")
+            mm.use_profile(lib, mm.DEFAULT_PROFILE)
+            modmenu.sync(lib)
+            menu = Path(modmenu.menu_path(lib)).read_text(encoding="utf-8")
+            more = OPEN_MODS + ["g sel 5", "g a", "g frame 3", "g rows"]
+            steps, log = self.run_fake("sw", more + ["g sel 0", "g right", "g sel 0", "g sel 1", "g right", "g sel 2",
+                                                    "g a", "modmenu", "g y", "modmenu", "g sel 0", "g right",
+                                                    "g sel 1", "g right", "!sleep 150"], library=lib.root)
+            pending = modmenu.read_pending(lib)
+            calls = []
+            applied = modmenu.apply(lib, deploy=lambda library: calls.append(library.profile) or {})
+            font_json = Path(lib.root) / "font.json"
+            chosen = json.loads(font_json.read_text(encoding="utf-8")).get("choice") if font_json.exists() else None
+        self.assertIn("profile\tDefault\tnow\nprofile\tQuiet\n", menu)
+        rows = steps[len(OPEN_MODS) + 3]
+        self.assertEqual(names(rows), ["Mod set", "Font", "Turn all mods off", "Turn all mods on", "What changed",
+                                       "How to use changes"], log)
+        self.assertEqual(values(rows)[:4], ["Default", "Game font", "Turn off", "Turn on"])
+        k = len(OPEN_MODS) + 4
+        self.assertEqual(steps[k + 1]["data"]["value"], "Quiet")
+        self.assertEqual(steps[k + 2]["data"]["desc"], "Uses the mod set Quiet once you use changes.")
+        self.assertEqual(steps[k + 6]["data"]["result"], "done")
+        st = steps[k + 7]["data"]
+        self.assertEqual((st["profile"], st["profile_next"], st["font_next"]), ("Default", "Quiet", "easy-read"))
+        # (the set and the font: Turn all mods off is refused while another set is picked, review finding)
+        self.assertEqual(st["changes"], 2)
+        self.assertEqual(steps[k + 9]["data"]["changes"], 0)  # (Y: all undone)
+        self.assertEqual((pending.profile, pending.font), ("Quiet", "easy-read"))
+        self.assertEqual(applied.status, "used", applied)
+        self.assertEqual(calls, ["Quiet"])
+        self.assertEqual(chosen, "easy-read")
 
     # ---- path B (a Savage Wind with sw_options_add_page)
 

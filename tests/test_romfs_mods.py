@@ -729,5 +729,117 @@ class Cli(unittest.TestCase):
         self.assertIn("not supported", err)
 
 
+
+# ---------------------------------------------------------------- rule S2: size-table entries for files made at deploy
+
+def _table(entries: dict, names: dict | None = None) -> bytes:
+    """A made-up Switch size table (Yaz0, as the game ships it), built in memory."""
+    import zlib
+    import wiiu_convert as wc
+    crcs = [(zlib.crc32(k.encode()) & 0xFFFFFFFF, v) for k, v in entries.items()]
+    raw = wc.rstb_build(crcs, [(k.encode(), v) for k, v in (names or {}).items()])
+    return wc.yaz0_compress(raw, 0)
+
+
+def _sizes(data: bytes) -> dict:
+    import wiiu_convert as wc
+    crcs, named = wc.rstb_load(wc.yaz0_decompress(data)[0] if data[:4] == b"Yaz0" else data)
+    out = {c: v for c, v in crcs}
+    out.update({n.split(b"\0", 1)[0].decode(): v for n, v in named})
+    return out
+
+
+class SizeTableMerge(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def crc(self, name):
+        import zlib
+        return zlib.crc32(name.encode()) & 0xFFFFFFFF
+
+    def game(self, table: bytes | None):
+        files = {"romfs/Pack/Bootup.pack": b"game pack", "romfs/Actor/Pack/A.txt": "a"}
+        if table is not None:
+            files["romfs/" + RSTB] = table
+        make(self.tmp / "extracted", files)
+        return rm.GameIndex.scan(str(self.tmp / "extracted"))
+
+    def test_merges_into_the_mods_table_like_linkle(self):
+        g = self.game(_table({"Layout/Common.blarc": 1000, "Actor/Pack/A.bactorpack": 50}))
+        linkle = make(self.tmp / "linkle", {"romfs/" + RSTB: _table({"Layout/Common.blarc": 1000, "Actor/Pack/A.bactorpack":
+                                                                      90, "Model/Linkle.bfres": 777}),
+                                            "romfs/Actor/Pack/A.txt": "linkle"})
+        p = rm.plan([str(linkle)], g)
+        rm.add_generated(p, [("Pack/Bootup.pack", b"made", ("Layout/Common.blarc", 5000))], "generated:pictures")
+        w = p.winner(RSTB)
+        self.assertEqual(w.mod, "generated:pictures")
+        got = _sizes(w.read())
+        self.assertEqual(got[self.crc("Model/Linkle.bfres")], 777)       # (the mod's own entries stay)
+        self.assertEqual(got[self.crc("Actor/Pack/A.bactorpack")], 90)
+        self.assertEqual(got[self.crc("Layout/Common.blarc")], 5000)
+        self.assertEqual(p.generated[w.target]["built_on"], "linkle")
+        man = rm.manifest_for(p, str(self.tmp / "ov"), complete=True, dry_run=True)
+        self.assertTrue(man["rstb"]["shipped"])
+        self.assertEqual(man["rstb"]["added"], {"Layout/Common.blarc": 5000})
+        self.assertIn(rm.ENV_NO_HUD, man["env"])
+        self.assertTrue(any("linkle's size table with them added" in x for x in man["warnings"]), man["warnings"])
+
+    def test_only_raises_entries(self):
+        g = self.game(_table({"Layout/Common.blarc": 9000}))
+        p = rm.plan([], g)
+        rm.add_generated(p, [("Pack/Bootup.pack", b"made", ("Layout/Common.blarc", 5000))], "generated:pictures")
+        self.assertIsNone(p.winner(RSTB).mod)           # (the game's table fits: no table shipped)
+        self.assertEqual(p.winner("Pack/Bootup.pack").read(), b"made")
+
+    def test_game_table_when_no_mod_ships_one(self):
+        g = self.game(_table({"Layout/Common.blarc": 1000}, names={"Long/Name.bxml": 4}))
+        p = rm.plan([], g)
+        rm.add_generated(p, [("Pack/Bootup.pack", b"made", ("Layout/Common.blarc", 5000)),
+                             ("Pack/Other.pack", b"x", ("Long/Name.bxml", 8))], "generated:pictures")
+        got = _sizes(p.winner(RSTB).read())
+        self.assertEqual((got[self.crc("Layout/Common.blarc")], got["Long/Name.bxml"]), (5000, 8))
+        self.assertIsNone(p.generated[p.winner(RSTB).target]["built_on"])
+        out = self.tmp / "ov"
+        man = rm.deploy([], str(out), plan_=p)
+        self.assertTrue((out / RSTB).is_file())
+        self.assertEqual(man["files"][RSTB]["mod"], "generated:pictures")
+        self.assertTrue(any("the game's size table" in x for x in man["warnings"]))
+
+    def test_two_makers_share_one_table(self):
+        g = self.game(_table({"Layout/Common.blarc": 1000, "Font/Font_US.bfarc": 10}))
+        p = rm.plan([], g)
+        rm.add_generated(p, [("Font/Font_US.sbfarc", b"font", ("Font/Font_US.bfarc", 20))], "generated:fonts")
+        rm.add_generated(p, [("Pack/Bootup.pack", b"made", ("Layout/Common.blarc", 5000))], "generated:pictures")
+        got = _sizes(p.winner(RSTB).read())
+        self.assertEqual((got[self.crc("Font/Font_US.bfarc")], got[self.crc("Layout/Common.blarc")]), (20, 5000))
+        g2 = p.generated[p.winner(RSTB).target]
+        self.assertIsNone(g2["built_on"])
+        self.assertEqual(g2["sizes"], {"Font/Font_US.bfarc": 20, "Layout/Common.blarc": 5000})
+
+    def test_no_table_known_leaves_the_file_out(self):
+        p = rm.plan([])
+        taken = rm.add_generated(p, [("Pack/Bootup.pack", b"made", ("Layout/Common.blarc", 5000))],
+                                 "generated:pictures")
+        self.assertEqual(taken, [])
+        self.assertIsNone(p.winner("Pack/Bootup.pack"))
+        self.assertTrue(any("needs a bigger size-table" in w for w in p.warnings))
+
+    def test_a_damaged_table_leaves_the_file_out(self):
+        g = self.game(b"not a size table")
+        p = rm.plan([], g)
+        rm.add_generated(p, [("Pack/Bootup.pack", b"made", ("Layout/Common.blarc", 5000))], "generated:pictures")
+        self.assertIsNone(p.winner("Pack/Bootup.pack").mod)
+        self.assertTrue(any("can't be read" in w for w in p.warnings), p.warnings)
+
+    def test_rstb_name(self):
+        self.assertEqual(rm.rstb_name("Layout/Common.sblarc"), "Layout/Common.blarc")
+        self.assertEqual(rm.rstb_name("Pack/Bootup.pack"), "Pack/Bootup.pack")
+        self.assertEqual(rm.rstb_name("Font/Font_US.sbfarc"), "Font/Font_US.bfarc")
+
+
 if __name__ == "__main__":
     unittest.main()

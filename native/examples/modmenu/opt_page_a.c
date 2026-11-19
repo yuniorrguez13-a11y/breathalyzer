@@ -17,7 +17,19 @@
 //    that answers "no row" for every row while our table is in. Its first 16 bytes are checked, then it is replaced by
 //    a jump to pointer_kind() below, which does the same for both tables.
 //  - A page change closes the screen (rt_opt_decide answers 1); the title menu's or the pause menu's update opens it
-//    again (rt_opt_title_tick / rt_opt_pause_tick answer 1), as Savage Wind does for its own pages.
+//    again (rt_opt_title_tick / rt_opt_pause_tick answer 1), as Savage Wind does for its own pages. The pages and
+//    their rows come from mm_pages.c: Mods, Order, More, "Mod settings and info", a mod's page and its sub-pages. B
+//    goes back one page.
+//  - Choice rows (the Order page, Mod set, Font, a mod's sliders and choices) answer 0 to rt_opt_decide: the game sends
+//    left and right through it too (the early game check, 2026-11-14). Only button rows answer 2.
+//  - Locked rows (a setting's enable_if): changes are refused, the title and a choice's value are drawn in the game's
+//    grey (its message colour tag 3), and the description line says "Locked: needs ...". Rows a show_if hides stay
+//    on the page, grey, with "Not used now" (the page isn't closed and opened again yet: see docs/mod-menu.md).
+//  - Key rows: A starts a 10 s key capture. While it runs the screen's update is skipped (rt_opt_tick answers 1), the
+//    keyboard is read only while the game's window is in front, and Savage Wind's own keys (Esc, F1, F10, F11, `) are
+//    refused: Savage Wind acts on them first. The description line counts down.
+//  - The symbols the menu font lacks (# $ % @ ^ ` { | } ~) are drawn in the game's font tag 3, which has all of
+//    ASCII, unless menu.txt says "symbols full" (font.py fix-symbols added them to the menu font).
 //  - The description line: the game writes it only when the cursor comes to a row. After a change of ours (a switch,
 //    a move, Y) it is written again for the row the cursor is on, through the game's own function for that (Savage
 //    Wind's later versions name it opt_two_help and call it the same way; 0.4.1-alpha.4's game code doesn't name it).
@@ -71,14 +83,20 @@ _Static_assert(sizeof(Entry) == 0x30, "Entry");
 #define MSG_ON 90004u
 #define MSG_FIXED 8u
 #define MSG_VALUE 90100u       // + v: the Order page's values, "1st" to "64th"
-#define MSG_ROW 91000u         // + 4 * row + part: our page's rows
+#define MSG_ROW 91000u         // + 4 * row + part: our page's rows (64 rows: 91000-91255)
+#define MSG_SLOT 92000u        // + 240 * slot + v: the values of a choice row with its own texts (32: 92000-99679)
 enum { PART_TITLE, PART_DESC, PART_BUTTON };
+_Static_assert(MSG_ROW + 4u * MM_PAGE_ROWS <= MSG_SLOT, "row ids");
+_Static_assert(MSG_SLOT + (uint32_t)MM_SLOT_VALUES * MM_SLOTS - 1 <= MSG_HI, "slot ids");
+_Static_assert(MSG_VALUE + MM_MAX_MODS <= MSG_ROW, "order ids");
+
+#define CAPTURE_MS 10000u      // a key capture's time
+#define CAPTURE_AFTER_MS 400u  // after the key goes up, before the page takes input again
 
 // rt_opt_pointer_kind's first 16 bytes in 0.4.1-alpha.4 (checked on the installed release)
 static const uint8_t k_pointer_kind[16] = {0x56, 0x48, 0x83, 0xec, 0x30, 0x48, 0x8b, 0x15,
                                            0x3c, 0xf6, 0x37, 0x01, 0xb8, 0xff, 0xff, 0xff};
 
-static inline uint8_t rd8(uint64_t a) { return *(volatile uint8_t *)(uintptr_t)a; }
 static inline uint32_t rd32(uint64_t a) { return *(volatile uint32_t *)(uintptr_t)a; }
 static inline uint64_t rd64(uint64_t a) { return *(volatile uint64_t *)(uintptr_t)a; }
 static inline void wr8(uint64_t a, uint8_t v) { *(volatile uint8_t *)(uintptr_t)a = v; }
@@ -129,13 +147,33 @@ static uint32_t g_my_cap, g_my_count;
 static uint32_t g_order[192];  // the row order the game sees (Savage Wind's first page plus Mods, or our page)
 static char g_names[1 + MM_PAGE_ROWS][16];  // our entries' flag names (never a real game data flag)
 static PageRow g_rows[MM_PAGE_ROWS];        // our page's rows (row k is entry g_sw_count + 1 + k)
+static int g_slot[MM_PAGE_ROWS];            // a choice row's value block (MSG_SLOT), -1: none
 static int g_nrows;
-static int g_shown = PG_NONE;  // the page up now (PG_NONE: one of Savage Wind's)
-static int g_due = PG_NONE;    // the page the next opening shows
+#define REF_NONE ((PageRef){PG_NONE, -1, -1})
+static PageRef g_shown = {PG_NONE, -1, -1};  // the page up now (PG_NONE: one of Savage Wind's)
+static PageRef g_due = {PG_NONE, -1, -1};    // the page the next opening shows
 static bool g_reopen;          // a page change of ours closed the screen: open it again once it has gone
 static bool g_off;             // turned off while running (the log says why): everything goes to Savage Wind
 static uint64_t g_dirty[MM_PAGE_ROWS + 8];  // our rows to redraw, one per frame
 static int g_ndirty;
+
+// The key capture (a key setting's A). Game thread only, except `inject` (the modmenu_key command: under mm_lock).
+static struct {
+    bool on;
+    int k;                 // the row
+    uint64_t row;          // its row in the screen
+    uint64_t until;        // GetTickCount64 when it runs out
+    int phase;             // 0 wait until no key is down (the key that started it), 1 listen, 2 wait for the key up
+    int vk;                // phase 2: the key
+    uint64_t done_at;      // phase 2: when it went up
+    char name[16];         // phase 2: its name ("" clears)
+    int left;              // the seconds the description line says
+    char refused[16];      // the last of Savage Wind's keys pressed during it
+    char inject[24];       // a key from modmenu_key ("wait": let it run out)
+} g_cap;
+static char g_cap_note[MM_TEXT_MAX];  // the last capture's result, for its row's description line
+static int g_cap_note_k = -1;
+static uint64_t g_cap_note_until;
 
 enum { NOT_MINE = -1, MODS_BUTTON = -2 };
 
@@ -212,6 +250,15 @@ static bool on_screen(uint64_t screen, uint64_t row) {
     for (uint32_t i = 0; rows && i < n && i < 128; i++)
         if (rd64(rows + 8 * i) == row) return true;
     return false;
+}
+
+static void mark_one(uint64_t r) {  // one row of ours, for a redraw: the next one (the rows go last in, first out)
+    for (int k = 0; k < g_ndirty; k++)
+        if (g_dirty[k] == r) {
+            g_dirty[k] = g_dirty[g_ndirty - 1], g_dirty[g_ndirty - 1] = r;
+            return;
+        }
+    if (r && my_row(r) >= 0 && g_ndirty < (int)(sizeof g_dirty / sizeof *g_dirty)) g_dirty[g_ndirty++] = r;
 }
 
 static void mark_rows(uint64_t screen, uint64_t except) {  // every row of ours on the screen, for a redraw
@@ -331,9 +378,17 @@ static bool copy_entries(uint64_t ent, uint32_t count) {
 // ------------------------------------------------------------------ texts
 
 // A text for the game ({char16_t *, u32 length with the terminator} at out), kept alive per id (game_options.mm
-// put_text). Plain ASCII only.
-static void put_text(uint32_t id, const char *s, uint64_t out) {
-    static uint16_t fixed[MSG_FIXED][128], values[MM_MAX_MODS][8], rows[MM_PAGE_ROWS][3][MM_TEXT_MAX + 8], other[8];
+// put_text). Plain ASCII. grey: in the game's grey (message colour tag 3). Unless the menu font has every symbol
+// (menu.txt "symbols full"), the symbols it lacks go in the game's font tag 3: 0x0e, group 0, tag 1 (font), 2 bytes,
+// font 3; then 0xffff (the text's own font) after them.
+#define TAG_LEN 5
+#define TEXT_CAP (MM_TEXT_MAX + 8 + 2 * TAG_LEN + 32 * TAG_LEN)  // (room for 16 tagged symbols; more: look-alikes)
+#define VALUE_CAP 40
+static void put_text(uint32_t id, const char *s, uint64_t out, bool grey, bool symbols_full) {
+    static uint16_t fixed[MSG_FIXED][128], values[MM_MAX_MODS][8], rows[MM_PAGE_ROWS][3][TEXT_CAP],
+        slots[MM_SLOTS][MM_SLOT_VALUES][VALUE_CAP], other[8];
+    static const uint16_t font_on[TAG_LEN] = {0x0e, 0, 1, 2, 3}, font_off[TAG_LEN] = {0x0e, 0, 1, 2, 0xffff},
+                          grey_on[TAG_LEN] = {0x0e, 0, 3, 2, 3}, grey_off[TAG_LEN] = {0x0e, 0, 3, 2, 0xffff};
     uint16_t *t = other;
     size_t cap = sizeof other / sizeof *other;
     if (id - MSG_LO < MSG_FIXED) {
@@ -341,19 +396,73 @@ static void put_text(uint32_t id, const char *s, uint64_t out) {
     } else if (id - MSG_VALUE < MM_MAX_MODS) {
         t = values[id - MSG_VALUE], cap = 8;
     } else if (id - MSG_ROW < 4u * MM_PAGE_ROWS && (id - MSG_ROW) % 4 < 3) {
-        t = rows[(id - MSG_ROW) / 4][(id - MSG_ROW) % 4], cap = MM_TEXT_MAX + 8;
+        t = rows[(id - MSG_ROW) / 4][(id - MSG_ROW) % 4], cap = TEXT_CAP;
+    } else if (id - MSG_SLOT < (uint32_t)MM_SLOTS * MM_SLOT_VALUES) {
+        t = slots[(id - MSG_SLOT) / MM_SLOT_VALUES][(id - MSG_SLOT) % MM_SLOT_VALUES], cap = VALUE_CAP;
     } else {
         s = "";
     }
     size_t n = 0;
-    for (; s[n] && n + 1 < cap; n++) t[n] = (uint8_t)s[n] < 0x80 ? (uint8_t)s[n] : '?';
+#define PUT_TAG(tag)                                                       \
+    do {                                                                   \
+        if (n + TAG_LEN + 1 < cap) memcpy(t + n, (tag), sizeof(tag)), n += TAG_LEN; \
+    } while (0)
+    if (grey && cap > 2 * TAG_LEN + 4) PUT_TAG(grey_on);
+    size_t room = grey ? cap - TAG_LEN - 1 : cap - 1;  // (the grey's end always fits)
+    for (; *s && n < room; s++) {
+        uint16_t c = (uint8_t)*s < 0x80 && (uint8_t)*s >= 0x20 ? (uint8_t)*s : '?';
+        if (!symbols_full && mm_font_lacks((char)c)) {
+            if (n + 2 * TAG_LEN + 1 <= room) {
+                PUT_TAG(font_on);
+                t[n++] = c;
+                PUT_TAG(font_off);
+            } else {
+                char one[2] = {(char)c, 0};
+                mm_plain(one);
+                t[n++] = (uint8_t)one[0];
+            }
+            continue;
+        }
+        t[n++] = c;
+    }
+    if (grey && cap > 2 * TAG_LEN + 4) {
+        memcpy(t + n, grey_off, sizeof grey_off);
+        n += TAG_LEN;
+    }
+#undef PUT_TAG
     t[n] = 0;
     wr64(out, ADDR(t));
     wr32(out + 8, (uint32_t)n + 1);
 }
 
+// The row with this value block, or -1
+static int row_of_slot(int slot) {
+    for (int k = 0; k < g_nrows; k++)
+        if (g_slot[k] == slot) return k;
+    return -1;
+}
+
+// The description line while a key capture runs on row k, or after it: false when there is nothing to say
+static bool capture_desc(int k, char *s, size_t cap) {
+    if (g_cap.on && g_cap.k == k) {
+        snprintf(s, cap, "Press a key now. %d s left. Backspace clears.", g_cap.left);
+        if (g_cap.refused[0]) {
+            char more[48];
+            snprintf(more, sizeof more, " %s is Savage Wind's.", g_cap.refused);
+            mm_cat(s, cap, more);
+        }
+        return true;
+    }
+    if (g_cap_note_k == k && g_cap_note[0] && GetTickCount64() < g_cap_note_until) {
+        mm_copy(s, cap, g_cap_note);
+        return true;
+    }
+    return false;
+}
+
 static void our_msg(uint32_t id, uint64_t out) {
     char s[MM_TEXT_MAX + 32] = "";
+    bool grey = false, full = false;
     if (id == MSG_MODS) {
         mm_copy(s, sizeof s, TXT_MODS);
     } else if (id == MSG_MODS_DESC) {
@@ -371,13 +480,21 @@ static void our_msg(uint32_t id, uint64_t out) {
         mm_lock();
         if (k < g_nrows) {
             const PageRow *r = &g_rows[k];
-            if (part == PART_TITLE) mm_row_title(r, s, sizeof s);
-            else if (part == PART_DESC) mm_row_desc(r, s, MM_TEXT_MAX);
-            else if (part == PART_BUTTON) mm_row_button(r, s, sizeof s);
+            if (part == PART_TITLE) mm_row_title(r, s, sizeof s), grey = mm_row_locked(r);
+            else if (part == PART_DESC && !capture_desc(k, s, MM_TEXT_MAX)) mm_row_desc(r, s, MM_TEXT_MAX);
+            else if (part == PART_BUTTON) mm_row_button(r, s, sizeof s), grey = mm_row_locked(r);
         }
+        full = g_mm.symbols_full;
+        mm_unlock();
+    } else if (id - MSG_SLOT < (uint32_t)MM_SLOTS * MM_SLOT_VALUES) {
+        int slot = (int)(id - MSG_SLOT) / MM_SLOT_VALUES, v = (int)(id - MSG_SLOT) % MM_SLOT_VALUES;
+        mm_lock();
+        int k = row_of_slot(slot);
+        if (k >= 0) mm_row_value_text(&g_rows[k], v, s, sizeof s), grey = mm_row_locked(&g_rows[k]);
+        full = g_mm.symbols_full;
         mm_unlock();
     }
-    put_text(id, s, out);
+    put_text(id, s, out, grey, full);
 }
 
 // ------------------------------------------------------------------ our rows
@@ -401,12 +518,34 @@ static void fill_row(uint64_t row, int k) {
     wr32(row + ROW_MIN, 0);
 }
 
-static int open_page(int page) {
+static int open_page(PageRef page) {
     if (sw_hold && sw_hold()) return 2;  // (a key capture runs: as Savage Wind's own page buttons)
     g_due = page;
     g_reopen = true;
     mm_flush_soon();
     return 1;
+}
+
+static const char *page_name(int page) {
+    switch (page) {
+    case PG_MODS: return "mods";
+    case PG_ORDER: return "order";
+    case PG_MORE: return "more";
+    case PG_LIST: return "list";
+    case PG_MOD: return "mod";
+    case PG_SUB: return "sub";
+    }
+    return "";
+}
+
+// After a change on row k (CH_* bits): its row and, when others changed too, every row of ours is redrawn, and the
+// description line says what changed. A refused change puts the row back as it was.
+static void after_change(uint64_t row, int k, unsigned ch) {
+    if (!ch) return;
+    if (ch & CH_OTHERS) mark_rows(rd64(row), row);
+    if (ch & CH_REFUSED) fill_row(row, k), mark_one(row);
+    if (ch & (CH_THIS | CH_OTHERS)) mm_flush_soon();
+    show_desc(row);
 }
 
 // ------------------------------------------------------------------ the wrappers (all on the game's thread)
@@ -419,14 +558,15 @@ static void w_rows(void) {
     }
     sw.rows();
     find_help();
-    int page = g_due;
-    g_due = PG_NONE, g_reopen = false, g_ndirty = 0, g_shown = PG_NONE;
+    PageRef page = g_due;
+    g_due = REF_NONE, g_reopen = false, g_ndirty = 0, g_shown = REF_NONE;
+    g_cap.on = false, g_cap_note_k = -1;
     uint64_t ent = rd64(OPT_ENTRIES);
     uint32_t count = rd32(OPT_COUNT);
     if (g_off || !sw_table_ok(ent, count) || !copy_entries(ent, count)) return;
     uint32_t rows = rd32(OPT_ROWS);
     uint64_t order = rd64(OPT_ORDER);
-    if (page == PG_NONE) {
+    if (page.page == PG_NONE) {
         // Savage Wind's first page starts with its first entry (Gameplay): Mods goes just above the last row (Quit)
         if (rows < 2 || rows + 1 > sizeof g_order / sizeof *g_order || !order || rd32(order) != GAME_ENTRIES) return;
         for (uint32_t r = 0; r < rows; r++) g_order[r] = rd32(order + 4 * r);
@@ -440,11 +580,18 @@ static void w_rows(void) {
     }
     mm_lock();
     g_nrows = mm_page(page, g_rows, MM_PAGE_ROWS);  // (never 0 rows: the game would build none)
+    int slots = 0;
     for (int k = 0; k < g_nrows; k++) {
         const PageRow *r = &g_rows[k];
         int w = mm_row_widget(r);
-        uint32_t base = MSG_ROW + 4u * (uint32_t)k;
-        if (w == 1) set_entry(count + 1 + k, 1, base, base + 1, MSG_VALUE, MSG_VALUE + (uint32_t)mm_row_max(r), 0, k + 1);
+        uint32_t base = MSG_ROW + 4u * (uint32_t)k, max = (uint32_t)mm_row_max(r);
+        g_slot[k] = -1;
+        if (w == 1 && mm_row_own_values(r) && slots >= MM_SLOTS) w = 2;  // (no value block left: a button)
+        if (w == 1 && mm_row_own_values(r)) {
+            g_slot[k] = slots++;
+            uint32_t first = MSG_SLOT + (uint32_t)MM_SLOT_VALUES * (uint32_t)g_slot[k];
+            set_entry(count + 1 + k, 1, base, base + 1, first, first + max, 0, k + 1);
+        } else if (w == 1) set_entry(count + 1 + k, 1, base, base + 1, MSG_VALUE, MSG_VALUE + max, 0, k + 1);
         else if (w == 0) set_entry(count + 1 + k, 0, base, base + 1, MSG_OFF, MSG_ON, 0, k + 1);
         else set_entry(count + 1 + k, 2, base, base + 1, 0, 0, base + PART_BUTTON, k + 1);
         g_order[k] = count + 1 + (uint32_t)k;
@@ -482,26 +629,28 @@ static int w_store(uint64_t row) {
     mm_lock();
     PageRow r = g_rows[k];
     int w = mm_row_widget(&r), max = mm_row_max(&r);
-    bool others = false;
+    unsigned ch = 0;
     if (w == 0) {
-        others = mm_row_set(&r, (rd32(row + ROW_ON) & 0xff) != 0);
+        ch = mm_row_set(&r, (rd32(row + ROW_ON) & 0xff) != 0);
     } else if (w == 1) {
         int v = (int)rd32(row + ROW_VALUE);
-        others = mm_row_set(&r, v < 0 ? 0 : v > max ? max : v);
+        ch = mm_row_set(&r, v < 0 ? 0 : v > max ? max : v);
     }
     mm_unlock();
-    if (others) mark_rows(rd64(row), row);  // (a move changes every position on the Order page)
-    show_desc(row);                          // (the row's line says what changes: "Turns off once you use changes.")
+    // (a move changes every position on the Order page; a setting can lock others. The row's line says what
+    // changes: "Turns off at your next start.")
+    after_change(row, k, ch);
     return 1;
 }
 
-// Y (restore default settings): on our pages, every mod back to how it is now
+// Y (restore default settings): on the Mods, Order and More pages every change for the next start is undone; on a
+// mod's page its settings go back to their defaults
 static int w_reset(uint64_t row) {
     int k = my_row(row);
     if (k == NOT_MINE) FWD(int, sw.reset(row));
     if (k == MODS_BUTTON) return 1;
     mm_lock();
-    bool any = mm_undo();
+    bool any = mm_page_reset(g_shown) != 0;
     mm_unlock();
     if (any) {
         mark_rows(rd64(row), 0);  // (all of them: whether the game redraws a reset row itself isn't known)
@@ -520,20 +669,184 @@ static int w_msg(uint32_t id, uint64_t out) {
     FWD(int, sw.msg(id, out));
 }
 
-// A on a row: 0 the game's own handling (ON/OFF flips, then store), 1 close the screen (a page change), 2 done
+static void start_capture(uint64_t row, int k) {
+    memset(&g_cap, 0, sizeof g_cap);
+    g_cap.on = true, g_cap.k = k, g_cap.row = row;
+    g_cap.until = GetTickCount64() + CAPTURE_MS;
+    g_cap.left = (int)(CAPTURE_MS / 1000);
+    g_cap_note_k = -1;
+    show_desc(row);
+}
+
+// A on a row: 0 the game's own handling (ON/OFF flips, then store; a choice row's left and right come here too),
+// 1 close the screen (a page change), 2 done
 static int w_decide(uint64_t row) {
     int k = my_row(row);
     if (k == NOT_MINE) FWD(int, sw.decide(row));
-    if (k == MODS_BUTTON) return open_page(PG_MODS);
+    if (k == MODS_BUTTON) return open_page((PageRef){PG_MODS, -1, -1});
+    if (g_cap.on) return 2;
+    PageRef open = REF_NONE;
+    unsigned ch = 0;
     mm_lock();
-    int kind = g_rows[k].kind;
+    PageRow r = g_rows[k];
+    int act = mm_row_press(&r, &open, &ch);
     mm_unlock();
-    if (kind == RK_ORDER_BUTTON) return open_page(PG_ORDER);
-    return kind == RK_MOD || kind == RK_ORDER ? 0 : 2;
+    switch (act) {
+    case ACT_GAME: return 0;
+    case ACT_OPEN: return open_page(open);
+    case ACT_KEY: start_capture(row, k); return 2;
+    case ACT_REFUSED: show_desc(row); return 2;  // (a locked row: its line says why)
+    }
+    after_change(row, k, ch);
+    return 2;
 }
+
+// ------------------------------------------------------------------ the key capture (game thread)
+
+__declspec(dllimport) short WINAPI GetAsyncKeyState(int vk);
+__declspec(dllimport) void *WINAPI GetForegroundWindow(void);
+__declspec(dllimport) DWORD WINAPI GetWindowThreadProcessId(void *hwnd, DWORD *pid);
+__declspec(dllimport) DWORD WINAPI GetCurrentProcessId(void);
+
+// The keys a key setting can take (modhost's names: native/modhost/settings.c), and Savage Wind's own (refused: it
+// acts on them first, and saves F10, F11 and its menu's changes to savagewind.ini)
+typedef struct {
+    int vk;
+    const char *name;
+} KeyName;
+static const KeyName k_named[] = {{0x20, "Space"}, {0x09, "Tab"},    {0x0D, "Enter"}, {0x2D, "Insert"},
+                                  {0x2E, "Delete"}, {0x24, "Home"},  {0x23, "End"},   {0x21, "PageUp"},
+                                  {0x22, "PageDown"}, {0x25, "Left"}, {0x26, "Up"},   {0x27, "Right"},
+                                  {0x28, "Down"},  {0x10, "Shift"},  {0x11, "Ctrl"},  {0x12, "Alt"}};
+static const KeyName k_theirs[] = {{0x1B, "Esc"}, {0x70, "F1"}, {0x79, "F10"}, {0x7A, "F11"}, {0xC0, "`"}};
+#define VK_BACKSPACE 0x08
+
+static bool same_ci(const char *a, const char *b);
+
+// A key's name; false: not a key a setting can take
+static bool vk_name(int vk, char *out, size_t cap) {
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) return snprintf(out, cap, "%c", vk), true;
+    if (vk >= 0x70 && vk <= 0x87) return snprintf(out, cap, "F%d", vk - 0x6F), true;
+    if (vk >= 0x60 && vk <= 0x69) return snprintf(out, cap, "Num%d", vk - 0x60), true;
+    for (size_t i = 0; i < sizeof k_named / sizeof *k_named; i++)
+        if (k_named[i].vk == vk) return mm_copy(out, cap, k_named[i].name), true;
+    return false;
+}
+
+static const char *theirs(int vk) {
+    for (size_t i = 0; i < sizeof k_theirs / sizeof *k_theirs; i++)
+        if (k_theirs[i].vk == vk) return k_theirs[i].name;
+    return NULL;
+}
+
+static bool game_in_front(void) {
+    void *w = GetForegroundWindow();
+    DWORD pid = 0;
+    if (!w) return false;
+    GetWindowThreadProcessId(w, &pid);
+    return pid == GetCurrentProcessId();
+}
+
+static bool key_down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+
+// The first key down that counts (Savage Wind's and Backspace too), or 0
+static int first_down(void) {
+    for (int vk = 0x08; vk <= 0xC0; vk++) {
+        char name[16];
+        if ((vk == VK_BACKSPACE || theirs(vk) || vk_name(vk, name, sizeof name)) && key_down(vk)) return vk;
+    }
+    return 0;
+}
+
+static void capture_end(const char *note) {
+    g_cap.on = false;
+    mm_copy(g_cap_note, sizeof g_cap_note, note);
+    g_cap_note_k = g_cap.k, g_cap_note_until = GetTickCount64() + 4000;
+    mark_one(g_cap.row);
+    show_desc(g_cap.row);
+}
+
+// One frame of the key capture: true while it runs (the screen's update is skipped, so the page takes no input)
+static bool capture_tick(uint64_t screen) {
+    if (!g_cap.on) return false;
+    if (!on_screen(screen, g_cap.row) || my_row(g_cap.row) != g_cap.k) {
+        g_cap.on = false;
+        return false;
+    }
+    uint64_t now = GetTickCount64();
+    char inject[24];
+    mm_lock();
+    mm_copy(inject, sizeof inject, g_cap.inject);
+    g_cap.inject[0] = 0;
+    mm_unlock();
+    if (g_cap.phase == 2) {  // (a key was taken: wait for it to go up, then a little, so the page doesn't get it)
+        if (g_cap.vk && key_down(g_cap.vk)) return true;
+        if (!g_cap.done_at) g_cap.done_at = now;
+        if (g_cap.vk && now - g_cap.done_at < CAPTURE_AFTER_MS) return true;
+        mm_lock();
+        PageRow r = g_rows[g_cap.k];
+        unsigned ch = mm_row_key(&r, g_cap.name);
+        mm_unlock();
+        char note[MM_TEXT_MAX];
+        if (ch & CH_REFUSED) mm_copy(note, sizeof note, "That key can't be used now. Nothing changed.");
+        else if (g_cap.name[0]) snprintf(note, sizeof note, "Got %s.", g_cap.name);
+        else mm_copy(note, sizeof note, "No key now.");
+        if (ch & CH_OTHERS) mark_rows(screen, 0);
+        if (ch & (CH_THIS | CH_OTHERS)) mm_flush_soon();
+        capture_end(note);
+        return true;
+    }
+    int vk = 0;
+    const char *refused = NULL;
+    char name[16] = "";
+    bool got = false;
+    if (inject[0]) {  // (modmenu_key: as if pressed, with no key to wait for)
+        if (same_ci(inject, "wait")) {
+            g_cap.until = now;
+        } else if (same_ci(inject, "Backspace")) {
+            got = true;
+        } else {
+            for (size_t i = 0; i < sizeof k_theirs / sizeof *k_theirs; i++)
+                if (same_ci(inject, k_theirs[i].name)) refused = k_theirs[i].name;
+            for (int v = 0x08; !refused && !got && v <= 0x87; v++)
+                if (vk_name(v, name, sizeof name) && same_ci(inject, name)) got = true;
+            if (!got) name[0] = 0;
+        }
+    } else if (game_in_front()) {  // (never a key typed into another window)
+        int down = first_down();
+        if (g_cap.phase == 0) {  // (the key that started it goes up first)
+            if (!down) g_cap.phase = 1;
+        } else if (down) {
+            refused = theirs(down);
+            if (!refused) {
+                vk = down;
+                got = down == VK_BACKSPACE || vk_name(down, name, sizeof name);
+                if (down == VK_BACKSPACE) name[0] = 0;
+            }
+        }
+    }
+    if (refused) mm_copy(g_cap.refused, sizeof g_cap.refused, refused);
+    if (got) {
+        g_cap.phase = 2, g_cap.vk = vk, g_cap.done_at = 0;
+        mm_copy(g_cap.name, sizeof g_cap.name, name);
+        return true;
+    }
+    if (now >= g_cap.until) {
+        capture_end("No key in 10 s: nothing changed.");
+        return true;
+    }
+    int left = (int)((g_cap.until - now + 999) / 1000);
+    if (left != g_cap.left || refused) {
+        g_cap.left = left;
+        show_desc(g_cap.row);
+    }
+    return true;
+}
+
 
 // The screen's update: Savage Wind's first (with our table in place); then one of our rows to redraw, if any
 static uint64_t w_tick(uint64_t screen) {
+    if (capture_tick(screen)) return 1;  // (a key capture runs: no input for the page, and none for Savage Wind's)
     uint64_t r = sw.tick(screen);
     if (r == 1) return 1;  // (the quit question is up: the screen's update is skipped)
     if (r) {
@@ -562,11 +875,15 @@ static uint64_t w_tick(uint64_t screen) {
     return 0;
 }
 
-// B: Savage Wind cancels a key capture; from our pages, back one page
+// B: Savage Wind cancels a key capture; from our pages, back one page (from the Mods page: Savage Wind's first page)
 static void w_back(void) {
     sw.back();
-    if (g_shown == PG_MODS) g_due = PG_NONE, g_reopen = true;   // (Savage Wind's first page)
-    else if (g_shown == PG_ORDER) g_due = PG_MODS, g_reopen = true;
+    PageRef parent;
+    PageRow from;
+    mm_lock();
+    bool up = g_shown.page != PG_NONE && mm_page_parent(g_shown, &parent, &from);
+    mm_unlock();
+    if (up) g_due = parent, g_reopen = true;
     mm_flush_soon();
 }
 
@@ -575,7 +892,7 @@ static int w_title_tick(uint64_t menu) {
     int r = sw.title_tick(menu);
     if (r || !menu) return r;
     if (rd32(menu + g_title_off) != MENU_OPTIONS_ACTIVE) {  // (its Options button isn't active: forget the reopen)
-        g_reopen = false, g_due = PG_NONE;
+        g_reopen = false, g_due = REF_NONE;
         return 0;
     }
     if (!g_reopen || options_screen()) return 0;
@@ -595,7 +912,7 @@ static int w_pause_tick(void) {
 // In place of Savage Wind's rt_opt_pointer_kind (its mouse code): the row kind under the pointer, or -1. The same as
 // Savage Wind's, for its own table and for ours.
 static int pointer_kind(uint64_t row) {
-    if (!row || (sw_hold && sw_hold())) return -1;
+    if (!row || (sw_hold && sw_hold()) || g_cap.on) return -1;
     uint64_t ent = rd64(OPT_ENTRIES);
     uint32_t idx = rd32(row + ROW_ENTRY);
     if (g_my && ent == ADDR(g_my)) return idx < g_my_count ? (int)g_my[idx].kind : -1;
@@ -749,5 +1066,27 @@ bool page_a_start(char *why, size_t cap) {
     VirtualProtect(pk, 14, old_code, &tmp);
     VirtualProtect((void *)(uintptr_t)lo, hi - lo, old_iat, &tmp);
     FlushInstructionCache(GetCurrentProcess(), pk, 14);
+    return true;
+}
+
+// ------------------------------------------------------------------ for the commands (frame thread)
+
+// (called locked: from the modmenu command)
+void page_a_status(SwModReply *r) {
+    PageRef p = g_shown;
+    g_api->reply_str(r, "page", page_name(p.page));
+    g_api->reply_str(r, "page_mod", (p.page == PG_MOD || p.page == PG_SUB) && p.mod >= 0 && p.mod < g_mm.n
+                                        ? g_mm.mods[p.mod].id
+                                        : "");
+    g_api->reply_int(r, "page_rows", p.page == PG_NONE ? 0 : g_nrows);
+    g_api->reply_bool(r, "capture", g_cap.on);
+    if (g_cap.on) g_api->reply_int(r, "capture_left", g_cap.left);
+}
+
+bool page_a_inject_key(const char *name, char *why, size_t cap) {
+    if (!g_cap.on) return snprintf(why, cap, "no key capture runs: press A on a key row first"), false;
+    mm_lock();
+    mm_copy(g_cap.inject, sizeof g_cap.inject, name);
+    mm_unlock();
     return true;
 }

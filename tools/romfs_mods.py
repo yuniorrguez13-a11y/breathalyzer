@@ -678,38 +678,137 @@ def add_generated(p: Plan, files: list, owner: str) -> list[str]:
     `owner` is "generated:<what>", listed as the file's mod in .mod-deploy.json, with "built_on": the mod whose file
     it was made from. Returns the paths taken.
 
-    Size-table entries aren't merged yet (docs/mod-pictures.md, rule S2): a file that needs one is left out, with a
+    Size-table entries (rule S2, docs/mod-pictures.md): they go into the size table in use (a mod's own, the one
+    merged from the mods' tables, or the game's when no mod ships one), and only ever raise an entry. That table is
+    then deployed as a made file too. When no table can be read, a file that needs an entry is left out, with a
     warning, so the game never reads a file bigger than its entry."""
     if not owner.startswith(GENERATED) or len(owner) == len(GENERATED):
         raise ValueError(f"owner must be '{GENERATED}<what>', not {owner!r}")
-    idx = next((k for k, m in enumerate(p.mods) if m.owner == owner), None)
-    if idx is None:
-        p.mods.append(Mod(path="", name=owner, owner=owner))
-        idx = len(p.mods) - 1
-    case = dict(p.game.dirs) if p.game else {}
-    taken: list[str] = []
+    items = []
     for item in files:
         path, data, rstb = item
         rel = str(path).replace("\\", "/").strip("/")
         if not rel or "/" not in rel or any(_bad_name(x) for x in rel.split("/")) \
                 or rel.lower().startswith(("aoc/", DLC_PREFIX)) or not isinstance(data, (bytes, bytearray)):
             raise ValueError(f"{owner}: {path!r} isn't a RomFS file path with bytes")
+        if isinstance(rstb, int) and not isinstance(rstb, bool):   # (a size alone: the file's own name in the table)
+            rstb = (rstb_name(rel), rstb)
         if rstb is not None:
-            p.warnings.append(f"{owner}: {rel} needs a bigger size-table (RSTB) entry, which this deploy can't add "
-                              "yet: left out.")
-            continue
-        old = next((t for t in p.winners if t.lower() == rel.lower()), None)
-        rel = old or _canon(rel, False, case, p.game.files if p.game else {})  # (spelled as the file it replaces)
-        built_on = p.mods[p.winners[old][0]].name if old else None
-        if old:
-            del p.winners[old]
-        e = Entry(member="(made at deploy)", rel=rel, size=len(data), data=bytes(data))
-        p.mods[idx].entries.append(e)
-        p.winners[rel] = (idx, e)
-        p.generated[rel] = {"owner": owner, "built_on": built_on}
-        taken.append(rel)
+            name, size = rstb
+            if not isinstance(name, str) or not name or len(name.encode()) > 127 or not isinstance(size, int) \
+                    or size <= 0:
+                raise ValueError(f"{owner}: {rel}'s size-table entry {rstb!r} isn't (name, size)")
+        items.append((rel, data, rstb))
+    sizes: dict[str, int] = {}
+    for _, _, rstb in items:
+        if rstb is not None:
+            sizes[rstb[0]] = max(sizes.get(rstb[0], 0), rstb[1])
+    table = None
+    if sizes:
+        try:
+            table = _sizes_into_table(p, sizes)
+        except DeployError as e:
+            p.warnings.append(f"{owner}: {e}")
+            table = False
+        if table is False or table is None and not p.winner(RSTB):
+            if table is None:
+                p.warnings.append(f"{owner}: no size table (RSTB) to add entries to (the game's files aren't known)")
+            for rel, _, rstb in items:
+                if rstb is not None:
+                    p.warnings.append(f"{owner}: {rel} needs a bigger size-table (RSTB) entry: left out.")
+            items = [x for x in items if x[2] is None]
+            table = None
+    taken: list[str] = []
+    for rel, data, _ in items:
+        taken.append(_put_generated(p, rel, data, owner))
+    if table is not None:   # (the table in use with our entries: it wins like any made file)
+        data, base, changed = table
+        rel = _put_generated(p, RSTB, data, owner)
+        p.generated[rel]["built_on"] = base
+        p.generated[rel]["sizes"] = changed
     p.winners = dict(sorted(p.winners.items()))
     return taken
+
+
+def rstb_name(rel: str) -> str:
+    """A RomFS file's name in the size table: its path with Yaz0's "s" taken off the extension
+    ("Layout/Common.sblarc" -> "Layout/Common.blarc")."""
+    d, _, name = rel.replace("\\", "/").strip("/").rpartition("/")
+    stem, dot, ext = name.rpartition(".")
+    if dot and stem and ext[:1] == "s" and len(ext) > 1:
+        name = f"{stem}.{ext[1:]}"
+    return f"{d}/{name}" if d else name
+
+
+def _put_generated(p: Plan, rel: str, data: bytes, owner: str) -> str:
+    idx = next((k for k, m in enumerate(p.mods) if m.owner == owner), None)
+    if idx is None:
+        p.mods.append(Mod(path="", name=owner, owner=owner))
+        idx = len(p.mods) - 1
+    case = dict(p.game.dirs) if p.game else {}
+    old = next((t for t in p.winners if t.lower() == rel.lower()), None)
+    rel = old or _canon(rel, False, case, p.game.files if p.game else {})  # (spelled as the file it replaces)
+    built_on = p.mods[p.winners[old][0]].name if old else None
+    if old:
+        del p.winners[old]
+    e = Entry(member="(made at deploy)", rel=rel, size=len(data), data=bytes(data))
+    p.mods[idx].entries.append(e)
+    p.winners[rel] = (idx, e)
+    p.generated[rel] = {"owner": owner, "built_on": built_on}
+    return rel
+
+
+def merge_sizes(table: bytes, sizes: dict[str, int]) -> tuple[bytes, dict[str, int]]:
+    """A size table (Yaz0 or plain, as given) with `sizes` ({name in the table: size}) put in, raising entries only:
+    a name the table lists by name keeps its name, any other goes in by its CRC-32. Returns (table, the entries that
+    changed); the table comes back as given when nothing changed. A big table is written as stored Yaz0 (fast)."""
+    import wiiu_convert as wc  # (lazy: only deploys with made files that need entries read size tables)
+    try:
+        yaz = bytes(table[:4]) == b"Yaz0"
+        raw, align = wc.yaz0_decompress(bytes(table)) if yaz else (bytes(table), 0)
+        if wc.rstb_order(raw) != wc.LE and len(raw) > 12:
+            raise DeployError("the size table (RSTB) is a Wii U one")
+        crcs, named = wc.rstb_load(raw)
+    except wc.FormatError as e:
+        raise DeployError(f"the size table (RSTB) can't be read ({e})") from None
+    crc = dict(crcs)
+    names = {n.split(b"\0", 1)[0].decode("utf-8", "replace"): v for n, v in named}
+    changed: dict[str, int] = {}
+    for name, size in sizes.items():
+        if name in names:
+            if size > names[name]:
+                names[name] = changed[name] = size
+        else:
+            k = zlib.crc32(name.encode()) & 0xFFFFFFFF
+            if size > crc.get(k, -1):
+                crc[k] = changed[name] = size
+    if not changed:
+        return bytes(table), {}
+    out = wc.rstb_build(sorted(crc.items()), [(n.encode()[:127], v) for n, v in names.items()])
+    if not yaz:
+        return out, changed
+    return (wc.yaz0_compress(out, align) if len(out) <= 16 << 10 else wc.yaz0_store(out, align)), changed
+
+
+def _sizes_into_table(p: Plan, sizes: dict[str, int]):
+    """(new table, the mod it was built on or None for the game's, changed entries) for the table in use, or None
+    when there is no table to read (no game files known and no mod ships one)."""
+    w = p.winner(RSTB)
+    if w is None:
+        return None
+    try:
+        data = w.read()
+    except (OSError, KeyError) as e:
+        raise DeployError(f"the size table (RSTB) can't be read ({e})") from None
+    new, changed = merge_sizes(data, sizes)
+    if not changed:   # (the table in use fits already: it stays as it is)
+        return None
+    base = w.mod
+    if base and base.startswith(GENERATED):    # (an earlier maker's table: keep what it was built on)
+        g = p.generated.get(w.target) or {}
+        base = g.get("built_on")
+        changed = {**(g.get("sizes") or {}), **changed}
+    return new, base, changed
 
 
 def _game_check(p: Plan) -> dict:
@@ -777,6 +876,9 @@ def manifest_for(p: Plan, out: str, *, complete: bool, dry_run: bool = False) ->
     rstb_from = next((p.mods[i].name for t, (i, _) in p.winners.items() if t.lower() == RSTB.lower()), None)
     rstb_mods = [m.name for m in p.mods if any(not e.dlc and e.rel.lower() == RSTB.lower() for e in m.entries)]
     check = _game_check(p) if p.game else None
+    made_rstb = next((g for t, g in p.generated.items() if t.lower() == RSTB.lower() and t in files), None)
+    if made_rstb is not None:   # (the table in use with entries for files made at deploy: S2)
+        rstb_from = made_rstb.get("built_on")
 
     warnings: list[str] = list(p.warnings)
     for m in p.mods:
@@ -784,7 +886,19 @@ def manifest_for(p: Plan, out: str, *, complete: bool, dry_run: bool = False) ->
             if reason == R_DLC_MARK:
                 warnings.append(f"{m.name}: skipped {member}. At the overlay's root it would turn on Savage Wind's "
                                 "fix for a RomFS with the DLC merged in; DLC files go in 01007EF00011F001/romfs.")
-    if rstb_from and p.rstb_merged:
+    if made_rstb is not None:
+        what = made_rstb["owner"][len(GENERATED):]
+        warnings.append(f"The {what} made at deploy need bigger size-table (RSTB) entries, so the deploy ships "
+                        f"{'the game' if not rstb_from else rstb_from}'s size table with them added. Start Savage Wind "
+                        f"with {ENV_NO_HUD}=1 (modman run does): 0.4.1-alpha.4 stops its own RSTB fixes when the "
+                        "overlay has one (issue #505). Keep the voice language the same as the text language.")
+        others = [m.name for i, m in enumerate(p.mods) if won[i] and not m.owner and not sizes_checked(m.path)
+                  and m.name != rstb_from and m.name not in p.rstb_merged]
+        if others:
+            warnings.append(f"The {'merged ' if p.rstb_merged else ''}RSTB has no size changes from "
+                            f"{_some(others, 3)}; their files may need entries in it. Merge the mods with UKMM "
+                            "(Switch mode) first.")
+    elif rstb_from and p.rstb_merged:
         warnings.append(f"The RSTB is merged from the size tables of {', '.join(p.rstb_merged)}, so start Savage Wind "
                         f"with {ENV_NO_HUD}=1 (modman run does): 0.4.1-alpha.4 stops its own RSTB fixes when the "
                         "overlay has one (issue #505). Keep the voice language the same as the text language.")
@@ -824,14 +938,20 @@ def manifest_for(p: Plan, out: str, *, complete: bool, dry_run: bool = False) ->
     notes = list(p.notes)
     boot = files.get(BOOTUP) or next((f for t, f in files.items() if t.lower() == BOOTUP.lower()), None)
     if boot:
-        notes.append(f"{boot['mod']} replaces {BOOTUP}: Savage Wind's HUD button letters stay as the game's.")
+        who = (f"The {boot['mod'][len(GENERATED):]} made at deploy" + (f" (over {boot['built_on']}'s)" if
+               boot.get("built_on") else "")) if boot.get("generated") else boot["mod"]
+        notes.append(f"{who} {'replace' if boot.get('generated') else 'replaces'} {BOOTUP}: Savage Wind's HUD button "
+                     "letters stay as the game's.")
     if not p.game:
         notes.append("Paths not checked against the game: add --game-romfs <extracted\\romfs> to check them.")
 
     man = {"tool": TOOL_ID, "format": FORMAT, "complete": complete, "overlay": out,
            "game_romfs": p.game.romfs if p.game else None, "mods": mods, "files": files,
-           "conflicts": p.conflicts, "rstb": {"shipped": bool(rstb_from), "from": rstb_from, "mods": rstb_mods,
-                                              **({"merged_from": p.rstb_merged} if p.rstb_merged else {})},
+           "conflicts": p.conflicts, "rstb": {"shipped": bool(rstb_from) or made_rstb is not None, "from": rstb_from,
+                                              "mods": rstb_mods,
+                                              **({"merged_from": p.rstb_merged} if p.rstb_merged else {}),
+                                              **({"made_by": made_rstb["owner"], "added": made_rstb.get("sizes") or {}}
+                                                 if made_rstb is not None else {})},
            "game_check": check, "warnings": warnings, "notes": notes}
     if p.generated:  # (files made at deploy, by owner: "generated:pictures" -> its paths)
         gen: dict[str, list[str]] = {}

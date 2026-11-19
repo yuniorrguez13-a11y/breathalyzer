@@ -50,6 +50,7 @@ Deleting such a link never changes the file's other names, not even its read-onl
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import filecmp
 import hashlib
@@ -608,6 +609,18 @@ def read_setting_values(lib: "Library", mod_id: str) -> dict:
         return {}
     vals = (data or {}).get("values")
     return dict(vals) if isinstance(vals, dict) and (data or {}).get("mod") == mod_id else {}
+
+
+def settings_ids(lib: "Library") -> dict[str, str]:
+    """Library id -> the id its settings file has (settings\\<[mod] id>.json). The two differ only for a mod.toml put
+    into a library folder by hand; mods without settings (or without tools/mod_settings.py) aren't listed."""
+    f = feature("mod_settings", "library_schemas")
+    if f is None:
+        return {}
+    try:
+        return {m["id"]: s.mod_id for m, s in f(lib) if isinstance(getattr(s, "mod_id", None), str)}
+    except Exception:  # (a broken mod.toml: its values are keyed by the library id, as before)
+        return {}
 
 
 def write_setting_values(lib: "Library", mod_id: str, values: dict) -> None:
@@ -1612,7 +1625,8 @@ def example_dll(src: str, stage: str) -> str | None:
     if os.path.isfile(dst):
         return None
     base = os.path.basename(dst).lower()
-    examples = (*bn.EXAMPLES, *bn.HOOK_EXAMPLES, *getattr(bn, "GHOST_EXAMPLES", ()))
+    examples = (*bn.EXAMPLES, *bn.HOOK_EXAMPLES, *getattr(bn, "GHOST_EXAMPLES", ()),
+                *getattr(bn, "SETTINGS_EXAMPLES", ()))
     target = next((t for t in examples if t.filename.lower() == base), None)
     if target is None:
         return None
@@ -2281,6 +2295,12 @@ def inputs_hash(lib: Library) -> str:
     font = _feature_call("font", "hash_inputs", lib)  # (what deploy's font files are made from; None: it makes none)
     if font is not None:
         h.update(json.dumps({"font": font}, sort_keys=True, default=str).encode())
+    pics = _feature_call("mod_pictures", "hash_inputs", lib)  # (pictures in the game; None while they are off)
+    if pics is not None:
+        h.update(json.dumps({"pictures": pics}, sort_keys=True, default=str).encode())
+    title = _feature_call("mod_pictures", "choice", lib, "_title") if feature("menu_bg", "deploy_files") else None
+    if title:  # (the title-screen picture the player chose: a new one is deployed by Play)
+        h.update(json.dumps({"title": [os.path.basename(title), *_stat_key(title)]}).encode())
     return h.hexdigest()
 
 
@@ -3289,29 +3309,45 @@ def stop(proc, grace: float = 5.0) -> None:
         proc.kill()
 
 
-def run(lib: Library, *, port: int | None = None, no_cheats: bool = False) -> int:
+def no_mods_launch(lib: Library) -> dict:
+    """launch.json for Play without mods: Savage Wind on its own, with every mod variable cleared (nothing needs to
+    be deployed)."""
+    install = lib.require_install()
+    exe = os.path.join(install, EXE)
+    return {"tool": TOOL_ID, "format": FORMAT, "argv": [exe], "cwd": install, "env": {}, "clear_env": list(MOD_ENV),
+            "mods": [], "parts": {}, "cheats": None, "hash": None, "no_mods": True}
+
+
+def run(lib: Library, *, port: int | None = None, no_cheats: bool = False, no_mods: bool = False) -> int:
+    """Start Savage Wind with the last deploy (no_mods: without any mod). First: the crash check of the last start,
+    the set's own save folder, and a save backup when the mod set differs from the last start's (S3)."""
     if port is not None and not 1 <= port <= 65535:
         raise ModmanError(f"{port} isn't a port: use 1 to 65535.")
-    launch = read_launch(lib)
+    launch = no_mods_launch(lib) if no_mods else read_launch(lib)
     exe, cwd = launch["argv"][0], launch["cwd"]
     if not os.path.isfile(exe):
         raise ModmanError(f"{exe} not found: run init and deploy again.")
-    gone = missing_paths(launch)
-    if gone:
-        raise ModmanError(f"The last deploy can't start: {_gone_text(gone)} (was the library or Savage Wind moved?). "
-                          "Run: python tools/modman.py deploy")
-    if inputs_hash(lib) != launch.get("hash"):
-        say("Warning: your mods or settings changed since the last deploy; this starts the last deployed set. "
-            "Run deploy to use the changes.")
-    e = (launch.get("parts") or {}).get("exefs")
-    if e and e.get("rebuild") == "pending":
-        say("Warning: the code patches are not active (deployed with --no-rebuild).")
-    k = (launch.get("parts") or {}).get("hooks")
-    if k and k.get("rebuild") == "pending":
-        say("Warning: the hooks are not active (deployed with --no-rebuild): modhost will log 'this game code has no "
-            "hook slots'.")
+    if not no_mods:
+        gone = missing_paths(launch)
+        if gone:
+            raise ModmanError(f"The last deploy can't start: {_gone_text(gone)} (was the library or Savage Wind "
+                              "moved?). Run: python tools/modman.py deploy")
+        if inputs_hash(lib) != launch.get("hash"):
+            say("Warning: your mods or settings changed since the last deploy; this starts the last deployed set. "
+                "Run deploy to use the changes.")
+        e = (launch.get("parts") or {}).get("exefs")
+        if e and e.get("rebuild") == "pending":
+            say("Warning: the code patches are not active (deployed with --no-rebuild).")
+        k = (launch.get("parts") or {}).get("hooks")
+        if k and k.get("rebuild") == "pending":
+            say("Warning: the hooks are not active (deployed with --no-rebuild): modhost will log 'this game code has "
+                "no hook slots'.")
     if game_running():
         raise ModmanError("Savage Wind is already running. Close it first.")
+    for line in crash_lines(check_last_start(lib)):   # (Play anyway: the window asks first; this only says it)
+        say(f"Note: {line}")
+    if not no_mods:  # (the game's mod list again, after the crash check: "What changed" and the crash line are fresh)
+        _feature_call("modmenu", "before_start", lib)
     cheats = launch.get("cheats") if not no_cheats else None
     if cheats and not cheats.get("args"):
         cheats = None
@@ -3319,12 +3355,25 @@ def run(lib: Library, *, port: int | None = None, no_cheats: bool = False) -> in
     if want_port and port_open(want_port):
         raise ModmanError(f"Another program already uses port {want_port}. Pick a free one with --port.")
     env = game_env(dict(os.environ), launch, want_port)
+    # (the set's own saves, unless the save folder was given: a test save, the co-op copy. Without mods: the normal
+    # save folder, as the launcher's Play without mods does; a set's modded save never opens without its mods: S3)
+    own = profile_own_save(lib) if not no_mods else None
+    if own and not any(k.upper() == ENV_SAVE and v for k, v in env.items()):
+        os.makedirs(own, exist_ok=True)
+        env[ENV_SAVE] = own
+    folder = save_folder(lib, env, no_mods=no_mods)
+    now = launch_set(launch, no_mods)
+    for line in backup_before_start(lib, folder, now):
+        say(line)
     flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)  # (Ctrl+C here stops the cheats, not the game)
     game = subprocess.Popen(launch["argv"], cwd=cwd, env=env, creationflags=flags)
     pid = getattr(game, "pid", None)
     try:  # (the crash check and "what changed" read it: docs/profiles.md, "History")
         history_append(lib, {"type": "start", "hash": launch.get("hash") if isinstance(launch.get("hash"), str)
-                             else None, "profile": lib.profile, "pid": pid if isinstance(pid, int) else None})
+                             else None, "profile": lib.profile, "pid": pid if isinstance(pid, int) else None,
+                             "mods": now["mods"], **({"settings": now["settings"]} if now["settings"] else {}),
+                             **({"no_mods": True} if no_mods else {}),
+                             **({"save": os.path.abspath(folder)} if folder else {})})
     except OSError:
         pass
     what = describe_parts(launch)
@@ -3433,11 +3482,17 @@ def profile_snapshot(lib: Library, name: str) -> dict:
         pkg = m.get("bnp") or m.get("ukmm")
         if isinstance(pkg, dict) and isinstance(pkg.get("options"), list):
             options[m["id"]] = [str(o) for o in pkg["options"]]
-    settings = {m["id"]: v for m in lib.mods if (v := read_setting_values(lib, m["id"]))}
+    sid = settings_ids(lib)
+    settings = {m["id"]: v for m in lib.mods if (v := read_setting_values(lib, sid.get(m["id"], m["id"])))}
     font = _feature_call("font", "profile_part", lib)
+    try:   # (the set's own save folder is a choice about the set, not about its mods: kept as it was)
+        own = (read_profile(lib, name) or {}).get("own_save") is True
+    except ModmanError:
+        own = False
     return {"tool": TOOL_ID, "format": 1, "kind": "profile", "name": name, "saved": _now(),
             "mods": [{"id": m["id"], "enabled": bool(m.get("enabled"))} for m in lib.mods],
-            "options": options, "settings": settings, **({"font": dict(font)} if isinstance(font, dict) else {})}
+            "options": options, "settings": settings, **({"font": dict(font)} if isinstance(font, dict) else {}),
+            **({"own_save": True} if own else {})}
 
 
 def save_profile(lib: Library, name: str) -> str:
@@ -3473,10 +3528,12 @@ def apply_profile(lib: Library, data: dict) -> list[str]:
         notes.append(f"Not in the library any more, so left out: {_some(gone)}.")
     lib.mods = new + added
     want = data.get("settings") if isinstance(data.get("settings"), dict) else {}
+    sid = settings_ids(lib)
     for m in lib.mods:
         target = want.get(m["id"]) if isinstance(want.get(m["id"]), dict) else {}
-        if read_setting_values(lib, m["id"]) != target and (target or os.path.isfile(settings_file(lib, m["id"]))):
-            write_setting_values(lib, m["id"], target)
+        f = sid.get(m["id"], m["id"])
+        if read_setting_values(lib, f) != target and (target or os.path.isfile(settings_file(lib, f))):
+            write_setting_values(lib, f, target)
     opts = data.get("options") if isinstance(data.get("options"), dict) else {}
     for m in lib.mods:
         pkg = m.get("bnp") or m.get("ukmm")
@@ -3501,10 +3558,16 @@ def use_profile(lib: Library, name: str) -> list[str]:
     data = read_profile(lib, target)
     if data is None:
         raise ModmanError(f"The mod set '{target}' has no file ({profile_file(lib, target)}).")
+    backup = backup_save(lib, f"before {target}")   # (S3: the save in use now, before another set touches it)
     save_profile(lib, lib.profile)
     notes = apply_profile(lib, data)
     lib.profile = data["name"]
     lib.save()
+    if backup and not backup.get("skipped"):
+        notes.append(f"Your save was backed up first: {backup['path']}")
+    own = profile_own_save(lib)
+    if own:
+        notes.append(f"This set has its own save folder: {own}")
     return notes
 
 
@@ -3535,6 +3598,817 @@ def remove_profile(lib: Library, name: str) -> str:
     if os.path.isfile(path):
         os.remove(path)
     return path
+
+
+def copy_profile(lib: Library, name: str, new: str) -> str:
+    """A new set with the mods, order, settings and font of set `name` (the set in use: as it is now). The set in use
+    stays in use. Its own save folder isn't copied: the new set uses the normal saves until own-save is turned on."""
+    src = find_profile(lib, name)
+    new = (new or "").strip()
+    if not profile_name_ok(new):
+        raise ModmanError(f"'{new}' can't be a mod set name: use up to 40 letters, digits, spaces, '.', '-' and '_'.")
+    if any(n.lower() == new.lower() for n in profile_names(lib)) or os.path.isfile(profile_file(lib, new)):
+        raise ModmanError(f"There is a mod set called '{new}' already (or one with the same file name).")
+    if src == lib.profile:
+        data = profile_snapshot(lib, new)
+    else:
+        data = read_profile(lib, src)
+        if data is None:
+            raise ModmanError(f"The mod set '{src}' has no file ({profile_file(lib, src)}).")
+    data = {**data, "name": new, "saved": _now()}
+    data.pop("own_save", None)
+    path = profile_file(lib, new)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    write_json(path, data)
+    return path
+
+
+def rename_profile(lib: Library, name: str, new: str) -> str:
+    """Give a set another name (not Default). Its file, and its own save folder when it has one, are renamed too;
+    nothing is deleted."""
+    src = find_profile(lib, name)
+    new = (new or "").strip()
+    if src.lower() == DEFAULT_PROFILE.lower():
+        raise ModmanError("The Default mod set can't be renamed. Copy it to make a set with another name.")
+    if not profile_name_ok(new) or new.lower() == DEFAULT_PROFILE.lower():
+        raise ModmanError(f"'{new}' can't be a mod set name: use up to 40 letters, digits, spaces, '.', '-' and '_'.")
+    old_path, new_path = profile_file(lib, src), profile_file(lib, new)
+    same_file = os.path.normcase(old_path) == os.path.normcase(new_path)
+    if not same_file and (any(n.lower() == new.lower() for n in profile_names(lib)) or os.path.exists(new_path)):
+        raise ModmanError(f"There is a mod set called '{new}' already (or one with the same file name).")
+    if game_running():
+        raise ModmanError("Savage Wind is running. Close it, then rename the mod set.")
+    data = profile_snapshot(lib, src) if src == lib.profile else read_profile(lib, src)
+    if data is None:
+        raise ModmanError(f"The mod set '{src}' has no file ({old_path}).")
+    old_dir, new_dir = os.path.splitext(old_path)[0], os.path.splitext(new_path)[0]
+    if not same_file and os.path.isdir(old_dir):   # (its own save folder, and anything else in it)
+        if os.path.exists(new_dir):
+            raise ModmanError(f"{new_dir} is there already: move it away first.")
+        os.rename(old_dir, new_dir)
+    write_json(new_path, {**data, "name": new, "saved": _now()})
+    if not same_file:
+        os.remove(old_path)
+    if src == lib.profile:
+        lib.profile = new
+        lib.save()
+    return new_path
+
+
+def set_profile_own_save(lib: Library, name: str, on: bool, *, copy: bool = False) -> list[str]:
+    """Give set `name` its own save folder (<library>\\profiles\\<file name>\\save), so an overhaul playthrough keeps its
+    own save; or use the normal save folder again. copy: start the own folder from a copy of the save in use (only
+    when it is empty). Nothing is ever deleted: turning it off leaves the folder where it is. Returns notes."""
+    target = find_profile(lib, name)
+    if target.lower() == DEFAULT_PROFILE.lower():
+        raise ModmanError("Default always uses Savage Wind's normal save folder. Make a set (profile new) for an own "
+                          "save.")
+    if game_running():
+        raise ModmanError("Savage Wind is running. Close it, then change where the set keeps its save.")
+    if target == lib.profile:
+        save_profile(lib, target)
+    data = read_profile(lib, target)
+    if data is None:
+        raise ModmanError(f"The mod set '{target}' has no file ({profile_file(lib, target)}).")
+    folder = os.path.join(os.path.splitext(profile_file(lib, target))[0], "save")
+    notes: list[str] = []
+    if on:
+        normal = save_folder(lib)   # (the save in use before the change)
+        data["own_save"] = True
+        os.makedirs(folder, exist_ok=True)
+        if copy and normal and os.path.isdir(normal) and not os.listdir(folder) \
+                and os.path.normcase(os.path.abspath(normal)) != os.path.normcase(os.path.abspath(folder)):
+            shutil.copytree(normal, folder, dirs_exist_ok=True)
+            notes.append(f"Copied your save from {normal}.")
+        notes.append(f"'{target}' keeps its save in {folder}." + (
+            "" if os.listdir(folder) else " It is empty: the game starts a new save there."))
+    else:
+        data.pop("own_save", None)
+        notes.append(f"'{target}' uses Savage Wind's normal save folder again. Its own save stays in {folder}.")
+    write_json(profile_file(lib, target), {**data, "saved": _now()})
+    return notes
+
+
+# ---------------------------------------------------------------- saves: backups before a start (S3, S4)
+
+ENV_SAVE = "SAVAGEWIND_SAVE_DIR"   # Savage Wind's save folder when set (else <Savage Wind>\save); run never clears it
+SAVE_BACKUPS = "save-backups"      # <library>\save-backups\<date>-<reason>\save\ (the copy) + backup.json
+SAVE_INFO = "backup.json"
+SAVE_KEEP = 5                      # automatic backups kept per save folder (one made by hand stays)
+
+
+def profile_own_save(lib: Library, name: str | None = None) -> str | None:
+    """The set's own save folder (<library>\\profiles\\<file name>\\save) when it has one (profile own-save on), else
+    None. Default never has one."""
+    name = name or lib.profile
+    if name.lower() == DEFAULT_PROFILE.lower():
+        return None
+    try:
+        data = read_profile(lib, name)
+    except ModmanError:
+        return None
+    if not data or data.get("own_save") is not True:
+        return None
+    return os.path.join(os.path.splitext(profile_file(lib, name))[0], "save")
+
+
+def save_folder(lib: Library, env: dict | None = None, *, no_mods: bool = False) -> str | None:
+    """The save folder the next start uses: SAVAGEWIND_SAVE_DIR when it is set (a relative one is in the Savage Wind
+    folder), else the set's own (not for a start without mods: no_mods), else <Savage Wind>\\save. None when the
+    library knows no Savage Wind folder."""
+    env = os.environ if env is None else env
+    given = next((v for k, v in env.items() if k.upper() == ENV_SAVE and v), None)
+    if given:
+        return os.path.abspath(os.path.join(lib.install or os.getcwd(), given))
+    own = profile_own_save(lib) if not no_mods else None
+    if own:
+        return own
+    return os.path.join(lib.install, "save") if lib.install else None
+
+
+def _tree_state(folder: str) -> list:
+    """[relative path, size, modified time] of every file in a folder, sorted: two equal states are the same save."""
+    out = []
+    for path, rel, size in walk_files(folder):
+        try:
+            out.append([rel, size, os.stat(path).st_mtime_ns])
+        except OSError:
+            out.append([rel, size, None])
+    return sorted(out)
+
+
+def save_backups(lib: Library, folder: str | None = None) -> list[dict]:
+    """The save backups, newest first. modman's own (<library>\\save-backups: "ours"), and, to restore from but never
+    changed, the ones next to the save folder in use: Savage Wind's "Back up saves" folders (save-backup...) and saves
+    a restore moved aside (<save>-before-restore-...)."""
+    out: list[dict] = []
+    root = os.path.join(lib.root, SAVE_BACKUPS)
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        names = []
+    for n in names:
+        if n.startswith("."):
+            continue
+        try:
+            info = read_json(os.path.join(root, n, SAVE_INFO))
+        except ModmanError:
+            info = None
+        if not info or info.get("tool") != TOOL_ID or not os.path.isdir(os.path.join(root, n, "save")):
+            continue
+        out.append({**info, "name": n, "path": os.path.join(root, n, "save"), "ours": True})
+    folder = folder or save_folder(lib)
+    if folder:
+        parent, base = os.path.split(os.path.normpath(folder))
+        try:
+            others = sorted(os.listdir(parent))
+        except OSError:
+            others = []
+        for n in others:
+            low, p = n.lower(), os.path.join(parent, n)
+            if low == base.lower() or not os.path.isdir(p) or _is_link(p):
+                continue
+            if low.startswith(base.lower() + "-before-restore-"):
+                kind = "moved aside by a restore"
+            elif low.startswith("save-backup"):
+                kind = "Savage Wind's backup"
+            else:
+                continue
+            subs = []
+            if low == "save-backups":   # (a folder of backups: each one in it)
+                with contextlib.suppress(OSError):
+                    subs = [(f"{n}\\{s}", os.path.join(p, s)) for s in sorted(os.listdir(p))
+                            if os.path.isdir(os.path.join(p, s))]
+            for name, path in subs or [(n, p)]:
+                try:
+                    when = datetime.datetime.fromtimestamp(os.path.getmtime(path)).isoformat(timespec="seconds")
+                except OSError:
+                    when = ""
+                out.append({"name": name, "path": path, "ours": False, "time": when, "reason": kind, "from": folder})
+    out.sort(key=lambda b: (str(b.get("time") or ""), b.get("made") if isinstance(b.get("made"), (int, float))
+                            else 0.0, b["name"]), reverse=True)
+    return out
+
+
+def backup_save(lib: Library, reason: str, *, folder: str | None = None, keep: bool = False) -> dict | None:
+    """Copy the save folder (`folder`, else the one the next start uses) to <library>\\save-backups\\<date>-<reason>\\.
+    None when there is no save yet. A save the same as its newest backup isn't copied again ("skipped": True, with
+    that backup). Only automatic backups (keep False) past the newest SAVE_KEEP of a save folder are deleted; the save
+    itself is only read. Call it while the game is closed."""
+    folder = folder or save_folder(lib)
+    if not folder or not os.path.isdir(folder):
+        return None
+    folder = os.path.abspath(folder)
+    state = _tree_state(folder)
+    if not state:
+        return None
+    mine = [b for b in save_backups(lib, folder)
+            if b["ours"] and os.path.normcase(str(b.get("from"))) == os.path.normcase(folder)]
+    if mine and mine[0].get("state") == state:
+        return {**mine[0], "skipped": True}
+    root = os.path.join(lib.root, SAVE_BACKUPS)
+    os.makedirs(root, exist_ok=True)
+    base = f"{datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')}-{slug(reason)[:30].strip('-') or 'backup'}"
+    name, k = base, 2
+    while os.path.exists(os.path.join(root, name)):
+        name, k = f"{base}-{k}", k + 1
+    tmp = os.path.join(root, f".{name}.tmp")
+    info = {"tool": TOOL_ID, "format": 1, "kind": "save-backup", "time": _now(), "made": time.time(),
+            "reason": reason, "from": folder,
+            "profile": lib.profile, "kept": bool(keep), "files": len(state), "bytes": sum(s for _, s, _ in state),
+            "state": state}
+    try:
+        shutil.copytree(folder, os.path.join(tmp, "save"), symlinks=True)
+        write_json(os.path.join(tmp, SAVE_INFO), info)
+        os.replace(tmp, os.path.join(root, name))
+    except BaseException:
+        with contextlib.suppress(OSError, ModmanError):
+            remove_tree(tmp)   # (only the copy being made)
+        raise
+    auto = [b for b in save_backups(lib, folder) if b["ours"] and not b.get("kept")
+            and os.path.normcase(str(b.get("from"))) == os.path.normcase(folder)]
+    for old in auto[SAVE_KEEP:]:
+        with contextlib.suppress(OSError, ModmanError):
+            remove_tree(os.path.dirname(old["path"]))
+    return {**info, "name": name, "path": os.path.join(root, name, "save"), "skipped": False}
+
+
+def backups_for(lib: Library, folder: str | None = None) -> list[dict]:
+    """save_backups, only those made from the save folder in use (folder; default: save_folder): a backup of another
+    playthrough (a set's own save, a test save) is never offered to put back over this one."""
+    folder = folder or save_folder(lib)
+    if not folder:
+        return save_backups(lib, folder)
+    here = os.path.normcase(os.path.abspath(folder))
+    return [b for b in save_backups(lib, folder)
+            if not b.get("from") or os.path.normcase(os.path.abspath(str(b["from"]))) == here]
+
+
+def find_backup(lib: Library, ref: str, folder: str | None = None) -> dict:
+    items = backups_for(lib, folder)
+    ref = (ref or "").strip()
+    if ref.isdigit() and 1 <= int(ref) <= len(items):
+        return items[int(ref) - 1]
+    hit = next((b for b in items if b["name"].lower() == ref.lower()), None)
+    if hit is None:
+        raise ModmanError(f"No save backup '{ref}'. python tools/modman.py saves lists them (by number).")
+    return hit
+
+
+def restore_save(lib: Library, ref: str) -> dict:
+    """Put a backup back as the save folder in use, only while the game is closed. The save there now is moved aside
+    (renamed <save>-before-restore-<date>, next to it) and never deleted. Returns {"name", "to", "aside"}."""
+    if game_running():
+        raise ModmanError("Savage Wind is running. Close it, then restore the save.")
+    target = save_folder(lib)
+    if not target:
+        raise ModmanError("The library doesn't know your Savage Wind folder. Run: python tools/modman.py init "
+                          "<Savage Wind folder>")
+    pick = find_backup(lib, ref, target)
+    if not os.path.isdir(pick["path"]):
+        raise ModmanError(f"The backup {pick['name']} isn't there any more.")
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    k = 2
+    while os.path.lexists(f"{target}-before-restore-{stamp}") or os.path.lexists(f"{target}.restoring-{stamp}"):
+        stamp = f"{datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')}-{k}"
+        k += 1
+    tmp = f"{target}.restoring-{stamp}"
+    try:
+        shutil.copytree(pick["path"], tmp, symlinks=True)
+    except BaseException:
+        with contextlib.suppress(OSError, ModmanError):
+            remove_tree(tmp)   # (only the copy being made)
+        raise
+    aside = None
+    if os.path.lexists(target):
+        aside = f"{target}-before-restore-{stamp}"
+        os.rename(target, aside)
+    try:
+        os.rename(tmp, target)
+    except OSError:
+        if aside:
+            os.rename(aside, target)
+        raise
+    return {"name": pick["name"], "to": target, "aside": aside}
+
+
+# ---------------------------------------------------------------- the crash check, what changed, last good set
+
+GAME_LOG = "savagewind.log"        # the last start's log in the Savage Wind folder (.prev.log once it starts again)
+LOG_TAIL = 4 * 2**20               # how much of the log's end the crash check reads
+LOG_CRASH = "host backtrace (guest functions are f_"       # the game stopped with an error (rt_fatal_trace)
+LOG_CLEAN = ("window closed", "application requested exit", "console: exit")
+
+
+def log_result(path: str) -> str:
+    """"crash" when Savage Wind's log says the game stopped with an error, "clean" when it says the game was closed,
+    else "unknown" (closed through the control port, killed, a power cut)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, os.path.getsize(path) - LOG_TAIL))
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return "unknown"
+    if LOG_CRASH in text:
+        return "crash"
+    return "clean" if any(x in text for x in LOG_CLEAN) else "unknown"
+
+
+def _time_of(rec: dict) -> float | None:
+    try:
+        return datetime.datetime.fromisoformat(str(rec.get("time"))).timestamp()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _starts(hist: list[dict]) -> list[int]:
+    return [i for i, r in enumerate(hist) if r.get("type") == "start" and isinstance(r.get("time"), str)]
+
+
+def _results(hist: list[dict]) -> dict[str, str]:
+    return {r["start"]: r.get("result") for r in hist
+            if r.get("type") == "result" and isinstance(r.get("start"), str)}
+
+
+def _set_mods(mods) -> list[dict]:
+    out = []
+    for m in mods if isinstance(mods, list) else []:
+        if isinstance(m, dict) and isinstance(m.get("id"), str):
+            out.append({"id": m["id"], "name": str(m.get("name") or m["id"]),
+                        **({"version": m["version"]} if isinstance(m.get("version"), str) else {})})
+    return out
+
+
+def start_set(hist: list[dict], i: int) -> dict | None:
+    """The mod set start hist[i] used: {"mods": [{id, name, version}] in load order, "settings", "no_mods"}. Older
+    start records (only a hash) take it from the deploy with that hash. None when it isn't known."""
+    rec = hist[i]
+    if rec.get("no_mods"):
+        return {"mods": [], "settings": {}, "no_mods": True}
+    if isinstance(rec.get("mods"), list):
+        return {"mods": _set_mods(rec["mods"]), "settings": rec.get("settings") or {}, "no_mods": False}
+    h = rec.get("hash")
+    for j in range(i - 1, -1, -1):
+        d = hist[j]
+        if d.get("type") == "deploy" and h and d.get("hash") == h:
+            return {"mods": _set_mods([m for m in d.get("mods") or [] if isinstance(m, dict) and m.get("enabled")]),
+                    "settings": d.get("settings") or {}, "no_mods": False}
+    return None
+
+
+def set_key(s: dict) -> str:
+    return json.dumps([[[m["id"], m.get("version")] for m in s.get("mods") or []], s.get("settings") or {}],
+                      sort_keys=True)
+
+
+def launch_set(launch: dict | None, no_mods: bool = False) -> dict:
+    """The mod set a start with this launch.json uses (none for Play without mods)."""
+    if no_mods or not launch:
+        return {"mods": [], "settings": {}, "no_mods": True}
+    return {"mods": _set_mods(launch.get("mods")), "settings": launch.get("settings") or {}, "no_mods": False}
+
+
+def current_set(lib: Library) -> dict:
+    """The mod set a deploy now would use (the mods that are on, in order, and the deploy settings)."""
+    return {"mods": _set_mods(lib.enabled()), "settings": deploy_setting_values(lib), "no_mods": False}
+
+
+def _names(mods: list[dict]) -> str:
+    return _some([m["name"] for m in mods], 5)
+
+
+def check_last_start(lib: Library, *, write: bool = True) -> dict | None:
+    """How the last start (history.jsonl) ended: {"result": clean / crash / unknown, "start": its record, "new": the
+    mods new since the last start that didn't crash (or changed version), "since": that start's time or None}. It
+    reads Savage Wind's log once and writes a result record (write). None when there was no start yet, or the game
+    still runs."""
+    hist = read_history(lib)
+    starts = _starts(hist)
+    if not starts:
+        return None
+    i = starts[-1]
+    last = hist[i]
+    done = _results(hist)
+    result = done.get(last["time"])
+    if result is None:
+        if game_running():
+            return None
+        log = os.path.join(lib.install, GAME_LOG) if lib.install else None
+        t0 = _time_of(last)
+        try:
+            mtime = os.path.getmtime(log) if log else None
+        except OSError:
+            mtime = None
+        # (a log older than the start isn't that start's: Savage Wind didn't get as far as writing one)
+        result = log_result(log) if mtime is not None and t0 is not None and mtime >= t0 - 2 else "unknown"
+        if write:
+            with contextlib.suppress(OSError):
+                history_append(lib, {"type": "result", "hash": last.get("hash"), "start": last["time"],
+                                     "result": result})
+        done[last["time"]] = result
+    out = {"result": result, "start": last, "new": [], "since": None}
+    if result != "crash":
+        return out
+    now = start_set(hist, i)
+    if now is None:
+        return out
+    base = None
+    for want in ("clean", "unknown"):   # (the last start that ended well; else one that didn't say it crashed)
+        base = next((j for j in reversed(starts) if j < i and done.get(hist[j]["time"]) == want
+                     and not hist[j].get("no_mods") and start_set(hist, j) is not None), None)
+        if base is not None:
+            break
+    if base is None:
+        out["new"] = now["mods"]
+        return out
+    before = {m["id"]: m.get("version") for m in start_set(hist, base)["mods"]}
+    out["since"] = hist[base]["time"]
+    out["new"] = [m for m in now["mods"] if m["id"] not in before or before[m["id"]] != m.get("version")]
+    return out
+
+
+def crash_lines(report: dict | None) -> list[str]:
+    """The crash note in plain words ([] when the last start didn't crash)."""
+    if not report or report.get("result") != "crash":
+        return []
+    out = ["The game stopped with an error last time."]
+    if report["new"] and report["since"]:
+        out.append(f"New since then: {_names(report['new'])}.")
+    elif report["new"]:
+        out.append(f"No earlier start ended well, so every mod counts as new: {_names(report['new'])}.")
+    elif report["start"].get("no_mods"):
+        out.append("It was started without mods.")
+    else:
+        out.append("No mod is new since the last start that ended well.")
+    return out
+
+
+def turn_off_new(lib: Library) -> list[str]:
+    """After a crash: turn off the mods new since the last start that ended well. Returns their names."""
+    report = check_last_start(lib)
+    if not report or report["result"] != "crash":
+        raise ModmanError("The last start didn't stop with an error: nothing to turn off.")
+    ids = {m["id"] for m in report["new"]}
+    hit = [m for m in lib.mods if m["id"] in ids and m.get("enabled")]
+    if not hit:
+        raise ModmanError("No mod that is on now is new since the last start that ended well.")
+    for m in hit:
+        m["enabled"] = False
+    lib.save()
+    return [m["name"] for m in hit]
+
+
+def last_good(lib: Library) -> dict | None:
+    """The newest start that ended well (a clean close) with mods: {"start": its record, "set": its mod set}."""
+    hist = read_history(lib)
+    done = _results(hist)
+    for i in reversed(_starts(hist)):
+        if done.get(hist[i]["time"]) == "clean" and not hist[i].get("no_mods"):
+            s = start_set(hist, i)
+            if s is not None:
+                return {"start": hist[i], "set": s}
+    return None
+
+
+def use_last_good(lib: Library) -> list[str]:
+    """Make the mods on (and their order) those of the newest start that ended well; the rest off. Hidden mods
+    ([mod] secret) stay as they are. Returns notes."""
+    good = last_good(lib)
+    if good is None:
+        raise ModmanError("No start that ended well is known yet (a start counts once the game was closed normally).")
+    want = [m["id"] for m in good["set"]["mods"]]
+    rank = {k: n for n, k in enumerate(want)}
+    have = {m["id"] for m in lib.mods}
+    places = [n for n, m in enumerate(lib.mods) if m["id"] in rank]
+    listed = sorted((lib.mods[n] for n in places), key=lambda m: rank[m["id"]])
+    for n, m in zip(places, listed):
+        lib.mods[n] = m
+    for m in lib.mods:
+        if m.get("secret") is True or is_modmenu(lib, m):   # (the Mod menu stays as it is: the game promises it)
+            continue
+        m["enabled"] = m["id"] in rank
+    lib.save()
+    notes = [f"On: {_some([m['name'] for m in listed], 8) or 'no mods'} (as on {good['start']['time']})."]
+    gone = [m["name"] for m in good["set"]["mods"] if m["id"] not in have]
+    if gone:
+        notes.append(f"Not in the library any more: {_some(gone)}.")
+    return notes
+
+
+def changes_since(lib: Library) -> list[str]:
+    """What is different now from the last start with mods: mods new, off, updated, moved; deploy settings."""
+    hist = read_history(lib)
+    starts = _starts(hist)
+    if not starts:
+        return ["No start yet: nothing to compare with."]
+    out = []
+    if hist[starts[-1]].get("no_mods"):
+        out.append("The last start was without mods.")
+    i = next((j for j in reversed(starts) if not hist[j].get("no_mods") and start_set(hist, j)), None)
+    if i is None:
+        return out + ["No start with mods to compare with."]
+    then, now = start_set(hist, i), current_set(lib)
+    old = {m["id"]: m for m in then["mods"]}
+    new = {m["id"]: m for m in now["mods"]}
+    added = [m for m in now["mods"] if m["id"] not in old]
+    gone = [m for m in then["mods"] if m["id"] not in new]
+    updated = [f"{m['name']} {old[m['id']].get('version') or '-'} -> {m.get('version') or '-'}"
+               for m in now["mods"] if m["id"] in old and old[m["id"]].get("version") != m.get("version")]
+    kept_old = [k for k in old if k in new]
+    kept_new = [k for k in new if k in old]
+    if added:
+        out.append(f"New: {_names(added)}.")
+    if gone:
+        out.append(f"Not on any more: {_names(gone)}.")
+    if updated:
+        out.append(f"Updated: {_some(updated, 5)}.")
+    if kept_old != kept_new:
+        out.append("The order changed.")
+    if (then.get("settings") or {}) != (now.get("settings") or {}):
+        out.append("Settings that apply at the next start changed.")
+    if len(out) == (1 if hist[starts[-1]].get("no_mods") else 0):
+        out.append("Nothing changed since the last start.")
+    return out
+
+
+def backup_before_start(lib: Library, folder: str | None, now: dict) -> list[str]:
+    """S3: copy the save before a start whose mod set differs from the last start's with this save folder (or when
+    no start is known). Returns lines to show. Raises ModmanError when the copy fails (the game isn't started)."""
+    if not folder:
+        return []
+    hist = read_history(lib)
+    starts = _starts(hist)
+    same = [i for i in starts if os.path.normcase(str(hist[i].get("save") or "")) == os.path.normcase(folder)]
+    # (start records from before "save" was kept used the save folder of their time: take the newest of them)
+    i = (same or [i for i in starts if "save" not in hist[i]] or [None])[-1]
+    before = start_set(hist, i) if i is not None else None
+    if before is not None and set_key(before) == set_key(now):
+        return []
+    why = "no mods" if now.get("no_mods") else "first start" if before is None else "mods changed"
+    try:
+        info = backup_save(lib, why, folder=folder)
+    except OSError as e:
+        raise ModmanError(f"Your save couldn't be backed up ({e.strerror or e}), so the game wasn't started. Free "
+                          f"some space on the library's drive, then try again.") from None
+    if not info:
+        return []
+    lines = [] if info.get("skipped") else [f"Your save was backed up first: {info['path']}"]
+    fewer = before is not None and {m["id"] for m in before["mods"]} - {m["id"] for m in now["mods"]}
+    if fewer:
+        lines.append(f"Saving without a mod can drop what it added to your save. A backup is in {info['path']}.")
+    return lines
+
+
+# ---------------------------------------------------------------- conflicts, mod info, pictures, turn all on/off
+
+def overlay_conflicts(lib: Library) -> list[dict]:
+    """The RomFS files several mods have in the last deploy ({"path", "mods", "winner"}), without the packs that were
+    merged and the files made at deploy."""
+    try:
+        man = read_json(os.path.join(lib.deploy_dir, "overlay", rm.MARKER))
+    except ModmanError:
+        return []
+    files = (man or {}).get("files") or {}
+    out = []
+    for c in (man or {}).get("conflicts") or []:
+        if not isinstance(c, dict) or not isinstance(c.get("mods"), list):
+            continue
+        owner = str((files.get(c.get("path")) or {}).get("mod") or "")
+        if owner == MERGED_OWNER or owner.startswith(rm.GENERATED):
+            continue
+        out.append(c)
+    return out
+
+
+def conflict_lines(lib: Library, ref: str | None = None) -> list[str]:
+    """Which mod replaces which one's files, in plain words ("Better Sprint replaces 2 of Linkle's files"), and mods
+    that hook the same game function, from the last deploy. ref: only lines about that mod."""
+    names = {m["id"]: m["name"] for m in lib.mods}
+    only = lib.find(ref)[1]["name"] if ref else None
+
+    def name(x) -> str:
+        base = str(x).split(" option ")[0]
+        return names.get(base, base)
+
+    pairs: dict[tuple[str, str], int] = {}
+    for c in overlay_conflicts(lib):
+        win = name(c.get("winner"))
+        for lost in dict.fromkeys(name(x) for x in c["mods"]):
+            if lost != win:
+                pairs[(win, lost)] = pairs.get((win, lost), 0) + 1
+    out = []
+    for (win, lost), n in sorted(pairs.items(), key=lambda kv: (-kv[1], kv[0])):
+        if only in (None, win, lost):
+            out.append(f"{win} replaces {n} of {lost}'s file{'s' if n != 1 else ''} ({win} is later in the list).")
+    try:
+        launch = DeployDir(lib.deploy_dir).read_launch() or {}
+    except (ModmanError, OSError):
+        launch = {}
+    for addr, who in ((launch.get("parts") or {}).get("hooks") or {}).get("by_addr", {}).items():
+        who = list(dict.fromkeys(who)) if isinstance(who, list) else []
+        if len(who) > 1 and (only is None or only in who):
+            out.append(f"{' and '.join(who)} change the same game function ({addr}).")
+    return out
+
+
+@dataclass
+class ModInfo:
+    id: str
+    name: str
+    on: bool
+    version: str | None = None
+    authors: list[str] = field(default_factory=list)
+    description: str = ""
+    url: str | None = None          # https only; shown in Mod Manager and here, never in the game
+    kinds: list[str] = field(default_factory=list)
+    source: str = "folder"          # folder, BCML package, UKMM package, Wii U (converted)
+    needs: list[str] = field(default_factory=list)
+    needed_by: list[str] = field(default_factory=list)
+    conflicts: list[str] = field(default_factory=list)
+    picture: str | None = None      # the picture shown for it (None: a letter tile)
+    picture_from: str = ""          # "your choice", "the mod", ...
+    settings: int = 0               # how many settings it has
+
+
+def _package_info(root: str) -> dict:
+    """What a BCML (.bnp\\info.json) or UKMM (.ukmm\\ukmm.json) package says about itself: desc, url, image, author."""
+    for rel in ((bnp.META, "info.json"), (ukmm.META, "ukmm.json")):
+        try:
+            data = read_json(os.path.join(root, *rel))
+        except ModmanError:
+            data = None
+        if data:
+            meta = data.get("meta") if isinstance(data.get("meta"), dict) else data
+            return {k: meta.get(k) for k in ("desc", "description", "url", "image", "author", "authors")
+                    if isinstance(meta.get(k), (str, list))}
+    return {}
+
+
+def picture_for(lib: Library, entry: dict, man: Manifest | None = None, pkg: dict | None = None
+                ) -> tuple[str | None, str]:
+    """The picture a mod shows and where it comes from: the player's choice, the mod's [mod] icon, a .bnp's image
+    when it names a file in the package (never a web address), thumbnail.png; else (None, "a letter tile").
+    tools/mod_pictures.source_for decides when it is there (it also skips a file it can't read)."""
+    f = feature("mod_pictures", "source_for")
+    if f is not None:
+        try:
+            src = f(lib, entry, man, pkg)
+            return src.path, PICTURE_FROM.get(src.kind, str(src.label))
+        except Exception:   # (its own bug: the plain order below)
+            pass
+    chosen = picture_choice(lib, entry["id"])
+    if chosen:
+        return chosen, "your choice"
+    root = os.path.join(lib.mods_dir, entry["id"])
+    if man and man.icon:
+        p = os.path.join(root, *man.rel(man.icon).split("/"))
+        if os.path.isfile(p):
+            return p, "the mod"
+    img = (pkg or {}).get("image")
+    if isinstance(img, str) and img and "://" not in img and not os.path.isabs(img) and ".." not in img.replace(
+            "\\", "/").split("/") and img.lower().endswith(PICTURE_EXTS):
+        p = os.path.join(root, *img.replace("\\", "/").split("/"))
+        if os.path.isfile(p):
+            return p, "the package"
+    for n in ("thumbnail.png", "icon.png"):
+        p = os.path.join(root, n)
+        if os.path.isfile(p):
+            return p, "the mod"
+    return None, "a letter tile"
+
+
+def mod_info(lib: Library, ref: str) -> ModInfo:
+    """Everything the window's and `info`'s mod page shows."""
+    _, m = lib.find(ref)
+    root = os.path.join(lib.mods_dir, m["id"])
+    man = None
+    if os.path.isdir(root):
+        with contextlib.suppress(OSError):
+            man = read_manifest(root)[0]
+    pkg = _package_info(root) if os.path.isdir(root) else {}
+    info = ModInfo(m["id"], m["name"], bool(m.get("enabled")), m.get("version"), kinds=list(m.get("kinds") or []))
+    if man:
+        info.authors, info.description, info.url = list(man.authors), man.description, man.url
+        info.needs = [f"{d} {r}".strip() for d, r in man.dependencies.items()]
+        info.settings = len(man.settings)
+    else:
+        a = pkg.get("authors") or pkg.get("author")
+        info.authors = [str(x) for x in a] if isinstance(a, list) else [a] if isinstance(a, str) and a else []
+        info.description = str(pkg.get("desc") or pkg.get("description") or "")
+        u = pkg.get("url")
+        info.url = u if isinstance(u, str) and u.lower().startswith("https://") and " " not in u else None
+    info.description = one_line(info.description)
+    info.source = ("BCML package" if m.get("bnp") else "UKMM package" if m.get("ukmm")
+                   else "Wii U mod (converted)" if m.get("wiiu") else "folder")
+    mine = man.id if man else None
+    if mine:
+        for other in lib.mods:
+            if other["id"] == m["id"]:
+                continue
+            oroot = os.path.join(lib.mods_dir, other["id"])
+            if not os.path.isfile(os.path.join(oroot, MANIFEST)):   # (a cheap look: mod.toml at the top only)
+                continue
+            with contextlib.suppress(OSError):
+                om = read_manifest(oroot, [MANIFEST])[0]
+                if om and mine in om.dependencies:
+                    info.needed_by.append(other["name"])
+    with contextlib.suppress(ModmanError):
+        info.conflicts = conflict_lines(lib, m["id"])
+    info.picture, info.picture_from = picture_for(lib, m, man, pkg)
+    return info
+
+
+PICTURE_MAX = 8 * 2**20
+PICTURE_MAGIC = {".png": b"\x89PNG\r\n\x1a\n", ".jpg": b"\xff\xd8\xff", ".jpeg": b"\xff\xd8\xff", ".webp": b"RIFF"}
+PICTURE_WORDS = {"title": TITLE_PICK, "title-screen": TITLE_PICK, "mods-page": MODS_PAGE_PICK}
+PICTURE_FROM = {"chosen": "your choice", "icon": "the mod", "package": "the package", "thumbnail": "the mod",
+                "letter": "a letter tile"}   # (mod_pictures.Source.kind, in info's words)
+
+
+def picture_key(lib: Library, what: str) -> tuple[str, str]:
+    """(key, words) for `picture`: "title" (the title screen), "mods-page" (behind the game's Mods page), or a mod."""
+    w = (what or "").strip()
+    if w.lower() in PICTURE_WORDS:
+        key = PICTURE_WORDS[w.lower()]
+        return key, "the title screen" if key == TITLE_PICK else "the Mods page"
+    _, m = lib.find(w)
+    return m["id"], m["name"]
+
+
+def set_picture(lib: Library, key: str, src: str) -> str:
+    """Copy a picture the player chose to <library>\\pictures\\<key>\\chosen.<ext> (never into the mod's folder).
+    PNG, JPG or WEBP, at most 8 MB. Deploy makes the game's pictures from it. Returns the copy."""
+    ext = os.path.splitext(src)[1].lower()
+    if ext not in PICTURE_EXTS:
+        raise ModmanError(f"{os.path.basename(src)} isn't a picture modman takes: use a .png, .jpg or .webp file.")
+    try:
+        size = os.path.getsize(src)
+        with open(src, "rb") as f:
+            head = f.read(16)
+    except OSError as e:
+        raise ModmanError(f"Can't read {src}: {e.strerror or e}") from None
+    if size > PICTURE_MAX:
+        raise ModmanError(f"{os.path.basename(src)} is {_size(size)}: pictures can be at most 8 MB.")
+    if not head.startswith(PICTURE_MAGIC[ext]) or (ext == ".webp" and head[8:12] != b"WEBP"):
+        raise ModmanError(f"{os.path.basename(src)} isn't a {ext[1:].upper()} picture inside.")
+    mp = feature("mod_pictures")
+    if mp is not None and hasattr(mp, "choose"):   # (it also refuses a picture deploy couldn't read)
+        try:
+            return mp.choose(lib, key, src)
+        except getattr(mp, "PictureError", ValueError) as e:
+            raise ModmanError(f"{os.path.basename(src)} can't be used: {e}") from None
+    folder = os.path.join(lib.root, PICTURES_DIR, key)
+    os.makedirs(folder, exist_ok=True)
+    dst = os.path.join(folder, "chosen" + ext)
+    tmp = dst + f".tmp-{os.getpid()}"
+    shutil.copyfile(src, tmp)
+    for e in PICTURE_EXTS:   # (the earlier choice, of another kind: our own copy)
+        old = os.path.join(folder, "chosen" + e)
+        if e != ext and os.path.isfile(old):
+            os.remove(old)
+    os.replace(tmp, dst)
+    return dst
+
+
+def clear_picture(lib: Library, key: str) -> bool:
+    """Forget the player's picture (our own copy in the library). True when there was one."""
+    f = feature("mod_pictures", "clear_choice")
+    if f is not None:
+        return bool(f(lib, key))
+    gone = False
+    for e in PICTURE_EXTS:
+        p = os.path.join(lib.root, PICTURES_DIR, key, "chosen" + e)
+        if os.path.isfile(p):
+            os.remove(p)
+            gone = True
+    return gone
+
+
+MODMENU_ID = "botw-mod-loader.modmenu"   # (tools/modmenu.py MOD_ID: the Mods page in the game)
+
+
+def is_modmenu(lib: Library, m: dict) -> bool:
+    """The library mod is the Mod menu mod (its library id or its mod.toml id). Turn all off and Use the last mods
+    that worked leave it as it is, like the game's own Turn all mods off ("The Mod menu stays on")."""
+    if m.get("id") == MODMENU_ID:
+        return True
+    root = os.path.join(lib.mods_dir, str(m.get("id")))
+    try:
+        man = read_manifest(root)[0] if os.path.isdir(root) else None
+    except (OSError, ModmanError, ValueError):
+        return False
+    return bool(man and getattr(man, "id", None) == MODMENU_ID)
+
+
+def set_all(lib: Library, on: bool) -> list[str]:
+    """Turn every mod on or off (not the hidden ones: [mod] secret, which their own switch keeps; not the Mod menu
+    mod, which stays as it is). Returns the names of the mods that changed."""
+    hit = [m for m in lib.mods if bool(m.get("enabled")) != on and m.get("secret") is not True
+           and not is_modmenu(lib, m)]
+    for m in hit:
+        m["enabled"] = on
+    lib.save()
+    return [m["name"] for m in hit]
 
 
 # ---------------------------------------------------------------- commands
@@ -3587,7 +4461,10 @@ def cmd_list(args) -> int:
     kw = max(len(", ".join(m["kinds"]) or "-") for m in lib.mods)
     vw = max(len(str(m.get("version") or "-")) for m in lib.mods)
     used = {m["id"] for m in lib.enabled()}
+    find = (getattr(args, "find", None) or "").strip().lower()
     for k, m in enumerate(lib.mods, 1):
+        if find and not any(find in str(x).lower() for x in (m["id"], m["name"], ", ".join(m["kinds"]))):
+            continue
         wiiu = wiiu_short(m)
         waits = m["enabled"] and m["id"] not in used   # ([mod] part_of: on, but its main mod is off)
         say(f"  {k:>2}  {'on ' if m['enabled'] else 'off'}  {m['id']:<{w}}  {str(m.get('version') or '-'):<{vw}}  "
@@ -3598,6 +4475,16 @@ def cmd_list(args) -> int:
 
 def cmd_enable(args, on: bool) -> int:
     lib = open_library(args)
+    if getattr(args, "all", False):
+        if args.mod:
+            raise ModmanError("Name a mod or use --all, not both.")
+        names = set_all(lib, on)
+        say(f"Turned {'on' if on else 'off'} {len(names)} mod(s)" + (f": {_some(names, 8)}." if names else ".")
+            + " Run deploy to apply.")
+        return 0
+    if not args.mod:
+        raise ModmanError(f"Say which mod: python tools/modman.py {'enable' if on else 'disable'} <id or number> "
+                          "(or --all)")
     _, m = lib.find(args.mod)
     m["enabled"] = on
     lib.save()
@@ -3633,7 +4520,7 @@ def cmd_deploy(args) -> int:
 
 
 def cmd_run(args) -> int:
-    return run(open_library(args), port=args.port, no_cheats=args.no_cheats)
+    return run(open_library(args), port=args.port, no_cheats=args.no_cheats, no_mods=args.no_mods)
 
 
 def cmd_status(args) -> int:
@@ -3664,6 +4551,9 @@ def cmd_status(args) -> int:
         say(f"  {x}")
     for a in launch.get("attention", []):
         say(f"  ! {a}")
+    for line in crash_lines(check_last_start(lib)):
+        say(f"  ! {line}")
+    say("Since the last start: " + " ".join(changes_since(lib)))
     say("Start: python tools/modman.py run")
     return 0
 
@@ -3674,7 +4564,8 @@ def cmd_profile(args) -> int:
         names = profile_names(lib)
         say(f"{len(names)} mod set(s); in use: {lib.profile}.")
         for n in names:
-            say(f"  {'*' if n == lib.profile else ' '} {n}")
+            own = profile_own_save(lib, n)
+            say(f"  {'*' if n == lib.profile else ' '} {n}" + (f"   (own save: {own})" if own else ""))
         say("Switch: python tools/modman.py profile use <name>")
         return 0
     if not args.name:
@@ -3691,9 +4582,242 @@ def cmd_profile(args) -> int:
             say(f"  {n}")
         say("Run deploy to use it.")
         return 0
-    name = find_profile(lib, args.name)
+    if args.action in ("copy", "rename"):
+        if not args.value:
+            raise ModmanError(f"Say the new name: python tools/modman.py profile {args.action} <name> <new name>")
+        if args.action == "copy":
+            copy_profile(lib, args.name, args.value)
+            say(f"Made the mod set '{args.value.strip()}' as a copy of '{find_profile(lib, args.name)}'. "
+                f"In use: {lib.profile}.")
+        else:
+            old = find_profile(lib, args.name)
+            rename_profile(lib, old, args.value)
+            say(f"The mod set '{old}' is now called '{args.value.strip()}'.")
+        return 0
+    if args.action == "own-save":
+        if (args.value or "").lower() not in ("on", "off"):
+            raise ModmanError("Say on or off: python tools/modman.py profile own-save <name> on|off [--copy]")
+        for n in set_profile_own_save(lib, args.name, args.value.lower() == "on", copy=args.copy):
+            say(n)
+        return 0
+    name = find_profile(lib, args.name)   # (delete, or remove: the same)
     remove_profile(lib, name)
-    say(f"Removed the mod set '{name}'. Its mods stay in the library.")
+    own = os.path.join(os.path.splitext(profile_file(lib, name))[0], "save")
+    say(f"Removed the mod set '{name}'. Its mods stay in the library."
+        + (f" Its own save stays in {own}." if os.path.isdir(own) else ""))
+    return 0
+
+
+def cmd_saves(args) -> int:
+    lib = open_library(args)
+    if args.action == "backup":
+        if game_running():   # (it may be writing the save right now: a copy could be half old, half new)
+            raise ModmanError("Savage Wind is running. Close it, then back up the save.")
+        info = backup_save(lib, "by hand", keep=True)
+        if info is None:
+            say(f"There is no save to back up yet ({save_folder(lib) or 'no Savage Wind folder'}).")
+        elif info.get("skipped"):
+            say(f"Your save is the same as the backup {info['name']}: no new copy needed.")
+        else:
+            say(f"Backed up your save to {info['path']}.")
+        return 0
+    if args.action == "restore":
+        if not args.name:
+            raise ModmanError("Say which backup: python tools/modman.py saves restore <number or name>")
+        res = restore_save(lib, args.name)
+        say(f"Restored the save from {res['name']} into {res['to']}.")
+        if res["aside"]:
+            say(f"Your save from before is in {res['aside']} (nothing was deleted).")
+        return 0
+    folder = save_folder(lib)
+    say(f"Save folder in use: {folder or 'not known (run init)'}")
+    items = backups_for(lib, folder)   # (the numbers `saves restore` takes: backups of this save folder only)
+    if not items:
+        say("No save backups yet. A start with other mods than the last one makes one.")
+        return 0
+    for k, b in enumerate(items, 1):
+        size = f", {_size(b['bytes'])}" if isinstance(b.get("bytes"), int) else ""
+        whose = "" if b["ours"] else "   (not made by modman: only read)"
+        say(f"  {k:>2}  {b['name']}  ({b.get('reason') or '-'}{size}){whose}")
+    say("Restore one (the game must be closed): python tools/modman.py saves restore <number>")
+    return 0
+
+
+def cmd_crash(args) -> int:
+    lib = open_library(args)
+    if args.action == "turn-off":
+        names = turn_off_new(lib)
+        say(f"Turned off: {_some(names, 8)}. Run deploy, then run.")
+        return 0
+    report = check_last_start(lib)
+    if report is None:
+        say("No start to check yet (or the game is still running).")
+        return 0
+    lines = crash_lines(report)
+    if not lines:
+        say({"clean": "The last start ended well (the game was closed).",
+             "unknown": "The last start ended without an error in the log (closed through the control port, or "
+                        "stopped)."}.get(report["result"], "The last start ended."))
+        return 0
+    for line in lines:
+        say(line)
+    if report["new"]:
+        say("Turn them off: python tools/modman.py crash turn-off   Or play without mods: python tools/modman.py run "
+            "--no-mods")
+    return 0
+
+
+def cmd_last_good(args) -> int:
+    lib = open_library(args)
+    if args.action == "use":
+        for n in use_last_good(lib):
+            say(n)
+        say("Run deploy to use them.")
+        return 0
+    good = last_good(lib)
+    if good is None:
+        say("No start that ended well is known yet (a start counts once the game was closed normally).")
+        return 0
+    say(f"The last mods that worked ({good['start']['time']}): {_names(good['set']['mods']) or 'no mods'}.")
+    say("Use them: python tools/modman.py last-good use")
+    return 0
+
+
+def cmd_changes(args) -> int:
+    for line in changes_since(open_library(args)):
+        say(line)
+    return 0
+
+
+def cmd_conflicts(args) -> int:
+    lib = open_library(args)
+    lines = conflict_lines(lib, args.mod)
+    if not lines:
+        say("No mod replaces another one's files in the last deploy." if os.path.isfile(
+            os.path.join(lib.deploy_dir, LAUNCH)) else "Nothing deployed yet: deploy first.")
+        return 0
+    say("From the last deploy (when two mods have the same file, the later one in the list is used):")
+    for line in lines:
+        say(f"  {line}")
+    return 0
+
+
+def cmd_info(args) -> int:
+    lib = open_library(args)
+    i = mod_info(lib, args.mod)
+    say(f"{i.name}" + (f" {i.version}" if i.version else "") + f"   ({'on' if i.on else 'off'}, id {i.id})")
+    if i.authors:
+        say(f"By: {', '.join(i.authors)}")
+    if i.description:
+        say(f"About: {i.description}")
+    if i.url:
+        say(f"Link: {i.url}")
+    say(f"What it has: {', '.join(KIND_NAMES.get(k, k) for k in i.kinds) or 'nothing usable'} ({i.source})")
+    if i.needs:
+        say(f"Needs: {', '.join(i.needs)}")
+    if i.needed_by:
+        say(f"Needed by: {', '.join(i.needed_by)}")
+    if i.settings:
+        say(f"Settings: {i.settings} (python tools/modman.py settings {i.id})")
+    for c in i.conflicts:
+        say(f"Files: {c}")
+    say(f"Picture: {i.picture or 'none'} (from {i.picture_from})")
+    return 0
+
+
+def cmd_picture(args) -> int:
+    lib = open_library(args)
+    key, words = picture_key(lib, args.what)
+    if args.clear:
+        gone = clear_picture(lib, key)
+        say(f"Forgot the picture you chose for {words}." if gone else f"You hadn't chosen a picture for {words}.")
+        return 0
+    if not args.file:
+        chosen = picture_choice(lib, key)
+        say(f"Your picture for {words}: {chosen}" if chosen else f"No picture chosen for {words}.")
+        say(f"Choose one: python tools/modman.py picture {args.what} <.png, .jpg or .webp file>   (--clear forgets it)")
+        return 0
+    dst = set_picture(lib, key, _abs(args.file))
+    say(f"The picture for {words} is now {os.path.basename(args.file)} (kept in {dst}). Run deploy to use it.")
+    return 0
+
+
+def cmd_font(args) -> int:
+    lib = open_library(args)
+    font = feature("font")
+    if font is None:
+        raise ModmanError("The font tool (tools/font.py) isn't there.")
+    try:
+        if args.action == "use":
+            if not args.value:
+                raise ModmanError("Say which font: python tools/modman.py font use <auto, game, easy-read or a font "
+                                  "mod's id>")
+            pick, notes = font.choose(lib, args.value)
+            for n in notes:
+                say(n)
+            say(f"Font: {pick.label}. Run deploy to use it.")
+            return 0
+        if args.action == "symbols":
+            if (args.value or "").lower() not in ("on", "off"):
+                raise ModmanError("Say on or off: python tools/modman.py font symbols on|off")
+            font.save_settings(lib, fix_symbols=args.value.lower() == "on")
+            say(f"Missing symbols fix: {args.value.lower()}. Run deploy to use it.")
+            return 0
+        pick, notes = font.current(lib)
+        st = font.load_settings(lib)
+        say(f"Font in use: {pick.label}" + (" (chosen automatically)" if st["choice"] == "auto" else ""))
+        for n in notes:
+            say(n)
+        say("Fonts: " + ", ".join(f"{c.label} ({c.key})" for c in font.choices(lib)))
+        say(f"Missing symbols fix: {'on' if st['fix_symbols'] else 'off'}")
+        say("Choose: python tools/modman.py font use <key>")
+    except font.FontError as e:
+        raise ModmanError(str(e)) from None
+    return 0
+
+
+def cmd_settings(args) -> int:
+    lib = open_library(args)
+    ms = feature("mod_settings")
+    if ms is None:
+        raise ModmanError("The settings tool (tools/mod_settings.py) isn't there.")
+    pairs = ms.library_schemas(lib)
+    if not args.mod:
+        if not pairs:
+            say("No mod in the library has settings.")
+            return 0
+        say("Mods with settings:")
+        for m, sch in pairs:
+            say(f"  {m['id']}  {m['name']} ({len(sch.settings)} setting(s))")
+        say("Show one: python tools/modman.py settings <id>")
+        return 0
+    _, entry = lib.find(args.mod)
+    sch = next((s for m, s in pairs if m["id"] == entry["id"]), None)
+    if sch is None:
+        raise ModmanError(f"{entry['name']} has no settings.")
+    on = ms.mods_on(lib, lib.enabled(), pairs)
+    try:
+        if args.action == "set":
+            if args.key is None or args.value is None:
+                raise ModmanError("Say the setting and its value: python tools/modman.py settings <mod> set <key> "
+                                  "<value>")
+            changed = ms.set_value(lib.root, sch, args.key, args.value, on)
+            say(f"{sch.name}: " + (", ".join(changed) + " changed." if changed else "no change."))
+        elif args.action == "reset":
+            ms.reset_values(lib.root, sch)
+            say(f"{sch.name}: every setting is back to its default.")
+        try:
+            launch = DeployDir(lib.deploy_dir).read_launch() or {}
+        except (ModmanError, OSError):
+            launch = {}
+        deployed = (launch.get("settings") or {}).get(sch.mod_id)
+        for r in ms.rows(sch, ms.load_values(lib.root, sch), on, deployed):
+            if not r.shown:
+                continue
+            say(f"  {r.label}: {r.value_text}   ({r.key})" + (f"   {r.lock_line}" if r.lock_line else "")
+                + (f"   {ms.WAITING_LINE}" if r.waiting else ""))
+    except ms.SettingsError as e:
+        raise ModmanError(str(e)) from None
     return 0
 
 
@@ -3778,10 +4902,12 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--bnp-no-options", "--no-options", action="store_true",
                    help="leave out the options a BCML or UKMM package turns on by default (--option ones still go "
                         "in)")
-    sub.add_parser("list", parents=[common], help="show the mods in order")
+    p = sub.add_parser("list", parents=[common], help="show the mods in order")
+    p.add_argument("--find", metavar="TEXT", help="only the mods whose name, id or kind has this text")
     for name in ("enable", "disable"):
         p = sub.add_parser(name, parents=[common], help=f"turn a mod {'on' if name == 'enable' else 'off'}")
-        p.add_argument("mod", help="id or number from list")
+        p.add_argument("mod", nargs="?", help="id or number from list")
+        p.add_argument("--all", action="store_true", help=f"turn every mod {'on' if name == 'enable' else 'off'}")
     p = sub.add_parser("move", parents=[common], help="move a mod to a position (later mods win)")
     p.add_argument("mod", help="id or number from list")
     p.add_argument("position", type=int)
@@ -3794,12 +4920,46 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("run", parents=[common], help="start Savage Wind with the deployed mods")
     p.add_argument("--port", type=port_arg, help=f"control port for cheats, 1-65535 (default {DEFAULT_PORT})")
     p.add_argument("--no-cheats", action="store_true", help="start without the cheats")
+    p.add_argument("--no-mods", action="store_true",
+                   help="start Savage Wind without any mod (needs no deploy; your save is backed up first)")
     sub.add_parser("status", parents=[common], help="what is deployed, and whether it is up to date")
     sub.add_parser("doctor", parents=[common], help="check that everything needed is there")
     p = sub.add_parser("profile", parents=[common],
-                       help="mod sets you switch between: list, new <name>, use <name>, remove <name>")
-    p.add_argument("action", nargs="?", default="list", choices=("list", "new", "use", "remove"))
+                       help="mod sets you switch between: list, new <name>, use <name>, copy <name> <new name>, "
+                            "rename <name> <new name>, delete <name>, own-save <name> on|off")
+    p.add_argument("action", nargs="?", default="list",
+                   choices=("list", "new", "use", "copy", "rename", "delete", "remove", "own-save"))
     p.add_argument("name", nargs="?", help="the mod set's name (up to 40 letters, digits, spaces, '.', '-', '_')")
+    p.add_argument("value", nargs="?", help="copy, rename: the new name; own-save: on or off")
+    p.add_argument("--copy", action="store_true", help="own-save on: start it from a copy of the save in use")
+    p = sub.add_parser("saves", parents=[common], help="save backups: list, backup, restore <number or name>")
+    p.add_argument("action", nargs="?", default="list", choices=("list", "backup", "restore"))
+    p.add_argument("name", nargs="?", help="restore: the backup's number from the list, or its name")
+    p = sub.add_parser("crash", parents=[common],
+                       help="did the last start stop with an error? turn-off: turn off what is new since")
+    p.add_argument("action", nargs="?", default="check", choices=("check", "turn-off"))
+    p = sub.add_parser("last-good", parents=[common],
+                       help="the mods of the last start that ended well; use: turn exactly those on")
+    p.add_argument("action", nargs="?", default="show", choices=("show", "use"))
+    sub.add_parser("changes", parents=[common], help="what changed since the last start")
+    p = sub.add_parser("conflicts", parents=[common], help="which mod replaces which one's files (last deploy)")
+    p.add_argument("mod", nargs="?", help="only this mod (id or number)")
+    p = sub.add_parser("info", parents=[common], help="a mod's author, version, text, link and files")
+    p.add_argument("mod", help="id or number from list")
+    p = sub.add_parser("picture", parents=[common],
+                       help="choose a picture for a mod, the title screen (title) or the Mods page (mods-page)")
+    p.add_argument("what", help="a mod's id or number, title, or mods-page")
+    p.add_argument("file", nargs="?", help="a .png, .jpg or .webp file (copied into the library)")
+    p.add_argument("--clear", action="store_true", help="forget the picture you chose")
+    p = sub.add_parser("font", parents=[common], help="the font: list, use <key>, symbols on|off (docs/fonts.md)")
+    p.add_argument("action", nargs="?", default="list", choices=("list", "use", "symbols"))
+    p.add_argument("value", nargs="?", help="use: auto, game, easy-read or a font mod's id; symbols: on or off")
+    p = sub.add_parser("settings", parents=[common],
+                       help="a mod's settings: show, set <key> <value>, reset (refused while the game runs)")
+    p.add_argument("mod", nargs="?", help="id or number from list (none: the mods that have settings)")
+    p.add_argument("action", nargs="?", default="show", choices=("show", "set", "reset"))
+    p.add_argument("key", nargs="?")
+    p.add_argument("value", nargs="?")
     return ap
 
 
@@ -3812,7 +4972,9 @@ def main(argv: list[str] | None = None) -> int:
     cmds = {"init": cmd_init, "add": cmd_add, "list": cmd_list, "enable": lambda a: cmd_enable(a, True),
             "disable": lambda a: cmd_enable(a, False), "move": cmd_move, "remove": cmd_remove,
             "deploy": cmd_deploy, "run": cmd_run, "status": cmd_status, "doctor": cmd_doctor,
-            "profile": cmd_profile}
+            "profile": cmd_profile, "saves": cmd_saves, "crash": cmd_crash, "last-good": cmd_last_good,
+            "changes": cmd_changes, "conflicts": cmd_conflicts, "info": cmd_info, "picture": cmd_picture,
+            "font": cmd_font, "settings": cmd_settings}
     try:
         return cmds[args.cmd](args)
     except ModmanError as e:

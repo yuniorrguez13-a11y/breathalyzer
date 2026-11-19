@@ -60,6 +60,73 @@ works, as `savagewind.exe` is a Windows program, not a console one.
   Ctrl + and Ctrl - change the text size (Ctrl 0: the start size), F5 reads the list again, Esc cancels a question.
 - Closing the window stops a running add, remove, deploy or check (it asks first). A game started with **Play**
   keeps running.
+- **Mod set: <name>** at the top picks the [mod set](#saves-crashes-and-mod-sets) in use, or makes, copies, renames
+  or deletes one. **Search** beside it keeps only the mods with those words in the name, id, kind or version (Ctrl+F
+  goes there, Esc empties it, Enter or Down goes back to the list).
+- **Play without mods** starts Savage Wind on its own (`run --no-mods`). **Play** first checks how the last start
+  ended: after a crash it asks **Turn it off and Play** (turn off what is new, deploy, then play), **Play without
+  mods**, **Play anyway** or **Cancel**.
+- **More...** has the rest, each as one big button: the picked mod's info (in **Details**, under its picture at
+  128 px when it has one), picture and settings, **Turn all on**,
+  **Turn all off**, **Use the last mods that worked**, what changed, which mod replaces which, save backups (back
+  up now, put one back, the list), the font, and the title-screen picture (the Mods-page picture comes back once
+  the game draws pictures: [mod-pictures](mod-pictures.md)). **Turn all off** leaves the Mod menu on. Answers that
+  are more than a line open **Details**.
+
+## Saves, crashes and mod sets
+
+Plain-word helpers around **Play**. The window has a button for each (see [Window](#window)); here are the commands.
+
+- **A save backup before a start with other mods.** `run` (and **Play without mods**) copies your save first when
+  the mods differ from the last start with that save folder (other mods, versions, order, or settings that apply at
+  the next start), or when no start is known yet. The copy goes to `<library>\save-backups\<date>-<reason>\save`.
+  It is the folder Savage Wind uses: `SAVAGEWIND_SAVE_DIR` when it is set, else the mod set's own folder, else
+  `<Savage Wind>\save`. When a mod is off now that was on last time, `run` says: "Saving without a mod can drop what
+  it added to your save. A backup is in <folder>." The newest 5 automatic copies of each save folder stay (a copy
+  the same as the newest isn't made again); a copy that fails stops the start. Your save itself is only read.
+  - `python tools/modman.py saves` lists the backups of the save folder in use by number, newest first, and also,
+    read-only, Savage Wind's own *Back up saves* folders and saves a restore moved aside. Backups of another save
+    folder (a mod set's own save, a test save) are not listed and can't be put back over this one: switch to that
+    set first.
+  - `python tools/modman.py saves backup` makes one now (kept until you delete it; only while the game is closed).
+  - `python tools/modman.py saves restore <number or name>` puts one back, only while the game is closed. The save
+    there now is renamed `<save>-before-restore-<date>` next to it, never deleted.
+- **Play without mods:** `python tools/modman.py run --no-mods`. Nothing is deployed and your mods stay as they are.
+  It always uses the normal save folder (`SAVAGEWIND_SAVE_DIR` when set, else `<Savage Wind>\save`), never a mod
+  set's own save: a modded save never opens without its mods (the same as the launcher's Play without mods).
+- **The crash check.** At the next start, modman reads the end of Savage Wind's log (`savagewind.log`): an error
+  backtrace means the game stopped with an error; "window closed" means it was closed. `run` then says "The game
+  stopped with an error last time. New since then: Better Sprint." (the mods new or updated since the last start
+  that ended well). `python tools/modman.py crash` says it again; `python tools/modman.py crash turn-off` turns
+  those mods off (then deploy).
+- **Use the last mods that worked:** `python tools/modman.py last-good` names them; `python tools/modman.py
+  last-good use` turns on exactly those, in that order, and the rest off. Hidden extras keep their own switch, and
+  the Mod menu stays as it is (`disable --all` leaves it on too).
+- **What changed since the last start:** `python tools/modman.py changes` (new, off, updated, moved, settings).
+  `status` says it too.
+- **Which mod replaces which:** `python tools/modman.py conflicts` reads the last deploy: "Better Sprint replaces 2
+  of Linkle's files (Better Sprint is later in the list)", and mods that change the same game function.
+  `python tools/modman.py conflicts <id>` shows one mod's.
+- **Turn all on or off:** `python tools/modman.py enable --all`, `python tools/modman.py disable --all`.
+- **Mod info:** `python tools/modman.py info <id>`: name, version, authors, description, the link (shown in Mod
+  Manager only, never in the game, and only `https://` ones), what it has, what it needs and what needs it, its
+  files that another mod replaces, and its picture.
+- **Search:** `python tools/modman.py list --find <words>`.
+- **Pictures:** `python tools/modman.py picture <id> <file>` picks a `.png`, `.jpg` or `.webp` (up to 8 MB) for a
+  mod; `title` or `mods-page` in place of the id picks the title-screen picture or the one behind the game's Mods
+  page. Mod Manager keeps its own copy in `<library>\pictures\<id>\chosen.<ext>` (never in the mod's folder), and
+  the next deploy uses it ([pictures](mod-pictures.md)). `python tools/modman.py picture <id> --clear` forgets it.
+  A picture a mod names by web address is never downloaded.
+- **The font:** `python tools/modman.py font`, `python tools/modman.py font use <key>`, `python tools/modman.py font
+  symbols on|off` ([fonts](fonts.md)).
+- **Mod settings:** `python tools/modman.py settings <id>` shows them; `python tools/modman.py settings <id> set
+  <key> <value>` and `python tools/modman.py settings <id> reset` change them, only while the game is closed
+  ([mod settings](mod-settings.md)). The window's editor (**More...**, then the mod's settings) does the same.
+- **Mod sets** ([profiles](profiles.md)): `python tools/modman.py profile list|new|use|copy|rename|delete <name>`
+  (copy and rename take the new name after it). Switching backs up the save in use first. A set can keep its own
+  save folder, `<library>\profiles\<set>\save`, so an overhaul playthrough doesn't touch your other saves:
+  `python tools/modman.py profile own-save <name> on` (add `--copy` to start it from a copy of the save in use; `off`
+  goes back to the normal folder and leaves the set's folder where it is). Deleting a set keeps its own save.
 
 ## What each kind of mod needs
 
@@ -205,7 +272,9 @@ your game's files. The details are in [ukmm](ukmm.md).
   manual setups and sets only what the deploy needs. `--no-cheats` starts without the cheats; `--port 8000` picks
   another control port (1-65535). If the cheats stop right away, `run` says so. The control port lets any program on
   this PC change the game's memory while it is on.
-- **Saves** are the same as when you start Savage Wind normally.
+- **Saves** are the same as when you start Savage Wind normally (a mod set with its own save folder uses that
+  one). `run` backs them up first when the mods changed: see
+  [Saves, crashes and mod sets](#saves-crashes-and-mod-sets).
 - **Another library folder:** add `--library <folder>` to every command, or set `SWMOD_LIBRARY`.
 
 ## What is tested

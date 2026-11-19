@@ -76,11 +76,21 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 KIND_LABELS = {"romfs": "RomFS", "dlc-romfs": "DLC RomFS", "exefs-patch": "Patch", "cheats": "Cheats",
                "native": "Code"}
 BUSY = {"add": "Adding the mod", "remove": "Removing the mod", "deploy": "Deploying", "check": "Checking",
-        "play": "Starting the game"}
-BUTTON = {"add": "Add mod", "remove": "Remove", "deploy": "Deploy", "check": "Check", "play": "Play"}
+        "play": "Starting the game", "saves": "Copying your save", "profile": "Changing the mod set"}
+BUTTON = {"add": "Add mod", "remove": "Remove", "deploy": "Deploy", "check": "Check", "play": "Play",
+          "saves": "the save copy", "profile": "the mod set change"}
+# The window's own QoL commands (docs/mod-manager.md "Saves, crashes and mod sets"): what the status says when one
+# fails (the reason follows), and the ones whose whole answer is in Details.
+QOL_FAILED = {"enable": "Not changed.", "disable": "Not changed.", "last-good": "Not changed.",
+              "crash": "Nothing was turned off.", "saves": "The save wasn't changed.",
+              "profile": "The mod set wasn't changed.", "picture": "The picture wasn't changed.",
+              "font": "The font wasn't changed.", "settings": "The setting wasn't changed.",
+              "info": "No info.", "conflicts": "No answer.", "changes": "No answer."}
+NO_MODS = "--no-mods"
+GATES = {"move_down": "move", "play_plain": "play"}   # the window's buttons that ask can() as another one
 # What run prints that the status shows while the game runs.
 PLAY_MARKS = ("Started Savage Wind", "Started cheats", "Warning: ", "The cheats stopped", "The game closed before",
-              "Savage Wind closed")
+              "Savage Wind closed", "Your save was backed up first", "Saving without a mod")
 PLAY_WARNINGS = (("changed since the last deploy", "Your newer changes aren't in it: deploy first next time."),
                  ("code patches are not active", "Code patches are off (deployed without the rebuild)."),
                  ("hooks are not active", "Hooks are off (deployed without the rebuild)."))
@@ -224,6 +234,8 @@ class Job:
     cancelled: bool = False
     hide: tuple = ()           # words its output never shows (a secret mod's id, title, folder): see hide_words
     env: dict = field(default_factory=dict)   # play: more variables for the game (the Multiplayer page's save copy)
+    show: str = ""             # the status head when the answer is in Details (info, conflicts, ...); {who}: its mod
+    picture: str = ""          # info: the mod's 128 px picture (a PNG), shown at the top of Details
 
     @property
     def slot(self) -> str:
@@ -367,6 +379,13 @@ def summarize(job: Job, name: str = "") -> Status:
                 failed("The game didn't start.", text)
         closed = any(x.startswith("Savage Wind closed") for x in text)
         out, kind = ["The game closed." if closed else "Game started."], "ok"
+        if NO_MODS in job.args and not closed:
+            out[0] = "Game started without mods."
+        if any(x.startswith("Saving without a mod") for x in text):   # (S3: fewer mods than the last start)
+            out.append("Your save was backed up first: a mod is off now, see Details.")
+            kind = "warn"
+        elif any(x.startswith("Your save was backed up first") for x in text):
+            out.append("Your save was backed up first.")
         stopped = next((i for i, x in enumerate(text) if x.startswith("The cheats stopped right away")), None)
         if stopped is not None:  # (first: it says why, from what cheats.py printed after run's "Waiting" line)
             waited = next((i for i in range(stopped - 1, -1, -1) if text[i].startswith("Waiting for the game")), None)
@@ -382,6 +401,15 @@ def summarize(job: Job, name: str = "") -> Status:
         elif stopped is None and not closed and any(x.startswith("Started cheats") for x in text):
             out.append("Cheats are on.")
         return Status(kind, out[:3])
+    if a in QOL_FAILED:
+        if not ok:
+            return failed(QOL_FAILED[a], text)
+        if job.show:
+            return Status("ok", [job.show.format(who=who), *[plain(x.strip()) for x in text[:2]]])
+        if a == "picture":
+            chosen = "--clear" not in job.args and len(job.args) > 2
+            return Status("ok", [f"Picture chosen for {who}: {os.path.basename(job.args[2])}." if chosen
+                                 else plain(text[0]) if text else "Done.", PRESS_DEPLOY])
     return Status("ok" if ok else "error", [plain(x.strip()) for x in text[:3]] or ["Done." if ok else "Failed."])
 
 
@@ -638,6 +666,8 @@ class Controller:
         self._select: str | None = None
         self._state_token = 0
         self._state_pending = 0
+        self.then_jobs: list[Job] = []   # what starts once the running job ends well ("Turn it off and Play")
+        self.want_details = False     # the answer is in Details: the window shows it
         self.status = self._first_status()
 
     def _first_status(self) -> Status:
@@ -664,7 +694,8 @@ class Controller:
             return True
         if "main" in self.jobs:
             return False
-        return not ("play" in self.jobs and action in ("deploy", "play"))
+        # (the save and the mod set don't change under a running game: modman refuses too)
+        return not ("play" in self.jobs and action in ("deploy", "play", "saves", "profile", "settings", "crash"))
 
     def row(self, mod_id: str | None) -> Row | None:
         return next((r for r in self.listing.rows if r.id == mod_id), None)
@@ -912,12 +943,242 @@ class Controller:
         elif job.action == "remove" and code == 0 and self.listing.rows:
             # (the one now in its place: the next listed one, else the last)
             select = next((r.id for r in self.listing.rows if r.number >= job.number), self.listing.rows[-1].id)
-        if select:
-            self._select = select
+        if select or job.action == "profile":   # (profile: the window shows the set's name again)
+            if select:
+                self._select = select
             self.list_version += 1
         self.status = summarize(job, name)
         if job.action != "check":
             self.refresh_state()
+        nxt = self.then_jobs.pop(0) if self.then_jobs and code == 0 and not job.cancelled else None
+        if nxt is None:
+            self.then_jobs = []
+        elif self.free(nxt.action):
+            done = self.status.lines[0] if self.status.lines else ""
+            self._start(nxt)
+            self.status = Status("busy", [f"{BUSY.get(nxt.action, 'Working')}...", done])
+
+    # --- saves, crashes, mod sets and the rest (docs/mod-manager.md "Saves, crashes and mod sets")
+
+    def library(self):
+        """The library as modman reads it now (None: no library yet). Raises what modman raises."""
+        with self.backend.files:
+            return self.backend.mm.Library.load(self.backend.root)
+
+    def game_running(self) -> bool:
+        try:
+            return bool(self.backend.mm.game_running())
+        except Exception:  # (then modman refuses by itself when it matters)
+            return False
+
+    def matching_rows(self, find: str) -> list[Row]:
+        """The mods the search box keeps: every word of it is in the name, id, kind or version (any case)."""
+        words = (find or "").lower().split()
+        if not words:
+            return list(self.listing.rows)
+        return [r for r in self.listing.rows
+                if all(w in " ".join((r.name, r.id, kind_text(r.kinds), r.version or "")).lower() for w in words)]
+
+    def profile_state(self) -> tuple[str, list[str]]:
+        """(the mod set in use, every set's name), or ("", []) when the library can't say (no library yet)."""
+        try:
+            lib = self.library()
+            return (lib.profile, list(self.backend.mm.profile_names(lib))) if lib is not None else ("", [])
+        except Exception:  # (a broken library: the list says what is wrong; never a crash here)
+            return "", []
+
+    def crash_check(self) -> tuple[list[str], list[str]]:
+        """Before Play: (modman's plain lines when the last start stopped with an error, else []; the names of the
+        mods that are on now and new since the last start that ended well)."""
+        mm = self.backend.mm
+        try:
+            lib = self.library()
+            if lib is None:
+                return [], []
+            report = mm.check_last_start(lib)
+            lines = list(mm.crash_lines(report))
+            if not lines:
+                return [], []
+            new = {m["id"] for m in report["new"]}
+            return lines, [m["name"] for m in lib.mods if m.get("enabled") and m["id"] in new]
+        except Exception:
+            return [], []
+
+    def _command(self, action: str, args: list[str], *, name: str = "", show: str = "") -> Job:
+        """A short command in this thread (it reads or writes only small files). Sets the status; returns its Job."""
+        started = self.clock()
+        code, lines = self.backend.quick(args)
+        job = Job(action, args, name=name, lines=lines, code=code, started=started, ended=self.clock(), show=show)
+        self.details_job = job
+        self._reload()
+        self.status = summarize(job, name)
+        self.want_details = bool(show) and code == 0
+        self.refresh_state()
+        return job
+
+    def play_without_mods(self) -> None:
+        """Savage Wind on its own (run --no-mods): nothing is deployed, the mods stay as they are."""
+        if self.free("play"):
+            self._start(Job("play", [*self.run_args, NO_MODS], in_process=True))
+            self.status = Status("busy", ["Starting the game without mods...", "Your mods stay as they are."])
+
+    def turn_off_and_play(self) -> None:
+        """After a crash: turn off the mods new since the last start that ended well, deploy, then Play."""
+        if not self.free("play") or not self.free("deploy"):
+            return
+        job = self._command("crash", ["crash", "turn-off"])
+        if job.code != 0:
+            return
+        said = job.last_line().split(" Run deploy")[0]
+        self.then_jobs = [Job("play", list(self.run_args), in_process=True)]
+        self._start(Job("deploy", ["deploy"]))
+        self.status = Status("busy", [said, "Deploying, then the game starts.", REBUILD_NOTE])
+
+    def set_all(self, on: bool) -> None:
+        verb = "enable" if on else "disable"
+        if not self.free(verb):
+            return
+        job = self._command(verb, [verb, "--all"])
+        if job.code == 0:
+            self.status = Status("ok", [f"Every mod is {'on' if on else 'off'}.", PRESS_DEPLOY])
+
+    def use_last_good(self) -> None:
+        """Turn on exactly the mods of the newest start that ended well (in its order)."""
+        if not self.free("last-good"):
+            return
+        job = self._command("last-good", ["last-good", "use"])
+        if job.code == 0:
+            first = plain(job.lines[0].strip()) if job.lines else ""
+            self.status = Status("ok", ["The mods from your last good start are on.", first, PRESS_DEPLOY])
+
+    def show(self, what: str, mod_id: str | None = None) -> None:
+        """An answer that goes to Details: info and settings (of a mod), conflicts, changes, saves, crash, fonts."""
+        if not self.free(what):
+            return
+        if what in ("info", "settings"):
+            row = self._ready(what, mod_id)
+            if row is None:
+                return
+            heads = {"info": "{who}: its info is in Details.", "settings": "{who}'s settings are in Details."}
+            job = self._command(what, [what, row.id], name=row.name, show=heads[what])
+            if what == "info" and job.code == 0:
+                job.picture = self.picture_file(row.id)
+            return
+        args, head = {"conflicts": (["conflicts"], "Which mod replaces which: see Details."),
+                      "changes": (["changes"], "What changed since the last start:"),
+                      "saves": (["saves"], "Your save backups are in Details."),
+                      "crash": (["crash"], "How the last start ended:"),
+                      "last-good": (["last-good"], "The last mods that worked:"),
+                      "font": (["font"], "The fonts are in Details.")}[what]
+        self._command(what, args, show=head)
+
+    def picture_file(self, mod_id: str) -> str:
+        """The mod's picture as a PNG of 128 px that Tk shows as it is (tools/mod_pictures' cache); "" when none."""
+        try:
+            mp, lib = self.backend.mm.feature("mod_pictures"), self.library()
+            if mp is None or lib is None or not hasattr(mp, "icon_path"):
+                return ""
+            path = mp.icon_path(lib, mod_id, 128)
+            if not path and hasattr(mp, "refresh"):   # (not made yet, or its source changed: make it now)
+                mp.refresh(lib, lib.find(mod_id)[1])
+                path = mp.icon_path(lib, mod_id, 128)
+            return path if path and os.path.isfile(path) else ""
+        except Exception:
+            return ""
+
+    def backups(self) -> list[dict]:
+        """The save backups of the save folder in use, newest first (modman.backups_for: never another playthrough's),
+        [] when none or no library."""
+        try:
+            lib = self.library()
+            mm = self.backend.mm
+            pick = getattr(mm, "backups_for", None) or mm.save_backups
+            return list(pick(lib)) if lib is not None else []
+        except Exception:
+            return []
+
+    def back_up_save(self) -> None:
+        if self.free("saves"):
+            self._start(Job("saves", ["saves", "backup"], in_process=True))
+            self.status = Status("busy", ["Copying your save..."])
+
+    def restore_save(self, name: str) -> None:
+        """Put a backup back (only with the game closed: modman refuses otherwise). The save there now is moved
+        aside, never deleted."""
+        if self.free("saves"):
+            self._start(Job("saves", ["saves", "restore", name], in_process=True))
+            self.status = Status("busy", ["Putting the backup back...", "Your save now is kept, not deleted."])
+
+    def profile(self, *args: str) -> None:
+        """modman profile use / new / copy / rename / delete / own-save, in the background (use copies the save)."""
+        if self.free("profile"):
+            self._start(Job("profile", ["profile", *args], in_process=True))
+            self.status = Status("busy", ["Changing the mod set..."])
+
+    def choose_picture(self, what: str, path: str, name: str = "") -> None:
+        """A picture for a mod (its id), the title screen ("title") or the Mods page ("mods-page"); "" forgets it.
+        In the background: tools/mod_pictures reads the whole picture first (a few seconds for a big PNG)."""
+        if not self.free("picture"):
+            return
+        self._start(Job("picture", ["picture", what, path] if path else ["picture", what, "--clear"],
+                        name=name or what, in_process=True))
+        self.status = Status("busy", ["Reading the picture..." if path else "Forgetting the picture..."])
+
+    def fonts(self) -> tuple[str, list[tuple[str, str]]]:
+        """(the font in use, [(key, words)] to choose from); ("", []) without tools/font.py or a library."""
+        try:
+            font, lib = self.backend.mm.feature("font"), self.library()
+            if font is None or lib is None:
+                return "", []
+            return font.current(lib)[0].label, [(c.key, c.label) for c in font.choices(lib)]
+        except Exception:
+            return "", []
+
+    def use_font(self, key: str) -> None:
+        if self.free("font"):
+            job = self._command("font", ["font", "use", key])
+            if job.code == 0:
+                self.status = Status("ok", [plain(job.last_line()).replace(" Press Deploy to use it.", ""),
+                                            PRESS_DEPLOY])
+
+    def font_symbols(self) -> bool | None:
+        """Is the missing-symbols fix on (font.json)? None without tools/font.py or a library."""
+        try:
+            font, lib = self.backend.mm.feature("font"), self.library()
+            return None if font is None or lib is None else bool(font.load_settings(lib)["fix_symbols"])
+        except Exception:
+            return None
+
+    def set_font_symbols(self, on: bool) -> None:
+        if self.free("font"):
+            job = self._command("font", ["font", "symbols", "on" if on else "off"])
+            if job.code == 0:
+                self.status = Status("ok", [f"Missing symbols fix: {'on' if on else 'off'}.", PRESS_DEPLOY])
+
+    def setting_rows(self, mod_id: str) -> tuple[str, list]:
+        """(the mod's name for its settings, the rows shown now: mod_settings.Row) for the settings editor;
+        ("", []) when it has none."""
+        mm = self.backend.mm
+        try:
+            ms, lib = mm.feature("mod_settings"), self.library()
+            if ms is None or lib is None:
+                return "", []
+            pairs = ms.library_schemas(lib)
+            sch = next((s for m, s in pairs if m["id"] == mod_id), None)
+            if sch is None:
+                return "", []
+            on = ms.mods_on(lib, lib.enabled(), pairs)
+            return sch.name, [r for r in ms.rows(sch, ms.load_values(lib.root, sch), on) if r.shown]
+        except Exception:
+            return "", []
+
+    def set_setting(self, mod_id: str, key: str, value: str, name: str = "") -> None:
+        """One setting's new value (modman refuses while the game runs: S5)."""
+        if not self.free("settings"):
+            return
+        job = self._command("settings", ["settings", mod_id, "set", key, str(value)], name=name)
+        if job.code == 0 and job.lines:
+            self.status = Status("ok", [plain(job.lines[0].strip()), "It is used at your next start."])
 
 
 # ---------------------------------------------------------------- the window
@@ -1061,9 +1322,9 @@ class BigText:
         fn()
         return "break"
 
-    def ask(self, title: str, message: str, detail: str, choices: list, default: int = 0):
+    def ask(self, title: str, message: str, detail: str, choices: list, default: int = 0, columns: int = 0):
         """A question in the same big text. Returns the value of the button pressed; Esc or closing it gives the
-        last button's."""
+        last button's. columns: the buttons in that many columns (0: all on one row)."""
         t = self.t
         top = tk.Toplevel(self.root, bg=t["bg"], padx=24, pady=20)
         top.title(title)
@@ -1082,8 +1343,13 @@ class BigText:
         row = tk.Frame(top, bg=t["bg"])
         row.pack(anchor="w", pady=(20, 0))
         group: list = []
-        for text, value in choices:
-            self.make_button(row, text, lambda v=value: done(v), group).ring.pack(side="left", padx=(0, 8))
+        for k, (text, value) in enumerate(choices):
+            ring = self.make_button(row, text, lambda v=value: done(v), group).ring
+            if columns:
+                ring.grid(row=k // columns, column=k % columns, sticky="ew", padx=(0, 8))
+                ring.winfo_children()[0].pack_configure(fill="x")
+            else:
+                ring.pack(side="left", padx=(0, 8))
         top.bind("<Escape>", lambda e: done(choices[-1][1]))
         top.protocol("WM_DELETE_WINDOW", lambda: done(choices[-1][1]))
         top.update_idletasks()
@@ -1158,9 +1424,28 @@ class View(BigText):
         set_app_icon(r)
         r.configure(bg=t["bg"])
         r.columnconfigure(0, weight=1)
-        # results first
-        self.status_box = box = tk.Frame(r, bg=t["bg"])
-        box.grid(row=0, column=0, sticky="ew", padx=pad, pady=(pad, 10))
+        # the mod set in use and the search box, then the results
+        self.head_box = hb = tk.Frame(r, bg=t["bg"])
+        hb.grid(row=0, column=0, sticky="ew", padx=pad, pady=(pad, 10))
+        hb.columnconfigure(0, weight=1)
+        self.top_bar = top = tk.Frame(hb, bg=t["bg"])
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        top.columnconfigure(2, weight=1)
+        self.set_button = self.make_button(top, "Mod set: Default", self.on_sets, self.buttons, bold=True,
+                                           why=lambda: self.after_action(lambda: self.ctl.free("profile")))
+        self.set_button.ring.grid(row=0, column=0, sticky="w")
+        self.label(top, text="Search:").grid(row=0, column=1, sticky="e", padx=(12, 6))
+        self.search = tk.StringVar(r)
+        self.search_box = tk.Entry(top, textvariable=self.search, font=self.font, width=4, bg=t["bg"], fg=t["fg"],
+                                   insertbackground=t["fg"], relief="flat", highlightthickness=4,
+                                   highlightcolor=t["focus"], highlightbackground=t["line"])
+        self.search_box.grid(row=0, column=2, sticky="ew")
+        self.search.trace_add("write", lambda *_: self.on_search())
+        self.search_box.bind("<Escape>", lambda e: self.key(lambda: self.search.set("")))
+        for seq in ("<Return>", "<KP_Enter>", "<Down>"):
+            self.search_box.bind(seq, lambda e: self.key(self.tree.focus_set))
+        self.status_box = box = tk.Frame(hb, bg=t["bg"])
+        box.grid(row=1, column=0, sticky="ew")
         box.columnconfigure(1, weight=1)
         self.status_bar = tk.Frame(box, width=10, bg=t["info"])
         self.status_bar.grid(row=0, column=0, rowspan=3, sticky="ns", padx=(0, 14))
@@ -1211,11 +1496,13 @@ class View(BigText):
                 ("remove", "Remove", self.on_remove, False, 0),
                 ("deploy", "Deploy", self.on_deploy, True, 0),
                 ("play", "Play", self.on_play, True, 0),
+                ("play_plain", "Play without mods", self.on_play_plain, False, 0),
                 ("check", "Check", self.on_check, False, 0),
+                ("more", "More...", self.on_more, False, 0),
                 ("details", "Details", self.on_details, False, 12)):
             if action == "deploy":
                 self.flow.items.append(None)  # (the game's buttons on a row of their own)
-            gate = "move" if action == "move_down" else action
+            gate = GATES.get(action, action)
             b = self.make_button(self.flow.frame, text, command, self.buttons, bold, width,
                                  why=lambda gate=gate: self.after_action(lambda: self.ctl.free(gate)))
             self.flow.items.append(b.ring)
@@ -1244,6 +1531,7 @@ class View(BigText):
         r.bind("<Control-0>", lambda e: self.set_size(self.start_size))
         r.bind("<Control-MouseWheel>", lambda e: self.set_size(self.size + (2 if e.delta > 0 else -2)))
         r.bind("<F5>", lambda e: self.after_action(self.ctl.refresh))
+        r.bind("<Control-f>", lambda e: self.key(self.search_box.focus_set))
         r.bind("<Configure>", self.on_resize)
         r.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -1413,10 +1701,13 @@ class View(BigText):
         self.status_head.configure(text=st.lines[0] if st.lines else "",
                                    fg=t["error"] if st.kind == "error" else t["fg"])
         self.status_more.configure(text="\n".join(st.lines[1:3]))
-        self.summary.configure(text=ctl.summary_line())
+        found = self.search.get().strip()
+        shown = f" Search shows {len(ctl.matching_rows(found))} of them." if found and ctl.listing.rows else ""
+        self.summary.configure(text=ctl.summary_line() + shown)
         self.render_footer()
         for action, b in self.by_action.items():
-            b.configure(state="normal" if ctl.can("move" if action == "move_down" else action) else "disabled")
+            b.configure(state="normal" if ctl.can(GATES.get(action, action)) else "disabled")
+        self.set_button.configure(state="normal" if ctl.can("profile") else "disabled")
         self.update_toggle()
         self.render_progress()
         if self.details_shown:
@@ -1425,9 +1716,10 @@ class View(BigText):
     def render_list(self) -> None:
         keep = self.ctl.take_select() or self.selected_id()
         self.tree.delete(*self.tree.get_children())
-        rows = self.ctl.listing.rows
+        rows = self.ctl.matching_rows(self.search.get())
         for row in rows:
             self.tree.insert("", "end", iid=row.id, values=row.cells())
+        self.render_sets()
         ids = [row.id for row in rows]
         pick = keep if keep in ids else (ids[0] if ids else None)
         if pick:
@@ -1457,6 +1749,14 @@ class View(BigText):
         if key != self.details_key:
             self.details.delete("1.0", "end")
             self.details.insert("end", "\n".join(lines))
+            self.details_picture = None
+            if job is not None and job.picture:   # (a mod's info: its picture, big, under the first line)
+                try:
+                    self.details_picture = tk.PhotoImage(master=self.root, file=job.picture)
+                    self.details.insert("2.0", "\n")
+                    self.details.image_create("2.0", image=self.details_picture, padx=4, pady=6)
+                except tk.TclError:   # (a picture Tk can't read: the words are enough)
+                    self.details_picture = None
         elif len(lines) > self.details_count:
             self.details.insert("end", "\n" + "\n".join(lines[self.details_count:]))
         self.details.configure(state="disabled")
@@ -1498,6 +1798,8 @@ class View(BigText):
     def after_action(self, fn) -> None:
         fn()
         self.render()
+        if self.ctl.want_details:
+            self.show_answer()
 
     def on_toggle(self) -> None:
         self.after_action(lambda: self.ctl.toggle(self.selected_id()))
@@ -1510,7 +1812,14 @@ class View(BigText):
             self.after_action(self.ctl.deploy)
 
     def on_play(self) -> None:
-        if self.install_known("play"):
+        if not self.install_known("play"):
+            return
+        pick = self.crash_question()
+        if pick == "off":
+            self.after_action(self.ctl.turn_off_and_play)
+        elif pick == "plain":
+            self.after_action(self.ctl.play_without_mods)
+        elif pick == "play":
             self.after_action(self.ctl.play)
 
     def on_check(self) -> None:
@@ -1589,6 +1898,246 @@ class View(BigText):
             self.root.rowconfigure(4, weight=0)
             self.fit(force=True)
         self.by_action["details"].configure(text="Hide details" if self.details_shown else "Details")
+
+    # --- saves, crashes, mod sets and the rest (docs/mod-manager.md "Saves, crashes and mod sets")
+
+    def ask_text(self, title: str, message: str, initial: str = "") -> str | None:
+        """A line of text in the same big text (a mod set's name, a setting's value). None when cancelled."""
+        t = self.t
+        top = tk.Toplevel(self.root, bg=t["bg"], padx=24, pady=20)
+        top.title(title)
+        top.transient(self.root)
+        top.resizable(False, False)
+        result = {"value": None}
+        text = tk.StringVar(top, value=initial)
+
+        def done(ok: bool):
+            result["value"] = text.get().strip() if ok else None
+            top.destroy()
+
+        wrap = max(320, self.font.measure("0") * 36)
+        self.label(top, self.head, text=message, wraplength=wrap).pack(anchor="w")
+        entry = tk.Entry(top, textvariable=text, font=self.font, width=24, bg=t["bg"], fg=t["fg"],
+                         insertbackground=t["fg"], relief="flat", highlightthickness=4, highlightcolor=t["focus"],
+                         highlightbackground=t["line"])
+        entry.pack(anchor="w", fill="x", pady=(14, 0))
+        row = tk.Frame(top, bg=t["bg"])
+        row.pack(anchor="w", pady=(20, 0))
+        group: list = []
+        for words, ok in (("OK", True), ("Cancel", False)):
+            self.make_button(row, words, lambda ok=ok: done(ok), group).ring.pack(side="left", padx=(0, 8))
+        entry.bind("<Return>", lambda e: done(True))
+        top.bind("<Escape>", lambda e: done(False))
+        top.protocol("WM_DELETE_WINDOW", lambda: done(False))
+        entry.focus_set()
+        entry.select_range(0, "end")
+        with contextlib.suppress(tk.TclError):
+            top.after(20, top.grab_set)
+        self.root.wait_window(top)
+        return result["value"] or None
+
+    def on_search(self) -> None:
+        self.list_version = -1   # (render_list again: it keeps only the mods the search box finds)
+        self.render()
+
+    def render_sets(self) -> None:
+        cur, _ = self.ctl.profile_state()
+        cur = cur or "Default"
+        self.set_button.configure(text=f"Mod set: {cur if len(cur) <= 16 else cur[:15] + '...'}")
+
+    def show_answer(self) -> None:
+        """The answer is in Details: show Details (when it fits)."""
+        self.ctl.want_details = False
+        if not self.details_shown:
+            self.on_details()
+
+    def on_play_plain(self) -> None:
+        if self.install_known("play"):
+            self.after_action(self.ctl.play_without_mods)
+
+    def crash_question(self) -> str | None:
+        """The crash check at Play: "off" (turn off what is new, then Play), "plain" (Play without mods), "play"
+        (Play anyway), None (cancel). "play" right away when the last start didn't stop with an error."""
+        lines, new = self.ctl.crash_check()
+        if not lines:
+            return "play"
+        them = "it" if len(new) == 1 else "them"
+        choices = ([(f"Turn {them} off and Play", "off")] if new else []) + [
+            ("Play without mods", "plain"), ("Play anyway", "play"), ("Cancel", None)]
+        return self.ask("The last start", lines[0], " ".join(lines[1:]), choices, default=0, columns=2)
+
+    def on_more(self) -> None:
+        if not self.ctl.can("more"):
+            return self.after_action(lambda: self.ctl.free("more"))
+        row = self.ctl.row(self.selected_id())
+        mine = [(f"About {row.name}", "info"), ("Choose a picture", "picture"), (f"Settings of {row.name}",
+                                                                                "settings")] if row else []
+        pick = self.ask("More", "What do you want to do?", "" if row else "Pick a mod in the list for its info, "
+                        "picture and settings.", [
+                            *mine, ("Turn all on", "all_on"), ("Turn all off", "all_off"),
+                            ("Use the last mods that worked", "last_good"), ("What changed since the last start",
+                                                                              "changes"),
+                            ("Which mod replaces which", "conflicts"), ("Save backups", "saves"),
+                            ("Font", "font"), ("Pictures for the game", "game_pictures"), ("Cancel", None)],
+                        columns=2)
+        if pick in ("info", "changes", "conflicts"):
+            self.after_action(lambda: self.ctl.show(pick, row.id if row else None))
+        elif pick in ("all_on", "all_off"):
+            self.after_action(lambda: self.ctl.set_all(pick == "all_on"))
+        elif pick == "last_good":
+            self.after_action(self.ctl.use_last_good)
+        elif pick == "picture" and row:
+            self.choose_picture(row.id, row.name)
+        elif pick == "game_pictures":
+            where = self.ask("Pictures", "Which picture?", "Pictures for mods are chosen with a mod picked in the "
+                             "list.", [("The title screen", "title"), ("Cancel", None)], columns=1)
+            # ("Behind the Mods page" comes back once the game draws pictures: docs/mod-pictures.md)
+            if where:
+                self.choose_picture(where, "the title screen" if where == "title" else "the Mods page")
+        elif pick == "settings" and row:
+            self.edit_settings(row)
+        elif pick == "saves":
+            self.saves_menu()
+        elif pick == "font":
+            self.font_menu()
+        return None
+
+    def choose_picture(self, what: str, words: str) -> None:
+        how = self.ask("Picture", f"A picture for {words}", "A .png, .jpg or .webp file, up to 8 MB. Mod Manager "
+                       "keeps its own copy; the mod's folder isn't changed.",
+                       [("Pick a file", "file"), ("Forget my picture", "clear"), ("Cancel", None)], columns=1)
+        if how == "clear":
+            self.after_action(lambda: self.ctl.choose_picture(what, "", words))
+            return
+        if how != "file":
+            return
+        path = filedialog.askopenfilename(parent=self.root, title=f"Pick a picture for {words}",
+                                          initialdir=self.last_dir,
+                                          filetypes=[("Pictures", "*.png *.jpg *.jpeg *.webp"), ("All files", "*.*")])
+        if path:
+            path = os.path.normpath(path)
+            self.last_dir = os.path.dirname(path)
+            self.after_action(lambda: self.ctl.choose_picture(what, path, words))
+
+    def edit_settings(self, row: Row) -> None:
+        """The settings editor: pick a setting, then its value. Refused while the game runs (S5)."""
+        if self.ctl.game_running():
+            return self.tell("The game is running: close it first.", "Settings can't change while it runs.")
+        name, rows = self.ctl.setting_rows(row.id)
+        if not rows:
+            return self.tell(f"{row.name} has no settings.")
+        rows = [r for r in rows if r.type != "button"][:16]   # (buttons work only in the game's Mods page)
+        if not rows:
+            return self.tell(f"{row.name}'s settings are buttons: they work in the game's Mods page.")
+        pick = self.ask("Settings", f"Settings of {name}", "Pick one to change it.",
+                        [*[(f"{r.label}: {r.value_text}", r) for r in rows], ("Cancel", None)], columns=2)
+        if pick is None:
+            return None
+        if not pick.enabled:
+            return self.tell(f"{pick.label} is locked.", pick.lock_line)
+        if pick.type == "toggle":
+            value = self.ask("Settings", pick.label, pick.description, [("On", "on"), ("Off", "off"),
+                                                                       ("Cancel", None)])
+        elif pick.type == "choice":
+            value = self.ask("Settings", pick.label, pick.description,
+                             [*[(label, v) for v, label in pick.choices], ("Cancel", None)],
+                             columns=2 if len(pick.choices) > 3 else 0)
+        else:
+            hint = {"slider": f"A number from {pick.min:g} to {pick.max:g}.",
+                    "key": "A key's name, like F6. None: no key.",
+                    "text": f"Up to {pick.max_length} letters."}.get(pick.type, "")
+            value = self.ask_text("Settings", f"{pick.label}. {hint}".strip(),
+                                  "" if pick.value is None else str(pick.value))
+        if value is not None:
+            self.after_action(lambda: self.ctl.set_setting(row.id, pick.key, value, row.name))
+        return None
+
+    def saves_menu(self) -> None:
+        pick = self.ask("Save backups", "Your save", "Mod Manager copies your save before a start with other mods "
+                        "than the last one. It keeps the newest 5 and never deletes your save.",
+                        [("Back up my save now", "backup"), ("Put a backup back", "restore"),
+                         ("Show the backups", "list"), ("Cancel", None)], columns=1)
+        if pick == "backup":
+            self.after_action(self.ctl.back_up_save)
+        elif pick == "list":
+            self.after_action(lambda: self.ctl.show("saves"))
+        elif pick == "restore":
+            if self.ctl.game_running():
+                return self.tell("The game is running: close it first.", "A save is put back only while the game "
+                                 "is closed.")
+            items = self.ctl.backups()[:8]
+            if not items:
+                return self.tell("No save backups yet.", "A start with other mods than the last one makes one.")
+            b = self.ask("Save backups", "Which backup?", "Newest first.",
+                         [*[(f"{str(b.get('time') or '')[:16].replace('T', ' ')}  {b.get('reason') or ''}"[:44], b)
+                            for b in items], ("Cancel", None)], columns=1)
+            if b is None:
+                return None
+            if self.ask("Save backups", "Put this backup back?", "Your save now is moved aside (renamed, next to "
+                        "it) and kept. Nothing is deleted.", [("Put it back", True), ("Cancel", False)], default=1):
+                self.after_action(lambda: self.ctl.restore_save(b["name"]))
+        return None
+
+    def font_menu(self) -> None:
+        cur, choices = self.ctl.fonts()
+        if not choices:
+            return self.tell("No font choice here.", "The font tool (tools/font.py) isn't there.")
+        fix = self.ctl.font_symbols()
+        extra = [] if fix is None else [(f"Fix missing symbols: turn {'off' if fix else 'on'}", ("symbols",))]
+        key = self.ask("Font", "Which font?", f"In use: {cur}." + ("" if fix is None else
+                                                                   f" Missing symbols fix: {'on' if fix else 'off'}."),
+                       [*[(label, k) for k, label in choices[:12]], *extra, ("Cancel", None)], columns=2)
+        if key == ("symbols",):
+            self.after_action(lambda: self.ctl.set_font_symbols(not fix))
+        elif key:
+            self.after_action(lambda: self.ctl.use_font(key))
+        return None
+
+    def on_sets(self) -> None:
+        """The mod set chooser: use another set, or make, copy, rename or delete one; a set's own save folder."""
+        if not self.ctl.can("profile"):
+            return self.after_action(lambda: self.ctl.free("profile"))
+        cur, names = self.ctl.profile_state()
+        if not cur:
+            return self.tell("No mod library yet.", "Press Add mod to start one.")
+        others = [n for n in names if n != cur][:8]
+        pick = self.ask("Mod sets", f"Mod set in use: {cur}", "A mod set keeps which mods are on, their order and "
+                        "their settings. Switching backs up your save first.",
+                        [*[(f"Use {n}", ("use", n)) for n in others], ("New set", ("new",)),
+                         ("Copy this set", ("copy",)), *([] if cur == "Default" else [
+                             ("Rename this set", ("rename",)), ("Own save folder", ("own",))]),
+                         *([("Delete a set", ("delete",))] if others else []), ("Cancel", None)], columns=2)
+        if pick is None:
+            return None
+        if pick[0] == "use":
+            if self.ctl.game_running():
+                return self.tell("The game is running: close it first.", "The mod set changes only while it is "
+                                 "closed.")
+            return self.after_action(lambda: self.ctl.profile("use", pick[1]))
+        if pick[0] in ("new", "copy", "rename"):
+            words = {"new": "Name of the new set (it starts as the mods are now):",
+                     "copy": f"Name of the copy of {cur}:", "rename": f"New name for {cur}:"}[pick[0]]
+            name = self.ask_text("Mod sets", words, cur if pick[0] == "rename" else "")
+            if not name:
+                return None
+            args = ("new", name) if pick[0] == "new" else (pick[0], cur, name)
+            return self.after_action(lambda: self.ctl.profile(*args))
+        if pick[0] == "own":
+            on = self.ask("Mod sets", f"Own save folder for {cur}?", "With its own save folder, this set's game "
+                          "doesn't touch your other saves.", [("Own folder, start with a copy of my save", "copy"),
+                                                              ("Own folder, empty", "on"),
+                                                              ("Use the normal save folder", "off"),
+                                                              ("Cancel", None)], columns=1)
+            if on:
+                args = ("own-save", cur, "on", "--copy") if on == "copy" else ("own-save", cur, on)
+                self.after_action(lambda: self.ctl.profile(*args))
+            return None
+        gone = self.ask("Mod sets", "Delete which set?", "Its mods stay in the library.",
+                        [*[(n, n) for n in others], ("Cancel", None)], columns=2)
+        if gone and self.ask("Mod sets", f"Delete the mod set {gone}?", "Its mods stay in the library. An own save "
+                             "folder stays too.", [("Delete", True), ("Cancel", False)], default=1):
+            self.after_action(lambda: self.ctl.profile("delete", gone))
+        return None
 
     def on_close(self) -> None:
         job = self.ctl.jobs.get("main")
@@ -1796,7 +2345,30 @@ class LaunchBackend(Backend):
         return facts
 
     def start_plain(self):
-        return la.start_plain(self.install, tuple(getattr(self.mm, "MOD_ENV", ())), self.popen)
+        """Play without mods: first a save backup when the last start had mods (S3, modman.backup_before_start; a
+        failed copy raises OSError and the game doesn't start), then savagewind.exe as it is, then a start record (the
+        crash check and "what changed" read it). self.plain_notes: what the backup said."""
+        mm, lib, folder = self.mm, None, None
+        self.plain_notes = []
+        if hasattr(mm, "backup_before_start"):
+            with contextlib.suppress(Exception):
+                lib = mm.Library.load(self.root)
+        if lib is not None:
+            given = next((v for k, v in os.environ.items() if k.upper() == mm.ENV_SAVE and v), None)
+            folder = os.path.abspath(os.path.join(self.install, given) if given else os.path.join(self.install,
+                                                                                                    "save"))
+            try:
+                self.plain_notes = list(mm.backup_before_start(lib, folder, mm.launch_set(None, True)))
+            except mm.ModmanError as e:
+                raise OSError(str(e)) from None
+        proc = la.start_plain(self.install, tuple(getattr(self.mm, "MOD_ENV", ())), self.popen)
+        if lib is not None:
+            pid = getattr(proc, "pid", None)
+            with contextlib.suppress(Exception):
+                mm.history_append(lib, {"type": "start", "hash": None, "profile": lib.profile,
+                                        "pid": pid if isinstance(pid, int) else None, "mods": [], "no_mods": True,
+                                        "save": folder})
+        return proc
 
     def bonus_needed(self, mods: list[dict]) -> list[str]:
         """The ids of the bundled mods with after_on (launcher.read_bundled's) that are on, or that the game's Mods
@@ -2161,7 +2733,9 @@ class LaunchController(Controller):
             return
         self.game_open, self._gone = True, 0
         self.offer = None
-        self.status = Status("ok", ["Started Savage Wind without mods.", "Your mods are kept for next time."])
+        saved = any(x.startswith("Your save was backed up first") for x in getattr(self.backend, "plain_notes", []))
+        self.status = Status("ok", ["Started Savage Wind without mods.", "Your save was backed up first." if saved
+                                    else "Your mods are kept for next time."])
 
     # --- Breathalyzer Plus: the mods picked in the mod picker
 
