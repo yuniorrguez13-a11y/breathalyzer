@@ -239,11 +239,13 @@ class Checks(Temp):
         sigma = {"mod/\u03c3.txt": b"a", "mod/\u03c2.txt": b"b"}   # (Greek sigma and final sigma: one name to Windows)
         self.assertRefused(make_breath(self.tmp / "sigma.breath", sigma), "Windows sees as the same name",
                            unpack=False)
-        # (the shared name check in romfs_mods now refuses device names like COM1 with superscripts first)
-        self.assertRefused(make_breath(self.tmp / "com.breath", {"mod/COM\u00b9.txt": b"x"}), "isn't safe",
-                           unpack=False)
+        # (refused either by breath's own check or by the shared name check in romfs_mods, whichever runs first)
+        msg = self.assertRefused(make_breath(self.tmp / "com.breath", {"mod/COM\u00b9.txt": b"x"}), "",
+                                 unpack=False)
+        self.assertTrue("can't use safely" in msg or "isn't safe" in msg, msg)
         flipped = {"mod/photo\u202egnp.dll": DLL}   # (shows as "photolld.png")
-        self.assertRefused(make_breath(self.tmp / "flip.breath", flipped), "hidden marks", unpack=False)
+        msg = self.assertRefused(make_breath(self.tmp / "flip.breath", flipped), "", unpack=False)
+        self.assertTrue("hidden marks" in msg or "isn't safe" in msg, msg)
 
     def test_a_file_and_a_folder_with_one_name(self):
         both = {"mod/romfs/x": b"a file", "mod/romfs/x/y.bin": b"in a folder"}
