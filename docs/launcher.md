@@ -123,7 +123,11 @@ Play with friends on your home network, without a command line (Experimental; th
   copy per host, story backups): your own save is only read. Play plays your own save, as always.
 - **Who am I** shows the characters in big buttons by group (Hylians, Races, Monsters), each with Ready, Not tried
   yet (built, not yet seen in the game), Build first, Stand-in (Link: Breathalyzer doesn't build the Link body yet)
-  or Needs a mod (Linkle needs the Linkle mod). A press picks it: it is used from your next Host or Join, and while
+  or Needs a mod (Linkle needs the Linkle mod). Linkle is your own body: picking her turns The Linkle Mod on (anyone
+  else turns it off again, only when Who am I turned it on), with one restart: the next Play, Host or Join, or
+  "Restart the game now?" while it is open (default Later; it says when friends get disconnected; yes: the game
+  closes itself and starts again). Friends still see her as her costume (each PC builds it from The Linkle Mod's
+  files, on or off). A press picks it: it is used from your next Host or Join, and while
   your game is open it is sent at once (the page says "In your game now." once the game took it). **Each PC shows
   the others from its own built characters**: **Build the characters** (once, a few minutes, from your own game
   files; the line under the status shows how long it has run) lets you see your friends as who they picked, and they

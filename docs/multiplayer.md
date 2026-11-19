@@ -26,7 +26,10 @@ or router (home network only: there is no server of ours anywhere; the host's PC
    **Build the characters** once on every PC (a few minutes, from your own game files; nothing is downloaded). Then
    you see your friends as who they picked, and they see your pick if they built them too; anyone else is a stand-in
    figure. Link is a stand-in figure for now (Breathalyzer doesn't build the Link body yet). All 9 characters load in
-   the game.
+   the game. **Linkle** is your own body: picking her turns The Linkle Mod on (it must be in your mods: Home > Add
+   mod) and the game restarts once; your armor shows as hers and the inventory shows her. Picking anyone else turns
+   it off again (only if Who am I turned it on). Friends see her costume (their PC builds it from The Linkle Mod's
+   files, on or off). Restarting while you host or play together disconnects your friends: they join again after.
 3. **Host** (one of you): press **Host**. The first time you are asked for **your name** (everyone on your home
    network sees it: your world is called by it). Breathalyzer opens your world on your PC. The first time, it waits
    at **Your world is open**: Windows asks whether Python may use the network, press **Allow**; your Wi-Fi must be set

@@ -189,7 +189,9 @@ class Recipes(unittest.TestCase):
             r = charsel.RECIPES[cid]
             self.assertEqual(dict(r.own)["RunGear2"], "Common_Move_Run", cid)
             self.assertEqual(charsel.frame_ctrl(r)["RunGear2"], (charsel.SPRINT_RATE, None, None), cid)
-        self.assertEqual(charsel.RECIPES["linkle"].v, 2)
+        self.assertEqual(charsel.RECIPES["linkle"].v, 4)   # (v4, 2026-11-18: no costume, her body is Link's)
+        self.assertTrue(charsel.RECIPES["zelda"].legs)      # (v6: legs under the dress)
+        self.assertEqual(charsel.RECIPES["zelda"].v, 6)
         # the resolve: Paya's Wait comes from her own file, the rest of her own from the women's
         clips = {"Npc_Shiekah_Heir_Animation": {"Npc_Shiekah_Heir_Talk_Shy_Wait"},
                  "UMii_Common_Body_W_Animation": {c for _n, c in charsel.UMII_W}}
@@ -542,8 +544,8 @@ class Build(unittest.TestCase):
     def test_size_table_2026_11_14(self):
         """0.9.5: the characters mod ships a size table: the game's own with an entry for each pack of ours and each
         file of ours inside it (sized from the game's file of that kind nearest in size), the game's own files left
-        alone; Linkle's model from Link's (his entry over his size), her textures as play-as sizes Link's. No game
-        table: no table, said."""
+        alone; a model file of ours (Link's copy) from Link's (his entry over his size), its textures as play-as sizes
+        Link's. No game table: no table, said."""
         import struct
         import zlib
         import bnp
@@ -584,29 +586,27 @@ class Build(unittest.TestCase):
             self.assertEqual(shipped.get(n), v, n)
         self.assertEqual(shipped.get("Model/Link.bfres"), 1576)               # (the game's entries kept)
         self.assertEqual(charsel.check(self.out), {"goron": []})
-        # Linkle's model and textures, sized from Link's
-        lm = {"name": "The Linkle Mod", "version": "3.0.1", "fp": "f" * 16, "enabled": False, "where": "x",
-              "member": "y"}
-        with mock.patch.object(charsel, "linkle_mod", lambda lib: lm), \
-                mock.patch.object(charsel, "linkle_costume",
-                                  lambda w, m: (yaz0_compress(b"M" * 3000), yaz0_compress(b"X" * 5000),
-                                                {"parts": [], "left_out": []})):
+        # a model file of ours (Link's own copy, --model-copies; 2026-11-18: no Linkle costume any more), sized from
+        # Link's
+        pm = {"id": "hero", "name": "Hero Skin", "version": "1", "fp": "f" * 16, "linkle": False}
+        with mock.patch.object(charsel, "player_model_mod", lambda lib, romfs=None: pm):
             fake_romfs(self.root / "romfs3", {glp.DONOR_LINK: pause_pack(), **donors})
             r3 = self.root / "romfs3"
-            for n in ("Link.sbfres", "Link.Tex.sbfres"):
-                shutil.copy(self.romfs / "Model" / n, r3 / "Model" / n)
+            for n, d in (("Link.sbfres", link_model), ("Link.Tex.sbfres", link_tex)):   # (Yaz0, as the game's)
+                (r3 / "Model" / n).write_bytes(yaz0_compress(d))
             (r3 / "System" / "Resource").mkdir(parents=True)
             shutil.copy(table, r3 / "System" / "Resource" / table.name)
-            cat = charsel.build(r3, self.out, ["linkle", "goron"], library=self.root, cache=None, say=quiet)
+            cat = charsel.build(r3, self.out, ["link", "goron"], library=self.root, model_copies=True, cache=None,
+                                say=quiet)
         sizes = cat["sizes"]
         self.assertEqual(sizes["model_ratio"], 1.576)
-        self.assertEqual(sizes["entries"]["Model/SwChar_linkle.bfres"], bnp.round32(3000 * 1576 // 1000 + 1))
-        self.assertEqual(sizes["entries"]["Model/SwChar_linkle.Tex.bfres"],
-                         max(ukmm.estimate_entry(2000, 2000 + 8208, 5000, False), bnp.round32(5000) + 8208))
-        self.assertEqual(charsel.check(self.out), {"goron": [], "linkle": []})
+        self.assertEqual(sizes["entries"]["Model/SwChar_link.bfres"], bnp.round32(1000 * 1576 // 1000 + 1))
+        self.assertEqual(sizes["entries"]["Model/SwChar_link.Tex.bfres"],
+                         max(ukmm.estimate_entry(2000, 2000 + 8208, 2000, False), bnp.round32(2000) + 8208))
+        self.assertEqual(charsel.check(self.out), {"goron": [], "link": []})
         # a table that lost an entry is named by check; no game table: no table shipped, and said
         t = bnp.Rstb((self.out / "romfs" / charsel.RSTB_REL).read_bytes())
-        t.apply({"Model/SwChar_linkle.bfres": 0})
+        t.apply({"Model/SwChar_link.bfres": 0})
         (self.out / "romfs" / charsel.RSTB_REL).write_bytes(t.to_bytes())
         self.assertIn("sizes", charsel.check(self.out))
         table.unlink()
@@ -621,7 +621,7 @@ class Build(unittest.TestCase):
         self.assertIn("No pack for Dm_Npc_Zelda_Sibyl", cat["skipped"]["zelda"])   # no donor
         self.assertIn("isn't free", cat["skipped"]["goron"])                    # the name has a pack in the game
         self.assertIn("No pack for Enemy_Bokoblin_Junior", cat["skipped"]["bokoblin"])
-        self.assertIn("no Linkle mod", cat["skipped"]["linkle"])
+        self.assertIn("no Linkle mod", cat["skipped"]["linkle"])   # (her costume, friends' view: needs the mod)
         self.assertEqual(cat["built"], {})
 
     def test_missing_clip_skips(self):
@@ -668,7 +668,8 @@ class Build(unittest.TestCase):
         cat = self.build(["linkle"], {}, library=lib)                           # (no pause-menu Link here)
         self.assertEqual(cat["linkle"]["how"], "link-body")                    # the Link body *is* Linkle there
         self.assertIn(glp.DONOR_LINK, cat["skipped"]["linkle"])                 # her costume needs it: said
-        # her costume: the mod's own model (made up here, so no hair merged: said) on its own free name
+        # her costume, for the FRIENDS' view (review C1 2026-11-18: only the self-puppet went): the mod's own model
+        # (made up here, so no hair merged: said) on its own free name
         tmp = self.root / "romfs2"
         fake_romfs(tmp, {glp.DONOR_LINK: pause_pack()})
         cat = charsel.build(tmp, self.out, ["linkle"], library=lib, cache=None, say=quiet)
@@ -677,22 +678,23 @@ class Build(unittest.TestCase):
         self.assertEqual(cat["linkle"]["look"]["how"], "body only")
         self.assertTrue(any("hair and clothes" in n for n in cat["notes"]))
         self.assertEqual((self.out / "romfs" / "Model" / "SwChar_linkle.sbfres").read_bytes(), b"made-up Linkle model")
-        self.assertEqual(charsel.check(self.out), {"linkle": []})
         self.assertTrue(charsel.linkle_ready(cat))
         self.assertEqual(charsel.Looks(cat).actor({"id": "linkle"}), (charsel.SLOTS["linkle"], ""))
-        # the mod OFF (out\showcase-lib, 2026-11-13: "iam linkle just returns to Link"): still built from its files
+        # the mod OFF: said as off, Linkle isn't the Link body here
         (lib / "config.json").write_text(json.dumps({"mods": [
             {"id": "the-linkle-mod", "name": "The Linkle Mod", "enabled": False, "version": "3.0.1"}]}),
             encoding="utf-8")
         self.assertIsNone(charsel.player_model_mod(lib))
         self.assertEqual(charsel.linkle_mod(lib)["enabled"], False)
         cat = charsel.build(tmp, self.out, ["linkle"], library=lib, cache=None, say=quiet)
-        self.assertEqual((cat["linkle"]["how"], cat["linkle"]["mod_on"]), ("costume", False))
-        self.assertIn("linkle", cat["built"])
+        self.assertEqual((cat["linkle"]["how"], cat["linkle"]["mod"], cat["linkle"]["mod_on"]),
+                         ("off", "The Linkle Mod", False))
+        self.assertIn("linkle", cat["built"])                                  # (still built from its files)
         self.assertTrue(charsel.linkle_ready(cat))
-        # --model-copies: Link's own copy too
-        cat = charsel.build(tmp, self.out, ["linkle"], library=lib, model_copies=True, cache=None, say=quiet)
-        self.assertEqual(cat["built"]["linkle"]["slot"], charsel.SLOTS["linkle"])
+        self.assertEqual(charsel.Looks(cat).actor({"id": "linkle"}), (charsel.SLOTS["linkle"], ""))
+        # no costume built (an empty catalog) and the mod off: the Link body, said
+        self.assertEqual(charsel.Looks({"linkle": {"how": "off"}}).actor({"id": "linkle"}),
+                         (charsel.LINK_ACTOR, "the Linkle mod isn't installed here"))
         # another player-model mod: noted, not Linkle
         (lib / "config.json").write_text(json.dumps({"mods": [{"id": "off-mod", "name": "Hero Skin",
                                                                "enabled": True}]}), encoding="utf-8")
@@ -703,6 +705,107 @@ class Build(unittest.TestCase):
         cat = charsel.build(tmp, self.out, ["linkle"], library=lib, cache=None, say=quiet)
         self.assertIn("no Linkle mod in your mod library (on or off)", cat["skipped"]["linkle"])
         self.assertFalse(charsel.linkle_ready(cat))
+
+
+class LinkleBody(unittest.TestCase):
+    """2026-11-18, stage 1 of out/research/linkle-body-swap-plan.md: picking Linkle turns The Linkle Mod ON as Link's
+    own body (and the play-as mod OFF: it would win over her); anyone else turns it OFF."""
+
+    MODS = [{"id": "the-linkle-mod", "name": "The Linkle Mod", "enabled": False},
+            {"id": "giruka.ak47", "name": "Extra item", "enabled": True},
+            {"id": charsel.PLAYAS_ID, "name": "Play as Daruk", "enabled": True}]
+
+    @staticmethod
+    def body_mod(lib, mod_id="the-linkle-mod"):
+        """A mod folder in the library that replaces Link's model (what makes a "linkle" mod The Linkle Mod)."""
+        f = Path(lib) / "mods" / mod_id / "romfs" / "Model"
+        f.mkdir(parents=True, exist_ok=True)
+        (f / "Link.sbfres").write_bytes(b"Linkle")
+
+    def test_plan(self):
+        with tempfile.TemporaryDirectory(prefix="charsel-plan-") as lib:
+            self.body_mod(lib)
+            on = charsel.linkle_plan(self.MODS, True, lib)
+            self.assertEqual((on["mod"]["id"], on["enable"], on["disable"]), ("the-linkle-mod", ["the-linkle-mod"],
+                                                                             [charsel.PLAYAS_ID]))
+            self.assertEqual(charsel.linkle_plan(self.MODS, False, lib),
+                             {"mod": self.MODS[0], "enable": [], "disable": []})
+            lit = [dict(m, enabled=True) for m in self.MODS[:2]]
+            self.assertEqual(charsel.linkle_plan(lit, False, lib)["disable"], ["the-linkle-mod"])
+            self.assertEqual(charsel.linkle_plan(lit, True, lib)["enable"], [])      # (already on: nothing to do)
+            self.assertIsNone(charsel.linkle_plan(self.MODS[1:], True, lib)["mod"])
+            # review C2: a "linkle" add-on that doesn't replace Link's model isn't her, on or off, before or after her
+            hair = {"id": "linkle-hair", "name": "Linkle Hair Recolor", "enabled": True}
+            for mods in ([dict(self.MODS[0]), hair], [hair, dict(self.MODS[0])]):
+                on = charsel.linkle_plan(mods, True, lib)
+                self.assertEqual((on["mod"]["id"], on["enable"], on["disable"]),
+                                 ("the-linkle-mod", ["the-linkle-mod"], []))
+                self.assertEqual(charsel.linkle_plan([dict(m, enabled=True) for m in mods], False, lib)["disable"],
+                                 ["the-linkle-mod"])
+            self.assertIsNone(charsel.linkle_plan([hair], True, lib)["mod"])        # (only the add-on: not Ready)
+            self.assertEqual(charsel.linkle_plan([{"id": "x", "name": "linkle hair"}, {"name": "no id"}], True,
+                                                 lib)["enable"], [])
+            self.assertTrue(charsel.is_linkle_mod("the-linkle-mod", "", lib))
+            self.assertFalse(charsel.is_linkle_mod("linkle-hair", "Linkle Hair Recolor", lib))
+            self.assertFalse(charsel.is_linkle_mod("the-linkle-mod", "", None))
+
+    def test_who_am_i_undoes_only_its_own(self):
+        """Review C3: picking anyone else turns off only a Linkle Mod Who am I turned on (not one you turned on on
+        Home); C7: what it switched leaves the play-as state's turned_off (a later playas off can't turn it back on)."""
+        with tempfile.TemporaryDirectory(prefix="charsel-own-") as d:
+            self.body_mod(d)
+            st = Path(d) / "state.json"
+            charsel.save_playas({"id": "goron", "library": d, "turned_off": ["the-linkle-mod", "x"]}, st)
+            yours = [dict(self.MODS[0], enabled=True)]
+            off = charsel.linkle_plan(yours, False, d, owned=charsel.linkle_owned(st))
+            self.assertEqual(off["disable"], [])                          # (you turned it on: left on)
+            on = charsel.linkle_plan(self.MODS, True, d, owned=charsel.linkle_owned(st))
+            charsel.linkle_switched(on, True, st)
+            self.assertEqual(charsel.linkle_owned(st), ["the-linkle-mod"])
+            self.assertEqual(charsel.load_playas(st)["turned_off"], ["x"])
+            off = charsel.linkle_plan(yours, False, d, owned=charsel.linkle_owned(st))
+            self.assertEqual(off["disable"], ["the-linkle-mod"])          # (its own: turned off again)
+            charsel.linkle_switched(off, False, st)
+            self.assertEqual(charsel.linkle_owned(st), [])
+
+    def test_a_game_identical_link_model_doesnt_count(self):
+        """(out\\showcase-lib: Emote animations ships TitleBG.pack filled from the game, Link's model included; the
+        merge keeps The Linkle Mod's, so with the game's files it isn't "the mod that replaces Link's model")"""
+        with tempfile.TemporaryDirectory(prefix="charsel-pm-") as d:
+            root = Path(d)
+            romfs = root / "romfs"
+            (romfs / "Model").mkdir(parents=True)
+            (romfs / "Model" / "Link.sbfres").write_bytes(b"the game's Link")
+            lib = root / "lib"
+            for mid, data in (("the-linkle-mod", b"Linkle"), ("emotes", b"the game's Link")):
+                f = lib / "mods" / mid / "romfs" / "Model"
+                f.mkdir(parents=True)
+                (f / "Link.sbfres").write_bytes(data)
+            (lib / "config.json").write_text(json.dumps({"mods": [
+                {"id": "the-linkle-mod", "name": "The Linkle Mod", "enabled": True},
+                {"id": "emotes", "name": "Emote animations", "enabled": True}]}), encoding="utf-8")
+            self.assertEqual(charsel.player_model_mod(lib)["id"], "emotes")
+            pm = charsel.player_model_mod(lib, romfs=romfs)
+            self.assertEqual((pm["id"], pm["linkle"]), ("the-linkle-mod", True))
+
+    def test_in_the_library(self):
+        import modman as mm
+        with tempfile.TemporaryDirectory(prefix="charsel-linkle-") as d:
+            lib = mm.Library(d, None, [dict(m) for m in self.MODS])
+            lib.save()
+            self.body_mod(d)
+            res = charsel.linkle_body(True, library=d)
+            self.assertEqual(res, {"changed": ["The Linkle Mod", "Play as Daruk"], "mod": "The Linkle Mod"})
+            got = {m["id"]: m["enabled"] for m in mm.Library.load(d).mods}
+            self.assertEqual(got, {"the-linkle-mod": True, "giruka.ak47": True, charsel.PLAYAS_ID: False})
+            self.assertEqual(charsel.linkle_body(True, library=d)["changed"], [])
+            self.assertEqual(charsel.linkle_body(False, library=d)["changed"], ["The Linkle Mod"])
+            self.assertFalse(mm.Library.load(d).mods[0]["enabled"])
+            lib = mm.Library(d, None, [dict(self.MODS[1])])
+            lib.save()
+            with self.assertRaises(charsel.CharselError) as e:
+                charsel.linkle_body(True, library=d)
+            self.assertIn("Add it first", str(e.exception))
 
 
 class LooksHere(unittest.TestCase):

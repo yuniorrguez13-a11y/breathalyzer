@@ -9,7 +9,7 @@ its own game files; only the character's id goes over the network.
         --out DIR        where the mod folder goes (default out\\charsel-packs; never inside the game's files)
         --library DIR    your mod library (default: next to Savage Wind): finds the Linkle mod there (read only)
         --slot ID=ACTOR  put a character on another free actor name (if the in-game check says one doesn't load)
-        --model-copies   also Link and Linkle side by side (renamed model copies; not yet tried in the game)
+        --model-copies   also Link side by side (a renamed model copy; not yet tried in the game)
         --monster-link-clips   monsters climb, glide and swim with Link's clips (not yet tried in the game)
         --cloth off      no cloth physics (skirts, hair and capes stiff, as before 2026-11-14)
     python tools/charsel.py check [--out DIR]         read every built pack back, no game: sorted animation lists, one
@@ -23,6 +23,9 @@ its own game files; only the character's id goes over the network.
         --no-own-moves   Link's moves only        --retarget   fit Link's clips to the body [G]
         --no-add         build and check only     --library DIR / --out DIR / --romfs DIR
     python tools/charsel.py playas off                back to Link (and Linkle back on) from the next start
+    python tools/charsel.py playas linkle             be Linkle yourself from the next start: The Linkle Mod on as
+                                                      Link's own body (in your library; any play-as mod out)
+    python tools/charsel.py playas link               plain Link from the next start (The Linkle Mod off too)
     python tools/charsel.py playas check              read the built play-as mod back, no game
 
 A character pack is a small actor pack (14-19 KB unpacked without cloth, 45-140 KB with) that names the game's own
@@ -171,6 +174,7 @@ class Recipe:
     cloth: tuple = ()         # the donor's cloth parts (names in its physics file), most important first: the pack
     #                           gets them as cloth-only physics (cloth_physics), the last ones left out when the heap
     #                           estimate is short (fit_cloth). (): no physics
+    legs: bool = False        # Zelda: her model copied with a Hylian woman's legs under the dress (zelda_legs)
 
 
 # Cloth and hair physics per character (2026-11-14, the user: "if there's no skirt or hair physics you can't do the
@@ -190,8 +194,13 @@ CLOTH_MOBLIN = ("Cloth_A_Havok", "Cloth_B_Havok", "Cloth_C_Havok")
 RECIPES: dict[str, Recipe] = {r.id: r for r in (
     Recipe("link", "Link", "Hylians", "link", aliases=("hero",),
            looks="Works in the game (the Link body). Bald and in underwear: hair and clothes are armor actors."),
-    Recipe("linkle", "Linkle", "Hylians", "linkle", aliases=("linkel",), v=2,
-           looks="Needs The Linkle Mod in your mod library (on or off): her costume is built from its files."),
+    # Linkle (2026-11-18, stage 1 of out/research/linkle-body-swap-plan.md): no self-puppet any more. Picking her turns
+    # The Linkle Mod on as Link's OWN body (linkle_body: it replaces Link's player and armor models), with one restart,
+    # so every armor piece shows as hers and the inventory shows her. Friends still see her as her costume (built
+    # from The Linkle Mod's files on THEIR PC, on or off), or as their Link body when they have the mod on.
+    Recipe("linkle", "Linkle", "Hylians", "linkle", aliases=("linkel",), v=4,
+           looks="Your own body becomes Linkle (The Linkle Mod, one restart): your armor shows as hers and the "
+                 "inventory shows her. Needs The Linkle Mod in your mod library."),
     # Own moves (2026-11-14): the stock actors' own sets pick their stand and walk by the look file's personality
     # (Woman_Active -> Positive_*, Woman_Deflated -> Negative_*, else Default_*); Zelda, Mipha and Paya are
     # Woman_Normal, Urbosa Woman_Active on the men's sets (Man_Active / Man_Deflated / default), so all four play
@@ -200,10 +209,10 @@ RECIPES: dict[str, Recipe] = {r.id: r for r in (
     # run, which v3 used).
     Recipe("zelda", "Zelda", "Hylians", "pack", "Dm_Npc_Zelda_Sibyl",
            (("UMii_Common_Body_W_Animation", True), (PLAYER_ANIM, True)), _with(UMII_W, RunGear2="Common_Move_Run"),
-           load_mb=10.6, aliases=("princess",), v=5, ctrl=(("RunGear2", SPRINT_RATE, None, None),),
-           cloth=CLOTH_ZELDA,
+           load_mb=10.6, aliases=("princess",), v=6, ctrl=(("RunGear2", SPRINT_RATE, None, None),),
+           cloth=CLOTH_ZELDA, legs=True,
            looks="Her game actor's own stand, walk, run (sprint: her run, faster); Link's moves for the rest. "
-                 "Her dress, hair and necklace swing (cloth physics, not yet tried in the game)."),
+                 "Her dress, hair and necklace swing; legs under the dress (a Hylian woman's, in her skin tone)."),
     Recipe("hylian", "Hylian", "Hylians", "pack", "Npc_HatenoVillage004",
            (("UMii_Common_Body_M_Animation", True), (PLAYER_ANIM, True)), UMII_M, load_mb=11.5,
            aliases=("hateno", "villager"), looks="A Hateno villager: his own walk, Link's moves for the rest."),
@@ -286,7 +295,9 @@ FREE_SLOTS = DEMO_SLOTS + NPC_SLOTS + TALL_SLOTS
 SLOTS = {"zelda": DEMO_SLOTS[0], "goron": DEMO_SLOTS[1], "bokoblin": DEMO_SLOTS[2],
          "hylian": NPC_SLOTS[0], "sheikah": NPC_SLOTS[1], "zora": NPC_SLOTS[2], "rito": NPC_SLOTS[3],
          "gerudo": NPC_SLOTS[6], "moblin": TALL_SLOTS[1],   # (Urbosa: a bigger heap than the tall box, HEAP_BASE)
-         "linkle": NPC_SLOTS[4], "link": NPC_SLOTS[5]}     # (the last two: only with --model-copies)
+         "linkle": NPC_SLOTS[4], "link": NPC_SLOTS[5]}
+# (Link: only with --model-copies. Linkle: her costume, for the FRIENDS' view only (2026-11-18 review C1): your own
+# Linkle is The Linkle Mod as Link's body, so no self-puppet uses it.)
 SLOT_PROFILE = {**{s: "DemoNPC" for s in DEMO_SLOTS}, **{s: "NPC" for s in NPC_SLOTS + TALL_SLOTS}}
 
 
@@ -435,9 +446,9 @@ def here_catalog(folder=None, library=None) -> tuple[dict, str]:
 
 
 def linkle_ready(cat: dict | None) -> bool | None:
-    """Whether this PC can show Linkle (the wheel's Ready): her costume is built (and, in a deployed catalog, deployed),
-    or the Linkle Mod is on (the Link body is Linkle then). None: no catalog. (tools/mp_page.py and tools/mp/lobby.py
-    should ask this too.)"""
+    """Whether this PC shows Linkle (the wheel's Ready): her costume is built (friends who pick her show as it), or the
+    Linkle Mod was on when the characters were built (Link's body is Linkle then). None: no catalog. (tools/mp_page.py
+    and tools/mp/lobby.py ask this too.)"""
     if not cat:
         return None
     lk = cat.get("linkle") if isinstance(cat.get("linkle"), dict) else {}
@@ -455,7 +466,7 @@ class Looks:
         for cid, info in (catalog.get("built") or {}).items():
             slot = info.get("slot") if isinstance(info, dict) else None
             if cid in RECIPES and isinstance(slot, str) and slot in FREE_SLOTS:
-                self.slots[cid] = slot
+                self.slots[cid] = slot   # (Linkle's too: a friend who picks her shows as her costume)
         lk = catalog.get("linkle") if isinstance(catalog.get("linkle"), dict) else {}
         self.linkle_body = lk.get("how") == "link-body"   # Linkle mod here: the Link body *is* Linkle
         self.failed: set[str] = set()                      # slots that didn't load in this session
@@ -589,8 +600,11 @@ class Wheel:
         short = r.name.split(" (")[0]
         out = ["Who am I?", f"  {groups}", f"  <  {r.name}  >" + (f"   {st}" if st else ""),
                f"  Others see you as: {short}." + (f" You see yourself as {short} too, live in the game."
-                                                    if r.kind == "pack" or r.kind == "linkle" and self.linkle
-                                                    else " You play as: Link.")]
+                                                    if r.kind == "pack" else
+                                                    # (review C6: a pick here never switches mods)
+                                                    " To be Linkle yourself, pick her in Breathalyzer's Who am I "
+                                                    "(The Linkle Mod on, one restart)." if r.kind == "linkle" else
+                                                    " You play as: Link.")]
         if r.looks:
             out.append(f"  {r.looks}")
         if self.playas_note:
@@ -855,13 +869,16 @@ def _link_model_in(folder: Path) -> tuple[Path, str] | None:
     return None
 
 
-def player_model_mod(library) -> dict | None:
+def player_model_mod(library, romfs=None) -> dict | None:
     """The enabled mod that replaces Link's model (the last one wins), or None: {"id", "name", "version", "linkle",
-    "where", "member", "fp"} (fp: the first 16 hex of the model file's sha256). Reads only."""
+    "where", "member", "fp"} (fp: the first 16 hex of the model file's sha256). romfs (the game's files): a mod whose
+    Link model is the game's own byte for byte doesn't count (2026-11-18: Emote animations ships a whole TitleBG.pack
+    filled from the game, and the file-by-file merge keeps The Linkle Mod's model over it). Reads only."""
     found = None
+    game = model_file(Path(romfs), "Link") if romfs is not None else None
     for m in library_mods(library):
         hit = _link_model_in(m["folder"])
-        if hit:
+        if hit and not (game and _read_link_model(Path(hit[0]), hit[1]) == game):
             found = dict(m, where=str(hit[0]), member=hit[1])
     if found is None:
         return None
@@ -877,12 +894,17 @@ def _read_link_model(where: Path, member: str, tex: bool = False) -> bytes | Non
 
 
 def _read_mod_model(where: Path, member: str, name: str) -> bytes | None:
-    """Model/<name>.sbfres next to a mod's Link model (where/member as _link_model_in gives them), or None."""
+    """Model/<name>.sbfres next to a mod's Link model (where/member as _link_model_in gives them): in the same pack, or
+    loose in the mod's romfs Model folder (The Linkle Mod keeps her armor there [V]); None when neither has it."""
     from mp import ghost_link_pack as glp
     if not member:
         p = Path(where).with_name(f"{name}.sbfres")
         return p.read_bytes() if p.is_file() else None
-    return glp._sarc_member(Path(where), f"Model/{name}.sbfres")
+    got = glp._sarc_member(Path(where), f"Model/{name}.sbfres")
+    if got is None:
+        p = Path(where).parent.parent / "Model" / f"{name}.sbfres"    # (romfs/Pack/TitleBG.pack -> romfs/Model)
+        got = p.read_bytes() if p.is_file() else None
+    return got
 
 
 def linkle_mod(library) -> dict | None:
@@ -910,10 +932,11 @@ def linkle_mod(library) -> dict | None:
     return found
 
 
-# The Linkle costume: the Linkle Mod's body (its Model/Link) wears its default look (its Model/Armor_Default: the hair,
-# the skirt and the pouches, which the game puts on the player as armor). One model with both, so a costume pack shows
-# all of her: merge_parts puts each part's shapes on the body's skeleton.
+# The Linkle costume (friends' view: a friend who picks Linkle shows as this, review C1 2026-11-18): the Linkle Mod's
+# body (its Model/Link) wears its default look (its Model/Armor_Default: the hair, the skirt and the pouches, which the
+# game puts on the player as armor). One model with both, so a costume pack shows all of her.
 LINKLE_LOOK = "Armor_Default"
+# Parts merged onto a body (merge_parts: Zelda's legs on her model): each part's shapes go on the body's skeleton.
 PART_PREFIX = "SwPart"      # a part's material names: SwPart<k>_<name> (k: the part's number)
 REST_GAP = 1e-3             # m: a part bone may rest this far from the body's (else its bone-space shapes are left out)
 
@@ -924,7 +947,7 @@ def merge_parts(base, parts, tex_rename: dict | None = None) -> tuple[object, di
     part), each part vertex skinned to the merged skeleton's matrix for the same bone. Both bind poses must be their
     skeletons' rest (the game's models are: checked), so a vertex in model space stays where it was; a bone-space
     (rigid) part shape whose bone rests elsewhere in the base is left out. Materials: SwPart<k>_<name>, textures
-    renamed by tex_rename. Returns (the model, info)."""
+    renamed by tex_rename (one dict for all parts, or a list with one per part). Returns (the model, info)."""
     import copy
     import struct
     from wiiu_model import formats
@@ -948,7 +971,6 @@ def merge_parts(base, parts, tex_rename: dict | None = None) -> tuple[object, di
     new_rigid: list[int] = []
     pending: list[tuple] = []       # (vertex buffer, [(attribute, {part matrix: ("s"|"r", merged bone)})])
     info = {"parts": [], "shapes": 0, "left_out": [], "new_bones": 0}
-    ren = tex_rename or {}
 
     def check_bind(p):
         pw = _worlds(p.skeleton.bones)
@@ -960,6 +982,7 @@ def merge_parts(base, parts, tex_rename: dict | None = None) -> tuple[object, di
         return pw
 
     for k, part in enumerate(parts):
+        ren = (tex_rename[k] if isinstance(tex_rename, (list, tuple)) else tex_rename) or {}
         psk = part.skeleton
         if not psk.flags & EULER_ROT:
             raise CharselError(f"{part.name}: only Euler skeletons are merged here")
@@ -1075,6 +1098,252 @@ def merge_parts(base, parts, tex_rename: dict | None = None) -> tuple[object, di
     return m, info
 
 
+# Skin drawn with an NPC's material (2026-11-15). The game check: Linkle's skin came out strong orange-yellow while
+# her hair, top and shorts looked right, and the imported avatar's skin lime green while her dress looked right. The
+# wrong ones all drew with Link's PLAYER materials (Linkle's skin: priority hint "player", the player's own skin
+# colour calculation; the avatar: Link's underwear and eyelashes materials); every costume that looks right draws with
+# an NPC's own (Zelda, Urbosa, Mipha...) [V: in-game shots]. Why the player's skin goes wrong on another actor isn't
+# known [G]. So such skin now draws with Zelda's skin material (Npc_Zelda_Miko Mt_Skin, the game's file on this PC),
+# its textures pointed at the costume's own.
+NPC_SKIN_MODEL, NPC_SKIN_MAT = "Npc_Zelda_Miko", "Mt_Skin"
+NPC_SKIN_ROLES = {"_a0": ("_a0",), "_a1": ("_gn0", "_a1"), "_n0": ("_n0",), "_s0": ("_s0",), "_ao0": ("_ao0",)}
+FLAT_DAMAGE, FLAT_AO = "SwFlat_Damage_Alb", "SwFlat_AO"
+
+
+def _hint(mat) -> str:
+    return next((str(r.values[0]) for r in mat.render_infos if r.name == "gsys_priority_hint" and r.values), "")
+
+
+def npc_skin(romfs) -> tuple[object, dict[str, object]]:
+    """(Zelda's skin material, {texture name: Texture} of its texture file, as the flat fill-ins' templates) from
+    the game's files."""
+    import copy
+    from wiiu_model import nx_bfres, nx_model
+    raw, tex = model_file(Path(romfs), NPC_SKIN_MODEL), model_file(Path(romfs), NPC_SKIN_MODEL + ".Tex")
+    if not raw or not tex:
+        raise CharselError(f"the game's {NPC_SKIN_MODEL} model isn't in your files")
+    mats = {m.name: m for mo in nx_model.read(_unyaz(raw)).models for m in mo.materials}
+    if NPC_SKIN_MAT not in mats:
+        raise CharselError(f"{NPC_SKIN_MODEL} has no {NPC_SKIN_MAT} (other game version?)")
+    m = copy.deepcopy(mats[NPC_SKIN_MAT])
+    if [s.name for s in m.samplers] != list(NPC_SKIN_ROLES):
+        raise CharselError(f"{NPC_SKIN_MODEL}'s {NPC_SKIN_MAT} has samplers {[s.name for s in m.samplers]}")
+    return m, {t.name: t for t in nx_bfres.read_textures(_unyaz(tex)).textures}
+
+
+def flat_texture(tpl, name: str, value: int):
+    """A 4x4 texture of one value in tpl's format (BC1: grey value, BC4: value; others refused), one level."""
+    import copy
+    import struct
+    kind = tpl.format >> 8
+    if kind == 0x1a:
+        v5, v6 = round(value * 31 / 255), round(value * 63 / 255)
+        c = (v5 << 11) | (v6 << 5) | v5
+        block = struct.pack("<HHI", c, c, 0)
+    elif kind == 0x1d:
+        block = bytes((value, value)) + bytes(6)
+    else:
+        raise CharselError(f"no flat texture in format {tpl.format:#x}")
+    t = copy.deepcopy(tpl)
+    t.name, t.width, t.height, t.levels = name, 4, 4, [block]
+    t.extra.pop("nx.block_height_log2", None)
+    return t
+
+
+def flat_skin_fills(tex_of: dict) -> list:
+    """The two fill-ins npc_skin_materials may point at: no damage (white) and no ambient shade (white)."""
+    return [flat_texture(tex_of["Npc_Zelda_Skin_Damage_Alb"], FLAT_DAMAGE, 255),
+            flat_texture(tex_of["Npc_Zelda_Skin_AO"], FLAT_AO, 255)]
+
+
+def ensure_uv1(vb) -> bool:
+    """Give a vertex buffer a second texture coordinate (_u1, a copy of _u0, in a buffer of its own) when it has none:
+    the NPC skin material reads it (its shade map). Returns whether one was added."""
+    names = {a.name for a in vb.attributes}
+    if "_u1" in names or "_u0" not in names:
+        return False
+    from wiiu_model import formats
+    from wiiu_model.neutral import Attribute
+    a = next(x for x in vb.attributes if x.name == "_u0")
+    size = sum(formats.attr_component_sizes(a.format))
+    src, stride = vb.buffers[a.buffer], vb.strides[a.buffer]
+    data = b"".join(src[v * stride + a.offset:v * stride + a.offset + size] for v in range(vb.vertex_count))
+    vb.attributes.append(Attribute("_u1", a.format, 0, len(vb.buffers)))
+    vb.buffers.append(data)
+    vb.strides.append(size)
+    return True
+
+
+def npc_skin_materials(model, tmpl, pick=lambda m: _hint(m) == "player") -> list[str]:
+    """Every material pick() takes (default: the player's own, priority hint "player") becomes a copy of tmpl (Zelda's
+    skin material) under its own name and hide groups, its samplers pointed at the material's own textures by role
+    (damage: _gn0; none: FLAT_DAMAGE / FLAT_AO); the shapes drawn with one get _u1. Returns the materials changed."""
+    import copy
+    done = []
+    for i, m in enumerate(model.materials):
+        if not pick(m):
+            continue
+        own = {s.name: t for s, t in zip(m.samplers, m.textures)}
+        new = copy.deepcopy(tmpl)
+        new.name, new.user_data = m.name, copy.deepcopy(m.user_data)
+        new.textures = []
+        for s in new.samplers:
+            t = next((own[r] for r in NPC_SKIN_ROLES.get(s.name, ()) if r in own), None)
+            new.textures.append(t or (FLAT_AO if s.name == "_ao0" else FLAT_DAMAGE))
+        model.materials[i] = new
+        done.append(m.name)
+        for sh in model.shapes:
+            if sh.material == i:
+                ensure_uv1(model.vertex_buffers[sh.vertex_buffer])
+    return done
+
+
+# Legs for Zelda (2026-11-15, the user's pick after the game check: "zelda_run": her sandals floated under the
+# dress, no legs). Her model (Npc_Zelda_Miko) has skin for the arms, the neck, the feet and a few strips, nothing from
+# the ankle to the hip, where her long dress swings open when she runs [V: its skin vertices by height]. The user
+# asked for a Hylian woman's legs, but no woman's body in the game has bare knees or thighs: every UMii_*_Body*_W_*
+# has skin only up to mid-shin (UMii_Hylia_BodyC_W_005: ankle to 0.45 m once fitted) [V: survey 2026-11-15]. The
+# slim Hylian body that does is Link's own bare legs (the game's Armor_Default_Lower, under his shorts: calves, knees
+# and the lower thighs, 0.10-0.75 m once fitted to her). Each vertex is moved from the donor's leg bones onto Zelda's
+# (her bones' rest turns, stretched along each bone to her lengths: her knees sit higher), coloured as her own skin
+# (the donor's skin texture tinted to her skin texture's average), drawn with her own skin material, and merged into a
+# copy of her model (Model/SwChar_zelda.sbfres, her textures beside it). His feet are left out (she has her own and
+# her sandals). Her dress, hair and cloth physics stay as they are.
+LEGS_DONOR = ("Armor_Default", "Armor_Default_Lower")    # (model file, model in it)
+LEGS_TEX_FILES = ("Armor_Default.Tex", "Link.Tex")       # where its skin material's textures are (in this order)
+LEGS_KEEP = ("Leg_1", "Leg_2")           # a triangle is kept when a corner is mostly on these (thigh, calf)...
+LEGS_DROP = ("Toe",)                     # ...and none on these (his feet: she has her own)
+LEGS_NEXT = {"Leg_1": "Leg_2", "Leg_2": "Ankle", "Ankle": "Toe"}
+LEGS_TEX = ("SwLegs_Alb", "SwLegs_Nrm", "SwLegs_Spm")
+
+
+def _s10(v: int) -> float:
+    return (v - 1024 if v & 512 else v) / 511
+
+
+def fit_legs(donor, base, keep=LEGS_KEEP, drop=LEGS_DROP) -> tuple[list, list, list, list, list[int], dict]:
+    """The donor body's leg skin moved onto `base`'s leg bones: (positions, normals, uvs, [(4 BASE smooth-matrix
+    indices, 4 u8 weights)], triangle corner list, info). Only the skin material's shapes; a triangle is kept when a
+    corner weighs most on a `keep` bone and none on a `drop` one (the feet). A donor bone the base lacks (Link's knee
+    and ankle helpers) counts as its nearest ancestor the base has. Each vertex is moved by its bones' fits (base world
+    . stretch along the bone to the base's length . donor world^-1), blended by weight; only the shape's skin_count
+    influences are read (a 4th byte past them is padding)."""
+    import math
+    import struct
+    dsk, bsk = donor.skeleton, base.skeleton
+    dn, bn = {b.name: i for i, b in enumerate(dsk.bones)}, {b.name: i for i, b in enumerate(bsk.bones)}
+    dw, bw = _worlds(dsk.bones), _worlds(bsk.bones)
+
+    def as_base(i):              # (donor bone -> the donor bone of the same name as its base target)
+        while i >= 0 and dsk.bones[i].name not in bn:
+            i = dsk.bones[i].parent
+        return i
+
+    def smooth_of(j):            # (base bone -> its smooth matrix, or its nearest ancestor's)
+        while j >= 0 and bsk.bones[j].smooth_index < 0:
+            j = bsk.bones[j].parent
+        return max(0, bsk.bones[j].smooth_index) if j >= 0 else 0
+    fits: dict[int, tuple] = {}
+    stretch = {}
+    for i in range(len(dsk.bones)):
+        d = as_base(i)
+        if d < 0:
+            continue
+        name = dsk.bones[d].name
+        j = bn[name]
+        side = name[-2:] if name[-2:] in ("_L", "_R") else ""
+        stem = name[:-2] if side else name
+        k, axis = 1.0, (1.0, 0.0, 0.0)
+        nxt = LEGS_NEXT.get(stem)
+        if nxt and nxt + side in dn and nxt + side in bn:
+            dv = [dw[dn[nxt + side]][r][3] - dw[d][r][3] for r in range(3)]
+            dl = math.sqrt(sum(c * c for c in dv))
+            bl = math.dist([bw[j][r][3] for r in range(3)], [bw[bn[nxt + side]][r][3] for r in range(3)])
+            if dl > 1e-4:
+                k = bl / dl
+                loc = [sum(dw[d][r][c] * dv[r] for r in range(3)) / dl for c in range(3)]   # (in the bone's frame)
+                n = math.sqrt(sum(c * c for c in loc)) or 1.0
+                axis = tuple(c / n for c in loc)
+            stretch[name] = round(k, 3)
+        sc = [[(1.0 if r == c else 0.0) + (k - 1.0) * axis[r] * axis[c] for c in range(3)] + [0.0] for r in range(3)]
+        sc.append([0.0, 0.0, 0.0, 1.0])
+        fits[i] = (_mul(_mul(bw[j], sc), _inv(dw[d])), _mul(bw[j], _inv(dw[d])), j, name)
+    pos, nrm, uv, infl, tris = [], [], [], [], []
+    stems = lambda names: {n + s for n in names for s in ("_L", "_R")}      # noqa: E731
+    keep_n, drop_n = stems(keep), stems(drop)
+    vmap: dict[tuple, int] = {}
+    for sh in donor.shapes:
+        if "Skin" not in donor.materials[sh.material].name or sh.skin_count == 0:
+            continue
+        vb = donor.vertex_buffers[sh.vertex_buffer]
+        at = {a.name: a for a in vb.attributes}
+        if not {"_p0", "_n0", "_u0", "_i0", "_w0"} <= set(at):
+            continue
+        sc_n = sh.skin_count
+
+        def val(a, v):
+            return _attr_values(a.format, vb.buffers[a.buffer], v * vb.strides[a.buffer] + a.offset)
+
+        def infl_of(v):
+            ix, w = val(at["_i0"], v)[:sc_n], val(at["_w0"], v)[:sc_n]
+            return [(dsk.matrix_to_bone[int(m)], wt) for m, wt in zip(ix, w) if wt > 0]
+        main: dict[int, str] = {}
+
+        def main_name(v):
+            if v not in main:
+                inf = infl_of(v)
+                b = max(inf, key=lambda x: x[1])[0] if inf else -1
+                main[v] = fits[b][3] if b in fits else ""
+            return main[v]
+        m0 = sh.meshes[0]
+        if m0.primitive != "triangles":
+            continue
+        size = {"u8": 1, "u16": 2, "u32": 4}[m0.index_format]
+        idx = list(struct.unpack_from(f"<{m0.index_count}{'BHI'[size // 2]}", m0.indices))
+        for t in range(0, len(idx) - 2, 3):
+            tri = [idx[t] + m0.first_vertex, idx[t + 1] + m0.first_vertex, idx[t + 2] + m0.first_vertex]
+            names = [main_name(v) for v in tri]
+            if not any(n in keep_n for n in names) or any(n in drop_n for n in names):
+                continue
+            for v in tri:
+                key = (sh.vertex_buffer, v)
+                if key not in vmap:
+                    p = val(at["_p0"], v)[:3]
+                    nw = struct.unpack_from("<I", vb.buffers[at["_n0"].buffer],
+                                            v * vb.strides[at["_n0"].buffer] + at["_n0"].offset)[0]
+                    n = (_s10(nw & 1023), _s10((nw >> 10) & 1023), _s10((nw >> 20) & 1023))
+                    q, qn, tot = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0
+                    mw: dict[int, float] = {}
+                    for b, wt in infl_of(v):
+                        if b not in fits:
+                            continue
+                        f, r_, j, _n = fits[b]
+                        for r in range(3):
+                            q[r] += wt * (sum(f[r][c] * p[c] for c in range(3)) + f[r][3])
+                            qn[r] += wt * sum(r_[r][c] * n[c] for c in range(3))
+                        tot += wt
+                        m = smooth_of(j)
+                        mw[m] = mw.get(m, 0.0) + wt
+                    if tot <= 0:
+                        raise CharselError(f"{donor.name}: a leg vertex has no bone the base has")
+                    ln = math.sqrt(sum(c * c for c in qn)) or 1.0
+                    vmap[key] = len(pos)
+                    pos.append(tuple(c / tot for c in q))
+                    nrm.append(tuple(c / ln for c in qn))
+                    uv.append(tuple(val(at["_u0"], v)[:2]))
+                    top = sorted(mw.items(), key=lambda kv: -kv[1])[:4]
+                    wq = [round(255 * w_ / tot) for _m, w_ in top]
+                    wq[0] += 255 - sum(wq)
+                    ixs = [m for m, _w in top]
+                    infl.append((ixs + [ixs[0]] * (4 - len(ixs)), wq + [0] * (4 - len(wq))))
+                tris.append(vmap[key])
+    if not tris:
+        raise CharselError(f"{donor.name} has no leg skin on {', '.join(keep)}")
+    ys = [p[1] for p in pos]
+    return pos, nrm, uv, infl, tris, {"donor": donor.name, "vertices": len(pos), "triangles": len(tris) // 3,
+                                      "stretch": stretch, "y": (round(min(ys), 3), round(max(ys), 3))}
+
+
 def linkle_costume(where, member) -> tuple[bytes, bytes, dict]:
     """(model, textures, info) of the Linkle costume, from the Linkle Mod's own files (where/member: linkle_mod's):
     its Link model with its default look (Armor_Default: hair, skirt, pouches) merged on, and its Link textures with
@@ -1105,6 +1374,124 @@ def linkle_costume(where, member) -> tuple[bytes, bytes, dict]:
         raise CharselError(f"the Linkle costume model fails the self-check: {bad[:3]}")
     info.update(textures=len(tex_names), texture_renames=rename)
     return _yaz(raw), _yaz(tex_raw), info
+
+
+def tinted_texture(src_tex, like_tex, name: str, max_side: int = 512):
+    """src_tex (a BC1 colour texture) recoloured so its average is like_tex's, as a new BC1 sRGB texture with mips
+    (Pillow); both read with menu_bg's decoder."""
+    import menu_bg
+    import vrm_import as vi
+    Image = menu_bg.pillow()
+    if Image is None:
+        raise CharselError("Zelda's legs need Pillow for their texture (pip install pillow)")
+
+    def rgba(t):
+        if t.format >> 8 != 0x1a:
+            raise CharselError(f"{t.name} isn't a BC1 texture")
+        return Image.frombytes("RGBA", (t.width, t.height), bytes(menu_bg.decode_bc1(t.levels[0], t.width, t.height)))
+
+    def mean(img):
+        small = img.convert("RGB").resize((1, 1), 2)
+        return small.getpixel((0, 0))
+    img, like = rgba(src_tex), rgba(like_tex)
+    if max(img.size) > max_side:
+        f = max_side / max(img.size)
+        img = img.resize((max(4, round(img.width * f)), max(4, round(img.height * f))), 1)
+    ms, ml = mean(img), mean(like)
+    r, g, b, a = img.split()
+    chans = [c.point([max(0, min(255, round(v * ml[k] / max(1, ms[k])))) for v in range(256)])
+             for k, c in enumerate((r, g, b))]
+    out = Image.merge("RGBA", chans + [Image.new("L", img.size, 255)])
+    return vi._texture(src_tex, name, out, False), {"donor_mean": ms, "her_mean": ml}
+
+
+def zelda_legs(romfs, folder: str) -> tuple[bytes, bytes, dict]:
+    """(model, textures, info): Zelda's game model with bare legs (LEGS_DONOR's, fitted to her) under her dress, named
+    as Model/<folder> (own_names). Game files only, read only."""
+    import copy
+    import struct
+    import vrm_import as vi
+    from wiiu_model import checks, nx_bfres, nx_model
+    from wiiu_model.convert import set_texinfo
+    from wiiu_model.neutral import Mesh, Model, ResFile, TextureSet
+    romfs = Path(romfs)
+    zraw, ztex = model_file(romfs, NPC_SKIN_MODEL), model_file(romfs, NPC_SKIN_MODEL + ".Tex")
+    draw = model_file(romfs, LEGS_DONOR[0])
+    if not (zraw and ztex and draw):
+        raise CharselError(f"the game's {NPC_SKIN_MODEL} or {LEGS_DONOR[0]} model isn't in your files")
+    zres = nx_model.read(_unyaz(zraw))
+    if len(zres.models) != 1:
+        raise CharselError(f"{NPC_SKIN_MODEL} has {len(zres.models)} models, expected 1")
+    zelda = zres.models[0]
+    donor = next((m for m in nx_model.read(_unyaz(draw)).models if m.name == LEGS_DONOR[1]), None)
+    if donor is None:
+        raise CharselError(f"the game's {LEGS_DONOR[0]} has no {LEGS_DONOR[1]}")
+    pos, nrm, uv, infl, tris, info = fit_legs(donor, zelda)
+    zts = nx_bfres.read_textures(_unyaz(ztex))
+    zt = {t.name: t for t in zts.textures}
+    dmat = next(m for m in donor.materials if "Skin" in m.name)
+    dt: dict = {}
+    for f in reversed(LEGS_TEX_FILES):      # (the first file listed wins a name)
+        data = model_file(romfs, f)
+        if data:
+            dt.update({t.name: t for t in nx_bfres.read_textures(_unyaz(data)).textures})
+    own = {s.name: t for s, t in zip(dmat.samplers, dmat.textures)}
+    if any(own.get(s) not in dt for s in ("_a0", "_n0", "_s0")):
+        raise CharselError(f"{LEGS_DONOR[1]}'s skin textures aren't in {' or '.join(LEGS_TEX_FILES)}")
+    zmat = next(m for m in zelda.materials if m.name == NPC_SKIN_MAT)
+    zown = {s.name: t for s, t in zip(zmat.samplers, zmat.textures)}
+    alb, tint = tinted_texture(dt[own["_a0"]], zt[zown["_a0"]], LEGS_TEX[0])
+    nrm_t, spm_t = copy.deepcopy(dt[own["_n0"]]), copy.deepcopy(dt[own["_s0"]])
+    nrm_t.name, spm_t.name = LEGS_TEX[1], LEGS_TEX[2]
+    extra = [alb, nrm_t, spm_t] + flat_skin_fills(zt)
+    mat = copy.deepcopy(zmat)
+    mat.name = "SwLegs_" + NPC_SKIN_MAT
+    mat.textures = [{"_a0": LEGS_TEX[0], "_a1": FLAT_DAMAGE, "_n0": LEGS_TEX[1], "_s0": LEGS_TEX[2],
+                     "_ao0": FLAT_AO}[s.name] for s in mat.samplers]
+    vb = vi.vertex_buffer(pos, nrm, uv, infl)
+    tpl = next(s for s in zelda.shapes if zelda.materials[s.material].name == NPC_SKIN_MAT)
+    sh = copy.deepcopy(tpl)
+    sh.name, sh.material, sh.vertex_buffer, sh.bone = "SwLegs__" + NPC_SKIN_MAT, 0, 0, 0
+    sh.skin_count, sh.key_shapes = 4, []
+    sh.skin_bones = sorted({zelda.skeleton.matrix_to_bone[i] for ix, _w in infl for i in ix})
+    sh.meshes = [Mesh("triangles", "u16", len(tris), struct.pack(f"<{len(tris)}H", *tris), 0, [(0, len(tris))])]
+    box = (0.0, 0.5, 0.0, 0.6, 0.6, 0.6)
+    sh.bounds, sh.radii = [box, box], [1.1]
+    # (the part is skinned to Zelda's own matrices, so it rides on her skeleton: no new bones)
+    part = Model(LEGS_DONOR[1], donor.path, copy.deepcopy(zelda.skeleton), [vb], [sh], [mat], [], vb.vertex_count, {})
+    model, minfo = merge_parts(zelda, [part])
+    info.update(tint=tint, new_bones=minfo["new_bones"], bones=minfo["bones"])
+    ts = TextureSet(zts.name, zts.textures + extra, "model", dict(zts.extra))
+    out = ResFile(zres.name, [model], [], [], [copy.deepcopy(e) for e in zres.external], dict(zres.extra))
+    set_texinfo(out, len(ts.textures))
+    raw = nx_model.write(out)
+    bad = checks.switch_model_problems(raw)
+    if bad:
+        raise CharselError(f"Zelda's model with legs fails the self-check: {bad[:3]}")
+    m, t, _ = own_names(_yaz(raw), _yaz(nx_bfres.write_textures(ts)), folder)
+    return m, t, info
+
+
+def repoint_model_list(model_list: bytes, old: str, new: str) -> tuple[bytes, int]:
+    """A model list whose ModelData folders and units named `old` name `new`. Returns (the file, how many changed)."""
+    import aamp
+    from aamp import Param, name_hash
+    ml = aamp.load(model_list)
+    md = ml.list("ModelData")
+    n = 0
+    for entry in (md.lists.values() if md else ()):
+        base = entry.object("Base")
+        f = base.get(name_hash("Folder")) if base else None
+        if f is not None and f.value == old:
+            base[name_hash("Folder")] = Param(f.type, new)
+            n += 1
+        ul = entry.lists.get(name_hash("Unit"))
+        for o in (ul.objects.values() if ul else ()):
+            p = o.get(name_hash("UnitName"))
+            if p is not None and p.value == old:
+                o[name_hash("UnitName")] = Param(p.type, new)
+                n += 1
+    return aamp.dump(ml), n
 
 
 # ------------------------------------------------------------------------------------------------ the game's files
@@ -2092,22 +2479,20 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
         pause = glp.read_pack(glp.find_pack(romfs, glp.DONOR_LINK)) if model_copies else None
     except (glp.PackError, FormatError, aamp.AampError, OSError) as e:
         raise CharselError(f"a game file didn't read as expected: {e}") from None
+    catalog_note = ""
     if pause is None and lm and "linkle" in ids:    # (Linkle's costume: the pause-menu Link's model list)
         try:
             pause = glp.read_pack(glp.find_pack(romfs, glp.DONOR_LINK))
         except (glp.PackError, FormatError, aamp.AampError, OSError) as e:
             lm = None
             catalog_note = f"Linkle wasn't built: the game's {glp.DONOR_LINK} didn't read ({e})"
-        else:
-            catalog_note = ""
-    else:
-        catalog_note = ""
     clips = ClipCache(romfs, cache)
-    pm = player_model_mod(library) if library else None
+    pm = player_model_mod(library, romfs=romfs) if library else None
     catalog = {"format": 1, "builder": VERSION, "mod": MOD_ID, "built": dict(keep), "kept": sorted(keep),
                "skipped": {k: v for k, v in (old.get("skipped") or {}).items()
                            if not all_ids and k in RECIPES and k not in ids and k not in keep and isinstance(v, str)},
-               "notes": notes, "linkle": {"how": "missing"}, "link_modded": bool(pm),
+               "notes": notes, "linkle": ({"how": "off", "mod": lm["name"], "version": lm["version"]} if lm
+                                          else {"how": "missing"}), "link_modded": bool(pm),
                "model_copies": bool(model_copies) or any(RECIPES[k].kind != "pack" for k in keep),
                "monster_link_clips": bool(monster_link)}
     if imported:
@@ -2126,6 +2511,7 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
         need = heap = bones = None
         link_rt, swap = True, False
         cl_info: dict | None = None
+        legs_info: dict | None = None
         try:
             if r.kind == "pack":
                 rest = "link" if (monster_link and r.cat == "Monsters") else None
@@ -2184,12 +2570,26 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
                     notes.append(f"{r.name} may not fit {slot}'s heap (about {need:,} of {heap:,} bytes): if it "
                                  "doesn't load, move it to a bigger free name with --slot.")
                 files = make_pack(r, slot, profile, template, donor, rest, anims, names, physics)
+                if r.legs:    # (Zelda: her model copied with legs; her pack's model list names the copy)
+                    legs_info = None
+                    try:
+                        if donor_model(r, donor) != NPC_SKIN_MODEL:
+                            raise CharselError(f"her model isn't {NPC_SKIN_MODEL}")
+                        lmodel, ltex, legs_info = zelda_legs(romfs, ours(cid))
+                        ml_rel = f"Actor/ModelList/{ours(cid)}.bmodellist"
+                        files[ml_rel], n = repoint_model_list(files[ml_rel], NPC_SKIN_MODEL, ours(cid))
+                        if not n:
+                            raise CharselError("her model list doesn't name her model")
+                        models[f"Model/{ours(cid)}.sbfres"], models[f"Model/{ours(cid)}.Tex.sbfres"] = lmodel, ltex
+                    except Exception as e:   # (any failure: her game model as before, said)
+                        legs_info = {"off": str(e)[:200]}
+                        notes.append(f"{r.name}'s legs couldn't be added ({str(e)[:120]}): her game model as before.")
             elif cid == "linkle" and lm or model_copies and cid == "link" and pm:
                 slot = table[cid]
                 profile, problems = check_slot(romfs, slot, ainfo)
                 if problems:
                     raise CharselError("; ".join(problems))
-                if cid == "linkle":   # her costume: the mod's body wearing its own hair and clothes
+                if cid == "linkle":   # her costume (friends' view): the mod's body wearing its own hair and clothes
                     src = Path(lm["where"]), lm["member"]
                     try:
                         model, tex, linfo = linkle_costume(*src)
@@ -2201,8 +2601,6 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
                                      "is the Linkle Mod's body only.")
                     catalog["linkle"].update(costume=slot, mod=lm["name"], version=lm["version"], fp=lm["fp"],
                                              mod_on=lm["enabled"], look=look)
-                    if catalog["linkle"]["how"] == "missing":
-                        catalog["linkle"]["how"] = "costume"
                 else:
                     model, tex = model_file(romfs, "Link"), model_file(romfs, "Link.Tex")
                 if not model or not tex:
@@ -2218,9 +2616,9 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
             else:
                 if cid == "linkle" and catalog_note:
                     catalog["skipped"][cid] = catalog_note
-                elif cid == "linkle" and catalog["linkle"]["how"] == "missing":
-                    catalog["skipped"][cid] = ("no Linkle mod in your mod library (on or off): Linkle can't be built, "
-                                               "so `iam linkle` and friends who pick Linkle show Link")
+                elif cid == "linkle" and not lm:
+                    catalog["skipped"][cid] = ("no Linkle mod in your mod library (on or off): her costume can't be "
+                                               "built, so friends who pick Linkle show as Link here")
                 continue
         except (CharselError, glp.PackError, FormatError, aamp.AampError, OSError) as e:
             catalog["skipped"][cid] = str(e)[:300]
@@ -2243,6 +2641,9 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
                                          link_retarget=link_rt)
         if cl_info is not None:
             catalog["built"][cid]["cloth"] = cl_info
+        if r.kind == "pack" and r.legs and legs_info is not None:
+            catalog["built"][cid]["legs"] = {k: legs_info[k] for k in ("off", "donor", "vertices", "triangles", "y")
+                                             if k in legs_info}
         if r.kind == "pack" and swap:
             catalog["built"][cid]["anim_targets"] = "link-body"
         say(f"  {r.name:16} on {slot:31} {len(files):3} files, {unpacked:6,} B unpacked, own clips "
@@ -2402,7 +2803,7 @@ def write_sizes(romfs, out, say=print) -> dict:
             target.unlink()
         return {"entries": {}, "table": False,
                 "note": "The game's size table isn't in your extracted romfs: the characters have no size entries "
-                        "(Linkle's model may not load)."}
+                        "(Zelda's and an imported avatar's own models may not load)."}
     sizes, info = size_entries(Path(romfs), out / "romfs", rstb)
     if not sizes:
         if target.is_file():
@@ -2861,7 +3262,7 @@ def body_of(romfs: Path, r: Recipe) -> tuple[str, str]:
     from mp import ghost_link_pack as glp
     if r.id not in PLAYAS_PEOPLE:
         why = ("monsters' skeletons start 20-60 degrees off Link's" if r.cat == "Monsters"
-               else "Link and Linkle are the player already: use playas off")
+               else "Link and Linkle are the player already: use playas off, or playas linkle")
         raise CharselError(f"{r.name} can't be played as yet ({why})")
     donor = glp.read_pack(glp.find_pack(Path(romfs), r.donor))
     _, lt = glp.link_target(donor, r.donor)
@@ -3260,6 +3661,103 @@ def playas_word(cid: str) -> str:
     return short if short in r.aliases else cid
 
 
+# ------------------------------------------------------------------------------------------------ Linkle by restart
+# Stage 1 of out/research/linkle-body-swap-plan.md (2026-11-18). The user, on the old Linkle costume (a puppet that
+# copied Link's moves in one outfit): equipped armor did nothing on her and the inventory showed Link, "terribly wrong".
+# Now picking Linkle (the launcher's Who am I, or `charsel playas linkle`) turns The Linkle Mod ON as Link's OWN body:
+# it replaces Link's player and armor models, so every armor piece shows as hers and the pause menu's inventory shows
+# her. It takes one restart (the deploy). Picking anyone else turns it OFF again. Only the mod list changes (modman's
+# own on/off); in the game `iam linkle` says whether her body is on (native/examples/ghost/iam.c reads the deploy's
+# launch.json). Friends see her as before: her costume (each PC builds it from The Linkle Mod's files, on or off).
+LINKLE_ADD = ("The Linkle Mod isn't in your mods. Add it first: on Home press Add mod and pick The Linkle Mod's folder "
+              "or .zip (its BotW Switch version), then pick Linkle again.")
+
+
+def is_linkle_mod(mod_id: str, name: str, library) -> bool:
+    """A mod that is The Linkle Mod, the way linkle_mod tells her: "linkle" in its id or name AND its folder in the
+    library replaces Link's model (review C2 2026-11-18: by name alone a "Linkle Hair Recolor" add-on counted)."""
+    return ("linkle" in f"{mod_id} {name}".lower() and library is not None
+            and _link_model_in(Path(library) / "mods" / mod_id) is not None)
+
+
+def linkle_owned(state: Path | None = None) -> list[str]:
+    """The Linkle Mod ids Who am I itself turned on (and so may turn off again: review C3 2026-11-18)."""
+    path = Path(state) if state else state_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    got = data.get("linkle_owned") if isinstance(data, dict) else None
+    return [x for x in got if isinstance(x, str)] if isinstance(got, list) else []
+
+
+def linkle_switched(plan: dict, on: bool, state: Path | None = None) -> None:
+    """After a linkle_plan was applied: keep what it turned on as Who am I's own (C3: picking anyone else turns off
+    only that, never a Linkle Mod you turned on yourself on Home), and drop every id it switched from the play-as
+    state's turned_off (C7: a later `charsel playas off` doesn't turn The Linkle Mod back on)."""
+    import os
+    path = Path(state) if state else state_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data = data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        data = {}
+    owned = linkle_owned(path)
+    if on:
+        owned += [i for i in plan["enable"] if i not in owned]
+    else:
+        owned = [i for i in owned if i not in plan["disable"]]
+    touched = set(plan["enable"]) | set(plan["disable"])
+    pa = data.get("playas")
+    if not touched and owned == linkle_owned(path):
+        return
+    data["linkle_owned"] = owned
+    if isinstance(pa, dict) and isinstance(pa.get("turned_off"), list):
+        pa["turned_off"] = [x for x in pa["turned_off"] if x not in touched]
+    data.setdefault("format", 1)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def linkle_plan(mods, on: bool, library, owned: list[str] | None = None) -> dict:
+    """What picking Linkle (on) or anyone else (off) changes in a mod list, read only. mods: the library's list, in
+    order ({"id", "name", "enabled"}). On: The Linkle Mod ON (the last one listed) and the play-as mod OFF (it is later
+    and would win over her body); off: every Linkle Mod OFF. library: its folder (is_linkle_mod looks at each mod's
+    files: other mods with "linkle" in the name are left alone). owned (Who am I: linkle_owned()): off turns off only
+    those; None (the command line's explicit `playas link`): every one. {"mod": its entry or None, "enable": [ids],
+    "disable": [ids]}: nothing to do when both are empty."""
+    mods = [m for m in mods or () if isinstance(m, dict) and isinstance(m.get("id"), str)]
+    lk = [m for m in mods if is_linkle_mod(m["id"], str(m.get("name") or ""), library)]
+    mod = lk[-1] if lk else None
+    if on:
+        enable = [mod["id"]] if mod is not None and not mod.get("enabled") else []
+        disable = [m["id"] for m in mods if m.get("enabled") and (m["id"] == PLAYAS_ID or m in lk[:-1])]
+    else:
+        enable, disable = [], [m["id"] for m in lk if m.get("enabled") and (owned is None or m["id"] in owned)]
+    return {"mod": mod, "enable": enable, "disable": disable}
+
+
+def linkle_body(on: bool, *, library=None, state: Path | None = None) -> dict:
+    """Linkle's body on (The Linkle Mod ON as Link's own; the play-as mod off) or off, in the library (modman's own
+    Library: on/off, then save). {"changed": [names], "mod": The Linkle Mod's name or None}. CharselError (LINKLE_ADD)
+    when on and the library has no Linkle Mod. The next deploy (Play) uses it: restart the game."""
+    lib = _open_library(library)
+    plan = linkle_plan(lib.mods, on, lib.root)     # (the command line: an explicit on/off of every one)
+    if on and plan["mod"] is None:
+        raise CharselError(LINKLE_ADD)
+    changed = []
+    for m in lib.mods:
+        if m["id"] in plan["enable"] or m["id"] in plan["disable"]:
+            m["enabled"] = m["id"] in plan["enable"]
+            changed.append(str(m.get("name") or m["id"]))
+    if changed:
+        lib.save()
+        linkle_switched(plan, on, state)
+    return {"changed": changed, "mod": str(plan["mod"].get("name") or plan["mod"]["id"]) if plan["mod"] else None}
+
+
 # ------------------------------------------------------------------------------------------------ command line
 
 def _print_list(cat: dict | None = None) -> None:
@@ -3296,12 +3794,22 @@ def _playas_cmd(args) -> int:
         bad = check_playas(args.out, args.romfs)
         print("OK" if not bad else "BAD: " + "; ".join(bad))
         return 0 if not bad else 1
-    if what in ("off", "link", "linkle"):
+    if what in ("off", "link", "linkle", "linkel"):
         res = playas_off(library=args.library, state=args.state)
-        print("Back to Link at the next start: restart the game." if res["removed"]
-              else "No play-as mod in your library: you play as Link.")
-        if res["turned_on"]:
-            print(f"{', '.join(res['turned_on'])}: on again.")
+        if what == "off":
+            print("Back to Link at the next start: restart the game." if res["removed"]
+                  else "No play-as mod in your library: you play as Link.")
+            if res["turned_on"]:
+                print(f"{', '.join(res['turned_on'])}: on again.")
+            return 0
+        try:   # (2026-11-18: Linkle is Link's own body, The Linkle Mod on; link: it off too)
+            lk = linkle_body(what != "link", library=args.library, state=args.state)
+        except CharselError as e:
+            print(str(e))
+            return 1
+        who = "Linkle (her body: The Linkle Mod on)" if what != "link" else "Link"
+        print(f"You play as {who} from the next start: restart the game." if lk["changed"] or res["removed"]
+              else f"You play as {who} already.")
         return 0
     cid = find_id(what)
     if cid is None:
@@ -3683,11 +4191,15 @@ def main(argv: list[str] | None = None) -> int:
     iv.add_argument("--romfs", type=Path, help=f"default: the library's Savage Wind with --library, else {DEFAULT_ROMFS}")
     iv.add_argument("--out", type=Path, help=f"the characters mod folder (default {DEFAULT_OUT})")
     iv.add_argument("--library", type=Path, help="put it in this mod library's characters mod instead")
+    iv.add_argument("--skin", choices=("link", "zelda", "zelda-fed"),
+                    help="the parts' material (default link: vrm_import.SKIN_MATERIAL; the others for a game check)")
     args = ap.parse_args(argv)
     try:
         if args.cmd == "import-vrm":
             import vrm_import as vi
             _low_priority()
+            if args.skin:
+                vi.SKIN_MATERIAL = args.skin
             got = (vi.import_into_library(args.vrm, args.id, args.library, args.romfs) if args.library
                    else vi.import_vrm(args.vrm, args.id, args.romfs, args.out))
             print(f"Imported {args.vrm.name}: {got['shapes']} parts, {got['vertices']:,} vertices, {got['textures']} "

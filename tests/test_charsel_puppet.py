@@ -45,14 +45,13 @@ class Table(unittest.TestCase):
     def test_every_pack_character_on_charsels_actor_name(self):
         slots = dll_slots()
         packs = [r.id for r in charsel.RECIPES.values() if r.kind == "pack"]
-        # Linkle's costume (charsel build, from the Linkle Mod's files, on or off) is on charsel's linkle name too,
-        # once the DLL lists it (the native change of 2026-11-14)
-        self.assertEqual(sorted(set(slots) - {"linkle", "custom"}), sorted(packs))
+        # (2026-11-18: no Linkle SELF-puppet: you are Link's own body with The Linkle Mod on; her costume stays in
+        # charsel's table for the friends' view, review C1)
+        self.assertNotIn("linkle", slots)
+        self.assertIn(charsel.SLOTS["linkle"], charsel.FREE_SLOTS)
+        self.assertEqual(sorted(set(slots) - {"custom"}), sorted(packs))
         import vrm_import
         for cid, (actor, name, playas) in slots.items():
-            if cid == "linkle":
-                self.assertEqual((actor, name, playas), (charsel.SLOTS["linkle"], "Linkle", ""))
-                continue
             if cid == vrm_import.IMPORT_ID:     # (charsel import-vrm's costume, on Link's skeleton)
                 self.assertEqual((actor, name, playas), (vrm_import.IMPORT_SLOT, "Custom", ""))
                 self.assertIn(actor, charsel.FREE_SLOTS)

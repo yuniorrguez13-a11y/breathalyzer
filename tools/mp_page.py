@@ -59,6 +59,7 @@ PREFS = "multiplayer"      # launcher.json (Settings.extra): {"name", "story", "
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 READY = "Ready: start your game"   # (coop_agent.READY: join's story is in the co-op save)
 MP_SCREENS = ("multiplayer", "who")
+RESTART_WAIT = 90.0        # seconds Linkle's restart waits for the game to close itself before it gives up
 
 STORY_ON = "ON: your friends' co-op saves get your towers, quests and freed Divine Beasts (they say yes first)."
 STORY_OFF = "OFF: friends share your time of day, not your story."
@@ -82,7 +83,8 @@ NOT_TRIED: frozenset = frozenset()  # all 9 spawn and play-as works in the game 
 # What each looks like to a friend, in plain words (charsel.Recipe.looks has the developer's notes)
 LOOKS = {
     "link": "Link: a stand-in figure for now (Breathalyzer doesn't build the Link body yet).",
-    "linkle": "Linkle: friends need the Linkle mod too; without it they see the stand-in figure.",
+    "linkle": ("Your own body becomes Linkle (The Linkle Mod, one restart): your armor shows as hers and the "
+               "inventory shows her. Friends need the Linkle mod too; without it they see the stand-in figure."),
     "zelda": "Her own stand, walk and run; Link's moves for the rest. The dress is stiff.",
     "hylian": "A Hateno villager: his own walk, Link's moves for the rest.",
     "sheikah": "Her own stand, walk and run; Link's moves for the rest.",
@@ -196,25 +198,26 @@ def prep_join(library, install, host: dict) -> Path:
                                             protect=[own]))
 
 
-def characters(library, on: bool = True, link_body: bool = False) -> list[dict]:
+def characters(library, on: bool = True, link_body: bool = False, linkle_mod: bool | None = None) -> list[dict]:
     """Who am I's characters in wheel order: {"id", "name", "group", "state", "looks"}, as THIS PC shows them (each
     PC shows the others' picks from its own built characters). state: "Ready"; "Not tried yet" (built, not yet seen
-    in the game: NOT_TRIED); "Build first" (the Characters mod hasn't built it here); "Stand-in" (Link, and Linkle
-    with the Linkle mod: the Link body, which Breathalyzer doesn't build yet: link_body says it is in the mod list,
-    ON); "Needs a mod" (Linkle without the Linkle mod). Read from the library copy of the Characters mod (on: it is
-    ON; off, every built one says "Build first" too: the game doesn't get it)."""
+    in the game: NOT_TRIED); "Build first" (the Characters mod hasn't built it here); "Stand-in" (Link: the Link body,
+    which Breathalyzer doesn't build yet: link_body says it is in the mod list, ON). Linkle (2026-11-18: your own
+    body, The Linkle Mod ON with one restart): "Ready" when The Linkle Mod is in the mod list (linkle_mod; None: ask
+    the catalog whether it was on), "Needs a mod" without it. Read from the library copy of the Characters mod (on: it
+    is ON; off, every built one says "Build first" too: the game doesn't get it)."""
     import charsel
     cat = charsel.load_catalog(Path(library) / "mods" / CHARS_ID) if on else {}
     built = cat.get("built") or {}
-    linkle = bool(charsel.linkle_ready(cat))   # (her costume built, or the Linkle Mod on)
+    linkle = bool(charsel.linkle_ready(cat)) if linkle_mod is None else linkle_mod
     out = []
     for group, ids in charsel.CATEGORIES:
         for cid in ids:
             r = charsel.RECIPES[cid]
-            if r.kind == "link" or (r.kind == "linkle" and linkle):
+            if r.kind == "link":
                 state = "Ready" if link_body else "Stand-in"
             elif r.kind == "linkle":
-                state = "Needs a mod"
+                state = "Ready" if linkle else "Needs a mod"
             elif cid in built:
                 state = "Not tried yet" if cid in NOT_TRIED else "Ready"
             else:
@@ -305,8 +308,9 @@ class MpSession:
 
     def __init__(self, library: str, install: str, *, python: str | None = None, spawn=None,
                  game_port: int = CONTROL_PORT, start_game=None, cancel_game=None, clock=time.monotonic, search=None,
-                 host_prep=prep_host, join_prep=prep_join, kill=_kill_tree, send_iam=None):
+                 host_prep=prep_host, join_prep=prep_join, kill=_kill_tree, send_iam=None, send_exit=None):
         self.library, self.install = str(library), str(install)
+        self.send_exit = send_exit or self._send_exit   # (Linkle's restart: the game closes itself)
         self.python = python or sys.executable
         self.spawn = spawn or subprocess.Popen
         self.game_port = game_port
@@ -333,6 +337,7 @@ class MpSession:
         self.pause = False                  # host: wait at "Your world is open" for Start the game (the 1st time)
         self.game_gone = False              # the game closed or didn't start (Stop says nothing about it)
         self.look_note = ""                 # Who am I: whether the game took the pick (`iam`'s answer)
+        self.exit_error: str | None = None  # Linkle's restart: why `exit` couldn't reach the game (send_exit)
         self.where = ""                     # the client's last "who is where" line
         self.news_at = -1e9                 # when something last happened (news): kept NEWS_HOLD seconds
         self.ending: Status | None = None   # why the session ended (a tool's last words)
@@ -571,6 +576,10 @@ class MpSession:
                 if ev[1] == self._token and self.mode == "stopping":
                     self.mode = "idle"
                     self.status = self.reason or Status("info", ["Multiplayer stopped."])
+            elif kind == "game_exit":
+                if ev[1]:
+                    self.log.append(f"exit: {ev[1]}")
+                    self.exit_error = ev[1]
             elif kind == "iam":
                 cid, err = ev[1], ev[2]
                 if err:
@@ -855,6 +864,25 @@ class MpSession:
         except Exception as e:  # (the game busy or loading: the choice is kept all the same)
             return f"{type(e).__name__}: {e}"
 
+    def _send_exit(self) -> str:
+        """`exit` to the game's control port: the game closes itself (Linkle's restart). "" or why it didn't go (the
+        port is only open while a developer mod is on: Ghost multiplayer is one). Only a failed CONNECT is "didn't
+        go" (review C4): once the command is out, the game closing drops the socket, or a load screen keeps the
+        answer past the timeout, and the restart waits for it to close (relaunch_tick gives up after RESTART_WAIT)."""
+        try:
+            from control import Control
+            c = Control(self.game_port, timeout=3.0)
+        except Exception as e:
+            return f"{type(e).__name__}: {e}"
+        try:
+            c.cmd("exit")
+        except Exception as e:  # (sent: an answer that doesn't come is the game closing)
+            self.log.append(f"exit sent, no answer: {type(e).__name__}: {e}")
+        finally:
+            with contextlib.suppress(Exception):
+                c.close()
+        return ""
+
 
 # ---------------------------------------------------------------- the page in the launcher's window
 
@@ -875,6 +903,8 @@ class MpPage:
         self.shape = None
         self.who_shape = None
         self.focus_text, self.focus_index = "", -1
+        self.relaunch: dict | None = None   # Linkle's restart: the game was told to close; then started again
+        self.body_note = ""                  # Who am I: what picking Linkle (or leaving her) did to your own body
 
     def gui(self):
         import modman_gui
@@ -1024,6 +1054,7 @@ class MpPage:
             if self.watch_ctl and not ctl.jobs.get("main"):
                 self.step_done(self.watch_ctl)
                 changed = True
+            changed = self.relaunch_tick() or changed
         quiet = self.quiet_now()   # (nothing else changes while the Join list finds nothing: the hint needs this)
         if quiet != self.quiet:
             self.quiet, changed = quiet, True
@@ -1217,7 +1248,7 @@ class MpPage:
         chars_row = self.row(CHARS_ID)
         body_row = self.row(LINK_BODY_ID)
         chars = characters(ctl.backend.root, on=bool(chars_row and chars_row.on),
-                           link_body=bool(body_row and body_row.on))
+                           link_body=bool(body_row and body_row.on), linkle_mod=self.linkle_row() is not None)
         import charsel
         pick = charsel.load_choice()["look"]
         st = self.status_now()
@@ -1229,13 +1260,15 @@ class MpPage:
         else:
             # (what friends see comes from THEIR PC's built characters: each PC shows the others from its own)
             seen = {"Stand-in": "Friends see a stand-in figure for now: Breathalyzer doesn't build the Link body yet.",
-                    "Needs a mod": "Friends need the Linkle mod; without it they see a stand-in figure.",
+                    "Needs a mod": "Add The Linkle Mod to your mods to be Linkle yourself (Home > Add mod).",
                     "Not tried yet": "Not tried in the game yet: friends may see a stand-in figure instead."}.get(
                 r["state"], "Friends see it if their PC built the characters too (each PC builds its own).")
+            if r["id"] == "linkle" and r["state"] == "Ready":
+                seen = "Friends see Linkle when their PC has The Linkle Mod in its mods too (on or off)."
             st = Status("ok" if r["state"] == "Ready" else "info",
                         [f"You picked {r['name']}.", seen,
                          r["looks"] if r["state"] in ("Ready", "Not tried yet", "Build first") else "",
-                         self.session.look_note])
+                         self.body_note, self.session.look_note])
             st.lines = [x for x in st.lines if x]
         self.paint_status(parts, st)
         shape = (pick, tuple(c["state"] for c in chars), busy, chars_row is not None,
@@ -1437,6 +1470,96 @@ class MpPage:
             self.session.say("error", "Your pick wasn't kept.", type(e).__name__)
             return self.after()
         self.who_error = None
-        self.session.say("ok", f"You picked {name}.", self.session.look_note)
+        self.body_note = self.linkle_switch(cid == "linkle")
+        self.session.say("ok", f"You picked {name}.", self.body_note, self.session.look_note)
         self.who_shape = None
         self.render_who()
+
+    # --- Linkle: your own body (out/research/linkle-body-swap-plan.md, stage 1)
+
+    def linkle_row(self):
+        """The Linkle Mod's row in the mod list (the last one), or None."""
+        import charsel
+        ctl = self.view.ctl
+        rows = ([r for r in ctl.listing.rows if charsel.is_linkle_mod(r.id, r.name, ctl.backend.root)]
+                if ctl is not None else [])
+        return rows[-1] if rows else None
+
+    def linkle_switch(self, want: bool) -> str:
+        """Picking Linkle turns The Linkle Mod ON as Link's own body (every armor piece hers, the inventory shows her),
+        and the play-as mod off (it would win over her body); picking anyone else turns it OFF again. Through the
+        launcher's own mod switch (Home's Turn on/off); the game gets it at its next start (Play, Host and Join deploy
+        first), or now with a restart when it is open. Returns what to say ("": nothing changed)."""
+        import charsel
+        ctl = self.view.ctl
+        if ctl is None:
+            return ""
+        plan = charsel.linkle_plan([{"id": r.id, "name": r.name, "enabled": r.on} for r in ctl.listing.rows], want,
+                                   ctl.backend.root, owned=charsel.linkle_owned())   # (review C3: only its own)
+        if want and plan["mod"] is None:
+            return "Your friends see Linkle. " + charsel.LINKLE_ADD
+        todo = plan["enable"] + plan["disable"]
+        if not todo:
+            return "Linkle's body is on." if want else ""
+        for mod_id in todo:
+            ctl.toggle(mod_id)
+        rows = {r.id: r.on for r in ctl.listing.rows}
+        if any(rows.get(i) is not True for i in plan["enable"]) or any(rows.get(i) is not False for i in plan["disable"]):
+            return ("The Linkle Mod couldn't be turned " + ("on" if want else "off") + ": "
+                    + " ".join(ctl.status.lines[:2]))
+        try:
+            charsel.linkle_switched(plan, want)     # (C3: what Who am I turned on; C7: the play-as state forgets it)
+        except OSError as e:
+            self.session.log.append(f"linkle state: {e}")
+        what = ("Linkle's body is on (The Linkle Mod): your armor shows as hers, the inventory shows her." if want
+                else "The Linkle Mod is off again: you are Link's own body.")
+        return self.restart_for(what)
+
+    def restart_for(self, what: str) -> str:
+        """The body changes at the game's next start: closed, the next Play, Host or Join starts it so (they deploy
+        first); open, a restart now when you say yes (the game closes itself, then starts again the way it ran)."""
+        ctl, s = self.view.ctl, self.session
+        if not (ctl.game_open or "play" in ctl.jobs):
+            return what + (" The game starts with it now." if s.running else
+                           " Press Host or Join (or Play on Home): the game starts with it.")
+        friends = "\nYour friends are disconnected, and join again after the restart." if s.running else ""
+        yes = self.view.ask("Who am I", "Restart the game now?", what + "\nIt shows after a restart. What you "
+                            "haven't saved in the game is lost." + friends, [("Restart now", True), ("Later", False)],
+                            default=1)    # (review C5: Enter is Later: a restart drops friends and unsaved play)
+        if not yes:
+            return what + " It shows from the game's next start."
+        # (review C4: the restart is set once the command goes; `exit` is sent off the UI thread, and only a game
+        # that can't be reached cancels it, through poll's "game_exit" and relaunch_tick)
+        self.relaunch = {"role": s.role if s.running else None, "until": s.clock() + RESTART_WAIT}
+        s.exit_error = None
+        threading.Thread(target=lambda: s.events.put(("game_exit", s.send_exit())), daemon=True,
+                         name="mp exit").start()
+        return what + " Restarting the game..."
+
+    def relaunch_tick(self) -> bool:
+        """Linkle's restart, once the game has closed: started again the way it ran (Play; a host hosts again; a
+        friend's Join list opens). Not closed in RESTART_WAIT: given up, said. True when something changed."""
+        r, ctl, s = self.relaunch, self.view.ctl, self.session
+        if r is None or ctl is None or s is None:
+            return False
+        if s.exit_error:          # (the game couldn't be reached: nothing closes, nothing restarts)
+            s.exit_error, self.relaunch = None, None
+            self.body_note = "The game didn't answer: close it yourself, then start it again."
+            s.say("warn", self.body_note)
+            return True
+        if ctl.game_open or "play" in ctl.jobs or ctl.jobs.get("main") or s.running:
+            if s.clock() > r["until"]:
+                self.relaunch = None
+                self.body_note = "The game didn't close: close it yourself, then start it again."
+                s.say("warn", self.body_note)
+                return True
+            return False
+        self.relaunch = None
+        if r["role"] == "host":
+            self.on_host()
+        elif r["role"] == "join":
+            self.on_join()
+        else:
+            ctl.launch()
+        self.body_note = ""
+        return True

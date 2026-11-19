@@ -1,15 +1,17 @@
-"""charsel import-vrm: a VRM avatar (VRoid Studio and the like) as a costume on Link's skeleton, the way Linkle's is
-made: Model/SwChar_<id>.sbfres is Link's own model file with his shapes shrunk to a point and the avatar's meshes on
+"""charsel import-vrm: a VRM avatar (VRoid Studio and the like) as a costume on Link's skeleton, the way Linkle's was
+made (until 2026-11-18): Model/SwChar_<id>.sbfres is Link's own model file with his shapes shrunk to a point and the avatar's meshes on
 his bones (so the costume plays Link's own clips), its pack on a free actor name that the ghost DLL knows as
 `custom` (`iam custom`, and the aliases in puppet.c's PUP_ALIASES).
 
 What it does: every skinned mesh of the VRM (glTF 2.0 .glb), each VRM humanoid bone moved to its Link bone (hips ->
 Waist, spine -> Spine_1, chest -> Spine_2, arms, legs, fingers; every other bone, such as hair or a skirt, follows its
-nearest humanoid ancestor), the mesh fitted from the VRM's T-pose to Link's rest pose (each body part moved to Link's
-joint, turned to his bone's direction and stretched along it to his bone's length, so a joint bends where Link's
-does), the weights put on Link's bones, and each material's base colour texture (up to 512 px, BC1, or BC3 with
-an alpha cut-out when the picture has transparency). Not done: spring bones (hair and skirt stay rigid), blend shapes
-(no blinking or mouth), MToon shading and outlines, emissive/normal maps.
+nearest humanoid ancestor), the mesh fitted from the VRM's T-pose to Link's rest pose with the avatar's OWN lengths
+(each body part turned to his bone's direction about its own joint, its joints chained at the avatar's lengths, the
+feet on Link's ankle height; the model's skeleton gets those joints as its rest pose: own_fits, own_skeleton), the
+weights put on Link's bones, and each material's base colour texture (up to 512 px, scaled to the game's albedo range,
+BC1, or BC3 with an alpha cut-out when the picture has transparency), drawn with Link's materials (SKIN_MATERIAL). Not done:
+spring bones (hair and skirt stay rigid), blend shapes (no blinking or mouth), MToon shading and outlines,
+emissive/normal maps.
 
 The VRM is untrusted data: it is only read (no code in it runs). Nothing made from a VRM goes in the repo.
 """
@@ -31,8 +33,25 @@ IMPORT_ID = "custom"                 # the DLL's id for the imported costume (pu
 IMPORT_SLOT = "Dm_Npc_Handmaid_A"    # its free actor name (charsel FREE_SLOTS; the Handmaid class: a bigger heap)
 IMPORT_ALIASES = ()                 # other words `iam` takes for it (puppet.c PUP_ALIASES; add yours, rebuild ghost)
 TEX_MAX = 512
-OPAQUE_MAT, MASK_MAT, SHAPE_TPL = "Mt_Underwear", "Mt_Eyelashes", "Skin__Mt_Underwear"   # Link's, as templates
+SHAPE_TPL = "Skin__Mt_Underwear"     # Link's shape, as the template of ours
 NRM_TEX, SPM_TEX = "SwVrm_Nrm", "SwVrm_Spm"
+SPM_VALUE = 38                      # a dull specular, Zelda's skin's average (Npc_Zelda_Skin_Spm: 37.6 [V])
+# 2026-11-15, lime-green skin: the base colour textures were the right ones [V: decoded back, skin (248, 230, 216)],
+# but drawn with Link's underwear / eyelashes materials; now Zelda's skin material (charsel.npc_skin, opaque and a
+# cut-out copy). VRM textures are painted for flat toon shading, near white; the game's lit albedos are darker (Zelda's
+# skin 156, 120, 92 and her white dress 121, 113, 98 average [V]), so the colours are scaled down to the game's range.
+ALBEDO_SCALE = 0.62     # [G: the in-game check says whether she looks too pale or too dark]
+# 2026-11-18 game check FAIL: with Zelda's Mt_Skin on every part, `iam custom` showed ONLY her head (body, arms and
+# legs invisible), also without own_skeleton and with make_fits, so her own proportions aren't it [V: the user's
+# check]. The cause isn't proven offline [G]; what Zelda's Mt_Skin asks that our meshes don't give: its shader reads a
+# third texture coordinate (_u2) from a vertex attribute "All" that only Zelda's own shapes have, and it turns on a
+# vertex position modify (uking_vtx_position_modify_calc_type 8, reading a vertex channel) that Link's Mt_Underwear
+# doesn't [V: options compared 2026-11-18]. So the parts are drawn again with Link's materials, which showed the whole
+# body before the looks change (the skin then came out lime green: that colour is the known cost of this fallback).
+# "zelda" brings Zelda's back for a game check; "zelda-fed" is Zelda's without those two (fed_by_our_meshes), the
+# next session's check of the likely cause.
+SKIN_MATERIAL = "link"
+OPAQUE_MAT, MASK_MAT = "Mt_Underwear", "Mt_Eyelashes"     # Link's (SKIN_MATERIAL "link")
 
 # VRM humanoid bone -> Link bone (the first VRM bone of a Link bone is where that Link bone sits on the avatar)
 BONES: dict[str, str] = {"hips": "Waist", "spine": "Spine_1", "chest": "Spine_2", "upperChest": "Spine_2",
@@ -95,18 +114,24 @@ def rot_between(a, b) -> list[list[float]]:
             for i in range(3)]
 
 
-class Fit:
-    """One Link bone's fit: an avatar point near that bone's VRM joint goes to Link's joint, turned from the VRM
-    bone's direction to Link's, the part beyond the joint stretched to Link's bone length."""
+EYE3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
 
-    def __init__(self, a_vrm, a_link, d_vrm=None, d_link=None, stretch=1.0):
+
+class Fit:
+    """One Link bone's fit: an avatar point near that bone's VRM joint goes to the costume's joint (a_link), turned
+    from the VRM bone's direction to Link's (or by `rot`), the part beyond the joint stretched by `stretch` (1: the
+    avatar's own length)."""
+
+    def __init__(self, a_vrm, a_link, d_vrm=None, d_link=None, stretch=1.0, rot=None):
         self.a_vrm, self.a_link = a_vrm, a_link
         self.d_vrm, self.d_link, self.k = d_vrm, d_link, stretch
-        self.rot = rot_between(d_vrm, d_link) if d_vrm and d_link else [[1.0, 0, 0], [0, 1.0, 0], [0, 0, 1.0]]
+        self.rot = rot or (rot_between(d_vrm, d_link) if d_vrm and d_link else EYE3)
 
     def point(self, p):
         x = _sub(p, self.a_vrm)
-        if self.d_vrm:
+        if self.k == 1.0:          # (own length: a plain turn about the joint)
+            x = _apply(self.rot, x)
+        elif self.d_vrm:
             along = _dot(x, self.d_vrm)
             perp = _apply(self.rot, (x[0] - along * self.d_vrm[0], x[1] - along * self.d_vrm[1],
                                      x[2] - along * self.d_vrm[2]))
@@ -136,6 +161,89 @@ def make_fits(vrm_joints: dict[str, tuple], link_joints: dict[str, tuple]) -> di
                 continue
         fits[lb] = Fit(av, link_joints[lb])
     return fits
+
+
+# 2026-11-15 (the user: "why are her arms so far away from her chest, it looks so weird"): make_fits stretched every
+# part to Link's lengths (her collarbones x2.2, forearms x1.4, neck x1.66), so her shoulders came out as wide as his
+# and her arms hung far from her chest. Link's clips turn the body bones only (no limb moves: every Player_Animation
+# clip moves only Root, Skl_Root, the weapon bones and the face [V]), so the costume can keep the avatar's own lengths:
+# each part is only turned to Link's rest direction (rot_between, as before), its joint placed at the end of its
+# parent part turned the same way, and the model's skeleton (Link's bones and rest turns) gets those joints as its
+# rest pose (own_skeleton). The feet are put on Link's ankle height (Skl_Root's moves are Link's hip heights).
+KEEP_UPRIGHT = ("Head",)       # bones whose part keeps the avatar's own turn (no direction of its own to fit)
+
+
+def own_fits(vrm_joints: dict[str, tuple], bones) -> tuple[dict[str, Fit], dict[str, tuple], dict]:
+    """({Link bone: Fit}, {Link bone: the costume's joint}, info) keeping the avatar's own lengths. vrm_joints: {VRM
+    humanoid bone: position (at Link's size)}; bones: Link's skeleton bones (rest pose)."""
+    lw = charsel._worlds(bones)
+    index = {b.name: i for i, b in enumerate(bones)}
+    link_joints = {b.name: (lw[i][0][3], lw[i][1][3], lw[i][2][3]) for i, b in enumerate(bones)}
+    anchor: dict[str, tuple] = {}
+    for hb, lb in BONES.items():
+        if hb in vrm_joints and lb in index and lb not in anchor:
+            anchor[lb] = vrm_joints[hb]
+
+    def parent_of(lb):          # (the nearest anchored ancestor in Link's skeleton)
+        i = bones[index[lb]].parent
+        while i >= 0 and bones[i].name not in anchor:
+            i = bones[i].parent
+        return bones[i].name if i >= 0 else None
+    order = sorted(anchor, key=lambda n: index[n])       # (Link's bones list parents first)
+    rot: dict[str, list] = {}
+    joint: dict[str, tuple] = {}
+    for lb in order:
+        p = parent_of(lb)
+        nb = LINK_NEXT.get(lb)
+        if nb in anchor:
+            dv, dl = _sub(anchor[nb], anchor[lb]), _sub(link_joints[nb], link_joints[lb])
+            rot[lb] = rot_between(_unit(dv), _unit(dl)) if _dot(dv, dv) > 1e-8 and _dot(dl, dl) > 1e-8 else EYE3
+        else:
+            rot[lb] = EYE3 if lb in KEEP_UPRIGHT or p is None else rot[p]
+        joint[lb] = anchor[lb] if p is None else tuple(
+            a + b for a, b in zip(joint[p], _apply(rot[p], _sub(anchor[lb], anchor[p]))))
+    # the feet on Link's ankle height
+    ank = [lb for lb in ("Ankle_L", "Ankle_R") if lb in joint and lb in link_joints]
+    dy = (sum(link_joints[a][1] - joint[a][1] for a in ank) / len(ank)) if ank else 0.0
+    joint = {lb: (j[0], j[1] + dy, j[2]) for lb, j in joint.items()}
+    fits = {lb: Fit(anchor[lb], joint[lb], rot=rot[lb]) for lb in order}
+
+    def width(a, b, js):
+        return round(math.dist(js[a], js[b]), 3) if a in js and b in js else None
+    info = {"own_lengths": True, "feet_shift_m": round(dy, 3),
+            "shoulders_m": width("Arm_1_L", "Arm_1_R", joint), "link_shoulders_m": width("Arm_1_L", "Arm_1_R",
+                                                                                        link_joints),
+            "hips_m": width("Leg_1_L", "Leg_1_R", joint), "link_hips_m": width("Leg_1_L", "Leg_1_R", link_joints)}
+    return fits, joint, info
+
+
+def own_skeleton(sk, joints: dict[str, tuple]):
+    """Link's skeleton with its rest pose moved so the named bones rest at `joints` (model space): each such bone
+    keeps Link's rest turn, every other bone its place on its parent. New inverse bind matrices to match. Returns the
+    new Skeleton (sk itself unchanged)."""
+    import copy
+    from wiiu_model.neutral import Skeleton
+    bones = copy.deepcopy(sk.bones)
+    old = charsel._worlds(sk.bones)
+    new: list = [None] * len(bones)
+    for i, b in enumerate(bones):     # (parents come first in the game's skeletons)
+        if b.parent >= i:
+            raise CharselError("Link's skeleton lists a bone before its parent")
+        pw = new[b.parent] if b.parent >= 0 else None
+        if b.name in joints:
+            w = [list(old[i][r][:3]) + [joints[b.name][r]] for r in range(3)] + [[0.0, 0.0, 0.0, 1.0]]
+            if pw is not None:            # (Link's rest turn kept: only the translation in the parent's frame moves)
+                rel = charsel._mul(charsel._inv(pw), w)
+                b.translation = (rel[0][3], rel[1][3], rel[2][3])
+            else:
+                b.translation = tuple(joints[b.name])
+        new[i] = charsel._local(b) if pw is None else charsel._mul(pw, charsel._local(b))
+    ibs = bytearray()
+    for k in range(sk.smooth_count):
+        w = charsel._inv(new[sk.matrix_to_bone[k]])
+        ibs += struct.pack("<12f", *(w[r][c] for r in range(3) for c in range(4)))
+    return Skeleton(sk.flags, bones, list(sk.matrix_to_bone), sk.smooth_count, sk.rigid_count, bytes(ibs),
+                    dict(sk.extra))
 
 
 # ------------------------------------------------------------------------------------------------------ the VRM
@@ -209,10 +317,11 @@ def vertex_buffer(pos, nrm, uv, infl) -> object:
         b1 += bytes(wt) + bytes(ix)
         tg = _unit(_cross((0.0, 1.0, 0.0), n), (1.0, 0.0, 0.0))
         b2 += struct.pack("<I", _n10(n)) + bytes((_snorm8(tg[0]), _snorm8(tg[1]), _snorm8(tg[2]), 127))
-        b2 += struct.pack("<2e", max(-65504.0, min(65504.0, t[0])), max(-65504.0, min(65504.0, t[1])))
+        b2 += struct.pack("<2e", max(-65504.0, min(65504.0, t[0])), max(-65504.0, min(65504.0, t[1]))) * 2
     attrs = [Attribute("_p0", 0x1805, 0, 0), Attribute("_w0", 0x0B01, 0, 1), Attribute("_i0", 0x0B03, 4, 1),
-             Attribute("_n0", 0x0E02, 0, 2), Attribute("_t0", 0x0B02, 4, 2), Attribute("_u0", 0x1205, 8, 2)]
-    return VertexBuffer(len(pos), 4, attrs, [12, 8, 12], [bytes(b0), bytes(b1), bytes(b2)], {})
+             Attribute("_n0", 0x0E02, 0, 2), Attribute("_t0", 0x0B02, 4, 2), Attribute("_u0", 0x1205, 8, 2),
+             Attribute("_u1", 0x1205, 12, 2)]      # (_u1: the NPC skin material's shade-map coordinates, = _u0)
+    return VertexBuffer(len(pos), 4, attrs, [12, 8, 16], [bytes(b0), bytes(b1), bytes(b2)], {})
 
 
 def quantize(weights: dict[int, float]) -> tuple[list[int], list[int]]:
@@ -246,6 +355,39 @@ def _texture(tpl, name: str, img, bc3: bool):
     return t
 
 
+def fed_by_our_meshes(mat, like):
+    """A copy of Zelda's skin material without what our meshes can't feed (the 2026-11-18 head-only check [G]): no
+    shader attribute from a vertex attribute our buffers lack ("All", her own shapes' third coordinates), and the
+    vertex position modify options set to `like`'s (Link's Mt_Underwear: off)."""
+    m = copy.deepcopy(mat)
+    ours = {"_p0", "_n0", "_t0", "_w0", "_i0", "_u0", "_u1"}
+    m.shader.attribs = [(a, v) for a, v in m.shader.attribs if v in ours]
+    theirs = dict(like.shader.options)
+    m.shader.options = [(k, theirs.get(k, v) if k.startswith("uking_vtx_position_modify") else v)
+                        for k, v in m.shader.options]
+    return m
+
+
+def as_mask(mat):
+    """A copy of a material drawn as a cut-out (alpha test at 0.5), the way Link's eyelashes differ from his
+    underwear: only these two render infos [V: their options are the same]."""
+    m = copy.deepcopy(mat)
+    for r in m.render_infos:
+        if r.name == "gsys_render_state_mode":
+            r.values = ("mask",)
+        elif r.name == "gsys_alpha_test_enable":
+            r.values = ("true",)
+    return m
+
+
+def game_albedo(img, k: float = ALBEDO_SCALE):
+    """An RGBA picture with its colour (not its alpha) scaled by k."""
+    import menu_bg
+    r, g, b, a = img.split()
+    lut = [max(0, min(255, round(v * k))) for v in range(256)]
+    return menu_bg.pillow().merge("RGBA", (r.point(lut), g.point(lut), b.point(lut), a))
+
+
 def _flat_texture(tpl, name: str, block: bytes):
     t = copy.deepcopy(tpl)
     t.name, t.width, t.height, t.levels = name, 4, 4, [block]
@@ -274,10 +416,18 @@ def vrm_costume(data: bytes, romfs, name: str = "the VRM", say=print) -> tuple[b
     bix = {b.name: i for i, b in enumerate(sk.bones)}
     lw = charsel._worlds(sk.bones)
     link_joints = {b.name: (lw[i][0][3], lw[i][1][3], lw[i][2][3]) for i, b in enumerate(sk.bones)}
-    mats = {m.name: m for m in link.materials}
     shape_tpl = copy.deepcopy(next(s for s in link.shapes if s.name == SHAPE_TPL))
-    if OPAQUE_MAT not in mats or MASK_MAT not in mats:
-        raise CharselError("Link's model has no Mt_Underwear or Mt_Eyelashes (other game version?)")
+    if SKIN_MATERIAL in ("zelda", "zelda-fed"):
+        skin_mat, ztex = charsel.npc_skin(romfs)      # (Zelda's skin material: see charsel NPC_SKIN_MODEL)
+        if SKIN_MATERIAL == "zelda-fed":
+            under = next(m for m in link_res.models[0].materials if m.name == OPAQUE_MAT)
+            skin_mat = fed_by_our_meshes(skin_mat, under)
+        mask_mat = as_mask(skin_mat)
+    else:                                             # (Link's: see SKIN_MATERIAL)
+        lmats = {m.name: m for m in link_res.models[0].materials}
+        if OPAQUE_MAT not in lmats or MASK_MAT not in lmats:
+            raise CharselError(f"Link's model has no {OPAQUE_MAT} / {MASK_MAT} (other game version?)")
+        skin_mat, mask_mat, ztex = lmats[OPAQUE_MAT], lmats[MASK_MAT], None
 
     def matrix_of(lb: str) -> int:      # (the Link bone's smooth matrix, or its nearest parent's)
         i = bix[lb]
@@ -297,7 +447,8 @@ def vrm_costume(data: bytes, romfs, name: str = "the VRM", say=print) -> tuple[b
         raise CharselError(f"{name}'s head bone isn't above its feet")
     s = link_joints["Head"][1] / head[1]
     vj = {b: tuple(c * s for c in jpos(n)) for b, n in hb.items() if jpos(n)}
-    fits = make_fits(vj, link_joints)
+    fits, joints, fit_info = own_fits(vj, sk.bones)     # (her own lengths, turned to Link's rest pose)
+    link.skeleton = sk = own_skeleton(sk, joints)
     links = node_links(g, hb)
 
     _shrink = charsel._shrink_model(link)
@@ -314,7 +465,9 @@ def vrm_costume(data: bytes, romfs, name: str = "the VRM", say=print) -> tuple[b
     lt = nx_bfres.read_textures(charsel._unyaz(link_tex))
     ltex = {t.name: t for t in lt.textures}
     ours = [_flat_texture(ltex["Link_Skin_Nrm"], NRM_TEX, bc5_encode(4, 4, lambda x, y: (128, 128))),
-            _flat_texture(ltex["Link_Skin_Spm"], SPM_TEX, menu_bg._alpha_block([24] * 16))]
+            _flat_texture(ltex["Link_Skin_Spm"], SPM_TEX, menu_bg._alpha_block([SPM_VALUE] * 16))]
+    if ztex:
+        ours += charsel.flat_skin_fills(ztex)
     tex_of: dict = {}      # image or colour key -> (texture name, has alpha)
 
     def texture_for(m: dict) -> tuple[str, bool]:
@@ -330,6 +483,7 @@ def vrm_costume(data: bytes, romfs, name: str = "the VRM", say=print) -> tuple[b
             if max(img.size) > TEX_MAX:
                 f = TEX_MAX / max(img.size)
                 img = img.resize((max(4, round(img.width * f)), max(4, round(img.height * f))), 1)
+            img = game_albedo(img)
             alpha = img.getchannel("A").getextrema()[0] < 250
             tname = f"SwVrm_{len(tex_of):02}_Alb"
             say(f"    texture {tname} {img.width}x{img.height} {'BC3 (cut-out)' if alpha else 'BC1'}")
@@ -337,8 +491,9 @@ def vrm_costume(data: bytes, romfs, name: str = "the VRM", say=print) -> tuple[b
             tex_of[key] = (tname, alpha)
         return tex_of[key]
 
-    info = {"shapes": 0, "vertices": 0, "triangles": 0, "left_out": [], "scale": round(s, 4),
-            "stretch": {lb: round(f.k, 3) for lb, f in fits.items() if abs(f.k - 1.0) > 0.01}}
+    info = {"shapes": 0, "vertices": 0, "triangles": 0, "left_out": [], "scale": round(s, 4), "fit": fit_info,
+            "material": (f"{charsel.NPC_SKIN_MODEL} {charsel.NPC_SKIN_MAT}" if ztex else
+                         f"Link {OPAQUE_MAT} / {MASK_MAT}"), "albedo_scale": ALBEDO_SCALE}
     for ni, node in enumerate(nodes):
         mi, si = node.get("mesh"), node.get("skin")
         if not isinstance(mi, int) or not 0 <= mi < len(meshes):
@@ -398,10 +553,10 @@ def vrm_costume(data: bytes, romfs, name: str = "the VRM", say=print) -> tuple[b
             if len(pos) > 0xFFFF:
                 raise CharselError(f"{name}: a mesh part has {len(pos)} vertices (at most 65535)")
             tname, alpha = texture_for(m)
-            mat = copy.deepcopy(mats[MASK_MAT if alpha else OPAQUE_MAT])
+            mat = copy.deepcopy(mask_mat if alpha else skin_mat)
             mat.name = f"SwVrm_Mt_{info['shapes']:02}"
-            mat.textures = [{"_a0": tname, "_n0": NRM_TEX, "_s0": SPM_TEX}.get(sm.name, t)
-                            for sm, t in zip(mat.samplers, mat.textures)]
+            ours_of = {"_a0": tname, "_a1": charsel.FLAT_DAMAGE, "_n0": NRM_TEX, "_s0": SPM_TEX, "_ao0": charsel.FLAT_AO}
+            mat.textures = [ours_of.get(sm.name, t) for sm, t in zip(mat.samplers, mat.textures)]
             link.materials.append(mat)
             link.vertex_buffers.append(vertex_buffer(pos, nrm, uv, infl))
             sh = copy.deepcopy(shape_tpl)

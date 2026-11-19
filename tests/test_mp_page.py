@@ -939,6 +939,85 @@ class Window(Temp):
         self.assertEqual(view.screen, "multiplayer")
         self.assertEqual(root.state(), "withdrawn")
 
+    def test_who_am_i_linkle_is_your_own_body(self):
+        """2026-11-18 (stage 1 of the Linkle plan): picking Linkle turns The Linkle Mod ON (Home's own switch) and the
+        play-as mod OFF; picking anyone else turns it OFF again; the game gets it at its next start (Host, Join or
+        Play deploy first). Open, a restart when you say yes: `exit` to the game, then Play again once it closed."""
+        root, view = self.open()
+        self.mm.mods += [{"id": "the-linkle-mod", "name": "The Linkle Mod", "enabled": False, "kinds": ["romfs"]},
+                         {"id": charsel.PLAYAS_ID, "name": "Play as Daruk", "enabled": True, "kinds": ["romfs"]}]
+        # (review C2: The Linkle Mod is the "linkle" mod whose folder replaces Link's model; a recolor add-on isn't)
+        body = Path(view.ctl.backend.root) / "mods" / "the-linkle-mod" / "romfs" / "Model"
+        body.mkdir(parents=True, exist_ok=True)
+        (body / "Link.sbfres").write_bytes(b"Linkle")
+        self.mm.mods.append({"id": "linkle-hair", "name": "Linkle Hair Recolor", "enabled": True, "kinds": ["romfs"]})
+        view.ctl.refresh()
+        view.mp.show()
+        view.mp.show_who()
+        root.update()
+        page = view.frames["who"]
+        on = lambda mod_id: next(m["enabled"] for m in self.mm.mods if m["id"] == mod_id)  # noqa: E731
+        buttons(page)["Linkle\nReady"].invoke()
+        root.update()
+        self.assertEqual(charsel.load_choice()["look"], "linkle")
+        self.assertTrue(on("the-linkle-mod"))
+        self.assertFalse(on(charsel.PLAYAS_ID))                    # (it would win over her body)
+        self.assertTrue(on("linkle-hair"))                         # (the add-on: left alone)
+        shown = "\n".join(texts(page))
+        self.assertIn("Linkle's body is on (The Linkle Mod)", shown)
+        self.assertIn("Press Host or Join (or Play on Home): the game starts with it.", shown)
+        self.assertIn("Friends see Linkle when their PC has The Linkle Mod in its mods too (on or off).", shown)
+        view.ask.assert_not_called()                               # (the game is closed: no question)
+        buttons(page)["Zelda\nBuild first"].invoke()
+        root.update()
+        self.assertFalse(on("the-linkle-mod"))
+        self.assertTrue(on("linkle-hair"))
+        self.assertIn("The Linkle Mod is off again", "\n".join(texts(page)))
+        # the game open: a restart when you say yes (the game told to close; Play again once it closed)
+        view.ctl.game_open = True
+        view.ask.return_value = True
+        exits = []
+        view.mp.session.send_exit = lambda: exits.append(1) or ""
+        view.ctl.launch = mock.Mock()
+        buttons(page)["Linkle\nReady"].invoke()
+        root.update()
+        self.assertTrue(on("the-linkle-mod"))
+        self.assertTrue(self.pump(root, view, lambda: exits == [1]))   # (sent off the UI thread, review C4)
+        self.assertEqual(view.ask.call_args[0][1], "Restart the game now?")
+        self.assertEqual(view.ask.call_args[1].get("default"), 1)     # (Enter: Later, review C5)
+        self.assertIn("Restarting the game", "\n".join(texts(page)))
+        view.mp.tick()
+        self.assertFalse(view.ctl.launch.called)                   # (still open: no second game)
+        view.ctl.game_open = False
+        self.assertTrue(self.pump(root, view, lambda: view.ctl.launch.called))
+        self.assertIsNone(view.mp.relaunch)
+        # "Later", and a game that doesn't answer: said, nothing else
+        view.ctl.game_open, view.ask.return_value = True, False
+        buttons(page)["Zelda\nBuild first"].invoke()
+        root.update()
+        self.assertIn("It shows from the game's next start.", "\n".join(texts(page)))
+        self.assertEqual(exits, [1])
+        view.ask.return_value = True
+        view.mp.session.send_exit = lambda: "ConnectionRefusedError: no"
+        buttons(page)["Linkle\nReady"].invoke()
+        root.update()
+        self.assertTrue(self.pump(root, view, lambda: view.mp.relaunch is None))
+        self.assertIn("The game didn't answer: close it yourself", "\n".join(texts(page)))
+        self.assertEqual(root.state(), "withdrawn")
+
+    def test_who_am_i_linkle_needs_the_mod(self):
+        root, view = self.open()
+        view.mp.show()
+        view.mp.show_who()
+        root.update()
+        page = view.frames["who"]
+        buttons(page)["Linkle\nNeeds a mod"].invoke()
+        root.update()
+        self.assertEqual(charsel.load_choice()["look"], "linkle")   # (friends still see your pick)
+        shown = "\n".join(texts(page))
+        self.assertIn("The Linkle Mod isn't in your mods. Add it first", shown)
+        self.assertEqual(root.state(), "withdrawn")
+
     def test_who_am_i_says_why_a_build_failed(self):
         root, view = self.open()
 

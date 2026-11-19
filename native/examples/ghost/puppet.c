@@ -205,9 +205,8 @@ static const PupSlot PUP_SLOTS[] = {
     {"zora", "Dm_Npc_UMii_Hylia_BodyS_M_003", "Mipha", "mipha"},
     {"bokoblin", "Dm663_Npc_Assasin_B", "Bokoblin", ""},
     {"moblin", "Dm663_Npc_Gerudo_S_B", "Moblin", ""},
-    // 0.9.4: Linkle, a costume charsel builds from The Linkle Mod's files (on or off in the library: charsel
-    // linkle_costume), on Link's skeleton with Link's clips. No Linkle Mod: no pack, and `iam linkle` says so.
-    {"linkle", "Dm_Npc_UMii_Hylia_BodyS_M_012", "Linkle", ""},
+    // (0.9.8: no Linkle costume any more: she is Link's own body with The Linkle Mod on, picked in Breathalyzer with
+    // one restart; iam.c answers `iam linkle`, and Link shows: out/research/linkle-body-swap-plan.md)
     // 0.9.7: a VRM avatar `charsel import-vrm` put on Link's skeleton (tools/vrm_import.py IMPORT_SLOT), Link's clips
     {"custom", "Dm_Npc_Handmaid_A", "Custom", ""},
 };
@@ -216,7 +215,7 @@ static const struct {
 } PUP_ALIASES[] = {  // (`iam daruk` with no client list keeps the word as typed: it still finds Daruk)
     {"princess", "zelda"}, {"hateno", "hylian"}, {"villager", "hylian"}, {"paya", "sheikah"}, {"urbosa", "gerudo"},
     {"daruk", "goron"},    {"revali", "rito"},   {"mipha", "zora"},      {"boko", "bokoblin"}, {"moriblin", "moblin"},
-    {"linkel", "linkle"},  // (an imported costume is "custom"; vrm_import.py IMPORT_ALIASES lists any extra words)
+    // (an imported costume is "custom"; vrm_import.py IMPORT_ALIASES lists any extra words. Linkle: no costume)
 };
 
 enum { PS_OFF, PS_WAIT, PS_PENDING, PS_LIVE, PS_FAILED };
@@ -328,7 +327,11 @@ typedef struct {
     char arrow[48];                // Link's nocked arrow ("" none seen)
     int arrow_hidden;
     int64_t arrow_hides;
-    float sprint_since;            // s since Link was last in his sprint (-1: not yet)
+    // 0.9.8: our copies' sheaths and quivers (the game's pods, at the NPC's own Pod_A), hidden
+    char sheath[48];               // the last one seen ("" none)
+    int sheaths;                   // how many are hidden now
+    int64_t sheath_hides;          // times one was hidden (it climbs when the game shows one again each frame)
+    float sprint_since;           // s since Link was last in his sprint (-1: not yet)
     float stamina;                 // his stamina (-1: unreadable)
     int64_t busy_waits;            // tries not spent because the game was busy (an event, Game Over, a load, no body)
     int64_t comebacks;             // a pack given up after a busy time spawned again by itself (a Continue)
@@ -2161,6 +2164,59 @@ static void pup_arrow_tick(struct Cpu *c, uint64_t player, int hide, double t) {
     t_pup.arrow_hidden = t_arrow.actor != 0;
 }
 
+// 0.9.8 (the user, 2026-11-15: with a sword drawn, the EMPTY sheath sticks out sideways on Revali, Paya and the
+// Hylian). Link's own sheath: the weapon's pod actor (Weapon_Sheath_* / _Lsheath_* / _SpearSheath_*, the bow's
+// Weapon_Quiver_001: class OptionalWeapon, AI `Pod`, BindNodeName Pod_A [V: ActorInfo, the pack files,
+// out/research/ghost-items-manual-bone.md]) stays on his back whether the sword is drawn or sheathed, placed by the
+// player's own code with his PlayerHold offsets. On a costume the game makes the pod for the NPC holder too and binds it
+// to the NPC's own Pod_A with no player offsets: sideways at shoulder height on Paya and Revali (where the round-4
+// sword stuck out [V]), at the hips on Urbosa. Its place can't be ours (its own AI binds it each frame [G]), so a pod of
+// one of our copies is hidden while the costume holds it: the copy hangs bare on the costume's back (our back place,
+// Link's on its Spine_2) and shows gripped in the hand when drawn. Found two ways (which one the game uses for an NPC
+// holder isn't known [G]): the copy's pod link (ITEM_POD, set right after the game makes it [S: 0x700121d384]) and the
+// costume holder's slots 3-5 (where Link's arrow sits). Hidden with the game's own model show/hide, as Link's arrow.
+#define ITEM_POD 0x958  // item: link to its sheath / quiver actor (data*, u32 id)
+#define PUP_PODS 6
+static int pup_is_pod(const char *name) {
+    return name && !strncmp(name, "Weapon_", 7) && (strstr(name, "heath") || strstr(name, "Quiver"));
+}
+// The pod a game link at `at` names (its name into nm), else 0.
+static uint64_t pup_pod_at(uint64_t at, char nm[64], double t) {
+    nm[0] = 0;
+    uint64_t a = link_at(at, t);
+    if (!a || !mem_ok(a + PROC_STATE, 1, t) || rd8(a + PROC_STATE) == PROC_DELETING) return 0;
+    if (!self_text(self_u64(a + PROC_NAME, t), nm, 64, t) || !pup_is_pod(nm)) return 0;
+    return a;
+}
+static void pup_pod_hide(struct Cpu *c, uint64_t pod, const char *nm, uint64_t seen[PUP_PODS], int *n, double t) {
+    for (int k = 0; k < *n; k++)
+        if (seen[k] == pod) return;
+    if (*n < PUP_PODS) seen[(*n)++] = pod;
+    if (pup_draw(c, pod, 0, t)) t_pup.sheath_hides++;
+    snprintf(t_pup.sheath, sizeof t_pup.sheath, "%s", nm);
+}
+static void pup_sheath_tick(struct Cpu *c, uint64_t proc, int live, double t) {
+    uint64_t seen[PUP_PODS];
+    int n = 0;
+    char nm[64];
+    if (live && proc && t_items_ghost == proc) {
+        for (int i = 0; i < ITEM_SLOTS; i++) {
+            uint64_t it = t_status.items.slot[i].actor;
+            if (!it || (t_items[i].state != IS_GRAB && t_items[i].state != IS_HELD) || !mem_ok(it + ITEM_POD, 12, t))
+                continue;
+            uint64_t pod = pup_pod_at(it + ITEM_POD, nm, t);
+            if (pod) pup_pod_hide(c, pod, nm, seen, &n, t);
+        }
+        uint64_t h = proc + PUP_NPC_HOLDER;
+        if (mem_ok(h, EQUIP_OWNER + 8, t) && rd64(h) == EQUIP_VPTR && rd64(h + EQUIP_OWNER) == proc)
+            for (int k = 3; k < 6; k++) {
+                uint64_t pod = pup_pod_at(h + EQUIP_LINKS + (uint64_t)k * EQUIP_LINK_SIZE, nm, t);
+                if (pod) pup_pod_hide(c, pod, nm, seen, &n, t);
+            }
+    }
+    t_pup.sheaths = n;
+}
+
 // For ghost.c's items part: the self puppet's copy in slot `slot` (on its back or in its hand): the bone, the grip, the
 // size.
 static int pup_item_grip(int slot, int back, const char **bone, float G[12], float *scale) {
@@ -2588,6 +2644,7 @@ static void pup_tick(struct Cpu *c, uint64_t pi, uint64_t player, double t) {
     // 0.9.5: its copies never sheathed by the game (an NPC holder's slots kept "in hand"); Link's arrow hidden with him
     t_pup.holder = t_pup.state == PS_LIVE && t_pup.proc ? pup_holder_in_hand(t_pup.proc, t) : 0;
     pup_arrow_tick(c, player, t_pup.state == PS_LIVE && t_pup.shown, t);
+    pup_sheath_tick(c, t_pup.proc, t_pup.state == PS_LIVE, t);  // 0.9.8: our copies' sheaths hidden
     t_pup.items = t_pup.state == PS_LIVE && t_items_ghost == t_pup.proc && t_pup.proc;
     lock();
     g_pup = t_pup;
@@ -2641,10 +2698,7 @@ static void pup_sentence(const PupStatus *p, const char *picked, char *out, size
         snprintf(out, cap, "Loading %s for you...", p->name);
         break;
     case PS_FAILED:
-        if (!strcmp(p->id, "linkle"))
-            snprintf(out, cap, "Linkle isn't on this PC: add The Linkle Mod to your mods (it can stay off) and build the "
-                               "characters again. You stay Link.");
-        else if (*p->playas)
+        if (*p->playas)
             snprintf(out, cap, "%s. Restart the game to play as %s: python tools\\charsel.py playas %s", p->why, p->name,
                      p->playas);
         else
@@ -2909,6 +2963,9 @@ static void cmd_puppet(int argc, char **argv, SwModReply *r) {
     api->reply_str(r, "arrow", p.arrow);
     api->reply_bool(r, "arrow_hidden", p.arrow_hidden != 0);
     api->reply_int(r, "arrow_hides", p.arrow_hides);
+    api->reply_str(r, "sheath", p.sheath);  // 0.9.8
+    api->reply_int(r, "sheaths", p.sheaths);
+    api->reply_int(r, "sheath_hides", p.sheath_hides);
     api->reply_num(r, "sprint_since", p.sprint_since);
     api->reply_num(r, "stamina", p.stamina);
     api->reply_int(r, "busy_waits", p.busy_waits);

@@ -73,7 +73,7 @@ the keys. All text is 18 pt or larger, white on dark green, blue and red (contra
 | Group | id (what you type) | Name | Built on actor name | Own clips + Link's | Loads |
 |---|---|---|---|---|---|
 | Hylians | `link` | Link | the Link body (`Dm_Npc_Sheiker_Searcher_M_001`) | 33 Link | 0 MB |
-| Hylians | `linkle` | Linkle | `Dm_Npc_UMii_Hylia_BodyS_M_012`: a costume built from The Linkle Mod's files (on or off in your library) | 33 Link | 0.9 MB model + its textures |
+| Hylians | `linkle` | Linkle | none: YOUR OWN body with The Linkle Mod on (see "Linkle: your own body"); friends: the Link body | Link's own | 0 MB |
 | Hylians | `zelda` | Zelda | `Dm_Npc_Sheiker_Searcher_M_000` | 6 + 27 | 10.6 MB |
 | Hylians | `hylian` | Hylian (a Hateno villager) | `Dm_Npc_UMii_Hylia_BodyS_M_001` | 6 + 27 | 11.5 MB |
 | Races | `sheikah` (`paya`) | Paya (Sheikah) | `Dm_Npc_UMii_Hylia_BodyS_M_002` | 6 + 27 | 6.4 MB |
@@ -118,8 +118,9 @@ the keys. All text is 18 pt or larger, white on dark green, blue and red (contra
   of Link's (hit windows read from the game's animation sets [V frames], the look [G]): e.g. the Bokoblin's
   `Attack_Small` from frame 23 at 1.21x for Link's first sword swing. The Moblin no longer stabs with a sword. In
   water they wade (their walk, slowed: no swim clip in their files [V]).
-- **Linkle:** `iam linkle` without a Linkle costume built says so ("add The Linkle Mod to your mods (it can stay
-  off) and build the characters again. You stay Link.").
+- **Linkle (2026-11-18):** no self-puppet any more (her costume stays for friends, see "Linkle: your own body"):
+  `iam linkle` says "You are Linkle (her body is on)." when The Linkle
+  Mod is in this game's deploy, else to pick Linkle in Breathalyzer (one restart). See "Linkle: your own body".
 
 ## Animation targets
 
@@ -179,6 +180,113 @@ files, and the four that load have no pack entry either.
   `charsel build --slot rito=Dm_Npc_Handmaid_A`.
 - **Size table [G]:** the free names have no size-table entry for their pack. Small new files without one loaded fine
   in the game (the Link body's own animation sets); a whole pack without one is checked in the game run.
+
+## Linkle: your own body (2026-11-18, stage 1 of `out\research\linkle-body-swap-plan.md`; not yet checked in the game)
+
+The user, on the Linkle costume (a puppet copying Link's moves in one outfit): equipped armor did nothing on her and
+the inventory showed Link, "terribly wrong". So Linkle is no longer a costume:
+
+- **Picking Linkle** (the launcher's Multiplayer > Who am I, or `python tools\charsel.py playas linkle`) turns **The
+  Linkle Mod ON** in your mod list as Link's own body: it replaces Link's player and armor models, so every armor
+  piece shows as hers and the inventory shows her. A play-as mod that is on goes off (it would win over her body).
+  The launcher does it with its own mod switch (Home's Turn on/off).
+- **One restart.** With the game closed, the next Play, Host or Join deploys it and starts the game. With the game
+  open, the page asks "Restart the game now?": yes tells the game to close itself (`exit` on its control port, open
+  while Ghost multiplayer is on), then starts it again the way it ran (Play; a host hosts again; a friend's Join list
+  opens). "Later", or a game that doesn't answer: said plainly, nothing else happens.
+- **Picking anyone else** turns The Linkle Mod OFF again (one restart, the same way).
+- **No Linkle Mod in your mods:** her button says Needs a mod; picking her keeps the pick (friends see Linkle) and
+  says how to add the mod (Home > Add mod, its BotW Switch version).
+- **In the game,** `iam linkle` spawns no puppet (Link shows: her body when the mod is on). It answers "You are Linkle
+  (her body is on)." when The Linkle Mod is in the game's deploy (the ghost mod reads the deploy's `launch.json`, next
+  to `SAVAGEWIND_ROMFS_OVERLAY`), else how to pick her in Breathalyzer (one restart).
+- **Friends** see her as before (review C1, 2026-11-18 night): each PC still builds her costume from The Linkle Mod's
+  files (on or off: `linkle_costume`, its pack on `Dm_Npc_UMii_Hylia_BodyS_M_012`), and Looks shows a friend who
+  picked Linkle as it. Only the self-puppet is gone (the ghost DLL has no `linkle` slot). The costume is v2 again (the
+  mod's `Armor_Default`: her no-armor look); v3's outfit code (`Armor_001`, hood down) was dropped with the costume
+  and has to be redone.
+- **Which mod is The Linkle Mod** (review C2): a mod with "linkle" in its id or name whose folder replaces Link's
+  model (`is_linkle_mod`, as `linkle_mod`). A "Linkle Hair Recolor" add-on is left alone, on or off.
+- **Only its own switch** (review C3, C7): picking anyone else turns off only a Linkle Mod that Who am I itself turned
+  on (`linkle_owned` in the choice file); one you turned on on Home stays on. What Who am I switches leaves the
+  play-as state's turned-off list, so a later `charsel playas off` can't turn it back on.
+- **The restart** (review C4, C5): "Restart now?" defaults to Later, and says when friends get disconnected. `exit`
+  goes off the UI thread; only a game that can't be reached is "didn't answer"; once sent, the restart waits for the
+  game to close (90 s).
+
+## Sheaths on costumes (2026-11-18, ghost 0.9.8; not yet checked in the game)
+
+The user: with a sword drawn, the EMPTY sheath stuck out sideways on Revali, Paya and the Hylian. Link's own sheath
+is the weapon's pod actor (`Weapon_Sheath_*`, `_Lsheath_*`, `_SpearSheath_*`, the bow's `Weapon_Quiver_001`: class
+OptionalWeapon, its AI binds it to `Pod_A` [V: ActorInfo, the packs]); on Link it stays on his back, drawn or
+sheathed, placed with his player offsets. On a costume the game makes it for the NPC holder too and binds it to the
+NPC's own `Pod_A` with no player offsets: sideways (where the round-4 sword stuck out [V]). Its place can't be ours
+(its own AI binds it every frame [G]), so the ghost mod hides every pod of our copies while the costume holds them
+(the game's own model show/hide, as Link's nocked arrow): the sword hangs bare on the costume's back and is gripped in
+the hand when drawn. Found by the copy's pod link (item `+0x958` [S]) and the costume holder's slots 3-5 [G: which
+one the game uses for an NPC isn't known]. `ghost puppet` shows `sheath` (the last one), `sheaths` (hidden now) and
+`sheath_hides`.
+
+### Sheath: why hiding it each frame doesn't stick, and the planned fix (design only, 2026-11-18 night)
+
+Game check FAIL: `sheath_hides` climbs about 110 a second: the ghost mod hides the pod in its own tick, and the game
+shows it again before drawing (its Pod AI or the holder's model update re-shows it each frame [G]). Hiding it later
+in the frame is the root fix, not hiding it more often. Plan (not coded tonight; the puppet code is as it was):
+1. When `pup_pod_hide` finds a pod, keep its model units (`pup_model(pod)` -> `MODEL_UNITS`, as `pup_drawn` reads
+   them) in a small atomic table, like `g_pup_ov_unit`.
+2. In `unit_step_wrapper` (after the game's own step, the place every posed unit already gets its pose), a unit in that
+   table gets its draw bit (`UNIT_FLAGS` bit `PUP_BIT`) cleared again, so the game's re-show in its step is undone
+   before the frame is drawn; count it as `sheath_unit_hides`.
+3. Or, if the re-show is the game's `MODEL_SHOW` call itself: wrap it (`hle_override`) and refuse "show" for a model
+   in that table; find which with a counter on each (one check session).
+4. Selftest: a fake unit whose step sets the bit again; after the wrapper it stays clear. Done when `sheath_hides`
+   stays at about one per pod and no sheath shows in a shot.
+
+### Looks (2026-11-15: the room-fix game check, `out\shots\room-fix`; not yet checked in the game)
+
+- **(2026-11-18: v3's outfit code is gone; her costume is v2 again, friends' view only.) Linkle was in her underwear** (bandeau top,
+  shorts, bare feet) [V]: v2 merged The Linkle Mod's `Armor_Default`,
+  which is her *no-armor* look. Linkle v3 wears her outfit: the mod's `Model/Armor_001` (the game's Hylian set, which
+  the mod turns into her hood, tunic, skirt, tights and boots [V: shape, material and texture names]) with the hood
+  down (the hood-up shapes are left out: `LINKLE_HOOD_UP` [G: by their names]), plus her belt pouches
+  (`Armor_Default_Extra_00/01`; the tunic's `IsDispOffPorch` is false, so the game shows them [V]). The game's hide
+  groups apply as on the player (`apply_hide_groups`): the tunic hides her bare upper body and Link's belts. The
+  mod's "green shirt" and "green boots" shapes name textures the mod doesn't ship (`greenshirt`, `greenleg`: not in
+  its .bnp either [V]), so they are left out (`no_texture` in `charsel.json`). Textures over 1024 px drop a mip level.
+  Model 0.9 MB, textures 1.2 MB (packed).
+- **Skin colour (Linkle strong orange-yellow, the imported avatar lime green)** [V: shots]: the avatar's textures
+  were the right ones (decoded back: skin 248, 230, 216; dress red), and Linkle's hair, top and shorts looked right.
+  What went wrong drew with Link's *player* materials (Linkle's skin: priority hint `player`, the player's skin colour
+  calculation; the avatar: Link's underwear and eyelashes materials); every costume that looks right draws with an
+  NPC's own [V]. Why the player's materials go wrong on another actor is not known [G]. Now such skin draws with
+  Zelda's skin material (`Npc_Zelda_Miko` `Mt_Skin`, from your game files, `npc_skin_materials`), pointed at the
+  costume's own textures (her shade map's coordinates: a copy of the first ones). The avatar's colours are scaled by
+  0.62 into the game's albedo range (VRM textures are painted for flat toon shading, near white; Zelda's skin averages
+  156, 120, 92) [G: too pale or too dark is for the game check; `vrm_import.ALBEDO_SCALE`].
+- **2026-11-18 game check FAIL: `iam custom` showed only her head** (body, arms, legs invisible; the same without
+  `own_skeleton` and with `make_fits`). Not proven offline [G]. What Zelda's `Mt_Skin` asks that the avatar's meshes
+  don't give [V: options compared with Link's `Mt_Underwear`]: its shader reads a third texture coordinate (`_u2`) from
+  a vertex attribute named `All` that only Zelda's own shapes have, and it turns on a vertex position modify
+  (`uking_vtx_position_modify_calc_type` 8, reading a vertex channel; `_shadow_only` 1). Fallback for now:
+  `vrm_import.SKIN_MATERIAL = "link"` draws the avatar with Link's materials again (they showed the whole body; the
+  skin may come out lime green again), keeping her own proportions. `charsel import-vrm --skin zelda` brings Zelda's
+  back; `--skin zelda-fed` is Zelda's without those two (`fed_by_our_meshes`: no `_u2`, the position modify off as on
+  Link's), the check of the likely cause.
+- **The avatar's arms hung far from her chest** (the user): the import stretched every part to Link's lengths
+  (collarbones x2.2, forearms x1.4, neck x1.66). Link's clips turn the body bones only (in all 1,167 of
+  `Player_Animation`, only Root, Skl_Root, the weapon bones and the face move [V]), so she now keeps her own lengths:
+  each part is only turned to Link's rest pose, her joints chained at her lengths, her feet on Link's ankle height, and
+  the costume's skeleton rests at her joints (`own_fits`, `own_skeleton`). Shoulders 0.18 m apart (Link's 0.37); the
+  offline plot of Link's `Nml_Wait` has her hands at her hips, close to her sides
+  (`out\vrm-import\plots\arms_now_wait.jpg`, before: `arms_before_wait.jpg`).
+- **Zelda had no legs** (her sandals floated under the swinging dress) [V: her model has no skin from the ankle to the
+  hip]. The user picked "a game Hylian woman's legs", but no woman's body in the game has bare knees or thighs (every
+  `UMii_*_Body*_W_*` stops at mid-shin) [V], so her legs are the slim Hylian legs the game has: Link's own under his
+  shorts (`Armor_Default_Lower`), feet left out, each vertex moved from his leg bones onto hers (stretched to her
+  lengths: her shin x1.31), tinted to her skin texture's average, drawn with her skin material, merged into a copy of
+  her model (`Model/SwChar_zelda.sbfres`; her pack's model list names it). Ankle to 0.74 m (mid-thigh; the dress
+  covers the rest); offline plots `out\shots\looks-offline\zelda_legs_*.jpg`. If the copy can't be made, she is built
+  as before and the notes say why.
 
 ## How it works
 
@@ -502,6 +610,8 @@ way The Linkle Mod does it. Built on your PC from your own files; it needs a res
 python tools\charsel.py playas daruk     build it, check it, add it to your mods (last, on)
 python tools\charsel.py playas           what you play as now
 python tools\charsel.py playas off       back to Link from the next start (and Linkle back on)
+python tools\charsel.py playas linkle    be Linkle yourself from the next start (The Linkle Mod on as Link's body)
+python tools\charsel.py playas link      plain Link from the next start (The Linkle Mod off too)
 python tools\charsel.py playas check     read the built mod back (no game)
 ```
 
@@ -543,6 +653,20 @@ the background and says "Done. Restart the game to play as Daruk."
 Packs, models, textures, animations and ActorInfo are never in this repo and never go over the network. Each PC
 builds its own from its own files; `out\` is never committed, and `check_clean.py` flags packs and models. Only ids,
 versions and names travel. The Linkle body comes from the Linkle mod on that PC (its own files, read only).
+
+## To check next session (2026-11-18 night fixes, offline only)
+
+1. `iam custom` (the VRM avatar, re-imported: `charsel import-vrm`): the whole body shows (Link's materials again);
+   note the skin colour (lime green again?) and send a shot. Then re-import with `--skin zelda-fed`: whole body with
+   Zelda's skin shading means the cause was the `All` coordinates / position modify (make it the default then).
+2. A friend picks Linkle: you see her costume (v2, her no-armor look), not the Sheikah stand-in. Rebuild the
+   characters first (Characters on).
+3. Who am I > Linkle, then Zelda: only a Linkle Mod that Who am I turned on goes off; a "Linkle ..." add-on stays as
+   it was; with The Linkle Mod turned on yourself on Home it stays on.
+4. Who am I with the game open: "Restart now?" defaults to Later; while hosting it says friends get disconnected;
+   Restart now closes the game and starts it again (no "didn't answer" when it closed).
+5. `charsel playas off` after a Who am I switch doesn't turn The Linkle Mod back on.
+6. Sheath on Revali, Paya, a Hylian: still shows (no code change tonight); `ghost puppet` `sheath_hides` for the plan.
 
 ## In-game check
 

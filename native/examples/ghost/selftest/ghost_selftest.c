@@ -1202,6 +1202,46 @@ static void run_line(void (*fn)(int, char **, SwModReply *), const char *line) {
     fn(argc, argv, (SwModReply *)(void *)g_rep_text);
 }
 
+// 0.9.8 Linkle by restart: `iam linkle` spawns no costume (pup_id: none) and says whether her body is on, from the
+// deploy's launch.json (its top "mods" list: a mod with linkle in its id or name), else how to get it in plain words.
+static int g_fake_linkle;
+static int fake_linkle(void) { return g_fake_linkle; }
+static void check_iam_linkle(void) {
+    static const char *const ON = "{\n \"env\": {\"X\": \"linkle\"},\n \"mods\": [\n  {\n   \"id\": \"the-linkle-mod\",\n"
+                                  "   \"name\": \"The Linkle Mod\",\n   \"kinds\": [\n    \"romfs\"\n   ]\n  }\n ],\n"
+                                  " \"parts\": {\"native\": {\"mods\": [\"ghost.dll\"]}}\n}\n";
+    static const char *const OFF = "{\n \"mods\": [\n  {\n   \"id\": \"giruka.ak47\",\n   \"name\": \"Extra item\",\n"
+                                   "   \"kinds\": [\"romfs\", \"linkle\"]\n  }\n ],\n \"notes\": [\"Better Sprint replaces 2 "
+                                   "of Linkle's files\"]\n}\n";
+    static const char *const BY_NAME = "{\"mods\": [{\"id\": \"x.y\", \"name\": \"LINKLE body\"}]}";
+    int parse = iam_launch_linkle(ON) == 1 && iam_launch_linkle(OFF) == 0 && iam_launch_linkle(BY_NAME) == 1 &&
+                iam_launch_linkle("{\"mods\": [{\"id\": \"a\"") == -1 && iam_launch_linkle("{}") == -1 &&
+                iam_launch_linkle(NULL) == -1 && iam_linkle_file("Z:\\no\\such\\launch.json") == -1;
+    check("iam", "linkle_launch_read", parse, "on %d off %d name %d cut %d", iam_launch_linkle(ON),
+          iam_launch_linkle(OFF), iam_launch_linkle(BY_NAME), iam_launch_linkle("{\"mods\": [{\"id\": \"a\""));
+    int (*was)(void) = g_iam_linkle;
+    g_iam_linkle = fake_linkle;
+    g_fake_linkle = 1;
+    run_line(cmd_iam, "iam linkle");
+    int on = !strcmp(g_rep_iam, "linkle") && strstr(g_rep_text, "You are Linkle (her body is on).") &&
+             !strstr(g_rep_text, "pick Linkle") && !*g_rep_fail;
+    char on_text[400];
+    snprintf(on_text, sizeof on_text, "%s", g_rep_text);
+    run_line(cmd_iam, "iam");
+    int on_now = strstr(g_rep_text, "You are linkle") && strstr(g_rep_text, "her body is on");
+    g_fake_linkle = 0;
+    run_line(cmd_iam, "iam linkel");
+    int off = !strcmp(g_rep_iam, "linkle") && strstr(g_rep_text, "Your friends see you as Linkle") &&
+              strstr(g_rep_text, "pick Linkle in Breathalyzer") && strstr(g_rep_text, "restarts once") &&
+              !strstr(g_rep_text, "her body is on") && !*g_rep_fail;
+    g_fake_linkle = -1;  // (no deploy known: the same words as off)
+    run_line(cmd_iam, "iam");
+    int unknown = strstr(g_rep_text, "pick Linkle in Breathalyzer") != 0;
+    g_iam_linkle = was;
+    check("iam", "linkle_body_words", on && on_now && off && unknown, "on %d (%s) now %d off %d (%s) unknown %d", on,
+          on_text, on_now, off, g_rep_text, unknown);
+}
+
 static void check_iam(void) {
     g_fake_api.reply_str = rep_str, g_fake_api.reply_int = rep_int, g_fake_api.reply_num = rep_num;
     g_fake_api.reply_bool = rep_bool, g_fake_api.reply_text = rep_text, g_fake_api.reply_fail = rep_fail;
@@ -1292,6 +1332,7 @@ static void check_iam(void) {
              "gerudo/urbosa,goron/daruk,rito/revali,zora/mipha,bokoblin/boko,moblin/moriblin link");
     check("iam", "client_list_fits", g_rep_looks == 11 && !*g_rep_fail, "looks %lld fail %s", (long long)g_rep_looks,
           g_rep_fail);
+    check_iam_linkle();
     lock();
     memset(&g_iam, 0, sizeof g_iam);
     unlock();
@@ -1652,9 +1693,8 @@ static void check_puppet(void) {
     free(m);
     check_puppet_093();
     check("puppet", "ids", !strcmp(pup_id("daruk"), "goron") && !strcmp(pup_id("goron"), "goron") &&
-          !*pup_id("link") && !strcmp(pup_id("linkle"), "linkle") && !strcmp(pup_id("linkel"), "linkle") &&
+          !*pup_id("link") && !*pup_id("linkle") && !*pup_id("linkel") && !pup_slot("linkle") &&
           !*pup_id("ganon") && pup_slot("zora") && !strcmp(pup_slot("goron")->actor, "Dm663_Npc_Assasin_A") &&
-          !strcmp(pup_slot("linkle")->actor, "Dm_Npc_UMii_Hylia_BodyS_M_012") &&
           !strcmp(pup_id("custom"), "custom") && !strcmp(pup_slot("custom")->actor, "Dm_Npc_Handmaid_A"),
           "daruk %s", pup_id("daruk"));
     PupStatus ps;
@@ -1668,13 +1708,10 @@ static void check_puppet(void) {
     pup_sentence(&ps, NULL, line, sizeof line);
     check("puppet", "sentences", picked && strstr(line, "Restart the game to play as Daruk") &&
           strstr(line, "charsel.py playas daruk"), "%s", line);
-    // 0.9.4: `iam linkle` with no Linkle pack says so in plain words (not "you see yourself as Link")
+    // 0.9.8: no Linkle costume: the puppet says nothing for her (iam.c answers: her body, or how to get it)
     char lk[300];
     pup_sentence(&ps, "linkle", lk, sizeof lk);
-    int lk_pick = strstr(lk, "Linkle in a moment") != 0;
-    snprintf(ps.id, sizeof ps.id, "linkle"), snprintf(ps.name, sizeof ps.name, "Linkle"), ps.playas[0] = 0;
-    pup_sentence(&ps, NULL, lk, sizeof lk);
-    check("puppet", "linkle_words", lk_pick && strstr(lk, "add The Linkle Mod") && strstr(lk, "You stay Link"), "%s", lk);
+    check("puppet", "linkle_words", !*lk, "%s", lk);
 
     if (!g_items_world_ok) {
         check("puppet", "world", 1, "SKIP: the made-up globals' page is taken in this process");
@@ -2313,6 +2350,39 @@ static void check_puppet_items_grip(void) {
         int ours0 = f0 && follow_is_ours(0, f0) && !strcmp((const char *)(uintptr_t)R64((void *)(uintptr_t)f0, FOLLOW_BONE), "Weapon_R");
         int ours1 = f1 && follow_is_ours(1, f1) && !strcmp((const char *)(uintptr_t)R64((void *)(uintptr_t)f1, FOLLOW_BONE), "Spine_2");
         int placed = ours0 && ours1 && !strcmp(o0->place, "grip") && !strcmp(o1->place, "back") && o0->state == IS_HELD;
+        // 0.9.8: our copies' pods hidden (the game binds them to the NPC's own Pod_A, sideways): the drawn sword's
+        // sheath (its pod link) and a quiver in the costume holder's slot 3; another item's name there left alone;
+        // nothing hidden once the links are gone
+        static struct {
+            _Alignas(16) uint8_t mem[0x600];
+            FakeModel fm;
+            FakeLinkData ld;
+            char name[24];
+        } pods[3];
+        static const char *const POD_NAMES[3] = {"Weapon_Sheath_001", "Weapon_Quiver_001", "Weapon_Sword_002"};
+        for (int k = 0; k < 3; k++) {
+            memset(&pods[k], 0, sizeof pods[k]);
+            snprintf(pods[k].name, sizeof pods[k].name, "%s", POD_NAMES[k]);
+            W64(pods[k].mem, PROC_NAME, pods[k].name);
+            fake_model(pods[k].mem, &pods[k].fm, 1);
+            ld_new(&pods[k].ld, P(pods[k].mem));
+        }
+        uint8_t *swm = (uint8_t *)(uintptr_t)sw;
+        uint64_t s3 = EQUIP_LINKS + 3 * EQUIP_LINK_SIZE, s4 = EQUIP_LINKS + 4 * EQUIP_LINK_SIZE;
+        W64(swm, ITEM_POD, &pods[0].ld), W32(swm, ITEM_POD + 8, pods[0].ld.id);
+        W64(hold, s3, &pods[1].ld), W32(hold, s3 + 8, pods[1].ld.id);
+        W64(hold, s4, &pods[2].ld), W32(hold, s4 + 8, pods[2].ld.id);
+        int64_t sh0 = t_pup.sheath_hides;
+        pup_run("Wait", 0, 0.2);
+        int pods_hidden = !fm_drawn(&pods[0].fm) && !fm_drawn(&pods[1].fm) && fm_drawn(&pods[2].fm) &&
+                          t_pup.sheaths == 2 && t_pup.sheath_hides == sh0 + 2 && pup_is_pod("Weapon_Lsheath_013") &&
+                          pup_is_pod("Weapon_SpearSheath_001") && !pup_is_pod("Weapon_Sword_002") && !pup_is_pod(NULL);
+        W64(swm, ITEM_POD, 0), W64(hold, s3, 0), W64(hold, s4, 0);
+        pup_run("Wait", 0, 0.1);
+        check("puppet", "sheath_hidden", pods_hidden && t_pup.sheaths == 0 && !strcmp(t_pup.sheath, "Weapon_Quiver_001"),
+              "sheath drawn %d quiver drawn %d other drawn %d, hidden %d (+%lld), after %d, last %s",
+              fm_drawn(&pods[0].fm), fm_drawn(&pods[1].fm), fm_drawn(&pods[2].fm), t_pup.sheaths,
+              (long long)(t_pup.sheath_hides - sh0), t_pup.sheaths, t_pup.sheath);
         t_status.self.equip_ok = 0;
         pup_run("Wait", 0, 0.2);
         t_status.self.equip_ok = 1;

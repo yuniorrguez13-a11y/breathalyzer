@@ -37,3 +37,7 @@ hidden with the game's own model show/hide (his armor and held items copy his mo
 (the character's pack, the same one your friends see) is kept at Link every frame, playing the character's clip for
 what he does (Daruk's sprint is his rolling ball). Link shows instead during loads, cutscenes, riding, and states
 the character has no clip for. `iam link` brings Link back. `ghost puppet` shows its state (developer mode).
+0.9.8 (not yet run in the game): `iam linkle` shows no costume: Linkle is Link's own body with The Linkle Mod on
+(picked in Breathalyzer's Who am I, one restart), and `iam linkle` says whether her body is on (the deploy's
+`launch.json`). The costume's copies of Link's sheaths and quivers (the game puts them at the NPC's own `Pod_A`,
+sideways) are hidden (docs/charsel.md, "Sheaths on costumes").

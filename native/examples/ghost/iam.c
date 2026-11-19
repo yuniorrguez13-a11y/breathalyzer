@@ -15,6 +15,8 @@
 //   iam <name>          pick one (an id or an alias from the list: `iam zelda`, `iam daruk`)
 //   iam next | back     the next or the previous one on the list (the wheel's order)
 //   iam self off | on   0.9.0: see yourself as Link, or (the default) as your pick, live (puppet.c)
+//   iam linkle          0.9.8: no costume: says whether her body is on (The Linkle Mod as Link's own body, picked in
+//                       Breathalyzer with one restart), else how to get it
 //   ghost looks <list> [current [seen]]   (the client) the list: comma-separated entries, each id/alias/alias
 //                                  (lower-case letters, digits and -, 1-24 each), at most IAM_MAX entries
 
@@ -38,6 +40,85 @@ static IamState g_iam;  // (under lock(): commands run on the frame thread, the 
 // 0.9.0: you see yourself as your pick, live (puppet.c, included after this file): its sentence, and `iam self`.
 static void pup_iam_text(const char *picked, char *out, size_t cap);
 static void pup_set_self(int on);
+
+// 0.9.8 Linkle by restart (docs/charsel.md "Linkle"; out/research/linkle-body-swap-plan.md, stage 1): `iam linkle`
+// shows no costume any more. Picking Linkle in Breathalyzer (Multiplayer > Who am I) turns The Linkle Mod on as Link's
+// OWN body (every armor piece shows as hers, the inventory shows her) and restarts the game once; here `iam linkle`
+// only says whether her body is on: The Linkle Mod is in this game's deploy (modman lists the mods it deployed in
+// launch.json, next to the deployed overlay SAVAGEWIND_ROMFS_OVERLAY), read when asked. Your friends still see your
+// pick (the client takes it from the `ghost` reply, as for any other).
+// (no C library calls for files here: Windows' own, as coop_story.c reads its list)
+__declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char *name, char *buf, unsigned long size);
+__declspec(dllimport) void *__stdcall CreateFileA(const char *path, unsigned long access, unsigned long share,
+                                                  void *security, unsigned long disposition, unsigned long flags,
+                                                  void *templ);
+__declspec(dllimport) int __stdcall ReadFile(void *h, void *buf, unsigned long size, unsigned long *got, void *ov);
+__declspec(dllimport) int __stdcall CloseHandle(void *h);
+#define IAM_LAUNCH_MAX (512u << 10)  // launch.json read up to this (its mod list is near the top)
+#define IAM_LINKLE_ON "You are Linkle (her body is on)."
+#define IAM_LINKLE_HOW "To be Linkle yourself, pick Linkle in Breathalyzer (Multiplayer > Who am I): it turns The " \
+                       "Linkle Mod on, then the game restarts once. You look like Link until then."
+
+// launch.json's text: 1 when a mod in its top "mods" list has "linkle" in its id or name (any case), 0 when none,
+// -1 when there is no such list (or it is cut short).
+static int iam_launch_linkle(const char *text) {
+    const char *p = text ? strstr(text, "\"mods\": [") : NULL;
+    if (!p) return -1;
+    p += 9;
+    int depth = 1, value = 0;  // value: the next string is an "id" or a "name" of a mod
+    char s[160];
+    while (*p && depth > 0) {
+        char ch = *p++;
+        if (ch == '[' || ch == '{') {
+            depth++;
+        } else if (ch == ']' || ch == '}') {
+            depth--;
+        } else if (ch == '"') {
+            size_t n = 0;
+            for (; *p && *p != '"'; p++) {
+                if (*p == '\\' && p[1]) p++;
+                if (n + 1 < sizeof s) s[n++] = (char)(*p >= 'A' && *p <= 'Z' ? *p + 32 : *p);
+            }
+            if (!*p) return -1;
+            p++, s[n] = 0;
+            const char *q = p;
+            while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
+            if (*q == ':') value = depth == 2 && (!strcmp(s, "id") || !strcmp(s, "name"));
+            else if (value && strstr(s, "linkle")) return 1;
+            else value = 0;
+        }
+    }
+    return depth == 0 ? 0 : -1;
+}
+
+// The same, for the file at path (-1: it can't be read).
+static int iam_linkle_file(const char *path) {
+    void *h = CreateFileA(path, 0x80000000ul, 1, 0, 3, 0, 0);  // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING
+    if (h == (void *)(intptr_t)-1) return -1;
+    char *text = malloc(IAM_LAUNCH_MAX + 1);
+    unsigned long got = 0, total = 0;
+    while (text && total < IAM_LAUNCH_MAX && ReadFile(h, text + total, IAM_LAUNCH_MAX - total, &got, 0) && got)
+        total += got;
+    CloseHandle(h);
+    if (!text) return -1;
+    text[total] = 0;
+    int on = iam_launch_linkle(text);
+    free(text);
+    return on;
+}
+
+// 1: The Linkle Mod is in this game's deploy (her body is Link's); 0: it isn't; -1: no deploy known (the game wasn't
+// started by modman or the launcher).
+static int iam_linkle_real(void) {
+    char dir[400], path[440];
+    unsigned long n = GetEnvironmentVariableA("SAVAGEWIND_ROMFS_OVERLAY", dir, sizeof dir);
+    if (!n || n >= sizeof dir) return -1;
+    snprintf(path, sizeof path, "%s\\..\\launch.json", dir);
+    return iam_linkle_file(path);
+}
+static int (*g_iam_linkle)(void) = iam_linkle_real;  // (the selftest fakes it)
+
+static int iam_is_linkle(const char *id) { return !strcmp(id, "linkle") || !strcmp(id, "linkel"); }
 
 // A word as `iam` takes it: lower-case letters, digits and -, 1-IAM_WORD, not starting with -.
 static int iam_word_ok(const char *s, size_t n) {
@@ -208,7 +289,10 @@ static void cmd_iam(int argc, char **argv, SwModReply *r) {
         api->reply_str(r, "iam", now);
         api->reply_int(r, "iam_seq", st->seq);
         api->reply_str(r, "names", names);
-        pup_iam_text(NULL, see, sizeof see);
+        if (iam_is_linkle(now))  // 0.9.8: no costume for her: whether her body is on
+            snprintf(see, sizeof see, "%s", g_iam_linkle() == 1 ? IAM_LINKLE_ON : IAM_LINKLE_HOW);
+        else
+            pup_iam_text(NULL, see, sizeof see);
         if (st->n)
             api->reply_text(r, "You are %s. %s%sType iam and a name: %s", now, see, *see ? " " : "", names);
         else
@@ -263,6 +347,14 @@ static void cmd_iam(int argc, char **argv, SwModReply *r) {
     api->reply_str(r, "iam", id);
     api->reply_int(r, "iam_seq", seq);
     pup_iam_text(id, see, sizeof see);  // (0.9.0: you see yourself as it too, live)
+    if (iam_is_linkle(id)) {  // 0.9.8: no puppet (Link shows): her body is Link's own when The Linkle Mod is on
+        const char *friends = !listed     ? "The multiplayer client tells your friends once it runs with --ghost-looks."
+                              : listening ? "Your friends see Linkle in a few seconds."
+                                          : "The multiplayer client (--ghost-looks) tells your friends when it runs.";
+        if (g_iam_linkle() == 1) api->reply_text(r, "%s %s", IAM_LINKLE_ON, friends);
+        else api->reply_text(r, "Your friends see you as Linkle. %s %s", IAM_LINKLE_HOW, friends);
+        return;
+    }
     if (!listed)  // (no client gave the list yet: the word is kept as typed; the client checks it when it starts)
         api->reply_text(r, "Kept: %s. %s%sThe multiplayer client checks it and tells your friends once it runs with "
                         "--ghost-looks.", id, see, *see ? " " : "");
