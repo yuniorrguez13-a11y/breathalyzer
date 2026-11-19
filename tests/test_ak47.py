@@ -417,6 +417,40 @@ class GeometryTests(unittest.TestCase):
             ak.Glb(data, "x")
 
 
+class SharedStepTests(unittest.TestCase):
+    """ak47_build's steps other weapons share (Dragonbreath): their names in its messages, the UV encoder's range."""
+
+    def setUp(self):
+        self.m = ak.to_weapon(ak.gather(ak.Glb(rifle(), "rifle.glb"), 64), "-z", "+y", (-0.5, 0.0), 2.0)
+
+    def test_unorm_uvs_outside_0_1_are_an_error_not_clamped(self):
+        size, enc = ak.ENCODERS[0x1201]
+        self.assertEqual(enc((0.0, 1.0)), struct.pack("<2H", 0, 65535))
+        for bad in ((1.5, 0.2), (0.2, -0.25)):
+            with self.assertRaisesRegex(ValueError, "outside 0-1"):
+                enc(bad)
+        self.m.uv[0] = (1.5, 0.0)          # a tiling UV, written through a 16_16 unorm attribute
+        with mock.patch.dict(ak.ENCODERS, {0x1205: ak.ENCODERS[0x1201]}):
+            with self.assertRaisesRegex(ak.AkError, r"the Blade model can't be written: vertex 0's _u0: .*outside "
+                                                    r"0-1.*the donor's model keeps it as 16-bit 0-1 values"):
+                ak.build_model(donor_model(), self.m, "Weapon_Test", {}, donor="the donor's", weapon="the Blade")
+        self.m.uv[0] = (1.0, 0.0)
+        with mock.patch.dict(ak.ENCODERS, {0x1205: ak.ENCODERS[0x1201]}):
+            ak.build_model(donor_model(), self.m, "Weapon_Test", {})     # inside 0-1: fine
+
+    def test_names_in_messages(self):
+        with self.assertRaisesRegex(ak.AkError, "^the claymore's model can't be read"):
+            ak.build_model(b"junk", self.m, "Weapon_Test", {})
+        with self.assertRaisesRegex(ak.AkError, "^the donor's model can't be read"):
+            ak.build_model(b"junk", self.m, "Weapon_Test", {}, donor="the donor's", weapon="the Blade")
+        with self.assertRaisesRegex(ak.AkError, "^the donor's icon can't be read"):
+            ak.build_icon(b"junk", self.m, None, "Weapon_Test", donor="the donor's")
+        with self.assertRaisesRegex(ak.AkError, "^the AK-47's gamedata.yml would be refused"):
+            ak.check_logs({"gamedata.yml": "bool_data: [not, a, map"})
+        with self.assertRaisesRegex(ak.AkError, "^Dragonbreath's gamedata.yml would be refused"):
+            ak.check_logs({"gamedata.yml": "bool_data: [not, a, map"}, weapon="Dragonbreath's")
+
+
 class BuildTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -747,6 +781,25 @@ class LibraryTests(unittest.TestCase):
         self.build()
         self.assertEqual([(m["id"], m["enabled"]) for m in self.lib.mods],
                          [(ak.MP_ID, True), ("giruka.ak47", False), ("giruka.ak47-spot", True)])
+
+    def test_add_new_on(self):
+        src = os.path.join(self.tmp, "src", "plain")
+        os.makedirs(os.path.join(src, "romfs", "System"))
+        with open(os.path.join(src, "mod.toml"), "w", encoding="utf-8") as f:
+            f.write('[mod]\nid = "giruka.plain"\nname = "Plain"\nversion = "0.1.0"\n[data]\nromfs = "romfs"\n')
+        with open(os.path.join(src, "romfs", "System", "PlainTest.txt"), "w", encoding="utf-8") as f:
+            f.write("made up")
+        with quiet():
+            e, _ = ak.add_to_library(self.lib, src, "giruka.plain", new_on=False)
+        self.assertFalse(e["enabled"])                                      # a new one: off, as asked
+        self.assertEqual([(m["id"], m["enabled"]) for m in self.lib.mods], [("giruka.plain", False)])
+        lib = self.lib
+        lib.mods[0]["enabled"] = True
+        lib.save()
+        with quiet():
+            e, _ = ak.add_to_library(self.lib, src, "giruka.plain", new_on=False)
+        self.assertTrue(e["enabled"])                                       # an old one keeps its on/off
+        self.assertTrue(self.lib.mods[0]["enabled"])
 
     def test_the_hash_id_keeps_clear_of_other_mods(self):
         first = zlib.crc32(b"giruka.ak47/hilltop")   # (what a build picks when nothing else uses it)

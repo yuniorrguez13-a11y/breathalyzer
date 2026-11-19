@@ -30,6 +30,7 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
@@ -72,6 +73,74 @@ class MathTests(unittest.TestCase):
             r = eb.rot_between(u, v)
             got = eb.mvec(r, eb.unit(u))
             self.assertTrue(all(abs(a - b) < 1e-9 for a, b in zip(got, eb.unit(v))))
+
+
+def hard_switch_swing(u, v):
+    """swing() as it was before the blend (a hard switch to the via-front path at 150 degrees), to compare with."""
+    u, v = eb.unit(u), eb.unit(v)
+    if eb.dot(u, v) > -0.866:
+        return eb.rot_between(u, v)
+    mid = eb.vsub((0.0, 0.0, 1.0), eb.vscale(u, u[2]))
+    if eb.vlen(mid) < 1e-3:
+        return eb.rot_between(u, v)
+    mid = eb.unit(mid)
+    return eb.mmul(eb.rot_between(mid, v), eb.rot_between(u, mid))
+
+
+class SwingTests(unittest.TestCase):
+    """swing(): a big turn blends smoothly from the direct path to the one by way of Link's front."""
+
+    @staticmethod
+    def target(theta, azimuth):
+        """theta degrees from hanging down (0, -1, 0), in the plane `azimuth` degrees from the front toward the side."""
+        t, a = math.radians(theta), math.radians(azimuth)
+        return (math.sin(t) * math.sin(a), -math.cos(t), math.sin(t) * math.cos(a))
+
+    def test_no_twist_jump_for_side_overhead_targets(self):
+        down = (0.0, -1.0, 0.0)
+        for az in (0, 30, 45, 60, 90):
+            prev, worst = None, 0.0
+            for k in range(361):                                         # 90 to 179.75 degrees, 0.25 apart
+                v = self.target(90 + k * 0.25, az)
+                r = eb.swing(down, v)
+                self.assertLess(max(abs(a - b) for a, b in zip(eb.mvec(r, down), eb.unit(v))), 1e-6)   # aims right
+                if prev is not None:
+                    worst = max(worst, eb.angle_between_m(prev, r))
+                prev = r
+            self.assertLess(worst, 2.5, az)                    # (the hard switch jumped up to 150 degrees here)
+            across = eb.angle_between_m(eb.swing(down, self.target(149.9, az)), eb.swing(down, self.target(150.1, az)))
+            old = eb.angle_between_m(hard_switch_swing(down, self.target(149.9, az)),
+                                     hard_switch_swing(down, self.target(150.1, az)))
+            self.assertLess(across, 1.0, az)
+            if az >= 45:
+                self.assertGreater(old, 60.0, az)              # (what the test would have caught)
+
+    def test_small_turns_and_the_ends_are_as_before(self):
+        down = (0.0, -1.0, 0.0)
+        for theta in (10, 90, 130, 140, 179.9):
+            for az in (0, 45, 90):
+                v = self.target(theta, az)
+                self.assertLess(eb.angle_between_m(eb.swing(down, v), hard_switch_swing(down, v)),
+                                0.2 if theta >= 179 else 1e-5, (theta, az))
+
+    def test_existing_emotes_solve_as_before(self):
+        sk = eb.demo_skeleton()
+        keyed = [d for d in eb.load_emotes() if d["kind"] == "keys"]
+        self.assertGreaterEqual(len(keyed), 20)
+
+        def solve_all():
+            solver = eb.Solver(sk, eb.demo_idle(sk))
+            return [eb.sample(solver, d) for d in keyed]
+        now = solve_all()
+        with mock.patch.object(eb, "swing", hard_switch_swing):
+            before = solve_all()
+        worst = 0.0
+        for a, b in zip(now, before):
+            for (ra, ta), (rb, tb) in zip(a.frames, b.frames):
+                for x, y in zip(ra, rb):
+                    worst = max(worst, eb.angle_between_m(x, y) if len(x) == 9 else
+                                math.degrees(2 * math.acos(min(1.0, abs(sum(p * q for p, q in zip(x, y)))))))
+        self.assertLess(worst, 0.01)
 
 
 class SolveTests(unittest.TestCase):

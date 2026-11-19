@@ -34,6 +34,7 @@ DONOR = "Weapon_Sword_T01"
 GUARDIAN_SRC = "Weapon_Sword_013"
 ACTOR = "Weapon_Sword_Dragonbreath"
 GUARDIANS = "Enemy_Ganon,Enemy_SiteBoss_Sword,Enemy_Guardian_Mini_Baby,Enemy_Guardian_Mini_Senior"
+GUARDIAN_BEAM = "Enemy_Guardian_Mini_Baby_DetachLineBeam"   # carries IsEffectiveAncientWeapon, as a Blight refight
 
 
 @contextlib.contextmanager
@@ -121,8 +122,13 @@ def make_game(root: str) -> str:
              "weaponCommonSharpWeaponAddAtkMax": 9, "weaponCommonSharpWeaponPer": 10.0,
              "weaponCommonSharpWeaponAddCrit": True, "homeArea": [{"name": "Somewhere"}],
              "aabbMin": {"X": -0.2, "Y": 0.0, "Z": -0.5}, "aabbMax": {"X": 0.2, "Y": 0.0, "Z": 1.5}}
+    def tagged(*names):
+        return {f"tag{zlib.crc32(t.encode()):08x}": bd.U32(zlib.crc32(t.encode())) for t in names}
+    enemies = [{"name": "Enemy_Guardian_Mini_Baby", "profile": "Guardian", "tags": tagged("TeamGuardian")},
+               {"name": "Enemy_SiteBoss_Sword_R", "profile": "SiteBoss", "tags": tagged("IsEffectiveAncientWeapon")},
+               {"name": GUARDIAN_BEAM, "profile": "Guardian", "tags": tagged("IsEffectiveAncientWeapon")}]
     actors = sorted([entry, {"name": GUARDIAN_SRC, "profile": "WeaponSmallSword", "sortKey": 201},
-                     {"name": t47.DONOR, "profile": "WeaponLargeSword", "sortKey": 100}],
+                     {"name": t47.DONOR, "profile": "WeaponLargeSword", "sortKey": 100}] + enemies,
                     key=lambda a: zlib.crc32(a["name"].encode()))
     put("Actor/ActorInfo.product.sbyml", wc.yaz0_compress(bd.byml_dump(
         {"Actors": actors, "Hashes": [bd.U32(zlib.crc32(a["name"].encode())) for a in actors]})))
@@ -379,8 +385,9 @@ class BuildTests(unittest.TestCase):
         self.assertEqual((got["attack"], got["power_twin"], got["life"], got["life_infinite"]), (40, 40, 1000, True))
         self.assertEqual((got["throwable"], got["subtype"], got["pod"]), (False, "Dragonbreath", "Weapon_Sheath_T01"))
         self.assertAlmostEqual(got["sp_ratio"], 0.25, places=6)
-        self.assertEqual(got["sp_actor"], "Enemy_Guardian_Mini_Baby,Enemy_Guardian_Mini_Senior")   # no Ganon, Blights
-        self.assertEqual(got["sp_tag"], "TeamGuardian,IsEffectiveAncientWeapon")
+        # no Ganon, no Blights: the tag a Blight refight carries is dropped, the Guardian that carries it named
+        self.assertEqual(got["sp_actor"], f"Enemy_Guardian_Mini_Baby,Enemy_Guardian_Mini_Senior,{GUARDIAN_BEAM}")
+        self.assertEqual(got["sp_tag"], "TeamGuardian")
         self.assertEqual(set(got["sharp"].values()), {0})
         self.assertEqual(got["sharp_per"], 0.0)
 
@@ -577,6 +584,27 @@ class LibraryTests(unittest.TestCase):
             gone = db.clean(self.libdir, recipe_dir=self.recipe_dir)
         self.assertEqual(gone, ["botw-mod-loader.dragonbreath"])
         self.assertEqual([m["id"] for m in self.lib().mods], ["giruka.dragonbreath-item"])
+
+    def test_broken_moves_leave_the_blade(self):
+        clips = os.path.join(self.recipe_dir, "clips")
+        os.makedirs(clips, exist_ok=True)
+        with open(os.path.join(clips, "s1.json"), "w", encoding="utf-8") as f:
+            f.write("{not json")
+        r = self.build()                                   # no raw traceback, no DragonError: the blade is added
+        self.assertIsNone(r["moves"])
+        self.assertTrue(any("fast moves" in n and "not valid JSON" in n for n in r["notes"]), r["notes"])
+        on = {m["id"]: m["enabled"] for m in self.lib().mods}
+        self.assertEqual(on, {"giruka.dragonbreath-item": True, "botw-mod-loader.dragonbreath": False})
+        self.assertTrue(any(p.startswith("clips:") for p in db.moves_problems(self.install, clips)))
+
+    def test_add_passes_new_on_to_the_shared_add(self):
+        lib = self.lib()
+        with mock.patch.object(ak, "add_to_library", return_value=({"id": "x", "enabled": False}, [])) as add, \
+                mock.patch.object(modman.Library, "save") as save:
+            entry, _ = db.add_to_library(lib, "folder", "x", None, new_on=False)
+        add.assert_called_once_with(lib, "folder", "x", None, new_on=False)
+        save.assert_not_called()               # (no second save turning it off again: the shared add does it)
+        self.assertFalse(entry["enabled"])
 
 
 if __name__ == "__main__":

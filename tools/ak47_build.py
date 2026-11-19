@@ -800,6 +800,14 @@ def _snorm8(v: float) -> int:
     return max(-127, min(127, round(v * 127))) & 0xFF
 
 
+def _unorm16(c: float) -> int:
+    """A 16-bit unorm value (0-1). Outside 0-1 (tiling texture coordinates) is an error, not clamped: clamping would
+    smear the texture."""
+    if not -1e-6 <= c <= 1 + 1e-6:
+        raise ValueError(f"a texture coordinate is {c:.4f}, outside 0-1")
+    return max(0, min(65535, round(c * 65535)))
+
+
 def _n10(n) -> int:
     q = [max(-511, min(511, round(c * 511))) & 0x3FF for c in n]
     return q[0] | (q[1] << 10) | (q[2] << 20) | (1 << 30)
@@ -812,7 +820,7 @@ ENCODERS = {   # nn::gfx attribute format -> (bytes per vertex, encoder of a val
     0x0B02: (4, lambda v: bytes(_snorm8(c) for c in (*v[:3], v[3] if len(v) > 3 else 1.0))),   # 8_8_8_8 snorm
     0x1205: (4, lambda v: _f16(v[0]) + _f16(v[1])),                              # 16_16 float
     0x1305: (8, lambda v: struct.pack("<2f", v[0], v[1])),                       # 32_32 float
-    0x1201: (4, lambda v: struct.pack("<2H", *(max(0, min(65535, round(c * 65535))) for c in v[:2]))),   # 16_16 unorm
+    0x1201: (4, lambda v: struct.pack("<2H", *(_unorm16(c) for c in v[:2]))),   # 16_16 unorm (0-1 only)
 }
 
 
@@ -854,31 +862,41 @@ def donor_length(res) -> float:
     return hi - lo
 
 
-def build_model(donor_raw: bytes, m: WeaponMesh, actor: str, tex_names: dict[str, str]) -> tuple[bytes, object]:
+def build_model(donor_raw: bytes, m: WeaponMesh, actor: str, tex_names: dict[str, str], *,
+                donor: str = "the claymore's", weapon: str = "the AK-47") -> tuple[bytes, object]:
     """The claymore's model file with our mesh in its (first) shape and our texture names in its material. Returns
-    (the BFRES bytes, the ResFile). Checked with the writer's own checks."""
+    (the BFRES bytes, the ResFile). Checked with the writer's own checks. donor/weapon: the names the messages use
+    (another weapon built with this passes its own, e.g. "the donor's", "the Dragonbreath")."""
     try:
         res = read_model(donor_raw)
     except ModelError as e:
-        raise AkError(f"the claymore's model can't be read ({e})") from None
+        raise AkError(f"{donor} model can't be read ({e})") from None
     if len(res.models) != 1 or not res.models[0].shapes:
-        raise AkError("the claymore's model isn't one model with a shape")
+        raise AkError(f"{donor} model isn't one model with a shape")
     md = res.models[0]
     sh = md.shapes[0]
     vb_old = md.vertex_buffers[sh.vertex_buffer]
     if sh.skin_count != 0 or vb_old.skin_count != 0:
-        raise AkError("the claymore's model is skinned; this tool expects a rigid weapon")
+        raise AkError(f"{donor} model is skinned; this tool expects a rigid weapon")
     n = len(m.pos)
     bufs = [bytearray() for _ in vb_old.strides]
     layout = []
     for a in vb_old.attributes:
         if a.format not in ENCODERS:
-            raise AkError(f"the claymore's {a.name} is in a format this tool can't write ({a.format:#06x})")
-        layout.append((a, ENCODERS[a.format], vertex_values(m, a.name)))
+            raise AkError(f"{donor} {a.name} is in a format this tool can't write ({a.format:#06x})")
+        try:
+            vals = vertex_values(m, a.name)
+        except AkError:
+            raise AkError(f"{donor} model has an attribute {a.name} this tool can't fill") from None
+        layout.append((a, ENCODERS[a.format], vals))
     for i in range(n):
         rows = [bytearray(s) for s in vb_old.strides]
         for a, (size, enc), vals in layout:
-            rows[a.buffer][a.offset:a.offset + size] = enc(vals[i])
+            try:
+                rows[a.buffer][a.offset:a.offset + size] = enc(vals[i])
+            except ValueError as e:
+                raise AkError(f"{weapon} model can't be written: vertex {i}'s {a.name}: {e} ({donor} model keeps "
+                              "it as 16-bit 0-1 values, so the texture can't tile: keep the UVs inside 0-1)") from None
         for b, r in enumerate(rows):
             bufs[b] += r
     vb = VertexBuffer(vertex_count=n, skin_count=0, attributes=copy.deepcopy(vb_old.attributes),
@@ -905,10 +923,10 @@ def build_model(donor_raw: bytes, m: WeaponMesh, actor: str, tex_names: dict[str
     try:
         out = nx_model.write(res)
     except (ModelError, struct.error, ValueError) as e:
-        raise AkError(f"the AK-47 model can't be written ({e})") from None
+        raise AkError(f"{weapon} model can't be written ({e})") from None
     problems = checks.switch_model_problems(out)
     if problems:
-        raise AkError(f"the AK-47 model fails its self-check: {'; '.join(map(str, problems[:3]))}")
+        raise AkError(f"{weapon} model fails its self-check: {'; '.join(map(str, problems[:3]))}")
     return out, res
 
 
@@ -978,14 +996,15 @@ def draw_icon(m: WeaponMesh, alb: menu_bg.Picture, size: int, margin: float = 0.
     return small
 
 
-def build_icon(donor_icon_raw: bytes, m: WeaponMesh, alb: menu_bg.Picture, actor: str) -> tuple[bytes, object]:
-    """The inventory icon in the claymore's icon's format and size."""
+def build_icon(donor_icon_raw: bytes, m: WeaponMesh, alb: menu_bg.Picture, actor: str, *,
+               donor: str = "the claymore's") -> tuple[bytes, object]:
+    """The inventory icon in the claymore's icon's format and size (donor: the name the messages use)."""
     try:
         ts = nx_bfres.read_textures(donor_icon_raw)
     except ModelError as e:
-        raise AkError(f"the claymore's icon can't be read ({e})") from None
+        raise AkError(f"{donor} icon can't be read ({e})") from None
     if len(ts.textures) != 1 or _block_kind(ts.textures[0].format) != "rgba8":
-        raise AkError("the claymore's icon isn't one RGBA8 picture")
+        raise AkError(f"{donor} icon isn't one RGBA8 picture")
     d = ts.textures[0]
     pic = draw_icon(m, alb, d.width) if d.width == d.height else menu_bg.resample(
         draw_icon(m, alb, max(d.width, d.height)), (0, 0, max(d.width, d.height), max(d.width, d.height)),
@@ -1420,8 +1439,9 @@ def actorinfo_entry(src: dict, actor: str, lo: tuple, hi: tuple, tags: list[str]
     return e
 
 
-def check_logs(logs: dict[str, str]) -> None:
-    """Read our logs back with the mergers modman uses: one they'd refuse is refused here, before it ships."""
+def check_logs(logs: dict[str, str], weapon: str = "the AK-47's") -> None:
+    """Read our logs back with the mergers modman uses: one they'd refuse is refused here, before it ships (weapon:
+    the name the message uses)."""
     for name, text in logs.items():
         data = text.encode("utf-8")
         try:
@@ -1436,7 +1456,7 @@ def check_logs(logs: dict[str, str]) -> None:
             elif name == "rstb.json":
                 bnp.read_rstb_json(data, f"logs/{name}")
         except (bt.LogError, bm.LogError, bd.LogError, bnp.BnpError) as e:
-            raise AkError(f"the AK-47's {name} would be refused by modman ({e})") from None
+            raise AkError(f"{weapon} {name} would be refused by modman ({e})") from None
 
 
 # ---------------------------------------------------------------------------------------------------- building
@@ -1647,11 +1667,12 @@ def other_hash_ids(lib: mm.Library | None, recipe: Recipe) -> dict[int, str]:
     return map_hash_ids(lib, [m for m in lib.mods if m["id"] not in ours]) if lib is not None else {}
 
 
-def add_to_library(lib: mm.Library, folder: str, mod_id: str, log=None) -> tuple[dict, list[str]]:
+def add_to_library(lib: mm.Library, folder: str, mod_id: str, log=None,
+                   new_on: bool = True) -> tuple[dict, list[str]]:
     """The built folder into the library through modman's normal add (the old copy removed first, its on/off and
-    place in the load order kept; a new one goes last, on)."""
+    place in the load order kept; a new one goes last, on when new_on, else off). Saves the library once."""
     idx = next((i for i, m in enumerate(lib.mods) if m["id"] == mod_id), None)
-    was_on = lib.mods[idx]["enabled"] if idx is not None else True
+    was_on = lib.mods[idx]["enabled"] if idx is not None else new_on
     if idx is not None:
         mm.remove_mod(lib, mod_id)
     elif os.path.isdir(os.path.join(lib.mods_dir, mod_id)):

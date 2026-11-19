@@ -86,23 +86,29 @@ def load_clips(folder: str = CLIPS) -> list[dict]:
     """Every clip file (sorted by slot, then part), each with the shared stances under its own poses."""
     shared = {}
     sp = os.path.join(folder, SHARED)
+
+    def read(p: str):
+        try:
+            with open(p, encoding="utf-8") as f:
+                d = json.load(f)
+        except (OSError, ValueError) as e:
+            raise ClipError(f"{os.path.basename(p)}: not valid JSON ({e})") from None
+        if not isinstance(d, dict) or not isinstance(d.get("poses") or {}, dict):
+            raise ClipError(f"{os.path.basename(p)}: not a clip file (an object, its poses an object)")
+        return d
     if os.path.isfile(sp):
-        with open(sp, encoding="utf-8") as f:
-            shared = json.load(f).get("poses", {})
+        shared = read(sp).get("poses") or {}
     out = []
     for p in sorted(glob.glob(os.path.join(folder, "*.json"))):
         if os.path.basename(p) == SHARED:
             continue
-        with open(p, encoding="utf-8") as f:
-            try:
-                d = json.load(f)
-            except ValueError as e:
-                raise ClipError(f"{os.path.basename(p)}: not valid JSON ({e})") from None
+        d = read(p)
         d["_file"] = os.path.basename(p)
         d["poses"] = {**shared, **(d.get("poses") or {})}
         out.append(d)
     order = {s: i for i, s in enumerate(SLOTS)}
-    out.sort(key=lambda d: (order.get(d.get("slot"), 99), d.get("part", 0), str(d.get("id"))))
+    out.sort(key=lambda d: (order.get(d.get("slot"), 99) if isinstance(d.get("slot"), str) else 99,
+                            d.get("part", 0) if _int(d.get("part", 0)) else 0, str(d.get("id"))))
     return out
 
 
@@ -131,6 +137,10 @@ def lint(clips: list[dict], skel=None) -> list[str]:
     p: list[str] = []
     seen: dict[str, str] = {}
     parts: dict[str, list[int]] = {}
+    last_part: dict = {}         # slot -> its last part: only that one's `next` is used (the others play to the end)
+    for c in clips:
+        if isinstance(c, dict) and isinstance(c.get("slot"), str) and _int(c.get("part", 1)):
+            last_part[c.get("slot")] = max(last_part.get(c.get("slot"), 1), c.get("part", 1))
     for c in clips:
         fn = c.get("_file", "?")
         cid = c.get("id")
@@ -181,7 +191,7 @@ def lint(clips: list[dict], skel=None) -> list[str]:
         if not (isinstance(at, list) and len(at) == 3 and all(isinstance(x, (int, float)) for x in at)):
             p.append(f"{cid}: at is the point [x, y, z] the blade must sweep through")
         nx = c.get("next")
-        if not _int(nx) or not en < nx <= frames:
+        if (not isinstance(slot, str) or part == last_part.get(slot, part)) and (not _int(nx) or not en < nx <= frames):
             p.append(f"{cid}: next (the frame the next attack may start) is after the hit, at most frames")
         p += [f"{cid}: {x}" if not x.startswith(cid) else x for x in eb.lint_one(emote_spec(c), skel)]
     for slot, ps in parts.items():
@@ -456,6 +466,48 @@ def _events(node: aamp.PList, kind: str) -> list:
     return list(lst.objects.values()) if lst is not None else []
 
 
+def _drop_events(node: aamp.PList, kind: str, type_index: int) -> None:
+    """Take the events of one type out of a node's event list (the others keep their order and the first names)."""
+    ex = node.list("Extend")
+    lst = ex.list(kind) if ex is not None else None
+    if lst is None:
+        return
+    keys = list(lst.objects)
+    keep = [o for o in lst.objects.values() if o.get_value("TypeIndex") != type_index]
+    lst.objects.clear()
+    for k, o in zip(keys, keep):
+        lst.objects[k] = o
+
+
+def _parent_sequence(els: list, name: str):
+    """The sequence node (TypeIndex 11) the clip `name` plays under, else None: found by that child, not by its place
+    in the set (Player_CutJustRush.bas in 0.4.1 has three: the spear's, the claymore's and, third in the tree, the
+    one-handed one, where Sword_Attack_Just_Rush1 sits in a speed selector (T16) right under the sequence)."""
+    def kids(i):
+        return [c.value for c in (els[i].object("Children") or {}).values() if isinstance(c.value, int)]
+
+    def holds(i, seen) -> bool:
+        if i in seen or not 0 <= i < len(els):
+            return False
+        seen.add(i)
+        p = els[i].object("Parameters")
+        if p is None:
+            return False
+        if p.get_value("FileName") == name:
+            return True
+        if p.get_value("TypeIndex") == 11:          # (another sequence: what it holds is its own)
+            return False
+        return any(holds(k, seen) for k in kids(i))
+    for i, e in enumerate(els):
+        p = e.object("Parameters")
+        if p is not None and p.get_value("TypeIndex") == 11 and any(holds(k, {i}) for k in kids(i)):
+            return e
+    return None
+
+
+RUSH_FIRST = SLOTS["CutJustRush"].format(part=1)     # the clip whose parent is the game's Flurry Rush sequence
+
+
 def _find_node(els: list, name: str):
     for e in els:
         p = e.object("Parameters")
@@ -483,10 +535,14 @@ def frame_map(stock: list[tuple[float, float]]):
     return f
 
 
-def clip_node(template: aamp.PList, c: dict, stock_len: float) -> aamp.PList:
+def clip_node(template: aamp.PList, c: dict, stock_len: float, last: bool = True) -> aamp.PList:
     """A clip node shaped like the game's one-handed one (its events kept, their frames moved onto ours: the hit
-    window exactly, the next-input frame exactly, the others in step), playing our clip at rate 1."""
+    window exactly, the next-input frame exactly, the others in step), playing our clip at rate 1. last=False (a
+    part of a set but its last): no next-attack trigger (TypeIndex 4), as the game's own sequence children, so a
+    buffered press can't start the next attack before the set's later parts have played."""
     e = copy.deepcopy(template)
+    if not last:
+        _drop_events(e, "TriggerEvents", 4)
     p = e.object("Parameters")
     p[H("FileName")] = aamp.Param(p[H("FileName")].type, clip_name(c))
     p[H("Morph")] = aamp.Param(aamp.F32, float(c.get("morph", MORPH)))
@@ -573,17 +629,18 @@ def wrap_bas(data: bytes, slot: str, parts: list[dict], stock_lens: dict[str, fl
     old = list(els_pl.lists.values())
     n = len(old)
     ours: list[aamp.PList] = []
-    for c in parts:
+    parts = sorted(parts, key=lambda c: c.get("part", 1))
+    for i, c in enumerate(parts):
         stock = SLOTS[slot].format(part=c.get("part", 1))
         tmpl = _find_node(old, stock)
         if tmpl is None:
             raise ClipError(f"your game's Player_{slot}.bas has no {stock} node")
-        ours.append(clip_node(tmpl, c, stock_lens.get(stock, float(c["frames"]))))
+        ours.append(clip_node(tmpl, c, stock_lens.get(stock, float(c["frames"])), last=i == len(parts) - 1))
     first = n + 1
     if len(ours) == 1:
         new = [_selector(n, first)] + old[1:] + [old[0]] + ours
     else:
-        own = next((e for e in old if e.object("Parameters").get_value("TypeIndex") == 11), None)
+        own = _parent_sequence(old, SLOTS[slot].format(part=1))
         seq = own or seq_template
         if seq is None:
             raise ClipError(f"{slot}: a set with parts needs a sequence node to copy (the game's Flurry Rush has one)")
@@ -700,8 +757,7 @@ def build_package(game, clips: list[dict], out: str, *, log=None) -> Moves:
     seq_src = game.bas("Player_CutJustRush")
     seq_t = None
     if seq_src is not None:
-        seq_t = next((e for e in aamp.load(seq_src).list("Elements").lists.values()
-                      if e.object("Parameters").get_value("TypeIndex") == 11), None)
+        seq_t = _parent_sequence(list(aamp.load(seq_src).list("Elements").lists.values()), RUSH_FIRST)
     bas_files: dict[str, bytes] = {}
     for slot in SLOTS:
         parts = [c for c in clips if c["slot"] == slot]
@@ -748,7 +804,7 @@ def build_package(game, clips: list[dict], out: str, *, log=None) -> Moves:
               "archive_bytes": len(data), "readback_degrees": round(worst, 4), "subtype": SUBTYPE,
               "sets": mv.sets, "speed": mv.speed, "inputs": dict(sorted(game.hashes.items())),
               "clips": [{"id": c["id"], "clip": clip_name(c), "slot": c["slot"], "part": c.get("part", 1),
-                         "frames": c["frames"], "next": c["next"], "hit": [c["hits"][0]["start"],
+                         "frames": c["frames"], "next": c.get("next"), "hit": [c["hits"][0]["start"],
                                                                            c["hits"][0]["end"]]} for c in clips]}
     eb._write(os.path.join(folder, "moves.json"), json.dumps(record, indent=1) + "\n")
     eb._write(os.path.join(folder, "BUILT.md"), "\n".join([
@@ -808,7 +864,8 @@ def main(argv: list[str] | None = None) -> int:
             n = 0
             for c, r in zip(clips, reps):
                 print(f"{c['id']:6} {c['slot']:12} {c['frames']:3} f, hit {c['hits'][0]['start']}-"
-                      f"{c['hits'][0]['end']}, next {c['next']:2}: blade {r.hit_cm:4.1f} cm from the hit point, "
+                      f"{c['hits'][0]['end']}, next {str(c.get('next', '-')):>2}: blade {r.hit_cm:4.1f} cm from the "
+                      "hit point, "
                       f"{r.tip_deg:4.1f} deg/frame, edge leads {r.edge_lead}, feet {r.lowest_cm:+.1f} cm, hips up "
                       f"{r.highest_hips_cm:.0f} cm" + ("" if not r.problems else f"  PROBLEMS: {len(r.problems)}"))
                 for x in r.problems:

@@ -169,6 +169,12 @@ class Clips(unittest.TestCase):
         two = [cut_clip(id="a", slot="CutS3", part=1), cut_clip(id="b", slot="CutS3", part=3)]
         self.assertTrue(any("parts" in p for p in dc.lint(two)))
 
+    def test_lint_next_on_the_last_part_only(self):
+        first = cut_clip(id="a", slot="CutS3", part=1)
+        del first["next"]                                # (part 1 plays to its end: its next isn't used)
+        self.assertEqual(dc.lint([first, cut_clip(id="b", slot="CutS3", part=2)]), [])
+        self.assertTrue(any("b: next" in p for p in dc.lint([first, cut_clip(id="b", slot="CutS3", part=2, next=3)])))
+
     def test_check_a_good_cut(self):
         c = cut_clip()
         rep = dc.check_clip(self.rig, c, dc.solve(self.rig, c))
@@ -323,6 +329,42 @@ class Sets(unittest.TestCase):
         self.assertEqual(kids, [len(els) - 2, len(els) - 1, len(els) - 1])   # the game's count: the last repeated
         self.assertEqual([e.object("Parameters").get_value("FileName") for e in els[-2:]],
                          ["SwDragon_r1", "SwDragon_r2"])
+        # only the last part keeps the next-attack trigger (TypeIndex 4): a buffered press can't skip part 2
+        trig = [[o.get_value("TypeIndex") for o in dc._events(e, "TriggerEvents")] for e in els[-2:]]
+        self.assertEqual(trig, [[0, 7], [0, 7, 4]])
+        self.assertEqual(aamp.dump(aamp.load(out)), out)
+
+    def test_cut_s3_part_1_has_no_next_trigger(self):
+        src = fake_set(("Sword_Attack_S3",))
+        parts = [cut_clip(id="s3b", slot="CutS3", part=2), cut_clip(id="s3a", slot="CutS3", part=1)]
+        out = dc.wrap_bas(src, "CutS3", parts, {}, seq_template=aamp.load(fake_set(
+            ["Sword_Attack_Just_Rush1"], seq=True)).list("Elements").lists[H("Element1")])
+        els = list(aamp.load(out).list("Elements").lists.values())
+        self.assertEqual([e.object("Parameters").get_value("FileName") for e in els[-2:]],
+                         ["SwDragon_s3a", "SwDragon_s3b"])            # (in part order, whatever the list's order)
+        has4 = [any(o.get_value("TypeIndex") == 4 for o in dc._events(e, "TriggerEvents")) for e in els[-2:]]
+        self.assertEqual(has4, [False, True])
+
+    def test_flurry_rush_sequence_found_by_its_child(self):
+        els = list(aamp.load(fake_set(["Sword_Attack_Just_Rush1", "Sword_Attack_Just_Rush2"], seq=True))
+                   .list("Elements").lists.values())
+        decoy = copy.deepcopy(els[1])                     # another sequence, first in the set, over another clip
+        decoy.objects[H("Children")] = aamp.PObject({H("Child0"): aamp.Param(aamp.INT, len(els) + 1)})
+        other = copy.deepcopy(els[2])
+        other.object("Parameters")[H("FileName")] = aamp.Param(aamp.STRING64, "Sword_Attack_Other")
+        got = dc._parent_sequence([els[0], decoy] + els[1:] + [other], "Sword_Attack_Just_Rush1")
+        self.assertIs(got, els[1])
+        self.assertIsNone(dc._parent_sequence([els[0]] + els[2:], "Sword_Attack_Just_Rush1"))
+        # as in the game's 0.4.1 file: the clip in a speed selector (T16) under the sequence, other sequences first
+        speed = aamp.PList()
+        speed.objects[H("Parameters")] = aamp.PObject({H("TypeIndex"): aamp.Param(aamp.INT, 16)})
+        speed.objects[H("Children")] = aamp.PObject({H("Child0"): aamp.Param(aamp.INT, 4)})
+        seq = copy.deepcopy(els[1])
+        seq.objects[H("Children")] = aamp.PObject({H("Child0"): aamp.Param(aamp.INT, 3)})
+        rush1 = els[2]
+        lst = [els[0], decoy, seq, speed, rush1, other]
+        decoy.objects[H("Children")] = aamp.PObject({H("Child0"): aamp.Param(aamp.INT, 5)})
+        self.assertIs(dc._parent_sequence(lst, "Sword_Attack_Just_Rush1"), seq)
 
     def test_wrap_needs_the_game_node(self):
         with self.assertRaises(dc.ClipError):

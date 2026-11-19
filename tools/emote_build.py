@@ -279,21 +279,34 @@ def rot_between(u, v):
     return axis_angle(ax, math.acos(c))
 
 
-SWING_VIA_FRONT = -0.866                       # a bone turning more than 150 degrees goes by way of the front
+SWING_BLEND = (140.0, 180.0)   # degrees: a bone turning more than 140 goes more and more by way of Link's front
 
 
 def swing(u, v):
-    """rot_between for aiming a bone, except that a turn of more than 150 degrees (an arm from hanging down to straight
-    up) goes by way of Link's front (+z): the plain smallest turn about a nearly arbitrary axis there gives the bone a
-    twist that flips with a millimetre of difference in the target, so a clip snapped it round between two frames."""
+    """rot_between for aiming a bone, except that a big turn (an arm from hanging down to straight up) goes by way of
+    Link's front (+z): the plain smallest turn about a nearly arbitrary axis there gives the bone a twist that flips
+    with a millimetre of difference in the target, so a clip snapped it round between two frames.
+
+    Both paths are two turns through a point between them (the direct one through the middle of its arc), and that
+    point slides smoothly from the direct path's to the front over SWING_BLEND, so the twist never jumps (an earlier
+    hard switch at 150 degrees jumped up to 150 degrees for a target out to the side). It starts at 140: below that
+    every emote is exactly as before (the 20 keyframed ones turn a bone up to about 130-135 degrees)."""
     u, v = unit(u), unit(v)
-    if dot(u, v) > SWING_VIA_FRONT:
+    lo, hi = SWING_BLEND
+    ang = math.degrees(math.acos(max(-1.0, min(1.0, dot(u, v)))))
+    if ang <= lo:
         return rot_between(u, v)
     mid = vsub((0.0, 0.0, 1.0), vscale(u, u[2]))
     if vlen(mid) < 1e-3:
         return rot_between(u, v)
     mid = unit(mid)
-    return mmul(rot_between(mid, v), rot_between(u, mid))
+    t = min(1.0, (ang - lo) / (hi - lo))
+    w = t * t * (3 - 2 * t)                    # (smoothstep: no kink where the blend starts or ends)
+    half = vadd(u, v)                          # the middle of the direct path's arc
+    half = unit(half) if vlen(half) > 1e-9 else mid
+    p = vadd(vscale(half, 1 - w), vscale(mid, w))
+    p = unit(p) if vlen(p) > 1e-6 else mid
+    return mmul(rot_between(p, v), rot_between(u, p))
 
 
 def frame_cols(a, b):

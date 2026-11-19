@@ -95,6 +95,8 @@ SHARP_KEYS = ("SharpWeaponAddAtkMin", "SharpWeaponAddAtkMax", "SharpWeaponAddLif
               "SharpWeaponAddGuardMin", "SharpWeaponAddGuardMax", "PoweredSharpAddAtkMin", "PoweredSharpAddAtkMax",
               "PoweredSharpAddLifeMin", "PoweredSharpAddLifeMax", "PoweredSharpWeaponAddGuardMin",
               "PoweredSharpWeaponAddGuardMax")
+DONOR_NAME = "the donor's"    # how ak47_build's shared model/icon steps name the donor and the weapon in messages
+WEAPON_NAME = "the Dragonbreath"
 POWER_TWIN = 0x2C76A0C2      # an Attack parameter (name unknown) that holds the same number as Power in the donors
 
 
@@ -264,9 +266,27 @@ def gparam_name(files: dict, actor: str) -> str:
     return name
 
 
+def _left_out(recipe: Recipe, actor: str) -> bool:
+    return any(actor.startswith(x) for x in recipe.stats["guardians_leave_out"])
+
+
+def tag_carriers(ai: dict[str, dict], tag: str) -> list[str]:
+    """The actors whose actor info carries `tag` (its "tags" map holds the tag's crc32)."""
+    h = zlib.crc32(tag.encode())
+    out = []
+    for name, e in ai.items():
+        tags = e.get("tags") if isinstance(e, dict) else None
+        if isinstance(tags, dict) and any(isinstance(v, int) and int(v) & 0xFFFFFFFF == h for v in tags.values()):
+            out.append(name)
+    return sorted(out)
+
+
 def guardian_lists(game: ak.Game, recipe: Recipe) -> tuple[str, str]:
     """(SpHitActor, SpHitTag): the ancient weapon's own lists (stats guardians_from), without the names that start
-    with guardians_leave_out (the plan: Ganon and the Blights don't count as Guardians)."""
+    with guardians_leave_out (the plan: Ganon and the Blights don't count as Guardians). A tag that a left-out actor
+    carries in your actor info is dropped too (IsEffectiveAncientWeapon: the castle's Blight refights
+    Enemy_SiteBoss_*_R carry it), and the other actors that carry it (the Guardian Scouts' DetachLineBeam ones) are
+    named in SpHitActor instead, so they stay weak to the blade."""
     src = recipe.stats["guardians_from"]
     files = pack_of(game, src)
     root = aamp.load(files[gparam_name(files, src)][0])
@@ -275,10 +295,27 @@ def guardian_lists(game: ak.Game, recipe: Recipe) -> tuple[str, str]:
     tag = at.get_value("SpHitTag") if at is not None else None
     if not isinstance(actors, str) or not actors or not isinstance(tag, str) or not tag:
         raise DragonError(f"{src}'s stats have no Guardian lists (Attack SpHitActor / SpHitTag)")
-    keep = [a for a in actors.split(",") if a and not any(a.startswith(x) for x in recipe.stats["guardians_leave_out"])]
+    keep = [a for a in actors.split(",") if a and not _left_out(recipe, a)]
+    ai = game.actorinfo()
+    tags = []
+    for t in (x for x in tag.split(",") if x):
+        who = tag_carriers(ai, t)
+        if any(_left_out(recipe, a) for a in who):
+            keep += [a for a in who if not _left_out(recipe, a) and a not in keep]
+        else:
+            tags.append(t)
     if not keep:
         raise DragonError(f"no Guardian is left in {src}'s list")
-    return ",".join(keep), tag
+    return ",".join(keep), ",".join(tags)
+
+
+def left_out_hit(game: ak.Game, recipe: Recipe, sp_actor: str, sp_tag: str) -> list[str]:
+    """The left-out actors (Ganon, the Blights) the Guardian lists would still weaken: named, or carrying a tag."""
+    ai = game.actorinfo()
+    hit = {a for a in sp_actor.split(",") if a and _left_out(recipe, a)}
+    for t in (x for x in sp_tag.split(",") if x):
+        hit.update(a for a in tag_carriers(ai, t) if _left_out(recipe, a))
+    return sorted(hit)
 
 
 # ------------------------------------------------------------------------------------------------ the stats file
@@ -531,9 +568,9 @@ def message_labels(game: ak.Game) -> set[str] | None:
 
 def check_logs(logs: dict[str, str]) -> None:
     try:
-        ak.check_logs(logs)
+        ak.check_logs(logs, weapon="Dragonbreath's")
     except ak.AkError as e:
-        raise DragonError(str(e).replace("the AK-47's", "Dragonbreath's")) from None
+        raise DragonError(str(e)) from None
 
 
 # ------------------------------------------------------------------------------------------------ building
@@ -631,9 +668,9 @@ def build_package(game: ak.Game, recipe: Recipe, out: str, *, log=None, used: se
     ts, tex_names, alb = make_textures(shape, donor_ts, ak.donor_sampler_textures(donor_raw), actor, log)
     _log(log, f"Writing the model ({res.vertices} vertices, {res.triangles} triangles)...")
     try:
-        model_bytes, _ = ak.build_model(donor_raw, m, actor, tex_names)
+        model_bytes, _ = ak.build_model(donor_raw, m, actor, tex_names, donor=DONOR_NAME, weapon=WEAPON_NAME)
     except ak.AkError as e:
-        raise DragonError(str(e).replace("the claymore's", "the donor's").replace("the AK-47", "the Dragonbreath"))
+        raise DragonError(str(e)) from None
     tex_bytes = nx_bfres.write_textures(ts)
     problems = checks.switch_tex_problems(tex_bytes)
     if problems:
@@ -649,9 +686,9 @@ def build_package(game: ak.Game, recipe: Recipe, out: str, *, log=None, used: se
     _log(log, "Drawing the inventory icon...")
     icon_raw = ak._unyaz0(game.raw("icon"))
     try:
-        icon_bytes, _pic = ak.build_icon(icon_raw, m, alb, actor)
+        icon_bytes, _pic = ak.build_icon(icon_raw, m, alb, actor, donor=DONOR_NAME)
     except ak.AkError as e:
-        raise DragonError(str(e).replace("the claymore's", "the donor's")) from None
+        raise DragonError(str(e)) from None
     ak._write(os.path.join(romfs, "UI", "StockItem", f"{actor}.sbitemico"),
               ukmm.yaz0(icon_bytes, ak._yaz0_align(game.raw("icon"))))
     size(f"UI/StockItem/{actor}.bitemico", f"UI/StockItem/{donor}.bitemico", len(icon_raw), len(icon_bytes), False)
@@ -693,9 +730,9 @@ def build_package(game: ak.Game, recipe: Recipe, out: str, *, log=None, used: se
         used_sort.add(le.get("sortKey"))
         ai_log[str(zlib.crc32(lr.actor.encode()))] = le
         try:
-            licon, _ = ak.build_icon(icon_raw, m, alb, lr.actor)
+            licon, _ = ak.build_icon(icon_raw, m, alb, lr.actor, donor=DONOR_NAME)
         except ak.AkError as e:
-            raise DragonError(str(e).replace("the claymore's", "the donor's")) from None
+            raise DragonError(str(e)) from None
         ak._write(os.path.join(romfs, "UI", "StockItem", f"{lr.actor}.sbitemico"),
                   ukmm.yaz0(licon, ak._yaz0_align(game.raw("icon"))))
         size(f"UI/StockItem/{lr.actor}.bitemico", f"UI/StockItem/{donor}.bitemico", len(icon_raw), len(licon), False)
@@ -770,15 +807,10 @@ def other_hash_ids(lib, recipe: Recipe) -> dict[int, str]:
 def add_to_library(lib, folder: str, mod_id: str, log=None, new_on: bool = True) -> tuple[dict, list[str]]:
     """modman's normal add (ak47_build's: an old copy is replaced, its on/off and place kept). A new mod is on when
     new_on, else off."""
-    new = not any(m["id"] == mod_id for m in lib.mods)
     try:
-        entry, notes = ak.add_to_library(lib, folder, mod_id, log)
+        return ak.add_to_library(lib, folder, mod_id, log, new_on=new_on)
     except ak.AkError as e:
         raise DragonError(str(e)) from None
-    if new and not new_on:
-        entry["enabled"] = False
-        lib.save()
-    return entry, notes
 
 
 def build(library: str | None = None, *, install: str | None = None, out: str | None = None, add: bool = True,
@@ -801,8 +833,7 @@ def build(library: str | None = None, *, install: str | None = None, out: str | 
     try:
         built = build_package(game, recipe, out, log=log, used=set(other_hash_ids(lib, recipe)),
                               test_spot=test_spot, stage2=stage2, events=events)
-        moves = build_moves(game.install, out, log, os.path.join(recipe_dir, "clips"))
-        entry = main_entry = moves_entry = None
+        entry = main_entry = moves = moves_entry = None
         notes: list[str] = []
         if add:
             entry, n1 = add_to_library(lib, built.folder, recipe.item_manifest["id"], log)
@@ -811,9 +842,16 @@ def build(library: str | None = None, *, install: str | None = None, out: str | 
                 main_entry["enabled"] = True
                 lib.save()
             notes = n1 + n2
-            if moves is not None:
-                moves_entry, n3 = add_to_library(lib, moves.folder, moves_id(), log)
-                notes += n3
+        # stage 3 on its own: a moves build that fails is a note, the blade (built and added above) stays
+        try:
+            moves = build_moves(game.install, out, log, os.path.join(recipe_dir, "clips"))
+        except DragonError as e:
+            old = add and any(m["id"] == moves_id() for m in lib.mods)
+            notes.append(f"{e} (the blade is built without them"
+                         f"{'; the old moves stay in your library' if old else ''})")
+        if add and moves is not None:
+            moves_entry, n3 = add_to_library(lib, moves.folder, moves_id(), log)
+            notes += n3
         return {"built": built, "entry": entry, "main_entry": main_entry, "moves": moves, "moves_entry": moves_entry,
                 "notes": notes}
     finally:
@@ -833,10 +871,10 @@ def build_moves(install: str, out: str, log=None, folder: str | None = None):
     import dragonbreath_clips as dc
     import emote_build as eb
     folder = folder or dc.CLIPS
-    clips = dc.load_clips(folder) if os.path.isdir(folder) else []
-    if not clips:
-        return None
     try:
+        clips = dc.load_clips(folder) if os.path.isdir(folder) else []
+        if not clips:
+            return None
         return dc.build_package(eb.find_game(install), clips, out, log=log)
     except (dc.ClipError, eb.EmoteError) as e:
         raise DragonError(f"the fast moves (stage 3) can't be built: {e}") from None
@@ -888,11 +926,14 @@ def check(library: str | None = None, *, install: str | None = None, recipe_dir:
         m, donor_raw, shape = make_mesh(game, recipe)
         ts, names, alb = make_textures(shape, nx_bfres.read_textures(ak._unyaz0(game.raw("tex"))),
                                        ak.donor_sampler_textures(donor_raw), actor, log)
-        ak.build_model(donor_raw, m, actor, names)
+        ak.build_model(donor_raw, m, actor, names, donor=DONOR_NAME, weapon=WEAPON_NAME)
         tex = nx_bfres.write_textures(ts)
         out += [f"textures: {p}" for p in checks.switch_tex_problems(tex)[:3]]
-        ak.build_icon(ak._unyaz0(game.raw("icon")), m, alb, actor)
+        ak.build_icon(ak._unyaz0(game.raw("icon")), m, alb, actor, donor=DONOR_NAME)
         sp_actor, sp_tag = guardian_lists(game, recipe)
+        weak = left_out_hit(game, recipe, sp_actor, sp_tag)
+        if weak:
+            out.append(f"the Guardian lists would weaken left-out actors too: {', '.join(weak[:6])}")
         stats = stats_file(files[gparam_name(files, donor)][0], recipe, sp_actor, sp_tag)
         got = read_stats(stats)
         want = {"attack": recipe.stats["attack"], "life": recipe.stats["life"],
@@ -952,7 +993,10 @@ def moves_problems(install: str, folder: str, log=None) -> list[str]:
     """Stage 3's clip checks on Link's own skeleton (tools/dragonbreath_clips.py check), when the recipe has clips."""
     import dragonbreath_clips as dc
     import emote_build as eb
-    clips = dc.load_clips(folder) if os.path.isdir(folder) else []
+    try:
+        clips = dc.load_clips(folder) if os.path.isdir(folder) else []
+    except dc.ClipError as e:
+        return [f"clips: {e}"]
     if not clips:
         return []
     bad = [f"clips: {p}" for p in dc.lint(clips)]

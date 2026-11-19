@@ -14,12 +14,14 @@ The full plan (4 stages, the game checks, the open questions): `out\research\dra
 
 **Checked offline, 2026-11-18** (Savage Wind 0.4.1-alpha.4's own files, read only; no game run):
 `dragonbreath_build.py check` all good; a build read back (attack 40, life 1000, `IsLifeInfinite` on, not throwable,
-sub-type `Dragonbreath`, Guardian ratio 0.25 with the 9 Guardian Scout names and the Guardian tags, tags as below,
+sub-type `Dragonbreath`, Guardian ratio 0.25 with 12 Guardian Scout names (the Guardian Sword's 9 and the 3
+`_DetachLineBeam` ones) and the tag `TeamGuardian` (rechecked after the review), tags as below,
 plain-iron chemistry, the donor's sheath); `modman add` of both mods into a scratch library merged the actor info,
 flags, texts and map with no refusal; 25 unit tests on a made-up game. Listed in `tools/packaging/bundled-mods.toml`
 (not ready, off by default). The donor's 16_16 unorm UVs are written by ak47_build's shared model writer, so any
-weapon mod on such a donor works. Follow-up: a new recipe mod needs `build --on` because the launcher adds no enable
-step for it; that belongs in the launcher, not in each mod.
+weapon mod on such a donor works (a UV outside 0-1 is refused with a clear message, not clamped: such a donor's
+texture can't tile). The shared steps take the weapon's and the donor's names for their messages, and the shared
+library add takes `new_on` (the switch is added off without a second save).
 
 ## Stage 1: the blade itself
 
@@ -78,7 +80,11 @@ from your own `extracted\romfs` (only read), as BCML-style packages that `modman
   Link's back) is the donor's, under the donor's names.
 - **The stats file**: the donor's with attack, life, `IsLifeInfinite`, `IsThrowingWeapon`, the "+" chances and
   bonuses (all 0), `WeaponSubType` and `SpHitActor` / `SpHitTag` / `SpHitRatio` changed. The Guardian lists are read
-  from your game's Guardian Sword (`Weapon_Sword_013`) at build time.
+  from your game's Guardian Sword (`Weapon_Sword_013`) at build time, without Ganon and the Blights
+  (`guardians_leave_out`): a tag a left-out actor carries in your actor info is dropped too
+  (`IsEffectiveAncientWeapon`: the castle's Blight refights `Enemy_SiteBoss_*_R` carry it, in 0.4.1), and the other
+  actors that carry it (the 3 Guardian Scout `_DetachLineBeam` ones) are named in `SpHitActor` instead, so the tag
+  list is `TeamGuardian` alone. `check` reports any left-out actor the lists would still weaken.
 - **Actor info**: the donor's entry renamed (model bounds, sort key) with the same stats repeated (`attackPower`,
   `generalLife`, the "+" values), no Compendium spots.
 - **The model**: the donor's model file (its `Root` bone and its one material) with our mesh; the textures in the
@@ -237,7 +243,14 @@ attack and they are cut off; stop and they play.
   our clip node (or a sequence node with our parts), `default` the game's own tree, whose nodes stay byte for byte
   (only moved down one place). Our nodes are copies of the game's own one-handed node in that file: every event
   kept, moved onto our frames (the hit window and the next-input frame exactly, the rest in step), rate 1.0, blend 2
-  frames. The flurry's sequence keeps the game's child count (it repeats the last cut once, as the game's does).
+  frames. In a set with parts only the last part keeps the next-attack trigger (`TriggerEvents` `TypeIndex 4`), as
+  the game's own sequence children have none: a buffered press can't start the next attack after `s3a` and skip
+  `s3b`; `next` is linted on the last part only. The flurry's sequence is the game's `T11` node that
+  `Sword_Attack_Just_Rush1` plays under (through its speed selector `T16`; found by that clip, not by its place: the
+  file has the spear's and the claymore's sequences too); it keeps the game's child count (it repeats the last cut
+  once, as the game's does).
+- **A moves build that fails** (a broken clip file, a pose check) is a note: the blade and the switch are built and
+  added first, the moves are a separate step after them (an old moves package stays as it was).
 - **Package:** `giruka.dragonbreath-moves` (hidden, `part_of` the Dragonbreath switch: used only while it is on).
   `dragonbreath_build.py build` makes it with the other two; `clean` takes it out with the switch's mod. With the
   switch off, the sets are the game's and the blade swings the normal one-handed moves.
@@ -377,6 +390,16 @@ Run B (tempers and re-buy; ores from the test save or Ghost's `ghost give`):
    `tools/emote_build.py` next to its field list) for other clip makers.
 6. Stage 4: the native mod: the energy and recharge, the special mode with its effects and camera, big characters.
 7. Our own scabbard (saya) model in place of the donor's sheath.
+8. **Follow-ups from the 2026-11-18 review** (left for later: they belong in `tools/modman.py` /
+   `tools/modman_gui.py`, not in this mod):
+   - **The `--on` flag** (`tools/packaging/bundled-mods.toml` and the force-on in `dragonbreath_build.build`): needed
+     only because `modman_gui.install_picked` adds no enable step for a new recipe mod. Root fix: after a new recipe's
+     build, turn it on when the player picked it on; then drop `--on` from the recipe line and the force-on.
+   - **A stale moves mod after a game update**: `giruka.dragonbreath-moves` ships whole copies of 7 sets (with the
+     spear and claymore branches), so one built from an older game overrides every weapon's attacks after an update.
+     `moves.json` records the input hashes but nothing compares them. Root fix: `modman deploy` compares a built
+     mod's recorded input hashes with the current game and refuses or rebuilds when they differ (one check for every
+     recipe mod, not one per mod).
 
 ## Files
 
