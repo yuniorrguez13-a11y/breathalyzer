@@ -333,11 +333,18 @@ class HiddenWindow(GuiBase):
         view.on_more()
         self.assertEqual([r.on for r in self.ctl.listing.rows], [False, False])
         self.assertEqual(view.status_head.cget("text"), "Every mod is off.")
+        # (a small screen, like the GitHub runner's 1024x768, may not fit Details: the window says so instead)
+        small = self.root.winfo_screenheight() < 900
         self.script("info")
         view.on_more()
-        self.assertEqual(view.status_head.cget("text"), "Alpha: its info is in Details.")
+        head = view.status_head.cget("text")
+        if small:
+            self.assertIn(head, ("Alpha: its info is in Details.", "Details doesn't fit at this text size."))
+        else:
+            self.assertEqual(head, "Alpha: its info is in Details.")
         self.assertFalse(self.ctl.want_details)   # (the window took it: Details opened, or said why it can't)
-        self.assertEqual(self.ctl.details_job.picture, "")   # (a letter tile: no picture file)
+        if not small:
+            self.assertEqual(self.ctl.details_job.picture, "")   # (a letter tile: no picture file)
         png = self.tmp / "pic.png"
         png.write_bytes(tiny_png())
         self.script("picture", "file")
@@ -345,7 +352,7 @@ class HiddenWindow(GuiBase):
             view.on_more()
         self.settle()
         self.assertTrue((self.libdir / mm.PICTURES_DIR / "alpha" / "chosen.png").is_file())
-        if mm.feature("mod_pictures", "icon_path") is not None:   # (the 128 px picture tops the info)
+        if mm.feature("mod_pictures", "icon_path") is not None and not small:   # (the 128 px picture tops the info)
             self.script("info")
             view.on_more()
             self.assertTrue(self.ctl.details_job.picture.endswith("icon-128.png"), self.ctl.details_job.picture)
