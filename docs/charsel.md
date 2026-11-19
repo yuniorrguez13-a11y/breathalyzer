@@ -202,9 +202,9 @@ the inventory showed Link, "terribly wrong". So Linkle is no longer a costume:
   to `SAVAGEWIND_ROMFS_OVERLAY`), else how to pick her in Breathalyzer (one restart).
 - **Friends** see her as before (review C1, 2026-11-18 night): each PC still builds her costume from The Linkle Mod's
   files (on or off: `linkle_costume`, its pack on `Dm_Npc_UMii_Hylia_BodyS_M_012`), and Looks shows a friend who
-  picked Linkle as it. Only the self-puppet is gone (the ghost DLL has no `linkle` slot). The costume is v2 again (the
-  mod's `Armor_Default`: her no-armor look); v3's outfit code (`Armor_001`, hood down) was dropped with the costume
-  and has to be redone.
+  picked Linkle as it. Only the self-puppet is gone (the ghost DLL has no `linkle` slot). The costume wears her outfit
+  again (v3, rebuilt 2026-11-18 late: `outfit_parts`, see Looks below; a mod without `Armor_001`: v2, her no-armor
+  look, said as `look.wears` in `charsel.json`).
 - **Which mod is The Linkle Mod** (review C2): a mod with "linkle" in its id or name whose folder replaces Link's
   model (`is_linkle_mod`, as `linkle_mod`). A "Linkle Hair Recolor" add-on is left alone, on or off.
 - **Only its own switch** (review C3, C7): picking anyone else turns off only a Linkle Mod that Who am I itself turned
@@ -227,11 +227,13 @@ the hand when drawn. Found by the copy's pod link (item `+0x958` [S]) and the co
 one the game uses for an NPC isn't known]. `ghost puppet` shows `sheath` (the last one), `sheaths` (hidden now) and
 `sheath_hides`.
 
-### Sheath: why hiding it each frame doesn't stick, and the planned fix (design only, 2026-11-18 night)
+### Sheath: why hiding it each frame doesn't stick, and the fix (ghost 0.9.9, 2026-11-18 night; not yet checked in the game)
 
 Game check FAIL: `sheath_hides` climbs about 110 a second: the ghost mod hides the pod in its own tick, and the game
 shows it again before drawing (its Pod AI or the holder's model update re-shows it each frame [G]). Hiding it later
-in the frame is the root fix, not hiding it more often. Plan (not coded tonight; the puppet code is as it was):
+in the frame is the root fix, not hiding it more often. Steps 1, 2 and 4 are coded (ghost 0.9.9, puppet.c
+`pup_pod_units_publish`, `pup_pod_unit_after_step`); step 3 is only the fallback if the game check says step 2
+isn't enough:
 1. When `pup_pod_hide` finds a pod, keep its model units (`pup_model(pod)` -> `MODEL_UNITS`, as `pup_drawn` reads
    them) in a small atomic table, like `g_pup_ov_unit`.
 2. In `unit_step_wrapper` (after the game's own step, the place every posed unit already gets its pose), a unit in that
@@ -240,13 +242,25 @@ in the frame is the root fix, not hiding it more often. Plan (not coded tonight;
 3. Or, if the re-show is the game's `MODEL_SHOW` call itself: wrap it (`hle_override`) and refuse "show" for a model
    in that table; find which with a counter on each (one check session).
 4. Selftest: a fake unit whose step sets the bit again; after the wrapper it stays clear. Done when `sheath_hides`
-   stays at about one per pod and no sheath shows in a shot.
+   stays at about one per pod and no sheath shows in a shot. Selftest `puppet sheath_after_step`: the fake step
+   shows the pod's unit again, the wrapper clears it (+1 `sheath_unit_hides`), the tick makes no new show/hide call,
+   another unit is left alone, and once the links are gone the table is empty and the game's show stays.
+   [G] The pod's units are stepped by the wrapped unit step (`UNIT_ANIM_STEP`, its only caller `0x7001051914`) like
+   every model unit; if `sheath_unit_hides` stays at 0 in the game, they aren't, and step 3 is next.
+
+Check in game next session: Revali, Paya, a Hylian with a sword drawn and with a bow: no sheath or quiver at the
+shoulder; `ghost puppet`: `sheath_unit_hides` climbs (about one per pod unit per frame), `sheath_hides` stays at
+about one per pod; sheathe the sword: it hangs bare on the back, no flicker.
 
 ### Looks (2026-11-15: the room-fix game check, `out\shots\room-fix`; not yet checked in the game)
 
-- **(2026-11-18: v3's outfit code is gone; her costume is v2 again, friends' view only.) Linkle was in her underwear** (bandeau top,
-  shorts, bare feet) [V]: v2 merged The Linkle Mod's `Armor_Default`,
-  which is her *no-armor* look. Linkle v3 wears her outfit: the mod's `Model/Armor_001` (the game's Hylian set, which
+- **(2026-11-18 late: v3 rebuilt for the friends' view, `outfit_parts` + `merge_parts`; not yet game-checked, so the
+  hide groups below are not in it yet: she wears no underwear parts of Armor_Default, only its pouches.) Linkle was
+  in her underwear** (bandeau top, shorts, bare feet) [V]: v2 merged The Linkle Mod's `Armor_Default`,
+  which is her *no-armor* look. Rebuilt v3 [V: 3.0.1's names]: `Armor_001_Head_A` (her hair is in it; `_Head_B` is
+  the same shapes, left out), `_Upper`, `_Lower`; hood-up shapes by name (`LINKLE_HOOD_UP`); shapes naming a texture
+  the mod doesn't ship left out; `Armor_Default_Extra_00/01` (pouches). Point plot: `out\research\linkle-v3-outfit.png`.
+  The old v3 (gone): her outfit was the mod's `Model/Armor_001` (the game's Hylian set, which
   the mod turns into her hood, tunic, skirt, tights and boots [V: shape, material and texture names]) with the hood
   down (the hood-up shapes are left out: `LINKLE_HOOD_UP` [G: by their names]), plus her belt pouches
   (`Armor_Default_Extra_00/01`; the tunic's `IsDispOffPorch` is false, so the game shows them [V]). The game's hide
@@ -666,7 +680,8 @@ versions and names travel. The Linkle body comes from the Linkle mod on that PC 
 4. Who am I with the game open: "Restart now?" defaults to Later; while hosting it says friends get disconnected;
    Restart now closes the game and starts it again (no "didn't answer" when it closed).
 5. `charsel playas off` after a Who am I switch doesn't turn The Linkle Mod back on.
-6. Sheath on Revali, Paya, a Hylian: still shows (no code change tonight); `ghost puppet` `sheath_hides` for the plan.
+6. Sheath on Revali, Paya, a Hylian (ghost 0.9.9: hidden again after the game's step): no sheath or quiver at the
+   shoulder, drawn or sheathed; `ghost puppet` `sheath_unit_hides` climbs, `sheath_hides` stays at about one per pod.
 
 ## In-game check
 

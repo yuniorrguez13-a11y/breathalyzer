@@ -936,6 +936,14 @@ def linkle_mod(library) -> dict | None:
 # body (its Model/Link) wears its default look (its Model/Armor_Default: the hair, the skirt and the pouches, which the
 # game puts on the player as armor). One model with both, so a costume pack shows all of her.
 LINKLE_LOOK = "Armor_Default"
+# Linkle v3 (2026-11-18 night, friends' view): v2's Armor_Default alone is her NO-armor look (bandeau, shorts, bare
+# feet). Her outfit is the mod's Model/Armor_001 (the game's Hylian set, which the mod turns into her hood, tunic, skirt,
+# tights and boots; its Head_A has her hair and the hood both up and down [V: 3.0.1's shape names]), merged on like
+# Zelda's legs (merge_parts), with her belt pouches from Armor_Default (the tunic's IsDispOffPorch is false [V]).
+LINKLE_OUTFIT = "Armor_001"
+LINKLE_FROM_LOOK = ("Armor_Default_Extra_00", "Armor_Default_Extra_01")   # her pouches (the look's hair: Head_A's)
+LINKLE_HOOD_UP = ("Hood_A_001_Metal__Mt_Hood_001", "green hood", "green necklace")   # left out: the hood is down [G]
+OUTFIT_PREFIX = "SwOutfit_"  # an outfit texture named like one already in the costume's textures
 # Parts merged onto a body (merge_parts: Zelda's legs on her model): each part's shapes go on the body's skeleton.
 PART_PREFIX = "SwPart"      # a part's material names: SwPart<k>_<name> (k: the part's number)
 REST_GAP = 1e-3             # m: a part bone may rest this far from the body's (else its bone-space shapes are left out)
@@ -1344,17 +1352,64 @@ def fit_legs(donor, base, keep=LEGS_KEEP, drop=LEGS_DROP) -> tuple[list, list, l
                                       "stretch": stretch, "y": (round(min(ys), 3), round(max(ys), 3))}
 
 
+def _shown(p) -> bool:
+    return any(p.vertex_buffers[s.vertex_buffer].vertex_count > 1 for s in p.shapes)   # (not all shrunk away)
+
+
+def outfit_parts(outfit_models, look_models, have_tex) -> tuple[list, list, list[str]]:
+    """Linkle v3's parts: (the outfit's models, the look's models, what was left out and why). Each outfit model
+    keeps its shapes but the hood-up ones (named in LINKLE_HOOD_UP) and those naming a texture the mod doesn't ship
+    (have_tex: every texture name the costume has; e.g. its "greenshirt"); a <x>_B model is left out when <x>_A is
+    there (the head's second copy: the same shapes). From the look only her pouches (LINKLE_FROM_LOOK: its hair would
+    double Head_A's, its shorts poke through the skirt). Models are shallow copies, with only the materials (renumbered)
+    their kept shapes use."""
+    import copy
+    have = set(have_tex)
+    left: list[str] = []
+    outfit = []
+    names = {p.name for p in outfit_models}
+    for p in outfit_models:
+        if p.name.endswith("_B") and p.name[:-1] + "A" in names:
+            left.append(f"{p.name}: a second copy of {p.name[:-1]}A")
+            continue
+        keep = []
+        for sh in p.shapes:
+            if p.vertex_buffers[sh.vertex_buffer].vertex_count <= 1:
+                continue
+            mat = p.materials[sh.material]
+            missing = [t for t in mat.textures if t not in have]
+            if sh.name in LINKLE_HOOD_UP:
+                left.append(f"{p.name}/{sh.name}: hood up")
+            elif missing:
+                left.append(f"{p.name}/{sh.name}: no texture {missing[0]}")
+            else:
+                keep.append(sh)
+        if keep:   # (only the materials its kept shapes use: a left-out one names textures that aren't there)
+            mats = sorted({sh.material for sh in keep})
+            q = copy.copy(p)
+            q.materials = [p.materials[i] for i in mats]
+            q.shapes = [copy.copy(sh) for sh in keep]
+            for sh in q.shapes:
+                sh.material = mats.index(sh.material)
+            outfit.append(q)
+    look = [p for p in look_models if p.name in LINKLE_FROM_LOOK and _shown(p)]
+    return outfit, look, left
+
+
 def linkle_costume(where, member) -> tuple[bytes, bytes, dict]:
     """(model, textures, info) of the Linkle costume, from the Linkle Mod's own files (where/member: linkle_mod's):
-    its Link model with its default look (Armor_Default: hair, skirt, pouches) merged on, and its Link textures with
-    the look's beside them. Yaz0-packed, like the game's .sbfres. Mod files only, read only."""
+    its Link model wearing her outfit (v3: LINKLE_OUTFIT, hood down, plus her hair and pouches from Armor_Default),
+    and its Link textures with the outfit's and the look's beside them. A mod without the outfit file: her default
+    look (v2: all of Armor_Default), said in info["look"]. Yaz0-packed, like the game's .sbfres. Read only."""
     import copy
-    from wiiu_model import checks, nx_model
+    from wiiu_model import checks, nx_bfres, nx_model
     from wiiu_model.convert import set_texinfo
     from wiiu_model.neutral import ResFile
     where = Path(where)
     body, body_tex = _read_link_model(where, member), _read_link_model(where, member, tex=True)
     look, look_tex = _read_mod_model(where, member, LINKLE_LOOK), _read_mod_model(where, member, LINKLE_LOOK + ".Tex")
+    fit = _read_mod_model(where, member, LINKLE_OUTFIT)
+    fit_tex = _read_mod_model(where, member, LINKLE_OUTFIT + ".Tex") if fit else None
     if not body or not body_tex:
         raise CharselError("the Linkle Mod's Link model or textures aren't in its files")
     if not look or not look_tex:
@@ -1362,10 +1417,22 @@ def linkle_costume(where, member) -> tuple[bytes, bytes, dict]:
     res = nx_model.read(_unyaz(body))
     if len(res.models) != 1:
         raise CharselError(f"the Linkle Mod's Link model file has {len(res.models)} models, expected 1")
-    parts = [p for p in nx_model.read(_unyaz(look)).models
-             if any(p.vertex_buffers[s.vertex_buffer].vertex_count > 1 for s in p.shapes)]
+    look_models = nx_model.read(_unyaz(look)).models
     tex_raw, tex_names, rename = merge_textures(body_tex, look_tex)
-    model, info = merge_parts(res.models[0], parts, rename)
+    if fit and fit_tex:   # (have: texture names as the parts' materials say them)
+        have = set(tex_names) | set(rename) | {t.name for t in nx_bfres.read_textures(_unyaz(fit_tex)).textures}
+        outfit, keep, left = outfit_parts(nx_model.read(_unyaz(fit)).models, look_models, have)
+        if not outfit:
+            raise CharselError(f"the Linkle Mod's {LINKLE_OUTFIT} has nothing to wear ({left[:3]})")
+        used = {t for p in outfit for sh in p.shapes for t in p.materials[sh.material].textures}
+        tex_raw, tex_names, fit_rename = merge_textures(tex_raw, fit_tex, OUTFIT_PREFIX, keep=used)
+        parts, renames, how = outfit + keep, [fit_rename] * len(outfit) + [rename] * len(keep), "outfit"
+    else:
+        parts = [p for p in look_models if _shown(p)]
+        renames, left, how = rename, [], "default look"
+    model, info = merge_parts(res.models[0], parts, renames)
+    info["left_out"] = left + info["left_out"]
+    info["look"] = how
     out = ResFile(res.name, [model], [], [], [copy.deepcopy(e) for e in res.external], dict(res.extra))
     set_texinfo(out, len(tex_names))
     raw = nx_model.write(out)
@@ -2593,7 +2660,8 @@ def build(romfs=DEFAULT_ROMFS, out=DEFAULT_OUT, ids=None, *, library=None, slots
                     src = Path(lm["where"]), lm["member"]
                     try:
                         model, tex, linfo = linkle_costume(*src)
-                        look = {"how": "costume", "parts": linfo["parts"], "left_out": linfo["left_out"]}
+                        look = {"how": "costume", "wears": linfo["look"], "parts": linfo["parts"],
+                                "left_out": linfo["left_out"]}
                     except Exception as e:   # (any read failure: the mod's body as it is, said)
                         model, tex = _read_link_model(*src), _read_link_model(*src, tex=True)
                         look = {"how": "body only", "why": str(e)[:200]}
@@ -3095,17 +3163,21 @@ def body_on_link(link_res, body_model, tex_count: int, tex_rename: dict | None =
     return res, info
 
 
-def merge_textures(link_tex: bytes, body_tex: bytes) -> tuple[bytes, list[str], dict[str, str]]:
-    """Link.Tex with the body's textures after Link's (a body texture named like one of Link's is renamed SwBody_*).
-    Returns (the file, its texture names, the renames)."""
+def merge_textures(link_tex: bytes, body_tex: bytes, prefix: str = BODY_PREFIX,
+                   keep=None) -> tuple[bytes, list[str], dict[str, str]]:
+    """Link.Tex with the body's textures after Link's (a body texture named like one of Link's is renamed
+    <prefix>*, SwBody_* by default; keep: only the body's textures with these names, e.g. not an outfit's 15 unused
+    dye colours). Returns (the file, its texture names, the renames)."""
     from wiiu_model import nx_bfres
     from wiiu_model.neutral import TextureSet
     lt, bt = nx_bfres.read_textures(_unyaz(link_tex)), nx_bfres.read_textures(_unyaz(body_tex))
+    if keep is not None:
+        bt.textures = [t for t in bt.textures if t.name in keep]
     names = {t.name for t in lt.textures}
     rename = {}
     for t in bt.textures:
         if t.name in names:
-            rename[t.name] = BODY_PREFIX + t.name
+            rename[t.name] = prefix + t.name
             t.name = rename[t.name]
         names.add(t.name)
     ts = TextureSet(lt.name, lt.textures + bt.textures, "model", dict(lt.extra))

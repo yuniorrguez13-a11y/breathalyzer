@@ -2322,6 +2322,11 @@ static int rdt_rot_is(const float *lc, const float want[9]) {  // (a fake local'
 // on OUR follows: the sword on its Weapon_R, the shield on its Spine_2 (its back); a short loss of Link's equipment
 // read keeps the same copy; the game putting the item's own follow back: ours again next frame; sheathed: the same
 // copy moves to its back.
+// 0.9.9: the game's step of a unit shows it again (as the game re-shows a hidden pod each frame, 2026-11-18)
+static void pod_fake_reshow(struct Cpu *c) {
+    uint64_t u = SWMOD_REGS(c)->x[0];
+    *(uint16_t *)(uintptr_t)(u + UNIT_FLAGS) |= (uint16_t)(1u << PUP_BIT);
+}
 static void check_puppet_items_grip(void) {
     {
         static const char *const PPH[] = {"Root", "Weapon_R", "Weapon_L"};
@@ -2377,8 +2382,30 @@ static void check_puppet_items_grip(void) {
         int pods_hidden = !fm_drawn(&pods[0].fm) && !fm_drawn(&pods[1].fm) && fm_drawn(&pods[2].fm) &&
                           t_pup.sheaths == 2 && t_pup.sheath_hides == sh0 + 2 && pup_is_pod("Weapon_Lsheath_013") &&
                           pup_is_pod("Weapon_SpearSheath_001") && !pup_is_pod("Weapon_Sword_002") && !pup_is_pod(NULL);
+        // 0.9.9: the game shows the hidden sheath again in its unit's step: hidden again right after it (the
+        // after-step hide), no new show/hide call from the tick; another unit's re-show left alone
+        struct Cpu *c = (struct Cpu *)(void *)g_cpu;
+        SwModGuestFn step0 = g_orig_unit_step;
+        g_orig_unit_step = pod_fake_reshow;
+        int64_t uh0 = g_pup_pod_hides;
+        SWMOD_REGS(c)->x[0] = P(pods[0].fm.unit);
+        unit_step_wrapper(c);
+        int after_step = !fm_drawn(&pods[0].fm) && g_pup_pod_hides == uh0 + 1;
+        SWMOD_REGS(c)->x[0] = P(pods[2].fm.unit);
+        unit_step_wrapper(c);
+        after_step = after_step && fm_drawn(&pods[2].fm) && g_pup_pod_hides == uh0 + 1;
+        pup_run("Wait", 0, 0.1);
+        after_step = after_step && !fm_drawn(&pods[0].fm) && t_pup.sheath_hides == sh0 + 2;
         W64(swm, ITEM_POD, 0), W64(hold, s3, 0), W64(hold, s4, 0);
         pup_run("Wait", 0, 0.1);
+        // links gone: the table is empty, the game's re-show stays
+        SWMOD_REGS(c)->x[0] = P(pods[0].fm.unit);
+        unit_step_wrapper(c);
+        int freed = !g_pup_pod_any && fm_drawn(&pods[0].fm) && g_pup_pod_hides == uh0 + 1;
+        g_orig_unit_step = step0;
+        check("puppet", "sheath_after_step", after_step && freed, "hidden after the step %d (+%lld unit hides, "
+              "+%lld tick hides), freed %d", after_step, (long long)(g_pup_pod_hides - uh0),
+              (long long)(t_pup.sheath_hides - sh0), freed);
         check("puppet", "sheath_hidden", pods_hidden && t_pup.sheaths == 0 && !strcmp(t_pup.sheath, "Weapon_Quiver_001"),
               "sheath drawn %d quiver drawn %d other drawn %d, hidden %d (+%lld), after %d, last %s",
               fm_drawn(&pods[0].fm), fm_drawn(&pods[1].fm), fm_drawn(&pods[2].fm), t_pup.sheaths,

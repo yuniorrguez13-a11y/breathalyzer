@@ -105,11 +105,12 @@ class GhostNative(unittest.TestCase):
     def test_linkle_body_and_sheaths(self):
         """0.9.8: `iam linkle` spawns no costume and says whether her body is on (The Linkle Mod in the deploy's
         launch.json mod list), else how to pick her in Breathalyzer (one restart); our copies' sheaths and quivers (the
-        game's pods, bound to the NPC's own Pod_A: sideways) are hidden while the costume holds them."""
+        game's pods, bound to the NPC's own Pod_A: sideways) are hidden while the costume holds them; 0.9.9: and hidden
+        again right after the game's own step of their units (the game shows them again each frame), never after."""
         self.group("iam", ["linkle_launch_read", "linkle_body_words"])
         self.group("puppet", ["ids", "linkle_words"])
         if ("puppet", "world") not in self.rows:  # (the made-up world ran)
-            self.group("puppet", ["sheath_hidden", "holder_in_hand", "items_grip"])
+            self.group("puppet", ["sheath_hidden", "sheath_after_step", "holder_in_hand", "items_grip"])
 
     def test_costume_ragdoll_and_ball(self):
         """0.9.2 (puppet.c, docs/charsel.md "Ragdoll", round 3): the slide he gets up into on a hill, the big knock-back
