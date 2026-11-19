@@ -1,6 +1,7 @@
 """Dragonbreath stage 3 (tools/dragonbreath_clips.py) and the key-language parts it added to tools/emote_build.py
 (blade, spin, a settable turn limit, the shared archive writer and list log): made-up data only, no game files."""
 import copy
+import importlib.util
 import math
 import os
 import sys
@@ -210,6 +211,7 @@ class Clips(unittest.TestCase):
         self.assertAlmostEqual(f(21), 14)
         self.assertAlmostEqual(f(19), 9.5)
 
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow isn't installed (the pictures are optional)")
     def test_picture(self):
         c = cut_clip()
         with tempfile.TemporaryDirectory() as tmp:
