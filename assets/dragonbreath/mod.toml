@@ -3,15 +3,17 @@
 # mods on your PC from your own game files (the Royal Guard's Sword's actor, model and icon as the base) and the
 # model it makes in code, then adds them to your mod library:
 #   python tools/dragonbreath_build.py build --on
-# This mod.toml is the main switch's (botw-mod-loader.dragonbreath): for now it holds only the test spot, one
-# Dragonbreath lying near the test save's start on the Great Plateau. Later stages add the cave, the Goron smith and
-# the fast moves here. item.toml is the other mod's (giruka.dragonbreath-item: the blade's actor, model, icon, texts
-# and flags): no part_of, so it stays on while this switch is off and a save that holds the blade keeps loading.
+# This mod.toml is the main switch's (botw-mod-loader.dragonbreath): stage 2's diamond cave with the chest that holds
+# the blade, Rohan's side quest (tips, tempers, re-buy) and Daruk's first-draw scene (tools/dragonbreath_stage2.py).
+# A developer build (`build --test-spot`) also lays one blade near the test save's start; players never get it.
+# item.toml is the other mod's (giruka.dragonbreath-item: the blade's actor and its 4 tempered levels, model, icons,
+# texts and every flag a save keeps): no part_of, so it stays on while this switch is off and a save that holds the
+# blade keeps loading.
 
 [mod]
 id = "botw-mod-loader.dragonbreath"
 name = "Dragonbreath"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["giruka"]
-description = "A lost Goron blade forged for Daruk. Test stage: one lies at the plateau start."
+description = "A lost Goron blade forged for Daruk: find it in a diamond cave above Lake Darman, temper it with Rohan in Goron City."
 game_versions = ["1.9.0"]

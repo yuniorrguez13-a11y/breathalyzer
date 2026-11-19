@@ -1,0 +1,131 @@
+{
+ "format": 1,
+ "about": "Dragonbreath stage 2 (tools/dragonbreath_stage2.py, docs/dragonbreath.md, Stage 2): Rohan's tip, the diamond cave, the chest, Daruk's first-draw scene, the tempers and the re-buy. Our own lines and numbers; every game file it needs is read on the player's PC.",
+ "base_actor": "Weapon_Sword_Dragonbreath",
+ "smith": {
+  "actor": "Npc_Goron016",
+  "pos": [1691.13, 502.47, -2494.66],
+  "about": "Rohan, Goron City's master smith (the one who re-forges the Boulder Breaker). No game quest uses him.",
+  "timeline_from": ["GoronCityMini_BeatGolem", "Npc_Goron017"],
+  "about_timeline": "a quest step lists the NPC with a day schedule and the talk it takes over. Rohan has no quest schedule of his own, so the build copies the one of Fugo (Npc_Goron017, same AI program, 2 m away) from your game's quest list: [G] that Rohan keeps working at his anvil with it",
+  "boulder_breaker_flag": "Get_GoronWeapon",
+  "boulder_breaker_entry": "GoronSword3Repair"
+ },
+ "quest": {
+  "name": "Dragonbreath",
+  "location": "Goron",
+  "prev_quest": "GoronCityMini_BeatGolem",
+  "marker": [1925.0, -3195.0]
+ },
+ "rebuy": {"Item_Ore_A": 8},
+ "daruk_look": {
+  "ghost": true,
+  "laugh_as": "Act_Happy_Wait",
+  "vanish_xlink": "Demo_Disappear",
+  "about": "the game's own spirit pattern (the King's spirit on the plateau, FindDungeon<Npc_King001_Appear>): Daruk's Wait pose, then his Ghost look (both in his own AS list), the laugh pose on his first line, the Demo_Disappear effect at the end. Set ghost false, laugh_as or vanish_xlink empty to leave a step out"
+ },
+ "levels": [
+  {"suffix": "", "attack": 40, "guardian_ratio": 0.25, "name": "Dragonbreath"},
+  {"suffix": "_1", "attack": 44, "guardian_ratio": 0.40, "name": "Dragonbreath +1",
+   "cost": {"Item_Ore_A": 1, "Item_Ore_B": 3, "Item_Ore_I": 5}},
+  {"suffix": "_2", "attack": 48, "guardian_ratio": 0.55, "name": "Dragonbreath +2",
+   "cost": {"Item_Ore_A": 2, "Item_Ore_B": 5, "Item_Ore_D": 2}},
+  {"suffix": "_3", "attack": 52, "guardian_ratio": 0.75, "name": "Dragonbreath +3",
+   "cost": {"Item_Ore_A": 3, "Item_Ore_C": 2, "Item_Ore_J": 1}},
+  {"suffix": "_4", "attack": 56, "guardian_ratio": 1.0, "name": "Dragonbreath +4",
+   "cost": {"Item_Ore_A": 4, "Item_Ore_J": 2}}
+ ],
+ "ore_names": {
+  "Item_Ore_A": "Diamond", "Item_Ore_B": "Ruby", "Item_Ore_C": "Sapphire", "Item_Ore_D": "Topaz",
+  "Item_Ore_I": "Flint", "Item_Ore_J": "Star Fragment"
+ },
+ "cave": {
+  "static_unit": "G-1_Static",
+  "unit": "G-1_Dynamic",
+  "origin": [1960.0, 527.7, -3230.0],
+  "yaw": 225.0,
+  "about": "a new cave on Death Mountain's north flank above Lake Darman, with the game's own Gorko Tunnel rock (out/research/dragonbreath-story.md). Local x runs from the mouth (about -15) into the mountain (+75); local z is across. y = your terrain there + lift (the rock is a shell, the terrain is its floor)",
+  "corridor": {"x": [-15.0, 75.0], "z": [-3.5, 3.5]},
+  "rock": "FldObj_CliffRedRock_Cave_A",
+  "rock_far": "FldObj_CliffRedRock_Cave_A_Far",
+  "objects": [
+   {"key": "seal", "actor": "FldObj_BreakableRockDeathMT_A_02", "at": [-6.0, 0.0], "about": "Daruk's seal: bomb it open"},
+   {"key": "lamp1", "actor": "TwnObj_City_GoronLight_B_01", "at": [2.0, 3.0]},
+   {"key": "rare1", "actor": "Obj_Mineral_B_01", "at": [4.0, -2.6], "params": {"DropTable": "Happy"}},
+   {"key": "ore1", "actor": "Obj_Mineral_A_01", "at": [6.5, 2.6]},
+   {"key": "rare2", "actor": "Obj_Mineral_B_01", "at": [8.5, 2.6], "params": {"DropTable": "Happy"}},
+   {"key": "diamond1", "actor": "Item_Ore_A", "at": [9.5, 0.4], "lift": 0.2},
+   {"key": "ore2", "actor": "Obj_Mineral_A_01", "at": [11.0, -2.6]},
+   {"key": "rare3", "actor": "Obj_Mineral_B_01", "at": [13.0, -2.6], "params": {"DropTable": "Happy"}},
+   {"key": "glow1", "actor": "Obj_Mineral_C_01", "at": [14.5, 2.9]},
+   {"key": "lamp2", "actor": "TwnObj_City_GoronLight_B_01", "at": [16.0, -3.0]},
+   {"key": "rare4", "actor": "Obj_Mineral_B_01", "at": [17.5, 2.6], "params": {"DropTable": "Happy"}},
+   {"key": "ore3", "actor": "Obj_Mineral_A_01", "at": [19.5, -2.6]},
+   {"key": "diamond2", "actor": "Item_Ore_A", "at": [21.0, -0.4], "lift": 0.2},
+   {"key": "rare5", "actor": "Obj_Mineral_B_01", "at": [22.5, -2.6], "params": {"DropTable": "Happy"}},
+   {"key": "glow2", "actor": "Obj_Mineral_C_01", "at": [24.0, 2.9]},
+   {"key": "rare6", "actor": "Obj_Mineral_B_01", "at": [26.0, 2.6], "params": {"DropTable": "Happy"}},
+   {"key": "ore4", "actor": "Obj_Mineral_A_01", "at": [27.5, -2.6]},
+   {"key": "glow3", "actor": "Obj_Mineral_C_01", "at": [29.0, -2.9]},
+   {"key": "lamp3", "actor": "TwnObj_City_GoronLight_B_01", "at": [30.5, 3.0]},
+   {"key": "pebblit1", "actor": "Enemy_Golem_Little_Fire", "at": [35.0, 1.0]},
+   {"key": "keese1", "actor": "Enemy_Keese_Fire", "at": [38.0, 0.0], "lift": 4.0},
+   {"key": "chuchu1", "actor": "Enemy_Chuchu_Fire_Middle", "at": [40.0, 2.0]},
+   {"key": "pebblit2", "actor": "Enemy_Golem_Little_Fire", "at": [42.5, -1.0]},
+   {"key": "keese2", "actor": "Enemy_Keese_Fire", "at": [45.0, 1.0], "lift": 4.0},
+   {"key": "pebblit3", "actor": "Enemy_Golem_Little_Fire", "at": [50.0, 1.5]},
+   {"key": "keese3", "actor": "Enemy_Keese_Fire", "at": [52.0, -1.0], "lift": 4.0},
+   {"key": "chuchu2", "actor": "Enemy_Chuchu_Fire_Middle", "at": [54.0, -2.0]},
+   {"key": "keese4", "actor": "Enemy_Keese_Fire", "at": [56.5, 0.0], "lift": 4.0},
+   {"key": "lizalfos1", "actor": "Enemy_Lizalfos_Fire", "at": [62.5, 1.5]},
+   {"key": "lizalfos2", "actor": "Enemy_Lizalfos_Fire", "at": [64.5, -1.5]},
+   {"key": "wizzrobe", "actor": "Enemy_Wizzrobe_Fire_Senior", "at": [68.0, 0.0], "lift": 1.0}
+  ],
+  "chest": {"actor": "TBox_Field_Stone", "at": [72.0, 0.0], "yaw": 270.0},
+  "daruk": {"actor": "Dm_Npc_Goron_Hero", "at": [69.0, 2.0], "yaw": 90.0},
+  "first_draw_area": {"at": [71.0, 0.0], "half": [3.0, 3.0, 3.0]},
+  "default_params": {
+   "Enemy_Keese_Fire": {"DropTable": "Normal", "IsNearCreate": false, "LevelSensorMode": 0, "SharpWeaponJudgeType": 0, "TerritoryArea": 0.0},
+   "Enemy_Wizzrobe_Fire_Senior": {"DropTable": "Normal", "IsNearCreate": false, "LevelSensorMode": 0, "SharpWeaponJudgeType": 0, "TerritoryArea": 0.0},
+   "Dm_Npc_Goron_Hero": {"TerritoryArea": 0.0}
+  },
+  "template_units": ["H-2_Dynamic", "H-2_Static", "G-2_Dynamic", "G-2_Static", "G-1_Dynamic", "G-1_Static"]
+ },
+ "texts": {
+  "quest_name": "Forged for Daruk",
+  "quest_desc": "Rohan, Goron City's master smith, told you about an old cave on Death Mountain's north flank, above Lake Darman. The young Gorons say it's full of diamonds... but something lurks deeper inside.",
+  "quest_get": "You found Dragonbreath, the blade the old Goron masters forged for Daruk. Rohan can temper it with rare ores, and forge it anew if you ever lose it.",
+  "quest_finish": "Rohan tempered Dragonbreath four times. It can't get any better. If you ever lose it, Rohan can forge it anew.",
+  "rohan": {
+   "tip1": "...Hmph. You look like the type who digs where he shouldn't.",
+   "tip2": "There's an old cave on the north flank, above Lake Darman. The young ones swear it's full of diamonds.",
+   "tip3": "Nobody's mined it in ages. Somethin' nasty moved in deeper down. Don't come cryin' to me.",
+   "remind": "That cave above Lake Darman? Still there. Still full of diamonds. Still not my problem.",
+   "menu": "What'll it be?",
+   "saw1": "...Where'd ya get that? Those dragon marks... That's the old masters' work.",
+   "saw2": "The blade they forged for Lord Daruk! Too small for him, the stories said. Never thought it was real.",
+   "saw3": "A blade like that deserves proper tempering. Bring me rare ores and I'll make it sing.",
+   "offer": "I can temper it once more. For {level} I need {cost}.",
+   "short": "That's not enough ore. Come back when you've got it all.",
+   "no": "Hmph. Suit yourself.",
+   "done": "Hmph. Feel that? Even faster now. Go on, take it.",
+   "maxed": "That blade sings already. Nothing left for me to teach it.",
+   "away": "Your blade's lyin' around out there somewhere. Go fetch it before some lizard does.",
+   "lost": "Lost the old masters' blade, did ya? I can forge you another, but it'll cost you {cost}.",
+   "reforged": "There. Forged anew, just like the old masters did it. Don't lose this one."
+  },
+  "choices": {
+   "menu": ["Just talk", "Boulder Breaker"],
+   "yes_no": ["Do it", "Not now"]
+  },
+  "daruk": [
+   "HAH! Ha ha ha! Would ya look at that!",
+   "Finally, hands it fits! That little toothpick kept slippin' outta mine, brother.",
+   "The old masters forged it up here, in the mountain's fire. Faster than that fancy sword of yours!",
+   "The King wanted only one sword beside the Princess... so I tucked this one away for the right hands.",
+   "It bites through just about anything, except them Guardian contraptions. Get the smiths in Goron City to temper it!",
+   "Now go show Ganon how fast a Goron blade can dance! HAH!"
+  ],
+  "level_desc": "The blade Goron masters forged for Daruk,\ntempered by Rohan with rare ores. Swift\nas a breath of flame."
+ }
+}

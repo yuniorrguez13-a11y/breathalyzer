@@ -1,11 +1,11 @@
-# The second mod tools/dragonbreath_build.py builds (see mod.toml next to this file): the blade itself (actor, model,
-# icon, texts, flags). No part_of: it stays on once built, even while the Dragonbreath switch is off, so a save that
+# The second mod tools/dragonbreath_build.py builds (see mod.toml next to this file): the blade itself and its 4
+# tempered levels (actors, model, icons, texts, flags). No part_of: it stays on once built, even while the Dragonbreath switch is off, so a save that
 # holds the blade keeps loading. secret: Home, More... and the game's Mods page never list it.
 
 [mod]
 id = "giruka.dragonbreath-item"
 name = "Dragonbreath (item data)"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["giruka"]
 description = "Data for the Dragonbreath blade. Stays on so saves that hold it keep loading."
 game_versions = ["1.9.0"]

@@ -164,9 +164,9 @@ build = [["castle_build.py", "build"]]
 # --on: the launcher adds no enable step for a new recipe mod, so the build turns the switch on itself.
 id = "botw-mod-loader.dragonbreath"
 title = "Dragonbreath"
-description = "A lost Goron blade forged for Daruk. Test stage: one lies at the plateau start."
+description = "A lost Goron blade forged for Daruk. Rohan in Goron City knows where it is."
 default = "off"
-why = "It adds a new weapon to the world (and later a cave, a quest and new sword moves)."
+why = "It adds a new weapon, a diamond cave, a quest at Rohan's and new sword moves."
 tags = ["Experimental", "Built from your game files the first time (about 1 minute)"]
 ready = false
 kind = "recipe"

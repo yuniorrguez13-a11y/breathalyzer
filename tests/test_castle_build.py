@@ -317,6 +317,20 @@ class Flows(unittest.TestCase):
         with self.assertRaises(cb.CastleError):
             cb.event_pack("MadeUp", b"x", shared, ["NotThere"])
 
+    def test_event_pack_can_carry_the_source_packs_other_files(self):
+        shared = dict(event_files())
+        shared["Sound/Resource/Event_MadeUp.bars"] = (b"BARS made up", 4)
+        data, _ = cb.event_pack("MadeUp", b"made-up flow", shared, ["Common"], source="Npc_MadeUp",
+                                other_files=True)
+        files = raw_files(data)
+        self.assertEqual(files["Sound/Resource/Event_MadeUp.bars"], b"BARS made up")
+        self.assertNotIn("EventFlow/InitTalk.bfevfl", files)          # (only the flows asked for)
+        data, _ = cb.event_pack("MadeUp", b"made-up flow", shared, ["Common"])
+        self.assertNotIn("Sound/Resource/Event_MadeUp.bars", raw_files(data))
+        with self.assertRaises(cb.CastleError) as e:
+            cb.event_pack("MadeUp", b"x", shared, ["NotThere"], source="Npc_MadeUp")
+        self.assertIn("Npc_MadeUp", str(e.exception))
+
 
 class ZeldaPack(unittest.TestCase):
     def link(self, files):

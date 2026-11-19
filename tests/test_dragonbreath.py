@@ -24,6 +24,7 @@ import bcml_texts as bt  # noqa: E402
 import bnp  # noqa: E402
 import dragonbreath_build as db  # noqa: E402
 import dragonbreath_model as dm  # noqa: E402
+import dragonbreath_stage2 as s2  # noqa: E402
 import modman  # noqa: E402
 import test_ak47 as t47  # noqa: E402  (the made-up game's terrain, model, textures, icon, flags)
 import wiiu_convert as wc  # noqa: E402
@@ -329,7 +330,16 @@ class BuildTests(unittest.TestCase):
         cls.recipe = db.load_recipe(make_recipe(cls.tmp))
         cls.game = ak.Game(cls.install, DONOR)
         cls.out = os.path.join(cls.tmp, "out")
-        cls.built = db.build_package(cls.game, cls.recipe, cls.out)
+        cls.calls = []
+
+        def fake_stage2(game, st, item_dir, main_dir, *, used=None, log=None, events=True):
+            """(the made-up game has no Goron City: tests/test_dragonbreath_stage2.py builds stage 2 itself)"""
+            cls.calls.append({"st": st, "item": item_dir, "main": main_dir, "used": set(used), "events": events,
+                              "main_logs": sorted(os.listdir(os.path.join(main_dir, "logs"))),
+                              "item_logs": sorted(os.listdir(os.path.join(item_dir, "logs")))})
+            return s2.Built2(notes=["stage 2 (made-up)"])
+        with mock.patch.object(s2, "build_stage2", fake_stage2):
+            cls.built = db.build_package(cls.game, cls.recipe, cls.out, test_spot=True)
         cls.item = os.path.join(cls.out, cls.recipe.item_manifest["id"])
         cls.main = os.path.join(cls.out, cls.recipe.manifest["id"])
         cls.rom = os.path.join(cls.item, ak.BASE_TID, "romfs")
@@ -428,11 +438,67 @@ class BuildTests(unittest.TestCase):
         with self.assertRaises(db.DragonError):
             db.build_package(self.game, self.recipe, self.out)              # (not empty)
 
+    def test_tempered_levels_share_the_base_model(self):
+        """Stage 2's 4 tempered levels: their own pack (stats per the temper table), actor info and icon; one model
+        for all five (the model list names the base blade's, which is the only model file)."""
+        st = s2.load_stage2()
+        want = [f"{ACTOR}_{i}" for i in range(1, 5)]
+        self.assertEqual(self.built.levels, want)
+        ai = bd.from_text(self.log("actorinfo.yml"))
+        by_name = {e["name"]: e for e in ai.values()}
+        self.assertEqual(sorted(by_name), sorted([ACTOR] + want))
+        self.assertEqual(len({e["sortKey"] for e in by_name.values()}), 5)
+        self.assertEqual(sorted(os.listdir(os.path.join(self.rom, "Model"))),
+                         sorted([f"{ACTOR}.Tex.sbfres", f"{ACTOR}.sbfres"]))
+        for i, a in enumerate(want, 1):
+            files = dict(bnp.Blob(self.read(f"Actor/Pack/{a}.sbactorpack")).open().items())
+            got = db.read_stats(files[f"Actor/GeneralParamList/{a}.bgparamlist"][0])
+            self.assertEqual((got["attack"], got["power_twin"]), (st.levels[i]["attack"],) * 2)
+            self.assertAlmostEqual(got["sp_ratio"], st.levels[i]["guardian_ratio"], places=6)
+            self.assertEqual((got["life_infinite"], got["subtype"]), (True, "Dragonbreath"))
+            t = aamp.load(files[f"Actor/ActorLink/{a}.bxml"][0]).object("LinkTarget")
+            self.assertEqual((t.get_value("ModelUser"), t.get_value("GParamUser")), (a, a))
+            self.assertEqual(t.get_value("ActorNameJpn"), st.levels[i]["name"])
+            md0 = list(aamp.load(files[f"Actor/ModelList/{a}.bmodellist"][0]).list("ModelData").lists.values())[0]
+            self.assertEqual(md0.object("Base").get_value("Folder"), ACTOR)
+            unit = list(md0.list("Unit").objects.values())[0]
+            self.assertEqual(unit.get_value("UnitName"), ACTOR)
+            self.assertEqual((by_name[a]["bfres"], by_name[a]["mainModel"], by_name[a]["attackPower"]),
+                             (ACTOR, ACTOR, st.levels[i]["attack"]))
+            icon = nx_bfres.read_textures(self.read(f"UI/StockItem/{a}.sbitemico"))
+            self.assertEqual(icon.textures[0].name, a)
+        texts = json.loads(self.log("texts.json"))["USen"][f"{db.MSG_FILE}.msyt"]
+        self.assertNotIn(f"{want[0]}_Name", texts)                         # (stage 2's item logs hold the levels')
+        self.assertNotIn(f"IsGet_{want[0]}", self.log("gamedata.yml"))
+
+    def test_stage2_is_built_into_both_folders(self):
+        self.assertEqual(len(self.calls), 1)
+        c = self.calls[0]
+        self.assertEqual((c["item"], c["main"], c["events"]), (self.item, self.main, True))
+        self.assertEqual(c["st"].base_actor, ACTOR)
+        self.assertIn(self.built.hash_id, c["used"])                        # (the test spot's: never reused)
+        self.assertIn("map.yml", c["main_logs"])                           # (after stage 1's logs are written)
+        self.assertIn("actorinfo.yml", c["item_logs"])
+        self.assertIn("stage 2 (made-up)", self.built.notes)
+
     def test_check(self):
         with quiet():
             problems = db.check(os.path.join(self.tmp, "no-library"), install=self.install,
-                                recipe_dir=self.recipe.folder)
+                                recipe_dir=self.recipe.folder, stage2=False)
         self.assertEqual(problems, [])
+
+    def test_no_test_spot_unless_asked(self):
+        """The plateau test blade is developer-only: picking it up would move the quest on for a player."""
+        out = os.path.join(self.tmp, "out-player")
+        built = db.build_package(self.game, self.recipe, out, stage2=False)
+        self.assertEqual((built.spot, built.hash_id), ((), 0))
+        main = os.path.join(out, self.recipe.manifest["id"])
+        self.assertFalse(os.path.exists(os.path.join(main, "logs", "map.yml")))
+        with open(os.path.join(out, self.recipe.item_manifest["id"], "logs", "gamedata.yml"), encoding="utf-8") as f:
+            gd = f.read()
+        self.assertIn(f"IsGet_{ACTOR}:", gd)
+        self.assertNotIn(f"MainField_{ACTOR}_", gd)
+        self.assertEqual(len(built.levels), 4)
 
     def test_optional_build_never_fails(self):
         with quiet():
@@ -488,8 +554,10 @@ class LibraryTests(unittest.TestCase):
         return modman.Library.load(self.libdir)
 
     def build(self, **kw):
-        with quiet():
-            return db.build(self.libdir, install=self.install, recipe_dir=self.recipe_dir, **kw)
+        with quiet():       # (stage 2 off: the made-up game has no Goron City, test_dragonbreath_stage2 has one;
+            #                    so the test spot gives the switch something to hold)
+            return db.build(self.libdir, install=self.install, recipe_dir=self.recipe_dir, stage2=False,
+                            test_spot=True, **kw)
 
     def test_switch_off_by_default_item_on(self):
         r = self.build()

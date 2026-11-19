@@ -572,15 +572,19 @@ def build_flow(spec: dict) -> bytes:
 
 
 def event_pack(flow: str, data: bytes, shared: dict[str, tuple[bytes, int]], subflows: list[str],
-               yaz0_align: int = 0) -> tuple[bytes, int]:
-    """Event/<flow>.sbeventpack: our flow plus the game's shared flows it calls, copied from the player's villager
-    event pack. Returns (bytes, unpacked size)."""
+               yaz0_align: int = 0, *, source: str = VILLAGER, other_files: bool = False) -> tuple[bytes, int]:
+    """Event/<flow>.sbeventpack: our flow plus the game's shared flows it calls, copied from the player's event pack
+    `shared` (source: whose pack it is, for the message; the castle's is a villager's). other_files: also carry the
+    pack's files that aren't flows (an NPC's talk sounds, named by its event info's slink_user), as another mod that
+    takes over an NPC's talk needs. Returns (bytes, unpacked size). (Shared: tools/dragonbreath_stage2.py uses it.)"""
     items = [(f"EventFlow/{flow}.bfevfl", data, ukmm.new_alignment("x.bfevfl", data, 8))]
     for sub in subflows:
         name = f"EventFlow/{sub}.bfevfl"
         if name not in shared:
-            raise CastleError(f"{VILLAGER}'s event pack has no {name}")
+            raise CastleError(f"{source}'s event pack has no {name}")
         items.append((name, shared[name][0], shared[name][1]))
+    if other_files:
+        items += [(n, d, a) for n, (d, a) in sorted(shared.items()) if not n.startswith("EventFlow/")]
     raw = bnp.sarc_build(items)
     return ukmm.yaz0(raw, yaz0_align), len(raw)
 
@@ -711,6 +715,14 @@ def map_objects(layout: dict, used: set[int], with_events: bool) -> list[dict]:
     objs.append(_obj("gate", "LinkTagAnd", layout["tags"]["room"], ids, params=_tag_params(GATE_FLAG),
                      links=[_link("Create", ids[k], {"AppearFade": False}) for k in created]))
     return sorted(objs, key=lambda o: int(o["HashId"]))
+
+
+# Shared names for other map mods (tools/dragonbreath_stage2.py places its cave, chest and triggers with them): a
+# placed object from a key, actor, spot and the HashIds map; a link; a LinkTag's parameters (flag: the save flag it
+# reads, or None).
+map_object = _obj
+map_link = _link
+tag_params = _tag_params
 
 
 def unit_name(layout: dict, unit: str) -> str:

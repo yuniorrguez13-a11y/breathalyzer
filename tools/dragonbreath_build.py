@@ -3,8 +3,9 @@
 on your PC from your own game files and a model made in code, and adds them to your mod library with modman.
 
     python tools/dragonbreath_build.py build [--on] [--library DIR] [--game DIR] [--no-add --out DIR] [--optional]
-                                             [--quiet]
-    python tools/dragonbreath_build.py check [--library DIR] [--game DIR]   offline checks on your files (reads only)
+                                             [--quiet] [--test-spot] [--no-events]
+    python tools/dragonbreath_build.py check [--library DIR] [--game DIR]   offline checks on your files (reads only;
+                                                                            stage 2's too)
     python tools/dragonbreath_build.py preview --out FILE.png [--scale N]   a picture of the blade (no game files)
     python tools/dragonbreath_build.py where [--library DIR] [--game DIR]   the game files it reads
     python tools/dragonbreath_build.py clean [--item] [--library DIR]       take it out of the library
@@ -33,10 +34,15 @@ giruka.dragonbreath-item (item.toml: secret, no part_of, so it stays on and a sa
   Model/Weapon_Sword_Dragonbreath.sbfres, .Tex.sbfres  the donor's model file (its Root bone, its material) with our
                                                      mesh; our textures in the donor's formats and sizes
   UI/StockItem/Weapon_Sword_Dragonbreath.sbitemico   the inventory icon, drawn from our model
-  logs/actorinfo.yml, texts.json, gamedata.yml, savedata.yml, rstb.json
+  Actor/Pack/Weapon_Sword_Dragonbreath_1.._4.sbactorpack, UI/StockItem/..._1.._4.sbitemico   the 4 tempered levels
+                                                     (stage 2's temper table: their own stats; one model for all
+                                                     five, the base blade's: actor_pack(model=))
+  logs/actorinfo.yml, texts.json, gamedata.yml, savedata.yml, rstb.json (stage 2 adds its flags and texts)
 
-botw-mod-loader.dragonbreath (mod.toml: the main switch, off by default): for now only the test spot, one blade
-lying near the test save's start (logs/map.yml). Later stages put the cave, the smith and the moves here.
+botw-mod-loader.dragonbreath (mod.toml: the main switch, off by default): stage 2 (tools/dragonbreath_stage2.py,
+run by build_package): the diamond cave and its chest, Rohan's quest, Daruk's first draw (logs/map.yml, quests.yml,
+eventinfo.yml, texts.json, Event/Dragonbreath.sbeventpack). --test-spot (developers only): also one blade lying near
+the test save's start; off for players, as picking it up moves the quest on.
 
 Pure Python (no third-party packages); the writers and helpers are tools/ak47_build.py's and tools/wiiu_model's.
 """
@@ -66,6 +72,7 @@ import bcml_maps as bm  # noqa: E402
 import bcml_texts as bt  # noqa: E402
 import bnp  # noqa: E402
 import dragonbreath_model as dm  # noqa: E402
+import dragonbreath_stage2 as s2  # noqa: E402
 import menu_bg  # noqa: E402
 import modman as mm  # noqa: E402
 import ukmm  # noqa: E402
@@ -333,11 +340,15 @@ def read_stats(data: bytes) -> dict:
 
 # ------------------------------------------------------------------------------------------------ the actor pack
 
-def actor_pack(files: dict[str, tuple[bytes, int]], recipe: Recipe, stats: bytes, yaz0_align: int = 0) -> ak.Pack:
+def actor_pack(files: dict[str, tuple[bytes, int]], recipe: Recipe, stats: bytes, yaz0_align: int = 0,
+               model: str | None = None) -> ak.Pack:
     """Our pack from the donor's: actor link (ModelUser, GParamUser, name, tags) and model list renamed, our stats
     file in place of the donor's (which is left out, so no two packs hold one path with different contents). Every
-    other file stays as it is under its own name."""
+    other file stays as it is under its own name. model: the model the model list names (its Folder and UnitName;
+    default the actor's own): the tempered levels share the base blade's. The link's ModelUser stays the actor's
+    own name (its own model list file)."""
     actor, donor = recipe.actor, recipe.donor
+    model = model or actor
     link_name = f"Actor/ActorLink/{donor}.bxml"
     link = link_of(files, donor)
     target = link.object("LinkTarget")
@@ -371,12 +382,12 @@ def actor_pack(files: dict[str, tuple[bytes, int]], recipe: Recipe, stats: bytes
         for lst in (md.lists.values() if md else []):
             base = lst.object("Base")
             if base is not None and aamp.name_hash("Folder") in base:
-                ak._set_text(base, "Folder", actor)
+                ak._set_text(base, "Folder", model)
                 n += 1
             units = lst.list("Unit")
             for u in (units.objects.values() if units else []):
                 if aamp.name_hash("UnitName") in u:
-                    ak._set_text(u, "UnitName", actor)
+                    ak._set_text(u, "UnitName", model)
         if not n:
             raise DragonError(f"{ml_name} names no model folder")
 
@@ -537,6 +548,8 @@ class Built:
     triangles: int = 0
     hash_id: int = 0
     notes: list[str] = field(default_factory=list)
+    levels: list[str] = field(default_factory=list)   # the tempered levels' actors (stage 2's recipe)
+    stage2: object = None                              # dragonbreath_stage2.Built2, when stage 2 was built
 
 
 def make_mesh(game: ak.Game, recipe: Recipe):
@@ -556,9 +569,30 @@ def make_mesh(game: ak.Game, recipe: Recipe):
         raise DragonError(str(e)) from None
 
 
-def build_package(game: ak.Game, recipe: Recipe, out: str, *, log=None, used: set[int] | None = None) -> Built:
+def load_levels(recipe: Recipe, stage2_dir: str = s2.STAGE2):
+    """(stage 2's recipe, stage 1 Recipes for the tempered levels Weapon_Sword_Dragonbreath_1..4)."""
+    try:
+        st2 = s2.load_stage2(stage2_dir)
+    except s2.Stage2Error as e:
+        raise DragonError(str(e)) from None
+    if st2.base_actor != recipe.actor:
+        raise DragonError(f"assets/dragonbreath/stage2/{s2.RECIPE_JSON}: base_actor is {st2.base_actor}, not "
+                          f"{recipe.actor}")
+    if st2.levels[0]["attack"] != recipe.stats["attack"]:
+        raise DragonError(f"assets/dragonbreath/stage2/{s2.RECIPE_JSON}: level 0's attack isn't the blade's "
+                          f"({recipe.stats['attack']})")
+    return st2, s2.level_recipes(st2, recipe)
+
+
+def build_package(game: ak.Game, recipe: Recipe, out: str, *, log=None, used: set[int] | None = None,
+                  test_spot: bool = False, stage2: bool = True, events: bool = True,
+                  stage2_dir: str = s2.STAGE2) -> Built:
     """Write Dragonbreath's two mods (BCML-style package folders) into `out` (a new or empty folder). used: more
-    HashIds to keep clear of (other library mods' map changes). Reads only the player's game files."""
+    HashIds to keep clear of (other library mods' map changes). Reads only the player's game files.
+    test_spot: also place the developer's test blade near the test save's start (off for players: picking it up
+    would move the quest on). stage2: Rohan's quest, the cave, the chest and the first draw
+    (tools/dragonbreath_stage2.py); events=False: the cave and chest only (no quest, talk or scene). The tempered
+    levels (actor packs, actor info, icons) are always built: they are item data, so a save that holds one loads."""
     if os.path.isdir(out) and os.listdir(out):
         raise DragonError(f"{out} isn't empty")
     actor, donor = recipe.actor, recipe.donor
@@ -567,6 +601,10 @@ def build_package(game: ak.Game, recipe: Recipe, out: str, *, log=None, used: se
         raise DragonError(f"Your game's actor info has no {donor}")
     if actor in ai:
         raise DragonError(f"Your game already has an actor called {actor}")
+    st2, levels = load_levels(recipe, stage2_dir)
+    for lr in levels:
+        if lr.actor in ai:
+            raise DragonError(f"Your game already has an actor called {lr.actor}")
     item_dir = os.path.join(out, recipe.item_manifest["id"])
     main_dir = os.path.join(out, recipe.manifest["id"])
     romfs = os.path.join(item_dir, BASE_TID, "romfs")
@@ -634,29 +672,65 @@ def build_package(game: ak.Game, recipe: Recipe, out: str, *, log=None, used: se
     lo, hi = m.bounds()
     used_sort = {a.get("sortKey") for a in ai.values() if isinstance(a.get("sortKey"), int)}
     entry = actorinfo_entry(ai[donor], recipe, lo, hi, pk.tags, used_sort)
-    logs = {"actorinfo.yml": bd.to_text({str(zlib.crc32(actor.encode())): entry})}
+    used_sort.add(entry.get("sortKey"))
+    ai_log = {str(zlib.crc32(actor.encode())): entry}
 
-    # the test spot (the main switch)
+    # the tempered levels (stage 2's recipe): the base blade's pack with their own stats, one model for all five
+    # (the model list names the base blade's), their own actor info and icon. Their IsGet flags and names are in
+    # stage 2's item logs.
+    if levels:
+        _log(log, f"Building the {len(levels)} tempered levels ({levels[0].actor}..)...")
+    pack_len = ukmm.unpacked_size(game.raw("pack"))
+    for lr in levels:
+        lpk = actor_pack(files, lr, stats_file(files[gparam_name(files, donor)][0], lr, sp_actor, sp_tag),
+                         ak._yaz0_align(game.raw("pack")), model=actor)
+        ak._write(os.path.join(romfs, "Actor", "Pack", f"{lr.actor}.sbactorpack"), lpk.data)
+        size(f"Actor/Pack/{lr.actor}.bactorpack", f"Actor/Pack/{donor}.bactorpack", pack_len, lpk.raw_len, True)
+        for name, data in lpk.inner.items():
+            size(name, lpk.refs[name], len(files[lpk.refs[name]][0]), len(data), False)
+        le = actorinfo_entry(ai[donor], lr, lo, hi, lpk.tags, used_sort)
+        le["bfres"] = le["mainModel"] = actor
+        used_sort.add(le.get("sortKey"))
+        ai_log[str(zlib.crc32(lr.actor.encode()))] = le
+        try:
+            licon, _ = ak.build_icon(icon_raw, m, alb, lr.actor)
+        except ak.AkError as e:
+            raise DragonError(str(e).replace("the claymore's", "the donor's")) from None
+        ak._write(os.path.join(romfs, "UI", "StockItem", f"{lr.actor}.sbitemico"),
+                  ukmm.yaz0(licon, ak._yaz0_align(game.raw("icon"))))
+        size(f"UI/StockItem/{lr.actor}.bitemico", f"UI/StockItem/{donor}.bitemico", len(icon_raw), len(licon), False)
+        res.levels.append(lr.actor)
+    logs = {"actorinfo.yml": bd.to_text(ai_log)}
+
+    # the test spot (developers only: the main switch)
     spot = recipe.spot
-    _log(log, f"Reading your terrain at the test spot (x={spot['x']:.0f}, z={spot['z']:.0f})...")
-    try:
-        ground, area = game.terrain().height(spot["x"], spot["z"])
-    except ak.AkError as e:
-        raise DragonError(str(e)) from None
-    if abs(ground - spot["ground"]) > GROUND_TOLERANCE:
-        raise DragonError(f"your terrain at the test spot is {ground:.1f} m high, not about {spot['ground']:.1f} m as "
-                          "the recipe says")
-    spread = ak.ground_spread(game.terrain(), spot["x"], spot["z"])
-    if spread > MAX_SLOPE_SPREAD:
-        res.notes.append(f"the ground at the test spot rises {spread:.2f} m within 1.2 m: the blade may slide")
     taken = set(game.hash_ids(log)) | set(used or ())
-    obj = placed_object(actor, spot, ground, taken)
-    res.hash_id, res.ground = int(obj["HashId"]), ground
-    res.spot = tuple(float(v) for v in obj["Translate"])
-    main_logs = {"map.yml": bd.to_text({spot["unit"]: {"Objs": {"add": [obj]}}})}
+    main_logs = {}
+    area = 0.0
+    if test_spot:
+        _log(log, f"Reading your terrain at the test spot (x={spot['x']:.0f}, z={spot['z']:.0f})...")
+        try:
+            ground, area = game.terrain().height(spot["x"], spot["z"])
+        except ak.AkError as e:
+            raise DragonError(str(e)) from None
+        if abs(ground - spot["ground"]) > GROUND_TOLERANCE:
+            raise DragonError(f"your terrain at the test spot is {ground:.1f} m high, not about {spot['ground']:.1f} m "
+                              "as the recipe says")
+        spread = ak.ground_spread(game.terrain(), spot["x"], spot["z"])
+        if spread > MAX_SLOPE_SPREAD:
+            res.notes.append(f"the ground at the test spot rises {spread:.2f} m within 1.2 m: the blade may slide")
+        obj = placed_object(actor, spot, ground, taken)
+        res.hash_id, res.ground = int(obj["HashId"]), ground
+        res.spot = tuple(float(v) for v in obj["Translate"])
+        taken.add(res.hash_id)
+        main_logs["map.yml"] = bd.to_text({spot["unit"]: {"Objs": {"add": [obj]}}})
 
-    # flags (the test spot's pick-up flag too: in the item mod, so a save keeps it), texts, sizes
+    # flags (the test spot's pick-up flag too, when there is one: in the item mod, so a save keeps it), texts, sizes
     gd, sd = ak.flags_logs(actor, donor, res.hash_id, game.flags())
+    if not test_spot:
+        placed = f"MainField_{actor}_{res.hash_id}"
+        gd["bool_data"]["add"].pop(placed, None)
+        sd["add"] = [e for e in sd["add"] if e["DataName"] != placed]
     logs["gamedata.yml"] = bd.to_text(gd)
     logs["savedata.yml"] = bd.to_text(sd)
     logs["texts.json"] = json.dumps(texts_log(actor, recipe.texts), indent=1, ensure_ascii=False) + "\n"
@@ -668,10 +742,23 @@ def build_package(game: ak.Game, recipe: Recipe, out: str, *, log=None, used: se
         head, "", f"- actor: {actor} (from {donor})", f"- model: {res.vertices} vertices, {res.triangles} triangles",
         f"- stats: attack {recipe.stats['attack']}, life {recipe.stats['life']}"
         f"{' (never breaks)' if recipe.stats['life_infinite'] else ''}, Guardians x{recipe.stats['guardian_ratio']:g}",
-        f"- the test spot: the mod {recipe.manifest['id']}"])
+        f"- tempered levels: {', '.join(res.levels) or 'none'} (the base blade's model)",
+        f"- the map (cave, quest{', test spot' if test_spot else ''}): the mod {recipe.manifest['id']}"])
     ak._package_files(main_dir, recipe.toml_text, recipe.manifest, main_logs, [
-        head, "", f"- test spot in {spot['unit']} at x={res.spot[0]:.2f} y={res.spot[1]:.2f} z={res.spot[2]:.2f} "
-        f"(ground {ground:.2f} m, terrain area {area:.1f} m), HashId {res.hash_id}"])
+        head, "", (f"- test spot (developer build) in {spot['unit']} at x={res.spot[0]:.2f} y={res.spot[1]:.2f} "
+                   f"z={res.spot[2]:.2f} (ground {res.ground:.2f} m, terrain area {area:.1f} m), HashId {res.hash_id}"
+                   if test_spot else "- no test spot (a developer build adds one: build --test-spot)"),
+        f"- stage 2: {'built (see logs/)' if stage2 else 'not built'}"])
+
+    # stage 2: Rohan's quest, the diamond cave, the chest, Daruk's first draw (docs/dragonbreath.md, stage 2). It
+    # reads stage 1's logs back and adds its entries.
+    if stage2:
+        try:
+            r2 = s2.build_stage2(game, st2, item_dir, main_dir, used=taken, log=log, events=events)
+        except s2.Stage2Error as e:
+            raise DragonError(str(e)) from None
+        res.notes += r2.notes
+        res.stage2 = r2
     return res
 
 
@@ -695,9 +782,11 @@ def add_to_library(lib, folder: str, mod_id: str, log=None, new_on: bool = True)
 
 
 def build(library: str | None = None, *, install: str | None = None, out: str | None = None, add: bool = True,
-          on: bool = False, recipe_dir: str = RECIPE, log=None) -> dict:
+          on: bool = False, recipe_dir: str = RECIPE, log=None, test_spot: bool = False, events: bool = True,
+          stage2: bool = True) -> dict:
     """Build the two mods and (add=True) put them in the library: the item always on, the main switch new as `on`
-    (off unless asked: it is off by default). Returns {"built", "entry", "main_entry", "notes"}."""
+    (off unless asked: it is off by default). test_spot: the developer's test blade (build_package). Returns
+    {"built", "entry", "main_entry", "notes"}."""
     recipe = load_recipe(recipe_dir)
     root = mm.resolve_library(library)
     lib = mm.Library.load(root)
@@ -710,7 +799,8 @@ def build(library: str | None = None, *, install: str | None = None, out: str | 
         out = os.path.join(tmp, "out")
     out = os.path.abspath(out)
     try:
-        built = build_package(game, recipe, out, log=log, used=set(other_hash_ids(lib, recipe)))
+        built = build_package(game, recipe, out, log=log, used=set(other_hash_ids(lib, recipe)),
+                              test_spot=test_spot, stage2=stage2, events=events)
         moves = build_moves(game.install, out, log, os.path.join(recipe_dir, "clips"))
         entry = main_entry = moves_entry = None
         notes: list[str] = []
@@ -754,11 +844,14 @@ def build_moves(install: str, out: str, log=None, folder: str | None = None):
 
 # ------------------------------------------------------------------------------------------------ check
 
-def check(library: str | None = None, *, install: str | None = None, recipe_dir: str = RECIPE, log=None) -> list[str]:
+def check(library: str | None = None, *, install: str | None = None, recipe_dir: str = RECIPE, log=None,
+          stage2: bool = True, stage2_dir: str = s2.STAGE2) -> list[str]:
     """Offline checks on the player's files (reads only): the new names are free, the donor is a plain one-handed
     sword whose files can be read, the model and textures build and pass the writers' self-checks, the stats file
-    reads back with our numbers, the test spot is open ground. Returns the problems (empty: all good)."""
+    reads back with our numbers (the tempered levels' too), the test spot is open ground; stage2: stage 2's own
+    checks (tools/dragonbreath_stage2.py check). Returns the problems (empty: all good)."""
     recipe = load_recipe(recipe_dir)
+    _st2, levels = load_levels(recipe, stage2_dir)
     lib = mm.Library.load(mm.resolve_library(library))
     game = find_game(install, lib, recipe.donor)
     out: list[str] = []
@@ -768,14 +861,17 @@ def check(library: str | None = None, *, install: str | None = None, recipe_dir:
         out.append(f"actor {donor} isn't in your game's actor info")
     elif ai[donor].get("profile") != "WeaponSmallSword":
         out.append(f"{donor} isn't a one-handed sword ({ai[donor].get('profile')})")
-    if actor in ai:
-        out.append(f"your game's actor info already has {actor}")
-    if os.path.isfile(game.path(f"Actor/Pack/{actor}.sbactorpack")):
-        out.append(f"your game already has Actor/Pack/{actor}.sbactorpack")
     rstb = game.rstb()
-    for name in (f"Actor/Pack/{actor}.bactorpack", f"Model/{actor}.bfres"):
-        if rstb is not None and rstb.get(name) is not None:
-            out.append(f"your game's size table already has {name}")
+    for a in [actor] + [lr.actor for lr in levels]:
+        if a in ai:
+            out.append(f"your game's actor info already has {a}")
+        if os.path.isfile(game.path(f"Actor/Pack/{a}.sbactorpack")):
+            out.append(f"your game already has Actor/Pack/{a}.sbactorpack")
+        for name in (f"Actor/Pack/{a}.bactorpack", f"UI/StockItem/{a}.bitemico"):
+            if rstb is not None and rstb.get(name) is not None:
+                out.append(f"your game's size table already has {name}")
+    if rstb is not None and rstb.get(f"Model/{actor}.bfres") is not None:
+        out.append(f"your game's size table already has Model/{actor}.bfres")
     if f"IsGet_{actor}" in game.flags():
         out.append(f"your game already has the flag IsGet_{actor}")
     labels = message_labels(game)
@@ -809,6 +905,16 @@ def check(library: str | None = None, *, install: str | None = None, recipe_dir:
         lost = [t for t in recipe.tags["drop"] if t in pk.tags]
         if lost:
             out.append(f"tags not dropped: {', '.join(lost)}")
+        for lr in levels:          # the tempered levels: their numbers, the base blade's model
+            got = read_stats(stats_file(files[gparam_name(files, donor)][0], lr, sp_actor, sp_tag))
+            if got["attack"] != lr.stats["attack"] or abs(got["sp_ratio"] - lr.stats["guardian_ratio"]) > 1e-6:
+                out.append(f"{lr.actor}'s stats read back attack {got['attack']}, Guardians x{got['sp_ratio']:g}")
+            lpk = actor_pack(files, lr, stats, model=actor)
+            ml = aamp.load(lpk.inner[f"Actor/ModelList/{lr.actor}.bmodellist"])
+            folders = {o.get_value("Folder") for lst in ml.list("ModelData").lists.values()
+                       for o in [lst.object("Base")] if o is not None}
+            if folders != {actor}:
+                out.append(f"{lr.actor}'s model list names {sorted(folders)}, not {actor}")
     except (DragonError, ak.AkError, ModelError, aamp.AampError) as e:
         out.append(f"the blade can't be built: {e}")
     spot = recipe.spot
@@ -834,6 +940,11 @@ def check(library: str | None = None, *, install: str | None = None, recipe_dir:
         except (ak.AkError, OSError, bm.LogError, wc.FormatError, struct.error, IndexError) as e:
             out.append(f"the map unit {unit_name} can't be read ({e})")
     out += moves_problems(game.install, os.path.join(recipe_dir, "clips"), log)
+    if stage2:
+        try:
+            out += [f"stage 2: {p}" for p in s2.check(library, install=install, folder=stage2_dir, log=log)]
+        except s2.Stage2Error as e:
+            out.append(f"stage 2: {e}")
     return out
 
 
@@ -891,6 +1002,10 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--out", help="where to write the mod folders (needed with --no-add; a new or empty folder)")
     b.add_argument("--optional", action="store_true", help="a build that can't be made says why and ends with 0")
     b.add_argument("--quiet", action="store_true", help="say only whether it worked (the launcher's Details)")
+    b.add_argument("--test-spot", action="store_true", help="developers only: also lay a blade near the test save's "
+                                                            "start (picking it up moves the quest on)")
+    b.add_argument("--no-events", action="store_true", help="stage 2 without its event flows: the cave and chest "
+                                                            "only (no quest, talk or first-draw scene)")
     sub.add_parser("check", parents=[common], help="offline checks on your files (reads only)")
     p = sub.add_parser("preview", help="draw the blade to a PNG for a look (no game files needed, changes nothing)")
     p.add_argument("--out", required=True, help="the PNG to write")
@@ -937,7 +1052,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.no_add and not args.out:
             raise DragonError("--no-add needs --out <folder>")
         r = build(args.library, install=args.game, out=args.out, add=not args.no_add, on=args.on,
-                  log=None if quiet else print)
+                  log=None if quiet else print, test_spot=args.test_spot, events=not args.no_events)
         made = r["built"]
         if quiet:
             print("Done: Dragonbreath is built" + (" and in your library." if r["entry"] else ".")
@@ -947,7 +1062,14 @@ def main(argv: list[str] | None = None) -> int:
                  f"{'on' if r['main_entry'].get('enabled') else 'off'})") if r["entry"] else \
             f"{made.folder} and {made.main_folder}"
         print(f"Dragonbreath built ({made.vertices} vertices, {made.triangles} triangles): {where}.")
-        print(f"  test spot: x={made.spot[0]:.1f} y={made.spot[1]:.1f} z={made.spot[2]:.1f}")
+        if made.spot:
+            print(f"  test spot (developer build): x={made.spot[0]:.1f} y={made.spot[1]:.1f} z={made.spot[2]:.1f}")
+        if made.levels:
+            print(f"  tempered levels: {', '.join(made.levels)}")
+        r2 = made.stage2
+        if r2 is not None:
+            print(f"  stage 2: cave ({len(r2.cave.dynamic) if r2.cave else 0} objects)"
+                  + (", quest, first draw" if r2.events else ", no quest or scene (events off)"))
         mv = r.get("moves")
         if mv is not None:
             print(f"  fast moves: {mv.clips} clips in {', '.join(mv.sets)} ({mv.folder}), "
