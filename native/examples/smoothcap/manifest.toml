@@ -1,0 +1,19 @@
+# smoothcap: smooth offline capture for trailers (docs/smooth-capture.md). A fixed game step and every frame saved,
+# driven by tools/smooth_capture.py (control commands: developer mode, SAVAGEWIND_CONTROL=<port>).
+# Build: python tools/smooth_capture.py build   (it goes to build\native\smoothcap-mods\smoothcap.dll)
+# This is manifest.toml, not mod.toml: smooth_capture.py build copies it as mod.toml next to the DLL into
+# out\capture-build\smoothcap-mod (README's native/ row has to name every examples/*/mod.toml). The tool puts that
+# folder into its own scratch library; to use it in another scratch library, add the folder:
+#   python tools/modman.py add out\capture-build\smoothcap-mod
+
+[mod]
+id = "botw-mod-loader.smoothcap"
+name = "Smooth capture"
+version = "0.1.0"
+authors = ["giruka"]
+description = "Records trailers offline: a fixed game step and every frame saved, for a smooth 60 fps video."
+game_versions = ["1.9.0"]   # the game's clock as Savage Wind 0.4.1-alpha.4 keeps it (runtime/hle/framepace.c)
+loader_api = 1
+
+[code]
+windows = "smoothcap.dll"
