@@ -234,6 +234,31 @@ class Picks(Base):
         self.assertEqual(font_file.read_bytes() if font_file.exists() else None, font_before)
         self.assertTrue(os.path.exists(modmenu.menu_path(self.lib, modmenu.PENDING)))
 
+    def test_a_switch_cut_off_partway_leaves_the_set_in_use_as_it_was(self):
+        """Second review #1: with no mod changes waiting, a switch that failed after writing some of the picked
+        set's values deployed the picked set's mod list (in memory) with the mixed values."""
+        sdir = self.root / mm.SETTINGS_DIR
+        sdir.mkdir(exist_ok=True)
+        (sdir / "better-sprint.json").write_text('{"speed": 3}', encoding="utf-8")
+        mods_before = [dict(m) for m in self.lib.mods]
+        self.pending(self.mod_lines() + ["profile\tQuiet"])
+
+        def half_switch(lib, name):
+            (sdir / "better-sprint.json").write_text('{"speed": 9}', encoding="utf-8")
+            (sdir / "picked-only.json").write_text('{"x": 1}', encoding="utf-8")
+            for m in lib.mods:
+                m["enabled"] = not m.get("enabled", True)
+            lib.profile = name
+            raise OSError(28, "No space left on device")
+        with mock.patch.object(mm, "use_profile", side_effect=half_switch):
+            a = modmenu.apply(self.lib, lambda lib: self.deployed.append((lib.profile, [dict(m) for m in lib.mods]))
+                              or {})
+        self.assertNotIn("Mod set: Quiet", a.changes)
+        self.assertEqual(self.deployed, [(mm.DEFAULT_PROFILE, mods_before)])
+        self.assertEqual((sdir / "better-sprint.json").read_text(encoding="utf-8"), '{"speed": 3}')
+        self.assertFalse((sdir / "picked-only.json").exists())
+        self.assertEqual(self.reload().profile, mm.DEFAULT_PROFILE)
+
 
 if __name__ == "__main__":
     unittest.main()

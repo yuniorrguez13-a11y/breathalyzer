@@ -253,7 +253,24 @@ static void t_rescue(void) {
     st.rescue.want_size = 0;
     check("rescue", "size_asked", asked == 64 * ROOM_MB && tiny == 16 * ROOM_MB && huge == ROOM_RESCUE_MAX,
           "room rescue size: %lld, %lld, %lld", (long long)asked, (long long)tiny, (long long)huge);
-    check("rescue", "not_made_has_nothing", !room_rescue_has(&st, 0x7400001000ull), "no heap yet");
+    // sized at its making from what the PC has then (RAM and page file left), not the boot-time figure
+    const uint64_t GB = 1024ull * ROOM_MB;
+    int64_t plenty = room_rescue_fit(1024 * ROOM_MB, 14385352, 1, 12 * GB, 20 * GB);
+    int64_t laptop = room_rescue_fit(1024 * ROOM_MB, 14385352, 1, 3 * GB + GB / 2, 6 * GB);
+    int64_t pagefull = room_rescue_fit(1024 * ROOM_MB, 14385352, 1, 8 * GB, 2 * GB + 100 * (uint64_t)ROOM_MB);
+    int64_t lowram = room_rescue_fit(1024 * ROOM_MB, 14385352, 1, GB / 2, GB);
+    int64_t unknown = room_rescue_fit(1024 * ROOM_MB, 14385352, 0, 0, 0);
+    int64_t asked16 = room_rescue_fit(16 * ROOM_MB, ROOM_MB, 1, 12 * GB, 20 * GB);
+    int64_t bigask = room_rescue_fit(1024 * ROOM_MB, 200 * ROOM_MB, 1, 2 * GB, 5 * GB);
+    check("rescue", "fit_now", plenty == 1024 * ROOM_MB && laptop == 512 * ROOM_MB, "%lld, %lld", (long long)plenty,
+          (long long)laptop);
+    check("rescue", "fit_commit_headroom", pagefull == 0, "page file nearly full: none (%lld)", (long long)pagefull);
+    check("rescue", "fit_low_ram_no_wrap", lowram == 0, "0.5 GB free: none (%lld)", (long long)lowram);
+    check("rescue", "fit_unknown", unknown == ROOM_RESCUE_MIN, "Windows didn't say: 64 MB (%lld)", (long long)unknown);
+    check("rescue", "fit_small_asked", asked16 == 16 * ROOM_MB, "room rescue size 16: %lld", (long long)asked16);
+    check("rescue", "fit_need", bigask == 0 && room_rescue_fit(0, 1, 1, 12 * GB, 20 * GB) == 0,
+          "a 200 MB ask with 2 GB free (a 128 MB fit): none (%lld)", (long long)bigask);
+    check("rescue", "not_made_has_nothing",!room_rescue_has(&st, 0x7400001000ull), "no heap yet");
     st.rescue.state = 1, st.rescue.base = 0x7400000000ull, st.rescue.size = 1024 * ROOM_MB;
     st.rescue.heap = st.rescue.base + ROOM_RESCUE_HEAD;
     st.rescue.free_now = st.rescue.size - ROOM_RESCUE_HEAD;
@@ -290,6 +307,11 @@ static void t_rescue(void) {
     snprintf(st.rescue.why, sizeof st.rescue.why, "Windows gave no memory (1.0 GB asked: the PC's RAM and page file are full)");
     room_rescue_text(&st, text, sizeof text);
     check("rescue", "text_not_made", strstr(text, "couldn't be made: Windows gave no memory") != NULL, "%s", text);
+    st.rescue.state = 0;
+    snprintf(st.rescue.why, sizeof st.rescue.why, "the PC has too little memory free now for the extra memory");
+    room_rescue_text(&st, text, sizeof text);
+    check("rescue", "text_not_now", strstr(text, "isn't made yet (the last need: the PC has too little memory") != NULL,
+          "%s", text);
     room_init(&st);
     room_rescue_text(&st, text, sizeof text);
     static char rep[8192];

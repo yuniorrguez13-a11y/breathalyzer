@@ -74,9 +74,10 @@ class RoomNative(unittest.TestCase):
         """TextureArchiveWork's failed allocations go to the extra memory (docs/room.md): which heaps, its size from
         the PC (64 MB to 1 GB), its blocks, the game's root heap list, the log rate, the plain-words lines."""
         self.group("rescue", ["default_textures", "add_heap", "full_stops", "off", "size_gaming_pc", "size_laptop",
-                              "size_floor", "too_big", "size_200mb_model", "size_asked", "not_made_has_nothing", "has", "root_slot",
+                              "size_floor", "too_big", "size_200mb_model", "size_asked", "fit_now", "fit_commit_headroom",
+                              "fit_low_ram_no_wrap", "fit_unknown", "fit_small_asked", "fit_need", "not_made_has_nothing", "has", "root_slot",
                               "log_rate", "used", "line", "vram_quiet", "vram_warn_once", "text_made",
-                              "text_not_made", "text_waiting"])
+                              "text_not_made", "text_not_now", "text_waiting"])
 
     def test_no_failures(self):
         self.assertEqual(self.fails, 0, self.report)

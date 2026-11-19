@@ -145,6 +145,19 @@ class MapPaths(unittest.TestCase):
         self.assertEqual(s["romfs/aoc/0011/Map/y.txt"], rm.R_AOC)
         self.assertEqual(s["romfs/Actor/CON.txt"], rm.R_BAD_NAME)
 
+    def test_every_windows_device_name_and_bidi_mark_is_a_bad_name(self):
+        """romfs_mods._bad_name is the check bnp, ukmm and wiiu_convert share: COM/LPT with superscript digits and
+        CONIN$/CONOUT$ open a device on Windows, and a BIDI mark hides a name's real end."""
+        for name in ("COM1", "com\u00b9", "LPT\u00b3.txt", "lpt\u00b2 .bin", "CONIN$", "conout$.x", "nul", "Aux.sarc",
+                     "a\u202egpj.exe", "x\u200f.txt", "A\u2066.byml"):
+            with self.subTest(name=ascii(name)):
+                self.assertTrue(rm._bad_name(name))
+        for name in ("COM10", "console", "conin", "LPT", "Actor", "Model.sbfres", "Font_US.bfarc"):
+            with self.subTest(name=name):
+                self.assertFalse(rm._bad_name(name))
+        _, s, _ = self.targets(["romfs/Actor/COM\u00b9", "romfs/Actor/ok.txt"])
+        self.assertEqual(s["romfs/Actor/COM\u00b9"], rm.R_BAD_NAME)
+
     def test_wiiu_refused(self):
         with self.assertRaises(rm.DeployError):
             rm.map_paths(["content/Actor/Pack/A.txt", "aoc/0010/Map/B.txt"])
@@ -834,6 +847,15 @@ class SizeTableMerge(unittest.TestCase):
         rm.add_generated(p, [("Pack/Bootup.pack", b"made", ("Layout/Common.blarc", 5000))], "generated:pictures")
         self.assertIsNone(p.winner("Pack/Bootup.pack").mod)
         self.assertTrue(any("can't be read" in w for w in p.warnings), p.warnings)
+
+    def test_a_table_claiming_gigabytes_is_refused_before_unpacking(self):
+        """merge_sizes reads the size table with wc.yaz0_decompress, which checks the header's size first."""
+        ok = _table({"Actor/B.txt": 2})
+        self.assertEqual(ok[:4], b"Yaz0")
+        bomb = ok[:4] + (0xFFFFFFFF).to_bytes(4, "big") + ok[8:]
+        with self.assertRaises(rm.DeployError) as cm:
+            rm.merge_sizes(bomb, {"Actor/A.txt": 5})
+        self.assertIn("Yaz0", str(cm.exception))
 
     def test_rstb_name(self):
         self.assertEqual(rm.rstb_name("Layout/Common.sblarc"), "Layout/Common.blarc")

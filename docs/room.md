@@ -71,6 +71,18 @@ none refused; the textures looked right in screenshots at every stop, and the ga
    lock). Its size is More Room's cap from this PC (a quarter of the free RAM less 1.5 GB, at most 1 GB), but at
    least 64 MB. Its pages take RAM only once a texture is in them (until then Windows only counts them against RAM
    plus page file).
+   - **Sized when it is made, not at start:** Windows is asked again then, and the size is cut to a quarter of the
+     free RAM less 1.5 GB and a quarter of what RAM plus page file can still give less 2 GB. Savage Wind commits its
+     own guest memory as it is first touched, and a commit that fails then crashes the game, so the extra memory must
+     never take that headroom (a PC with a small or full page file). Under 64 MB left: not made now (the game's own
+     failure stands; a later need tries again).
+   - **Made once:** several loader threads fail together at the first load. One makes it; the others wait for it (at
+     most 2 s, so a thread holding a lock the maker needs can't hang the game: its allocation then fails as in the
+     plain game). The maker looks again before making, so it is never made twice.
+   - **Only on the layout it was made for:** Windows is asked that Savage Wind's guest window (one reservation) ends
+     at 0x73_2000_0000 as in 0.4.1 and that the string class's vtable pointer is in committed memory; else it isn't
+     made, and `room` says why (a newer Savage Wind with a bigger window must not get memory right above it taken).
+   - If the game's heap code doesn't build the heap, the memory is given back to Windows.
 3. The game frees those blocks the way it frees any other:
    - through the heap it thinks the block came from: ExpHeap's `free` (`0x7000ea0a84`) and its three resizes
      (`0x7000ea0e00`, `0x7000ea0f78`, `0x7000ea139c`), all vtable calls, are wrapped: a block of the extra heap goes
@@ -88,7 +100,10 @@ none refused; the textures looked right in screenshots at every stop, and the ga
 6. The graphics-memory warning (a quarter of the graphics memory) is said once when the extra heap holds more than
    that.
 
-Only `TextureArchiveWork` is rescued by default; `room rescue <heap>` adds another by name (for tests).
+Only `TextureArchiveWork` is rescued by default; `room rescue <heap>` adds another by name (for tests only, and only a
+heap that lives the whole game: a per-scene or stage heap's rescued blocks would outlive it, and objects in them that
+register with their heap for clean-up would register with the extra heap, so their clean-up wouldn't run when the
+scene's heap goes).
 `TeraSZSWork` (the terrain streaming cache) and the screenshot heap fail and retry in a normal game, so they aren't.
 
 **What it means for memory [V, in the game]:** not one of those 489 blocks was freed while moving across the map

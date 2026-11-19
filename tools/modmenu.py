@@ -632,7 +632,7 @@ def _reload(lib: mm.Library) -> None:
     """lib as config.json is on disk now (another program, such as the Mod Manager window, may have saved it)."""
     fresh = mm.Library.load(lib.root)
     if fresh:
-        lib.mods, lib.install = fresh.mods, fresh.install
+        lib.mods, lib.install, lib.profile = fresh.mods, fresh.install, fresh.profile
 
 
 def _listed_now(lib: mm.Library) -> list[tuple[str, bool]]:
@@ -1108,10 +1108,12 @@ def apply(lib: mm.Library, deploy=None) -> Applied:
     except Exception as e:  # noqa: BLE001 (font.FontError, ModmanError: not used, said on the Mods page)
         note = _reason(e, lib) if isinstance(e, (mm.ModmanError, OSError, ValueError)) else _first_line(e)
         changes = [c for c in changes if not c.startswith(("Mod set: ", "Font: "))]
-        if profile and not switched and mod_changes:  # (the set in use stays: its mod changes are used)
+        if profile and not switched:  # (the set in use stays, as it was: a switch cut off partway may have
+            _restore_values(kept)     # written some of the picked set's values, and lib.mods in memory)
             _reload(lib)
-            lib.mods = merge(lib.mods, base, pending.wanted, hidden)[0]
-            lib.save()
+            if mod_changes:  # (its mod changes are used)
+                lib.mods = merge(lib.mods, base, pending.wanted, hidden)[0]
+                lib.save()
     saved = _config_bytes(lib)
     try:
         launch = deploy(lib)

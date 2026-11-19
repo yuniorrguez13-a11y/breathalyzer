@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mod_inspect as mi  # noqa: E402
 from romfs_mods import _bad_name, _cemu_pack  # noqa: E402  (the same rules as the mod installer)
 from wiiu_model import convert as wm_convert  # noqa: E402  (Wii U models and textures)
 from wiiu_model import nx_bfres, nx_model, wiiu_bfres, wiiu_models  # noqa: E402
@@ -221,10 +222,28 @@ def _header_align(data: bytes) -> int:
 # ------------------------------------------------------------------------------------------------------------- Yaz0
 # Header: "Yaz0", u32 size, u32 alignment, 4 reserved bytes - big-endian on Wii U and on Switch alike.
 
+UNPACK_MAX = 256 << 20     # a Yaz0 file that says it unpacks to more is refused (the game's own are far smaller)
+UNPACK_RATIO = 128         # Yaz0 can't unpack to more than about 87 times its size: a header claiming more lies
+
+
+def yaz0_check(data: bytes) -> None:
+    """Refuse (FormatError) a Yaz0 whose header claims more than UNPACK_MAX, or more than its stream could ever unpack
+    to, before any memory is taken: a small damaged or hostile mod file can't make a conversion or an add use
+    gigabytes. yaz0_decompress runs it, so every caller gets it."""
+    if len(data) >= 16 and data[:4] == b"Yaz0":
+        size = struct.unpack_from(">I", data, 4)[0]
+        if size > UNPACK_MAX:
+            raise FormatError(f"a Yaz0 file that says it unpacks to {size >> 20} MB (more than {UNPACK_MAX >> 20} "
+                              "MB: damaged, or made to fill the memory)")
+        if size > UNPACK_RATIO * len(data) + 4096:
+            raise FormatError(f"a Yaz0 file of {len(data)} bytes that says it unpacks to {size} (it can't: damaged)")
+
+
 def yaz0_decompress(data: bytes) -> tuple[bytes, int]:
-    """(decompressed data, the header's alignment field)."""
+    """(decompressed data, the header's alignment field). The size the header claims is checked first (yaz0_check)."""
     if len(data) < 16 or data[:4] != b"Yaz0":
         raise FormatError("not Yaz0")
+    yaz0_check(data)
     size, align = struct.unpack_from(">II", data, 4)
     out = bytearray()
     src, i = data, 16
@@ -952,6 +971,9 @@ def is_le_event_flow(data: bytes) -> bool:
     return len(data) >= 0x20 and data[:6] in (b"BFEVFL", b"BFEVTM") and data[0x0C:0x0E] == b"\xff\xfe"
 
 
+MAX_NEST = 8   # Yaz0 and SARC packs inside each other deeper than this are refused (the game's go 4 deep at most)
+
+
 class Converter:
     """Converts files to the byte order `to`, recursing into Yaz0 and SARC. Every file it meets (nested ones too)
     gets a Note. `recompress=False` (for check) skips Yaz0 compression: the result then keeps the old bytes."""
@@ -968,6 +990,7 @@ class Converter:
         self.byml_nodes: Counter = Counter()
         self.aamp_flags: Counter = Counter()
         self.tag_guesses: Counter = Counter()
+        self._depth = 0                        # packs open around the file being read (MAX_NEST)
 
     def _note(self, path: str, r: Result) -> Result:
         self.notes.append(Note(path, r.status, r.kind, r.detail, list(r.warnings)))
@@ -981,10 +1004,15 @@ class Converter:
         fmt = identify(data, name)
         label = KIND_LABEL.get(fmt, fmt)
         try:
-            if fmt == "yaz0":
-                return self._yaz0(data, path)
-            if fmt == "sarc":
-                return self._sarc(data, path)
+            if fmt in ("yaz0", "sarc"):
+                if self._depth >= MAX_NEST:
+                    raise FormatError(f"packed more than {MAX_NEST} deep (the game's own files never are: damaged, "
+                                      "or made to hang the converter)")
+                self._depth += 1
+                try:
+                    return self._yaz0(data, path) if fmt == "yaz0" else self._sarc(data, path)
+                finally:
+                    self._depth -= 1
             if fmt == "byml":
                 if byml_order(data) == self.to:
                     return self._note(path, Result(data, ALREADY, label))
@@ -2101,7 +2129,7 @@ class ModSource:
         self.zip: zipfile.ZipFile | None = None
         self.root = p
         if p.is_dir():
-            self.files = sorted(Path(d, n).relative_to(p).as_posix() for d, _, names in os.walk(p) for n in names)
+            self.files = mi.walk_files(p)  # (links and junctions skipped, as modman's library copy skips them)
             return
         # (the messages follow the mod's path, which main() and modman put in front)
         if not p.is_file():

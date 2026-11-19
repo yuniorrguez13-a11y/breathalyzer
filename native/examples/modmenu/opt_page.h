@@ -128,6 +128,7 @@ enum {
     RK_PROFILE, RK_FONT, RK_ALL_OFF, RK_ALL_ON, RK_CHANGED, RK_CONFLICTS,             // More
     RK_MODLINK,                                                                       // Mod settings and info
     RK_OFF_NOTE, RK_ABOUT, RK_SETTING, RK_SUBPAGE, RK_RESET, RK_EMPTY,                // a mod's pages
+    RK_LEFT_OUT,  // a mod's page: settings past the row limit (arg: how many), said instead of left out quietly
 };
 enum { AB_WHAT, AB_FILES, AB_FIELD };   // RK_ABOUT's arg: AB_FIELD + i is the mod's fields[i]
 typedef struct {

@@ -1183,23 +1183,16 @@ def is_packish(name: str) -> bool:
     return e in PACK_EXTS or (e.startswith("s") and e[1:] in PACK_EXTS)
 
 
-YAZ0_MAX = 256 << 20       # a Yaz0 file that says it unpacks to more is refused (the game's own are far smaller)
-YAZ0_RATIO = 128           # Yaz0 can't unpack to more than about 87 times its size: a header claiming more lies
+YAZ0_MAX = wc.UNPACK_MAX       # (the caps live in wiiu_convert.yaz0_check: every Yaz0 reader gets them)
+YAZ0_RATIO = wc.UNPACK_RATIO
 
 
 def unyaz0(data: bytes) -> tuple[bytes, int]:
     """wc.yaz0_decompress (the bytes and the header's alignment) after checking the size the header claims: more
     than YAZ0_MAX, or more than the stream could ever unpack to, is refused (wc.FormatError) before any memory is
     taken, so a small damaged or hostile file can't make an add use gigabytes. Every Yaz0 a mod or the game gives the
-    BCML mergers goes through here."""
-    if len(data) >= 16 and data[:4] == b"Yaz0":
-        size = struct.unpack_from(">I", data, 4)[0]
-        if size > YAZ0_MAX:
-            raise wc.FormatError(f"a Yaz0 file that says it unpacks to {size >> 20} MB (more than {YAZ0_MAX >> 20} "
-                                 "MB: damaged, or made to fill the memory)")
-        if size > YAZ0_RATIO * len(data) + 4096:
-            raise wc.FormatError(f"a Yaz0 file of {len(data)} bytes that says it unpacks to {size} (it can't: "
-                                 "damaged)")
+    BCML mergers goes through here. (wc.yaz0_check holds the caps; wc.yaz0_decompress runs it too.)"""
+    wc.yaz0_check(data)
     return wc.yaz0_decompress(data)
 
 

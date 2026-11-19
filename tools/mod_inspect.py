@@ -142,14 +142,34 @@ class Source:
         raise NotImplementedError
 
 
+def _is_link(e: os.DirEntry) -> bool:
+    return e.is_symlink() or e.is_junction()
+
+
+def walk_files(root: str | os.PathLike) -> list[str]:
+    """The "/"-separated relative path of every file under root. Links and junctions are neither followed nor listed
+    (like modman.walk_files, which stores the mod): a junction an archive restored can't make a mod's files come
+    from elsewhere on the PC, or a junction loop walk forever. wiiu_convert reads mod folders with this too."""
+    out = []
+    stack = [""]
+    while stack:
+        rel = stack.pop()
+        with os.scandir(os.path.join(root, *rel.split("/")) if rel else root) as it:
+            for e in it:
+                if _is_link(e):
+                    continue
+                r = f"{rel}/{e.name}" if rel else e.name
+                if e.is_dir(follow_symlinks=False):
+                    stack.append(r)
+                elif e.is_file(follow_symlinks=False):
+                    out.append(r)
+    return sorted(out)
+
+
 class FolderSource(Source):
     def __init__(self, root: Path):
         self.root = root
-        found = []
-        for dirpath, _dirs, names in os.walk(root):
-            for n in names:
-                found.append((Path(dirpath) / n).relative_to(root).as_posix())
-        super().__init__(found)
+        super().__init__(walk_files(root))
 
     def read(self, rel: str, limit: int = 65536) -> bytes:
         with open(self.root / (self.prefix + rel), "rb") as f:

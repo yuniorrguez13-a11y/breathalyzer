@@ -66,8 +66,12 @@ typedef struct {
 } RoomMemInfo;  // MEMORY_BASIC_INFORMATION (64-bit)
 __declspec(dllimport) size_t __stdcall VirtualQuery(const void *p, RoomMemInfo *out, size_t n);
 __declspec(dllimport) void *__stdcall VirtualAlloc(void *p, size_t n, uint32_t type, uint32_t protect);
+__declspec(dllimport) int __stdcall VirtualFree(void *p, size_t n, uint32_t type);
+__declspec(dllimport) uint64_t __stdcall GetTickCount64(void);
+__declspec(dllimport) void __stdcall Sleep(uint32_t ms);
 #define ROOM_MEM_COMMIT 0x1000u
 #define ROOM_MEM_RESERVE 0x2000u
+#define ROOM_MEM_RELEASE 0x8000u
 #define ROOM_MEM_FREE 0x10000u
 #define ROOM_PAGE_READWRITE 4u
 #define ROOM_INVALID_HANDLE ((void *)(intptr_t)-1)
@@ -263,8 +267,28 @@ static int root_add(struct Cpu *c, uint64_t heap) {
     return ok;
 }
 
-// Make the extra memory and its heap (registers: the caller saves them). 1 made, 0 not for this request (too big),
-// -1 never (why says it).
+// The memory layout the rescue was made for (Savage Wind 0.4.1, game 1.9.0), asked of Windows instead of assumed:
+// the guest window is one reservation that ends at BOTW_ADDR_GUEST_END (a bigger window would be Savage Wind's own
+// memory, which it reserves and commits lazily: More Room must not take addresses right above it then), and the
+// string class's vtable pointer is in committed memory (read only then: no fault on another layout). 0: why says it.
+static int guest_layout_ok(char *why, size_t cap) {
+    RoomMemInfo end1, end, vt;
+    memset(&end1, 0, sizeof end1), memset(&end, 0, sizeof end), memset(&vt, 0, sizeof vt);
+    int q1 = VirtualQuery((const void *)(uintptr_t)(BOTW_ADDR_GUEST_END - 1), &end1, sizeof end1) != 0;
+    int q2 = VirtualQuery((const void *)(uintptr_t)BOTW_ADDR_GUEST_END, &end, sizeof end) != 0;
+    if (!q1 || end1.state == ROOM_MEM_FREE || (q2 && end.state != ROOM_MEM_FREE && end.alloc_base == end1.alloc_base)) {
+        snprintf(why, cap, "Savage Wind's guest memory doesn't end where 0.4.1's does (a newer Savage Wind?)");
+        return 0;
+    }
+    if (!VirtualQuery((const void *)(uintptr_t)SAFESTRING_VT, &vt, sizeof vt) || vt.state != ROOM_MEM_COMMIT) {
+        snprintf(why, cap, "the game's string class isn't where 1.9.0 has it");
+        return 0;
+    }
+    return 1;
+}
+
+// Make the extra memory and its heap (registers: the caller saves them). 1 made, 0 not for this request (too big, or
+// too little memory free now: tried again at a later need), -1 never (why says it).
 static int rescue_make(struct Cpu *c, uint64_t need, char *why, size_t cap) {
     lock();
     int64_t size = room_rescue_size(&g_room, need);
@@ -273,6 +297,22 @@ static int rescue_make(struct Cpu *c, uint64_t need, char *why, size_t cap) {
         snprintf(why, cap, "one allocation of %llu bytes is more than the extra memory can be", (unsigned long long)need);
         return 0;
     }
+    // sized now, from what the PC has now (room_rescue_fit: Savage Wind's own lazy commits must still fit after it)
+    RoomMemStatus ms;
+    memset(&ms, 0, sizeof ms);
+    ms.len = sizeof ms;
+    int ms_ok = GlobalMemoryStatusEx(&ms) != 0;
+    int64_t fit = room_rescue_fit(size, need, ms_ok, ms.avail_phys, ms.avail_page);
+    if (!fit) {
+        char a[32], b[32];
+        room_mb(a, sizeof a, (int64_t)ms.avail_phys);
+        room_mb(b, sizeof b, (int64_t)ms.avail_page);
+        snprintf(why, cap, "the PC has too little memory free now for the extra memory (%s of RAM, %s of RAM and page "
+                 "file left): the game keeps its own failure", a, b);
+        return 0;
+    }
+    size = fit;
+    if (!guest_layout_ok(why, cap)) return -1;
     uint64_t vt = rd64(SAFESTRING_VT);
     if (vt < BOTW_ADDR_MAIN || vt >= BOTW_ADDR_MAIN + (1ull << 32)) {
         snprintf(why, cap, "the game's string class isn't where 1.9.0 has it");
@@ -294,6 +334,7 @@ static int rescue_make(struct Cpu *c, uint64_t need, char *why, size_t cap) {
     if (rd64(heap + H_SIZE) != (uint64_t)(size - ROOM_RESCUE_HEAD) || !free_b || free_b > (uint64_t)size) {
         snprintf(why, cap, "the game's heap code didn't make the heap (size %llu, free %llu)",
                  (unsigned long long)rd64(heap + H_SIZE), (unsigned long long)free_b);
+        VirtualFree((void *)(uintptr_t)base, 0, ROOM_MEM_RELEASE);  // (nothing points into it: not a root heap yet)
         return -1;
     }
     int root = root_add(c, heap);
@@ -311,13 +352,26 @@ static int rescue_make(struct Cpu *c, uint64_t need, char *why, size_t cap) {
 }
 
 // One allocation from the extra heap (registers: the caller saves them). 0: none.
+// Made once: the first need makes it (several loader threads fail together at the first load). A thread that comes
+// while another makes it waits for it (at most 2 s, so a thread holding a lock the maker needs can't hang the game:
+// its allocation then fails as in the plain game); the maker looks again under the flag, so it is never made twice.
 static uint64_t rescue_alloc(struct Cpu *c, uint64_t size, int64_t align) {
     if (!__atomic_load_n(&g_rescue_lo, __ATOMIC_ACQUIRE)) {
+        if (__atomic_exchange_n(&g_rescue_making, 1, __ATOMIC_ACQUIRE)) {
+            uint64_t until = GetTickCount64() + 2000;
+            while (__atomic_load_n(&g_rescue_making, __ATOMIC_ACQUIRE) && GetTickCount64() < until) Sleep(1);
+            if (!__atomic_load_n(&g_rescue_lo, __ATOMIC_ACQUIRE)) return 0;
+            goto made;
+        }
         int state;
         lock();
         state = g_room.rescue.state;
         unlock();
-        if (state == 2 || __atomic_exchange_n(&g_rescue_making, 1, __ATOMIC_ACQUIRE)) return 0;  // (or making now)
+        if (__atomic_load_n(&g_rescue_lo, __ATOMIC_ACQUIRE) || state == 2) {  // (made, or refused, while we looked)
+            __atomic_store_n(&g_rescue_making, 0, __ATOMIC_RELEASE);
+            if (state == 2) return 0;
+            goto made;
+        }
         char why[200] = "";
         int ok = rescue_make(c, size, why, sizeof why);
         if (ok < 0) {
@@ -326,13 +380,17 @@ static uint64_t rescue_alloc(struct Cpu *c, uint64_t size, int64_t align) {
             snprintf(g_room.rescue.why, sizeof g_room.rescue.why, "%s", why);
             unlock();
             api->log("room: the extra memory for full heaps couldn't be made: %s", why);
-        } else if (!ok && g_log) {
+        } else if (!ok) {
+            lock();
+            snprintf(g_room.rescue.why, sizeof g_room.rescue.why, "%s", why);  // (for `room`)
+            unlock();
             static int said;  // (a texture system may ask again every frame: the first 10)
-            if (__atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) < 10) api->log("room: %s", why);
+            if (g_log && __atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) < 10) api->log("room: %s", why);
         }
         __atomic_store_n(&g_rescue_making, 0, __ATOMIC_RELEASE);
         if (ok <= 0) return 0;
     }
+made:;
     SwModRegs *r = SWMOD_REGS(c);
     r->x[0] = g_rescue_heap, r->x[1] = size, r->x[2] = (uint64_t)align;
     g_exp_orig(c);  // (the game's own tryAlloc, on the extra heap)
@@ -617,6 +675,9 @@ static void cmd_room(int argc, char **argv, SwModReply *r) {
             api->reply_fail(r, "can't rescue %s too (at most %d heaps)", argv[2], ROOM_RESCUE_HEAPS);
             return;
         }
+        if (strcmp(argv[2], "on") && strcmp(argv[2], "off") && strcmp(argv[2], "size"))
+            api->log("room: rescuing %s too: for tests, and only a heap that lives the whole game (docs/room.md)",
+                     argv[2]);
     } else if (argc > 1) {
         api->reply_fail(r, "usage: room [watch <actor> | boost <MB>|auto|off | rescue on|off|size <MB>|<heap> | log on|off]");
         return;

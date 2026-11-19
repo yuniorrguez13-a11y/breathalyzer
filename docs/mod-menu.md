@@ -48,9 +48,11 @@ Open **Options** (on the title screen, or Pause > System > Options). **Mods** is
 **The More page**
 
 - **Mod set**: the set in use (Default until you make others in Mod Manager). Left and right pick another; it is used
-  at your next start. A set keeps its mods, their settings and the font. While another set is picked, the mod rows,
-  the Order page and Turn all mods off / on are refused ("Mod set Beta is picked. Change its mods once it is in use."):
-  they would change the set that isn't used next. Mod changes made before the pick are not used (the Mods page then
+  at your next start ("Mod set Beta is used at your next start."; with mod changes waiting, "Mod changes here are not
+  used." comes first). A set keeps its mods, their settings and the font. While another set is picked, the mod rows,
+  the Order page, Turn all mods off / on, a mod's settings, its keys and Reset (A or Y) are refused ("Mod set Beta is
+  picked: change this once it is in use."): they would change the set that isn't used next. Long names are shortened
+  ("..."), never the warning. Mod changes made before the pick are not used (the Mods page then
   says so); setting values you changed stay with the set in use. When the next start can't be made ready (a failed
   deploy), the set in use stays, with its own settings and font.
 - **Font**: the game's font, the easy-to-read font, or a font mod that is on. Used at your next start.
@@ -238,6 +240,12 @@ rebuild of the game code. The pages and mod info work with any modhost; the sett
 - Message ids: 90000-90004 (the Mods button and its texts), 90100 + n (the Order page's "1st"...), 91000 + 4 x row +
   part (title, line, button; 64 rows), and 92000 + 240 x slot + value for choice rows with their own value texts (32
   per page: the Mod set, the Font, a mod's sliders and choices). All stay under 99,999.
+- A page has at most 64 rows. mod.toml allows 30 rows per page (`MAX_ROWS_PAGE`), so a mod's page fits; as a
+  backstop, a mod's page keeps rows for its sub-page buttons and Reset first, and settings past the limit are left
+  out with one row that says so ("More settings in Mod Manager": "3 settings are left out here: the page is
+  full. Change them in Mod Manager.").
+- A slider or choice row past the 32 value blocks is built as a button that shows the value: A steps to the next
+  value (the game has no left and right for a button). Each row keeps the entry kind it was built as.
 - Choice rows answer 0 to the game's decide call: the game sends left and right through it too (the early game check
   found that answering "done" froze the value).
 - Key capture: while it runs the Options update is skipped, so the page takes no input. Keys are read only while the

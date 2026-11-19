@@ -148,6 +148,7 @@ static uint32_t g_order[192];  // the row order the game sees (Savage Wind's fir
 static char g_names[1 + MM_PAGE_ROWS][16];  // our entries' flag names (never a real game data flag)
 static PageRow g_rows[MM_PAGE_ROWS];        // our page's rows (row k is entry g_sw_count + 1 + k)
 static int g_slot[MM_PAGE_ROWS];            // a choice row's value block (MSG_SLOT), -1: none
+static int g_widget[MM_PAGE_ROWS];          // the entry kind row k was built as (0 ON/OFF, 1 value, 2 button)
 static int g_nrows;
 #define REF_NONE ((PageRef){PG_NONE, -1, -1})
 static PageRef g_shown = {PG_NONE, -1, -1};  // the page up now (PG_NONE: one of Savage Wind's)
@@ -412,7 +413,7 @@ static void put_text(uint32_t id, const char *s, uint64_t out, bool grey, bool s
     for (; *s && n < room; s++) {
         uint16_t c = (uint8_t)*s < 0x80 && (uint8_t)*s >= 0x20 ? (uint8_t)*s : '?';
         if (!symbols_full && mm_font_lacks((char)c)) {
-            if (n + 2 * TAG_LEN + 1 <= room) {
+            if (n + 2 * TAG_LEN + 1 < room) {  // (room for both tags: font_off needs n + TAG_LEN + 1 < cap after the letter)
                 PUT_TAG(font_on);
                 t[n++] = c;
                 PUT_TAG(font_off);
@@ -506,8 +507,8 @@ static void fill_row(uint64_t row, int k) {
     }
     mm_lock();
     PageRow r = g_rows[k];
-    int w = mm_row_widget(&r), v = mm_row_value(&r), max = mm_row_max(&r);
-    mm_unlock();
+    int w = g_widget[k], v = mm_row_value(&r), max = mm_row_max(&r);  // (a value row past the value blocks is a
+    mm_unlock();                                                       // button: no ON/VALUE/MAX in its row)
     if (w == 2) {
         wr8(row + ROW_BUTTON, 0);
         return;
@@ -586,7 +587,8 @@ static void w_rows(void) {
         int w = mm_row_widget(r);
         uint32_t base = MSG_ROW + 4u * (uint32_t)k, max = (uint32_t)mm_row_max(r);
         g_slot[k] = -1;
-        if (w == 1 && mm_row_own_values(r) && slots >= MM_SLOTS) w = 2;  // (no value block left: a button)
+        if (w == 1 && mm_row_own_values(r) && slots >= MM_SLOTS) w = 2;  // (no value block left: a button; A steps)
+        g_widget[k] = w;
         if (w == 1 && mm_row_own_values(r)) {
             g_slot[k] = slots++;
             uint32_t first = MSG_SLOT + (uint32_t)MM_SLOT_VALUES * (uint32_t)g_slot[k];
@@ -628,7 +630,7 @@ static int w_store(uint64_t row) {
     if (k == MODS_BUTTON) return 1;
     mm_lock();
     PageRow r = g_rows[k];
-    int w = mm_row_widget(&r), max = mm_row_max(&r);
+    int w = g_widget[k], max = mm_row_max(&r);
     unsigned ch = 0;
     if (w == 0) {
         ch = mm_row_set(&r, (rd32(row + ROW_ON) & 0xff) != 0);
@@ -690,6 +692,11 @@ static int w_decide(uint64_t row) {
     mm_lock();
     PageRow r = g_rows[k];
     int act = mm_row_press(&r, &open, &ch);
+    if (act == ACT_GAME && g_widget[k] == 2) {  // (a value row built as a button: the game has no left/right for
+        int max = mm_row_max(&r);               // it, so A steps to the next value)
+        ch = mm_row_set(&r, max > 0 ? (mm_row_value(&r) + 1) % (max + 1) : 0);
+        act = ch & CH_REFUSED ? ACT_REFUSED : ACT_DONE;
+    }
     mm_unlock();
     switch (act) {
     case ACT_GAME: return 0;

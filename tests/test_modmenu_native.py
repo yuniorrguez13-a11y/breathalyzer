@@ -610,6 +610,55 @@ class ModMenuNative(unittest.TestCase):
         self.assertEqual(saved["values"].get("hotkey"), "K")
         self.assertEqual(saved["values"].get("drain"), 1.5)
 
+    def test_settings_are_refused_while_another_set_is_picked(self):
+        """Second review #2: with another mod set picked, a setting, a key or Reset changed the set in use, and the
+        switch at the next start dropped it while the line said "Changes at your next start"."""
+        with tempfile.TemporaryDirectory() as d:
+            lib, mods = self.settings_library(d)
+            mm.new_profile(lib, "Quiet")
+            mm.use_profile(lib, mm.DEFAULT_PROFILE)
+            modmenu.sync(lib)
+            names_ = ["more_sel", "more_a", "more_f", "set_sel", "set_right", "back", "back_f", "list_sel", "list_a",
+                      "list_f", "tuner_sel", "tuner_a", "tuner_f", "tuner_rows", "mode_sel", "mode_right",
+                      "reset_sel", "reset_a", "key_sel", "key_a", "status", "y", "sleep"]
+            cmds = ["g sel 6", "g a", "g frame 3", "g sel 0", "g right", "g b", "g frame 3", "g sel 5", "g a",
+                    "g frame 3", "g sel 3", "g a", "g frame 3", "g rows", "g sel 4", "g right", "g sel 10", "g a",
+                    "g sel 7", "g a", "modmenu", "g y", "!sleep 400"]
+            steps, log = self.run_mods(mods, OPEN_MODS + cmds, lib.root)
+            s = dict(zip(names_, steps[len(OPEN_MODS):]))
+            values_file = Path(lib.root) / "settings" / "tuner.json"
+            saved = json.loads(values_file.read_text(encoding="utf-8")) if values_file.exists() else {}
+
+        def dd(k):
+            return s[k].get("data", {})
+
+        self.assertEqual(dd("set_right")["value"], "Quiet", log)
+        self.assertEqual(plain(names(s["tuner_rows"])[4]), "Sprint mode", log)
+        picked = "Mod set Quiet is picked: change this once it is in use."
+        self.assertEqual(dd("mode_sel")["desc"], picked)
+        self.assertEqual(dd("mode_right")["value"], "Classic")  # (refused: unchanged)
+        self.assertEqual(dd("reset_sel")["desc"], picked)
+        self.assertNotEqual(dd("reset_a").get("desc"), "Press A again to reset every setting of this mod, keys too.")
+        self.assertEqual(dd("key_sel")["desc"], picked)
+        self.assertFalse(dd("status")["capture"])  # (no key capture started)
+        self.assertNotIn("mode", saved.get("values", {}), saved)
+
+    def test_a_long_set_name_never_cuts_the_warning(self):
+        """Second review #5: "Uses the mod set <name> ... Mod changes here are not used." was cut mid-word with a long
+        set name. Now the warning comes first and only the name is shortened."""
+        name = "An overhaul run with a really long name2"  # (40 characters, as long as Mod Manager allows)
+        with tempfile.TemporaryDirectory() as d:
+            lib = make_library(Path(d) / "lib")
+            mm.new_profile(lib, name)
+            mm.use_profile(lib, mm.DEFAULT_PROFILE)
+            modmenu.sync(lib)
+            steps, log = self.run_fake("sw", OPEN_MODS + ["g sel 0", "g a", "g sel 5", "g a", "g frame 3", "g sel 0",
+                                                          "g right", "g sel 0", "!sleep 150"], library=lib.root)
+        desc = steps[len(OPEN_MODS) + 7]["data"]["desc"]
+        self.assertTrue(desc.startswith("Mod changes here are not used. Mod set An "), (desc, log))
+        self.assertTrue(desc.endswith("... is used once you use changes."), desc)
+        self.assertLessEqual(len(desc), 80)
+
     def test_info_page_without_settings(self):
         """A mod's info page needs no settings (no settings.txt here: modhost has none to show)."""
         with tempfile.TemporaryDirectory() as d:
@@ -648,7 +697,7 @@ class ModMenuNative(unittest.TestCase):
         self.assertEqual(values(rows)[:4], ["Default", "Game font", "Turn off", "Turn on"])
         k = len(OPEN_MODS) + 4
         self.assertEqual(steps[k + 1]["data"]["value"], "Quiet")
-        self.assertEqual(steps[k + 2]["data"]["desc"], "Uses the mod set Quiet once you use changes.")
+        self.assertEqual(steps[k + 2]["data"]["desc"], "Mod set Quiet is used once you use changes.")
         self.assertEqual(steps[k + 6]["data"]["result"], "done")
         st = steps[k + 7]["data"]
         self.assertEqual((st["profile"], st["profile_next"], st["font_next"]), ("Default", "Quiet", "easy-read"))

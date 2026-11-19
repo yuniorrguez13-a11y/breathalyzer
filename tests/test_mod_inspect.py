@@ -349,6 +349,19 @@ class InspectTests(unittest.TestCase):
         _, overall = self.run_on({"readme.txt": "hi"})
         self.assertIn("doesn't look like", overall)
 
+    def test_junctions_and_links_in_a_mod_folder_are_not_followed(self):
+        try:
+            import _winapi
+            create = _winapi.CreateJunction
+        except (ImportError, AttributeError):
+            self.skipTest("no junctions here")
+        outside = make(self.root / "outside", {"romfs/Actor/Secret.txt": "not the mod's"})
+        mod = make(self.root / "mod", {"romfs/Actor/Pack/ok.txt": "ok"})
+        create(str(outside), str(mod / "romfs" / "link"))
+        create(str(mod), str(mod / "romfs" / "loop"))  # (a loop: the walk must still end)
+        self.assertEqual(mi.walk_files(mod), ["romfs/Actor/Pack/ok.txt"])
+        self.assertEqual(mi.FolderSource(mod).files, ["romfs/Actor/Pack/ok.txt"])
+
     def test_7z_is_refused_clearly(self):
         p = self.root / "m.bnp"
         p.write_bytes(b"7z\xbc\xaf\x27\x1c")

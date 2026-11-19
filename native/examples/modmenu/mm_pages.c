@@ -108,11 +108,22 @@ int mm_page(PageRef ref, PageRow *out, int cap) {
             if (g_mm.mods[m].files >= 0) ROW(RK_ABOUT, m, AB_FILES);
         }
         const char *key = page == PG_SUB ? page_key(sm, ref.sub) : "";
-        int before = n;
-        for (int s = 0, count = sm >= 0 ? ui->count(sm) : 0; s < count; s++) {
+        int before = n, count = sm >= 0 ? ui->count(sm) : 0, want = 0, added = 0;
+        // (the sub-page buttons and Reset keep their rows: a big mod lost them, and its sub-pages, at the limit)
+        int keep = page == PG_MOD && sm >= 0 ? ui->page_count(sm) + 1 : 0;
+        for (int s = 0; s < count; s++) {
             SwModSettingInfo info;
-            if (setting_on_page(sm, s, key, &info) && (ui->shown(sm, s) || !g_mm.reopen_ok)) ROW(RK_SETTING, m, s);
+            if (setting_on_page(sm, s, key, &info) && (ui->shown(sm, s) || !g_mm.reopen_ok)) want++;
         }
+        int room = cap - n - keep, fits = want <= room ? want : room - 1;  // (else one row says how many are left out)
+        for (int s = 0; s < count && added < fits; s++) {
+            SwModSettingInfo info;
+            if (setting_on_page(sm, s, key, &info) && (ui->shown(sm, s) || !g_mm.reopen_ok)) {
+                ROW(RK_SETTING, m, s);
+                added++;
+            }
+        }
+        if (want > added) ROW(RK_LEFT_OUT, m, want - added);
         if (page == PG_SUB && n == before) ROW(RK_EMPTY, m, 0);
         if (page == PG_MOD && sm >= 0) {
             for (int p = 0, pages = ui->page_count(sm); p < pages; p++) ROW(RK_SUBPAGE, m, p);
@@ -165,6 +176,8 @@ uint64_t mm_page_shape(PageRef ref) {
 static int g_reset_sm = -1;
 static uint64_t g_reset_until;
 
+static bool set_picked(void);
+
 static bool reset_armed(int sm) { return sm >= 0 && g_reset_sm == sm && GetTickCount64() < g_reset_until; }
 
 static bool reset_confirmed(int sm) {
@@ -184,7 +197,7 @@ int mm_page_reset(PageRef ref) {
     case PG_MOD:
     case PG_SUB: {
         int sm = mod_ok(ref.mod) ? mm_settings_of(ref.mod) : -1;
-        if (sm < 0) return 0;
+        if (sm < 0 || set_picked()) return 0;  // (another set is picked: these values aren't the ones used next)
         if (!reset_confirmed(sm)) return (int)CH_OTHERS;  // (the rows' line now says "press Y again")
         uint32_t before = mm_ui()->serial();
         mm_ui()->reset(sm);
@@ -277,8 +290,13 @@ static int mod_changes(void) {
     return mm_changes() - (g_mm.profile_want != g_mm.profile_now) - (g_mm.font_want != g_mm.font_now);
 }
 
+static void fit(const char *what, const char *tail, char *out, size_t cap);
+
+// The warning is kept whole: fit() shortens only the set's name (a long name cut the warning mid-word)
 static void picked_note(char *out, size_t cap) {
-    snprintf(out, cap, "Mod set %s is picked. Change its mods once it is in use.", g_mm.profiles[g_mm.profile_want]);
+    char what[MM_TEXT_MAX];
+    snprintf(what, sizeof what, "Mod set %s", g_mm.profiles[g_mm.profile_want]);
+    fit(what, "is picked: change this once it is in use.", out, cap);
 }
 
 unsigned mm_row_set(const PageRow *r, int value) {
@@ -298,6 +316,7 @@ unsigned mm_row_set(const PageRow *r, int value) {
     case RK_SETTING: {
         int sm = row_sm(r);
         if (sm < 0 || mm_row_locked(r)) return CH_REFUSED;
+        if (set_picked()) return CH_REFUSED;  // (written now to the set in use, which isn't the one used next)
         int had = mm_ui()->get_index(sm, r->arg);
         if (had == value) return 0;
         int res = mm_ui()->set_index(sm, r->arg, value);
@@ -333,6 +352,7 @@ int mm_row_press(const PageRow *r, PageRef *open, unsigned *changed) {
     }
     case RK_RESET: {
         int sm = row_sm(r);
+        if (set_picked()) return ACT_REFUSED;  // (its line says which set is picked)
         if (sm >= 0 && !reset_confirmed(sm)) {
             *changed = CH_THIS;  // (its line now says "press A again")
             return ACT_DONE;
@@ -349,6 +369,7 @@ int mm_row_press(const PageRow *r, PageRef *open, unsigned *changed) {
         SwModSettingInfo info;
         if (!info_of(sm, r->arg, &info)) return ACT_DONE;
         if (mm_row_locked(r)) return ACT_REFUSED;
+        if (set_picked() && info.type != SWMOD_SETTING_TEXT) return ACT_REFUSED;  // (its line says which set)
         if (info.type == SWMOD_SETTING_KEY) return ACT_KEY;
         if (info.type == SWMOD_SETTING_BUTTON) {
             *changed = mm_ui()->press(sm, r->arg) == SWMOD_SET_OK ? CH_THIS | CH_OTHERS : 0;
@@ -362,7 +383,7 @@ int mm_row_press(const PageRow *r, PageRef *open, unsigned *changed) {
 
 unsigned mm_row_key(const PageRow *r, const char *name) {
     int sm = row_sm(r);
-    if (r->kind != RK_SETTING || sm < 0 || mm_row_locked(r)) return CH_REFUSED;
+    if (r->kind != RK_SETTING || sm < 0 || mm_row_locked(r) || set_picked()) return CH_REFUSED;
     int had = mm_ui()->get_index(sm, r->arg);
     if (mm_ui()->set_key(sm, r->arg, name) != SWMOD_SET_OK) return CH_REFUSED;
     return mm_ui()->get_index(sm, r->arg) != had ? CH_THIS | CH_OTHERS : 0;
@@ -456,6 +477,7 @@ void mm_row_title(const PageRow *r, char *out, size_t cap) {
     case RK_CHANGED: s = "What changed"; break;
     case RK_CONFLICTS: s = "Mods that share files"; break;
     case RK_OFF_NOTE: s = "This mod is off"; break;
+    case RK_LEFT_OUT: s = "More settings in Mod Manager"; break;
     case RK_ABOUT:
         if (r->arg == AB_WHAT && row_mod_ok(r)) {  // (the first row says whose page this is)
             snprintf(buf, sizeof buf, "%s", g_mm.mods[r->mod].name);
@@ -503,6 +525,10 @@ static void setting_desc(const PageRow *r, char *out, size_t cap) {
         return;
     }
     char lock[MM_TEXT_MAX] = "", tail[MM_TEXT_MAX] = "";
+    if (set_picked() && info.type != SWMOD_SETTING_TEXT) {  // (refused: see mm_row_set)
+        picked_note(out, cap);
+        return;
+    }
     if (!ui->enabled(sm, r->arg)) {
         ui->lock_text(sm, r->arg, lock, sizeof lock);   // ("Locked: needs Sprint mode Custom.")
         mm_copy(out, cap > MM_TEXT_MAX ? MM_TEXT_MAX : cap, lock[0] ? lock : "Locked.");
@@ -535,8 +561,10 @@ static void conflicts_desc(char *out, size_t cap) {
         mm_copy(out, cap, "No two mods change the same file.");
     } else if (losing == 1) {
         const MmMod *m = &g_mm.mods[first];
-        snprintf(out, cap, "%s replaces %d of %s's files. The later one is used.", m->rival[0] ? m->rival : "A later mod",
-                 m->loses, m->name);
+        char name[24], tail[MM_TEXT_MAX];  // (two long names cut the warning mid-word: fit() shortens only names)
+        fit(m->name, "", name, 20);
+        snprintf(tail, sizeof tail, "replaces %d of %s's files. The later one is used.", m->loses, name);
+        fit(m->rival[0] ? m->rival : "A later mod", tail, out, cap);
     } else {
         snprintf(out, cap, "%d mods have files a later mod replaces. Each mod's info page says which.", losing);
     }
@@ -591,10 +619,13 @@ void mm_row_desc(const PageRow *r, char *out, size_t cap) {
     case RK_MORE_BUTTON: mm_copy(out, cap, "Mod sets, the font, turn all mods off or on, and what changed."); break;
     case RK_PROFILE:
         if (g_mm.profile_want >= 0 && g_mm.profile_want != g_mm.profile_now) {
-            snprintf(tail, sizeof tail, "Uses the mod set %s", g_mm.profiles[g_mm.profile_want]);
-            mm_cat(tail, sizeof tail, when());
-            if (mod_changes()) mm_cat(tail, sizeof tail, " Mod changes here are not used.");
-            fit("", tail, out, cap);
+            // (the warning first and whole: fit() shortens only the set's name)
+            const char *warn = mod_changes() ? "Mod changes here are not used. " : "";
+            char name[MM_TEXT_MAX];
+            size_t room = MM_TEXT_MAX - strlen(warn) - strlen("Mod set ");
+            snprintf(tail, sizeof tail, "is used%s", when());
+            fit(g_mm.profiles[g_mm.profile_want], tail, name, room);
+            snprintf(out, cap, "%sMod set %s", warn, name);
         } else {
             mm_copy(out, cap, "A mod set keeps mods, their settings and the font. Make sets in Mod Manager.");
         }
@@ -657,10 +688,18 @@ void mm_row_desc(const PageRow *r, char *out, size_t cap) {
         break;
     }
     case RK_RESET:
+        if (set_picked()) {
+            picked_note(out, cap);
+            break;
+        }
         mm_copy(out, cap, reset_armed(row_sm(r)) ? "Press A again to reset every setting of this mod, keys too."
                                                  : "Every setting of this mod back to its default. Asks first.");
         break;
     case RK_EMPTY: mm_copy(out, cap, "Other settings hide these rows now."); break;
+    case RK_LEFT_OUT:
+        snprintf(out, cap, "%d setting%s left out here: the page is full. Change %s in Mod Manager.", r->arg,
+                 r->arg == 1 ? " is" : "s are", r->arg == 1 ? "it" : "them");
+        break;
     }
 }
 

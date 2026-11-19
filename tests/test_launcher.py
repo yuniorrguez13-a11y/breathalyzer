@@ -1244,5 +1244,24 @@ class CommandLine(unittest.TestCase):
                 la.parser().parse_args(bad)
 
 
+class PlainScreens(unittest.TestCase):
+    """The setup screens a first-time player meets: plain words, a short heading, and a main (focused, Enter/A)
+    button that never throws anything away."""
+    JARGON = ("deploy", "romfs", "exefs", "dll", "config.json", ".ini", "hash", "build id", "registry", "argv",
+              "traceback", "errno")
+    RISKY = ("delete", "remove", "restart", "reset", "overwrite", "erase", "wipe")
+
+    def test_words_and_main_button(self):
+        for key, (heading, line, buttons, _blocks) in la.SCREENS.items():
+            text = " ".join([heading, line] + [b for b, _ in buttons]).lower()
+            for word in self.JARGON:
+                self.assertNotIn(word, text, key)
+            self.assertLessEqual(len(heading), 50, key)         # (a heading at 24 pt stays on one or two lines)
+            self.assertTrue(1 <= len(buttons) <= 3, key)        # (all of them fit under the line on a 768-px screen)
+            main = buttons[0][0].lower()
+            for word in self.RISKY:
+                self.assertNotIn(word, main, key)
+
+
 if __name__ == "__main__":
     unittest.main()

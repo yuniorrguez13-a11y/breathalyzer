@@ -214,6 +214,30 @@ static inline int64_t room_rescue_size(const RoomState *st, uint64_t need) {
     return size;
 }
 
+// At its making, the size room_rescue_size gave cut to what this PC can still give now (not the boot-time figure: the
+// game takes RAM after boot). Savage Wind commits the guest's own memory as it is first touched, and a commit that
+// fails then crashes the game, so the extra memory takes at most a quarter of the commit headroom left (RAM and page
+// file) past 2 GB, and a quarter of the free RAM past 1.5 GB. ok 0: Windows didn't say (then 64 MB at most). 0 when
+// it doesn't fit now (under 64 MB, or under what the allocation needs): the game's own failure stands, tried again later.
+static inline int64_t room_rescue_fit(int64_t size, uint64_t need, int ok, uint64_t avail_phys, uint64_t avail_page) {
+    if (size <= 0) return 0;
+    int64_t floor_ = size < ROOM_RESCUE_MIN ? size : ROOM_RESCUE_MIN;
+    int64_t fit = size;
+    if (!ok) {
+        if (fit > ROOM_RESCUE_MIN) fit = ROOM_RESCUE_MIN;
+    } else {
+        // (unsigned compares first: a low-RAM PC's numbers never wrap)
+        uint64_t keep_phys = 1536ull * ROOM_MB, keep_page = 2048ull * ROOM_MB;
+        uint64_t phys = avail_phys > keep_phys ? (avail_phys - keep_phys) / 4 : 0;
+        uint64_t page = avail_page > keep_page ? (avail_page - keep_page) / 4 : 0;
+        if (phys < (uint64_t)fit) fit = (int64_t)phys;
+        if (page < (uint64_t)fit) fit = (int64_t)page;
+    }
+    fit &= ~0xffffll;
+    if (fit < floor_ || need > (uint64_t)ROOM_RESCUE_MAX || (int64_t)need + ROOM_RESCUE_HEAD + 0x1000 > fit) return 0;
+    return fit;
+}
+
 // p is a block of the extra memory's heap.
 static inline int room_rescue_has(const RoomState *st, uint64_t p) {
     return st->rescue.heap && p >= st->rescue.heap && p < st->rescue.base + st->rescue.size;
@@ -286,6 +310,8 @@ static inline void room_rescue_text(const RoomState *st, char *out, size_t cap) 
                  (long long)r->given, c, d, (long long)r->refused, (long long)r->redirected);
     else if (r->state == 2)
         snprintf(out + k, cap - (size_t)k, "; the extra memory couldn't be made: %s", r->why);
+    else if (r->why[0])  // (a heap ran out, but not now: too big an ask, or too little memory free then)
+        snprintf(out + k, cap - (size_t)k, "; the extra memory isn't made yet (the last need: %s)", r->why);
     else
         snprintf(out + k, cap - (size_t)k, "; no heap ran out yet (the extra memory is made at the first need)");
 }

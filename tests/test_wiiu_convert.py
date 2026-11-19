@@ -303,6 +303,36 @@ class Yaz0(unittest.TestCase):
         with self.assertRaises(wc.FormatError):
             wc.yaz0_decompress(b"Yaz1" + bytes(12))
 
+    def test_a_header_claiming_too_much_is_refused_before_unpacking(self):
+        """The caps live in yaz0_decompress itself (yaz0_check), so every caller - the converter, verify, the size
+        table merge, bnp.unyaz0 - gets them: a 50 MB file claiming 4 GB can't make an add take 8 GB."""
+        ok = wc.yaz0_compress(b"SARC" + bytes(1000))
+        self.assertEqual(wc.yaz0_decompress(ok)[0], b"SARC" + bytes(1000))
+        for claim in (wc.UNPACK_MAX + 1, 0xFFFFFFFF, len(ok) * wc.UNPACK_RATIO + 8192):
+            bomb = ok[:4] + struct.pack(">I", claim) + ok[8:]
+            with self.subTest(claim=claim), mock.patch.object(wc, "bytearray", side_effect=AssertionError,
+                                                               create=True):
+                with self.assertRaises(wc.FormatError):
+                    wc.yaz0_decompress(bomb)
+                r = wc.Converter(wc.LE).file(bomb, "Actor/Pack/A.sbactorpack")
+                self.assertEqual(r.status, wc.BROKEN)
+                self.assertEqual(r.data, bomb)
+
+    def test_packs_nested_too_deep_are_refused_cleanly(self):
+        data = wc.sarc_build([("a.txt", b"hello")], BE)
+        for i in range(wc.MAX_NEST + 3):
+            data = wc.sarc_build([(f"p{i}.sarc", data)], BE)
+            if i % 2:
+                data = yaz0_stored(data)
+        conv = wc.Converter(LE)
+        r = conv.file(data, "Deep.pack")  # (no RecursionError, no exception: a note says why)
+        self.assertNotIn(r.status, wc.OK)
+        self.assertTrue(any(n.status == wc.BROKEN and "deep" in n.detail for n in conv.notes))
+        # the game's own nesting (a Yaz0 SARC in a SARC in a Yaz0 SARC) still converts
+        ok = yaz0_stored(wc.sarc_build([("A.ssarc", yaz0_stored(wc.sarc_build([("a.byml", byml(DOC, BE))], BE)))],
+                                       BE))
+        self.assertEqual(wc.Converter(LE).file(ok, "Ok.pack").status, wc.CONVERTED)
+
 
 class Sarc(unittest.TestCase):
     FILES = [("Actor/Physics/A.bphysics", AAMP_LE), ("Actor/AnimationInfo/A.baniminfo", byml(DOC, LE)),
@@ -622,6 +652,20 @@ class Layout(unittest.TestCase):
                 self.assertIn("bigger than any game file", str(cm.exception))
             finally:
                 src.zip.close()
+
+    def test_a_junction_in_a_mod_folder_is_not_followed(self):
+        """A junction an archive restored (WinRAR does) must not make files elsewhere on the PC part of the mod."""
+        try:
+            import _winapi
+            create = _winapi.CreateJunction
+        except (ImportError, AttributeError):
+            self.skipTest("no junctions here")
+        with tempfile.TemporaryDirectory() as d:
+            outside = make(Path(d) / "outside", {"content/Pack/Secret.txt": "not the mod's"})
+            mod = make(Path(d) / "mod", {"content/Actor/Pack/ok.txt": "ok"})
+            create(str(outside), str(mod / "content" / "link"))
+            create(str(mod), str(mod / "content" / "loop"))  # (a loop: the walk must still end)
+            self.assertEqual(wc.ModSource(str(mod)).files, ["content/Actor/Pack/ok.txt"])
 
     def test_unsafe_names_are_never_mapped(self):
         bad = ["content/C:../C:../ESCAPED.txt", "content/D:/x.txt", "content/Actor\\..\\..\\x.txt",

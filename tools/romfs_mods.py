@@ -69,8 +69,13 @@ TID_RE = re.compile(r"0100[0-9a-f]{12}")
 DLC_TID_RE = re.compile(r"01007ef00011f(?!000)[0-9a-f]{3}")
 BASE_TIDS = {mi.TITLE, "01007ef00011e800"}  # the game and its update
 JUNK = {"thumbs.db", "desktop.ini", "__macosx"}
-BAD_CHARS = set('<>:"|?*\\') | {chr(i) for i in range(32)}
-RESERVED_RE = re.compile(r"(con|prn|aux|nul|com[0-9]|lpt[0-9])", re.I)
+# BIDI marks (breath.BIDI) make a name show other than it is (gpj.exe shown as exe.jpg): no game file has one
+BIDI = set("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+BAD_CHARS = set('<>:"|?*\\') | {chr(i) for i in range(32)} | BIDI
+# Names Windows keeps for devices, whatever the extension: COM and LPT with a superscript 1-3 are COM1-3 / LPT1-3
+# too, and CONIN$ / CONOUT$ are the console. Opening one opens the device, not a file.
+RESERVED_RE = re.compile(r"(con|prn|aux|nul|conin\$|conout\$|com[0-9\u00b9\u00b2\u00b3]|lpt[0-9\u00b9\u00b2\u00b3])",
+                         re.I)
 
 # why a file isn't deployed
 R_JUNK = "system or hidden"
