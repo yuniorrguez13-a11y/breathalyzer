@@ -8,9 +8,9 @@
 [mod]
 id = "botw-mod-loader.room"
 name = "More Room"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["giruka"]
-description = "Lifts the game's memory limits for modded actors at run time: a costume or model that needs more heap than its actor slot has gets it (sized from what the game itself asked for), within a cap from this PC's real RAM. When a model won't fit, the log says why in plain words (needed so many bytes, had so many) instead of a quiet 'could not create'. Part of multiplayer (the costumes)."
+description = "Lifts the game's memory limits for modded actors at run time: a costume or model that needs more heap than its actor slot has gets it (sized from what the game itself asked for), within a cap from this PC's real RAM. Textures past the game's 192 MB texture heap get extra memory too (a quarter of the free RAM, at most 1 GB), so big high-res models load instead of being shrunk. When a model won't fit, the log says why in plain words (needed so many bytes, had so many) instead of a quiet 'could not create'. Part of multiplayer (the costumes)."
 game_versions = ["1.9.0"]   # it wraps game functions by their 1.9.0 addresses
 loader_api = 2
 part_of = "botw-mod-loader.ghost"

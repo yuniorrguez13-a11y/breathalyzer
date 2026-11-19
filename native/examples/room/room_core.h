@@ -6,6 +6,7 @@
 // - Needs: for a watched actor whose heap ran out, how big its heap must be next time (from the failure's own
 //   numbers, plus half again; never more than the cap). The next try of that actor gets the extra at creation.
 // - The cap: the most one actor heap may grow, from the PC's real RAM (and a plain-words warning for graphics memory).
+// - The texture rescue: which heaps' failed allocations the extra memory takes over, how big it is made, its counts.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -22,6 +23,10 @@ int snprintf(char *buf, size_t n, const char *fmt, ...);  // (ucrtbase; the zig 
 #define ROOM_HEAPS 64        // watched actor heaps seen
 #define ROOM_NEEDS 64        // actors that need more room
 #define ROOM_MB 1048576ll
+#define ROOM_RESCUE_HEAPS 8  // heaps whose failed allocations the extra memory takes over
+#define ROOM_RESCUE_MIN (64 * ROOM_MB)    // the extra memory: the cap, but at least this (a few 4K textures)
+#define ROOM_RESCUE_MAX (1024 * ROOM_MB)  // and never more (its window in the guest's address space is 1 GB)
+#define ROOM_RESCUE_HEAD 0x1000ll         // its first page: the heap's name; the heap starts after it
 
 enum { ROOM_BOOST_AUTO, ROOM_BOOST_FIXED, ROOM_BOOST_OFF };
 
@@ -51,6 +56,25 @@ typedef struct {
     int creations, capped; // creations seen; 1: the need is over the cap (said once)
 } RoomNeed;
 
+// The texture rescue: when a heap of the list (TextureArchiveWork: textures, 192 MB fixed at boot) can't give an
+// allocation, the allocation comes from More Room's own heap instead (a sead ExpHeap the game itself builds, over
+// memory More Room adds to the guest), which the game frees as usual (docs/room.md).
+typedef struct {
+    int on;                                       // 1: rescue (the default); 0: failures stay failures
+    char heaps[ROOM_RESCUE_HEAPS][ROOM_NAME_LEN]; // the heaps rescued
+    int nheaps;
+    int state;                                    // 0 not made yet, 1 made, 2 couldn't be made (why: in `why`)
+    uint64_t base, size;                          // the extra memory (bytes, with its first page)
+    uint64_t heap;                                // the heap in it (0 until made)
+    int root;                                     // 1: listed with the game's root heaps (so `delete` finds it)
+    int64_t given, given_bytes, refused, biggest; // allocations it gave (and their bytes), couldn't give, biggest
+    int64_t redirected;                           // frees (and resizes) of its blocks sent to it from another heap
+    uint64_t free_now;                            // its free bytes after its last allocation
+    int warned;                                   // the graphics-memory warning (once)
+    int64_t want_size;                            // `room rescue size <MB>` before it is made (tests); 0: the cap's
+    char why[200];
+} RoomRescue;
+
 typedef struct {
     char names[ROOM_NAMES][ROOM_NAME_LEN];
     int nwatch;
@@ -65,6 +89,7 @@ typedef struct {
     int64_t cap;           // the most extra one actor heap gets (bytes)
     int64_t vram_budget;   // graphics memory a mod's textures may take before the warning (bytes)
     RoomMachine machine;
+    RoomRescue rescue;
 } RoomState;
 
 static inline uint32_t room_hash(const char *s) {
@@ -76,6 +101,9 @@ static inline uint32_t room_hash(const char *s) {
 static inline void room_init(RoomState *st) {
     memset(st, 0, sizeof *st);
     st->boost_mode = ROOM_BOOST_AUTO;
+    st->rescue.on = 1;
+    snprintf(st->rescue.heaps[0], ROOM_NAME_LEN, "%s", "TextureArchiveWork");
+    st->rescue.nheaps = 1;
 }
 
 // Add a watched name; 1: added or already there, 0: no room, or no name.
@@ -154,6 +182,112 @@ static inline int room_textures_warn(const RoomState *st, const char *what, int6
     snprintf(out, cap, "%s has %s of textures; this PC's graphics memory gives a mod about %s. It may load slowly, "
              "flicker or not show. A PC with more graphics memory shows it.", what, a, b);
     return 1;
+}
+
+// ---- the texture rescue (RoomRescue above)
+static inline int room_rescue_wanted(const RoomState *st, const char *heap) {
+    if (!st->rescue.on || !heap || !*heap) return 0;
+    for (int i = 0; i < st->rescue.nheaps; i++)
+        if (!strcmp(st->rescue.heaps[i], heap)) return 1;
+    return 0;
+}
+
+// Rescue one more heap's failures too (`room rescue <heap>`); 1: added or already there.
+static inline int room_rescue_add(RoomState *st, const char *heap) {
+    if (!heap || !*heap || strlen(heap) >= ROOM_NAME_LEN) return 0;
+    for (int i = 0; i < st->rescue.nheaps; i++)
+        if (!strcmp(st->rescue.heaps[i], heap)) return 1;
+    if (st->rescue.nheaps >= ROOM_RESCUE_HEAPS) return 0;
+    snprintf(st->rescue.heaps[st->rescue.nheaps++], ROOM_NAME_LEN, "%s", heap);
+    return 1;
+}
+
+// How big the extra memory is made (at the first allocation it must give, of `need` bytes): the cap from this PC's
+// RAM (room_set_cap: a quarter of the free RAM less 1.5 GB, at most 1 GB), but at least 64 MB; 64 KB pages.
+// 0 when even that can't hold the allocation (more than 1 GB at once: too big for any PC's share).
+static inline int64_t room_rescue_size(const RoomState *st, uint64_t need) {
+    int64_t size = st->cap < ROOM_RESCUE_MIN ? ROOM_RESCUE_MIN : st->cap;
+    if (st->rescue.want_size > 0) size = st->rescue.want_size < 16 * ROOM_MB ? 16 * ROOM_MB : st->rescue.want_size;
+    if (size > ROOM_RESCUE_MAX) size = ROOM_RESCUE_MAX;
+    size &= ~0xffffll;
+    if (need > (uint64_t)ROOM_RESCUE_MAX || (int64_t)need + ROOM_RESCUE_HEAD + 0x1000 > size) return 0;
+    return size;
+}
+
+// p is a block of the extra memory's heap.
+static inline int room_rescue_has(const RoomState *st, uint64_t p) {
+    return st->rescue.heap && p >= st->rescue.heap && p < st->rescue.base + st->rescue.size;
+}
+
+// The game's root heap list (sead's FixedPtrArray: s32 count, s32 room, Heap **list pointing at the slots right
+// after it) has a free slot and looks like one: 1 when the extra heap can be added.
+static inline int room_root_slot_ok(int32_t count, int32_t room, uint64_t list, uint64_t slots) {
+    return count >= 1 && room > count && room <= 16 && list == slots;
+}
+
+// An allocation it gave (request bytes; its free bytes after). 1 when it should be logged: the first 20, then every
+// 100th.
+static inline int room_rescue_given(RoomState *st, uint64_t request, uint64_t free_after) {
+    RoomRescue *r = &st->rescue;
+    r->given++;
+    r->given_bytes += (int64_t)request;
+    if ((int64_t)request > r->biggest) r->biggest = (int64_t)request;
+    r->free_now = free_after;
+    return r->given <= 20 || r->given % 100 == 0;
+}
+
+// Its bytes in use (from its free bytes after the last allocation).
+static inline int64_t room_rescue_used(const RoomState *st) {
+    const RoomRescue *r = &st->rescue;
+    if (!r->heap) return 0;
+    int64_t usable = (int64_t)r->size - ROOM_RESCUE_HEAD;
+    return r->free_now < (uint64_t)usable ? usable - (int64_t)r->free_now : 0;
+}
+
+// The log line for an allocation it gave: f is the heap's failure (its name, size, what was asked, what it had).
+static inline void room_rescue_line(const RoomState *st, const RoomFail *f, char *out, size_t cap) {
+    char a[32], b[32], c[32], d[32], e[32], g[32];
+    room_mb(a, sizeof a, (int64_t)f->heap_size);
+    room_mb(b, sizeof b, (int64_t)f->request);
+    room_mb(c, sizeof c, (int64_t)f->free_b);
+    room_mb(d, sizeof d, (int64_t)f->max_b);
+    room_mb(e, sizeof e, room_rescue_used(st));
+    room_mb(g, sizeof g, (int64_t)st->rescue.size);
+    snprintf(out, cap, "%s (%s) was full (needed %s, had %s free, largest block %s): More Room gave it from its extra "
+             "memory (%s of %s in use)", f->name, a, b, c, d, e, g);
+}
+
+// The graphics-memory warning, once, when the textures in the extra memory pass this PC's share. 1: say out.
+static inline int room_rescue_vram_warn(RoomState *st, char *out, size_t cap) {
+    if (st->rescue.warned) return 0;
+    if (!room_textures_warn(st, "The extra texture memory", room_rescue_used(st), out, cap)) return 0;
+    st->rescue.warned = 1;
+    return 1;
+}
+
+static inline void room_rescue_text(const RoomState *st, char *out, size_t cap) {
+    const RoomRescue *r = &st->rescue;
+    char heaps[ROOM_RESCUE_HEAPS * (ROOM_NAME_LEN + 2)] = "";
+    size_t n = 0;
+    for (int i = 0; i < r->nheaps && n < sizeof heaps; i++) {
+        int k = snprintf(heaps + n, sizeof heaps - n, "%s%s", i ? ", " : "", r->heaps[i]);
+        if (k > 0) n = n + (size_t)k < sizeof heaps ? n + (size_t)k : sizeof heaps - 1;
+    }
+    int k = snprintf(out, cap, "texture rescue: %s, for %s", r->on ? "on" : "off", r->nheaps ? heaps : "no heap");
+    if (k < 0 || (size_t)k >= cap) return;
+    char a[32], b[32], c[32], d[32];
+    room_mb(a, sizeof a, (int64_t)r->size);
+    room_mb(b, sizeof b, room_rescue_used(st));
+    room_mb(c, sizeof c, r->given_bytes);
+    room_mb(d, sizeof d, r->biggest);
+    if (r->state == 1)
+        snprintf(out + k, cap - (size_t)k, "; extra memory %s (%s in use%s): gave %lld allocations (%s, the biggest %s), "
+                 "%lld refused, %lld frees sent back to it", a, b, r->root ? "" : ", not a root heap: delete can't free it",
+                 (long long)r->given, c, d, (long long)r->refused, (long long)r->redirected);
+    else if (r->state == 2)
+        snprintf(out + k, cap - (size_t)k, "; the extra memory couldn't be made: %s", r->why);
+    else
+        snprintf(out + k, cap - (size_t)k, "; no heap ran out yet (the extra memory is made at the first need)");
 }
 
 // A failed allocation. Returns 1 when it should be logged (a new heap and size, or one of its first 3 repeats).
@@ -296,6 +430,8 @@ static inline void room_report(const RoomState *st, char *out, size_t cap) {
     if (!cap) return;
     out[0] = 0;
     room_cap_text(st, line, sizeof line);
+    ROOM_ADD("%s\n", line);
+    room_rescue_text(st, line, sizeof line);
     ROOM_ADD("%s\n", line);
     ROOM_ADD("boost: %s", st->boost_mode == ROOM_BOOST_OFF ? "off" : st->boost_mode == ROOM_BOOST_AUTO ? "auto" : "fixed");
     if (st->boost_mode == ROOM_BOOST_FIXED) ROOM_ADD(" %lld bytes", (long long)st->boost_fixed);

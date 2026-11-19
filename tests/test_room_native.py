@@ -5,7 +5,7 @@ priority, and runs it. Skipped when Savage Wind's zig isn't there (SWMOD_INSTALL
 
 Checks: watched names (the modded actors), the cap from the PC's RAM and graphics memory (a 16 GB gaming PC, the 8 GB
 laptop, a nearly full one), an actor's need from its own failed try and the extra its next creation gets (never for a
-game actor, never past the cap), a fixed boost, and the plain-words texts.
+game actor, never past the cap), a fixed boost, the plain-words texts, and the texture rescue's bookkeeping.
 """
 import ctypes
 import sys
@@ -69,6 +69,14 @@ class RoomNative(unittest.TestCase):
         """A model file named as its file (the cause of the Linkle and Custom failures, 2026-11-15)."""
         self.group("names", ["yaz0", "fres_name", "link_inside_costume", "own_name_ok", "tex_misnamed", "not_yaz0",
                              "name_out_of_range"])
+
+    def test_texture_rescue(self):
+        """TextureArchiveWork's failed allocations go to the extra memory (docs/room.md): which heaps, its size from
+        the PC (64 MB to 1 GB), its blocks, the game's root heap list, the log rate, the plain-words lines."""
+        self.group("rescue", ["default_textures", "add_heap", "full_stops", "off", "size_gaming_pc", "size_laptop",
+                              "size_floor", "too_big", "size_200mb_model", "size_asked", "not_made_has_nothing", "has", "root_slot",
+                              "log_rate", "used", "line", "vram_quiet", "vram_warn_once", "text_made",
+                              "text_not_made", "text_waiting"])
 
     def test_no_failures(self):
         self.assertEqual(self.fails, 0, self.report)

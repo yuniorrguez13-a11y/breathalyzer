@@ -210,6 +210,93 @@ static void t_names(void) {
     check("names", "name_out_of_range", !room_fres_name(raw, n, inside, sizeof inside), "refused");
 }
 
+// The texture rescue: TextureArchiveWork's failures (192 MB, 10-14 MB asks while the world loaded, 2026-11-15) go to
+// the extra memory, made at the cap's size (64 MB to 1 GB).
+static void t_rescue(void) {
+    room_init(&st);
+    machine(&st, 16, 10, 4, 8);
+    check("rescue", "default_textures", room_rescue_wanted(&st, "TextureArchiveWork") &&
+          !room_rescue_wanted(&st, "TeraSZSWork") && !room_rescue_wanted(&st, "Dm_Npc_Handmaid_A") &&
+          !room_rescue_wanted(&st, ""), "only TextureArchiveWork by default");
+    check("rescue", "add_heap", room_rescue_add(&st, "TeraSZSWork") && room_rescue_add(&st, "TeraSZSWork") &&
+          st.rescue.nheaps == 2 && room_rescue_wanted(&st, "TeraSZSWork"), "added once");
+    int added = 0;
+    char nm[32];
+    for (int i = 0; i < 20; i++) {
+        snprintf(nm, sizeof nm, "Heap_%d", i);
+        added += room_rescue_add(&st, nm);
+    }
+    check("rescue", "full_stops", st.rescue.nheaps == ROOM_RESCUE_HEAPS && added == ROOM_RESCUE_HEAPS - 2,
+          "%d heaps", st.rescue.nheaps);
+    st.rescue.on = 0;
+    check("rescue", "off", !room_rescue_wanted(&st, "TextureArchiveWork"), "off: failures stay failures");
+    st.rescue.on = 1;
+    check("rescue", "size_gaming_pc", room_rescue_size(&st, 14385352) == 1024 * ROOM_MB, "%lld",
+          (long long)room_rescue_size(&st, 14385352));
+    machine(&st, 8, 3.5, 0.125, 7.8);
+    check("rescue", "size_laptop", room_rescue_size(&st, 14385352) == 512 * ROOM_MB, "%lld",
+          (long long)room_rescue_size(&st, 14385352));
+    machine(&st, 8, 1.0, 0.125, 7.8);
+    check("rescue", "size_floor", room_rescue_size(&st, 14385352) == ROOM_RESCUE_MIN, "%lld",
+          (long long)room_rescue_size(&st, 14385352));
+    check("rescue", "too_big", room_rescue_size(&st, 200 * ROOM_MB) == 0 && room_rescue_size(&st, 0x80000000ull) == 0,
+          "a 200 MB ask on a 64 MB extra memory, a 2 GB ask: none");
+    machine(&st, 16, 10, 4, 8);
+    check("rescue", "size_200mb_model", room_rescue_size(&st, 200 * ROOM_MB) == 1024 * ROOM_MB,
+          "a 200 MB texture fits a gaming PC's extra memory");
+    st.rescue.want_size = 64 * ROOM_MB;
+    int64_t asked = room_rescue_size(&st, ROOM_MB);
+    st.rescue.want_size = 5 * ROOM_MB;
+    int64_t tiny = room_rescue_size(&st, ROOM_MB);
+    st.rescue.want_size = 4096 * ROOM_MB;
+    int64_t huge = room_rescue_size(&st, ROOM_MB);
+    st.rescue.want_size = 0;
+    check("rescue", "size_asked", asked == 64 * ROOM_MB && tiny == 16 * ROOM_MB && huge == ROOM_RESCUE_MAX,
+          "room rescue size: %lld, %lld, %lld", (long long)asked, (long long)tiny, (long long)huge);
+    check("rescue", "not_made_has_nothing", !room_rescue_has(&st, 0x7400001000ull), "no heap yet");
+    st.rescue.state = 1, st.rescue.base = 0x7400000000ull, st.rescue.size = 1024 * ROOM_MB;
+    st.rescue.heap = st.rescue.base + ROOM_RESCUE_HEAD;
+    st.rescue.free_now = st.rescue.size - ROOM_RESCUE_HEAD;
+    check("rescue", "has", room_rescue_has(&st, st.rescue.heap + 0x200) && room_rescue_has(&st, st.rescue.base +
+          st.rescue.size - 1) && !room_rescue_has(&st, st.rescue.base) && !room_rescue_has(&st, st.rescue.base +
+          st.rescue.size) && !room_rescue_has(&st, 0x7250000000ull), "its heap's memory only");
+    check("rescue", "root_slot", room_root_slot_ok(1, 4, 0x7001e33f98ull, 0x7001e33f98ull) &&
+          !room_root_slot_ok(4, 4, 0x7001e33f98ull, 0x7001e33f98ull) &&
+          !room_root_slot_ok(0, 4, 0x7001e33f98ull, 0x7001e33f98ull) &&
+          !room_root_slot_ok(1, 4, 0x7250000000ull, 0x7001e33f98ull) &&
+          !room_root_slot_ok(1, 4000, 0x7001e33f98ull, 0x7001e33f98ull), "a free slot in a list that looks right");
+    int logged = 0;
+    for (int i = 0; i < 250; i++) logged += room_rescue_given(&st, 10 * ROOM_MB, st.rescue.size - ROOM_RESCUE_HEAD -
+                                                                                     (uint64_t)(i + 1) * ROOM_MB);
+    check("rescue", "log_rate", logged == 20 + 2 && st.rescue.given == 250, "%d lines for 250 allocations", logged);
+    check("rescue", "used", room_rescue_used(&st) == 250 * ROOM_MB, "%lld", (long long)room_rescue_used(&st));
+    RoomFail f = fail(0, "TextureArchiveWork", 201326288, 0, 14385352);
+    f.free_b = 639232, f.max_b = 538080;
+    char line[600];
+    room_rescue_line(&st, &f, line, sizeof line);
+    check("rescue", "line", strstr(line, "TextureArchiveWork (192.0 MB) was full (needed 13.7 MB, had 0.6 MB free") &&
+          strstr(line, "250.0 MB of 1.0 GB in use"), "%s", line);
+    char warn[400];
+    check("rescue", "vram_quiet", !room_rescue_vram_warn(&st, warn, sizeof warn), "250 MB fits a 4 GB card's share");
+    machine(&st, 8, 3.5, 0.125, 0.8);  // (a small shared share: 100 MB)
+    int w1 = room_rescue_vram_warn(&st, warn, sizeof warn), w2 = room_rescue_vram_warn(&st, warn, sizeof warn);
+    check("rescue", "vram_warn_once", w1 && !w2 && strstr(warn, "extra texture memory has 250.0 MB"), "%s", warn);
+    st.rescue.root = 1, st.rescue.refused = 3, st.rescue.redirected = 7;
+    char text[600];
+    room_rescue_text(&st, text, sizeof text);
+    check("rescue", "text_made", strstr(text, "texture rescue: on, for TextureArchiveWork") &&
+          strstr(text, "gave 250 allocations") && strstr(text, "3 refused") && strstr(text, "7 frees"), "%s", text);
+    st.rescue.state = 2;
+    snprintf(st.rescue.why, sizeof st.rescue.why, "Windows gave no memory (1.0 GB asked: the PC's RAM and page file are full)");
+    room_rescue_text(&st, text, sizeof text);
+    check("rescue", "text_not_made", strstr(text, "couldn't be made: Windows gave no memory") != NULL, "%s", text);
+    room_init(&st);
+    room_rescue_text(&st, text, sizeof text);
+    static char rep[8192];
+    room_report(&st, rep, sizeof rep);
+    check("rescue", "text_waiting", strstr(text, "no heap ran out yet") && strstr(rep, "texture rescue: on"), "%s", text);
+}
+
 __declspec(dllexport) int room_selftest(char *out, int cap) {
     g_out = out, g_cap = cap, g_len = 0, g_fails = 0;
     if (cap > 0) out[0] = 0;
@@ -219,5 +306,6 @@ __declspec(dllexport) int room_selftest(char *out, int cap) {
     t_boost();
     t_text();
     t_names();
+    t_rescue();
     return g_fails;
 }

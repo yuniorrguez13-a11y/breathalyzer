@@ -11,8 +11,12 @@
 //   game's own failure, never guessed), or a fixed boost (`room boost`), within the cap.
 // - The cap: from the PC's real RAM (and the graphics memory, for the textures warning): `room` says both, and when a
 //   model won't fit it says so in plain words instead of failing quietly.
+// - Textures past the game's texture heap (TextureArchiveWork, 192 MB fixed at boot): an allocation it can't give
+//   comes from an extra game heap in memory More Room adds (the cap's size, made at the first need), and the game
+//   frees it as usual (ExpHeap's free and resizes are wrapped; the extra heap is one of the game's root heaps).
 //
-// Commands (developer mode): room | room watch <actor> | room boost <MB>|auto|off | room log on|off
+// Commands (developer mode): room | room watch <actor> | room boost <MB>|auto|off | room rescue on|off|size <MB>|<heap> |
+// room log on|off
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +57,19 @@ __declspec(dllimport) void *__stdcall CreateFileA(const char *path, uint32_t acc
 __declspec(dllimport) int __stdcall GetFileSizeEx(void *h, int64_t *size);
 __declspec(dllimport) int __stdcall ReadFile(void *h, void *buf, uint32_t n, uint32_t *got, void *ov);
 __declspec(dllimport) int __stdcall CloseHandle(void *h);
+typedef struct {
+    uint64_t base, alloc_base;
+    uint32_t alloc_protect;
+    uint16_t partition;
+    uint64_t region_size;
+    uint32_t state, protect, type;
+} RoomMemInfo;  // MEMORY_BASIC_INFORMATION (64-bit)
+__declspec(dllimport) size_t __stdcall VirtualQuery(const void *p, RoomMemInfo *out, size_t n);
+__declspec(dllimport) void *__stdcall VirtualAlloc(void *p, size_t n, uint32_t type, uint32_t protect);
+#define ROOM_MEM_COMMIT 0x1000u
+#define ROOM_MEM_RESERVE 0x2000u
+#define ROOM_MEM_FREE 0x10000u
+#define ROOM_PAGE_READWRITE 4u
 #define ROOM_INVALID_HANDLE ((void *)(intptr_t)-1)
 
 // ---- game addresses (1.9.0, docs/addresses.md)
@@ -67,6 +84,30 @@ __declspec(dllimport) int __stdcall CloseHandle(void *h);
 #define D_HEAP2 0x110                   // actor heap: its overflow heap (0: none)
 #define D_OVER 0x118                    // actor heap: bytes it put in the overflow heap
 #define ACTOR_NAME 0x10                 // actor: its name (char *)
+
+// The texture rescue (docs/room.md): TextureArchiveWork's 192 MB are fixed at boot by direct calls (no dispatcher on
+// the way, so nothing to wrap), so its failed allocations are given from an extra sead ExpHeap instead, which the
+// game's own heap code builds over memory More Room adds to the guest. The game frees those blocks as usual: through
+// the heap (ExpHeap's free and resizes, wrapped: a block of the extra heap goes to it) or through `delete` (the heap
+// lookup finds the extra heap: it is added to the game's root heaps).
+#define EXP_FREE 0x7000ea0a84ull          // ExpHeap free(heap, ptr): vtable slot 7
+#define EXP_RESIZE_FRONT 0x7000ea0e00ull  // ExpHeap slot 8 (heap, ptr, size): checks the block is its own first
+#define EXP_RESIZE_BACK 0x7000ea0f78ull   // ExpHeap slot 9 (heap, ptr, size): the same
+#define EXP_REALLOC 0x7000ea139cull       // ExpHeap slot 10 (heap, ptr, size, alignment): the same
+#define EXP_CTOR 0x7000e9ef38ull          // ExpHeap(this, SafeString *name, parent, start, size, direction, lock)
+#define EXP_INIT_FREE 0x7000e9ff94ull     // ExpHeap: its free list over its whole memory (after the constructor)
+#define ROOT_HEAPS 0x7001e33f88ull        // sead HeapMgr's root heaps: s32 count, s32 room, Heap **list, the slots
+#define HEAP_TREE_CS 0x7001e34020ull      // the lock the heap lookup (findContainHeap) holds while it reads them
+#define CS_LOCK 0x70015a0520ull           // lock / unlock a sead CriticalSection (x0)
+#define CS_UNLOCK 0x70015a0530ull
+#define SAFESTRING_VT 0x7001d66260ull     // sead::SafeString's vtable (a pointer to it; +0x10 is the vptr)
+// The extra memory: host memory right above Savage Wind's guest window (BOTW_ADDR_GUEST_END), the first free run
+// from here on, below 2^39 (the Switch's address width). Not inside the window: the guest maps its own memory into the
+// window's gaps (in game 2026-11-18 the time service's shared memory landed at 70baf22000), and Savage Wind's kernel
+// wouldn't know ours was there.
+#define RESCUE_FROM 0x7400000000ull
+#define RESCUE_TO (1ull << 39)
+static const char RESCUE_NAME[] = "MoreRoomExtra";
 
 // The actor heap's extra-size virtual (vf_102 of the actor classes, out/codemap): the base one, which returns 0. It is
 // the one of every class the costumes use (NPC, DemoNPC: in the game 2026-11-15 every costume's size went through it)
@@ -130,37 +171,200 @@ static void heap_room(struct Cpu *c, uint64_t heap, uint64_t *free_b, uint64_t *
     restore(c, &s);
 }
 
-static void note_fail(struct Cpu *c, int dual, uint64_t heap, uint64_t size, int64_t align) {
-    RoomFail f;
-    memset(&f, 0, sizeof f);
-    f.dual = dual;
-    f.heap = heap;
-    f.request = size;
-    f.align = align;
-    snprintf(f.name, sizeof f.name, "%s", cstr(rd64(heap + H_NAME)));
-    f.heap_size = rd64(heap + H_SIZE);
-    heap_room(c, heap, &f.free_b, &f.max_b);
+static void fill_fail(struct Cpu *c, int dual, uint64_t heap, uint64_t size, int64_t align, RoomFail *f) {
+    memset(f, 0, sizeof *f);
+    f->dual = dual;
+    f->heap = heap;
+    f->request = size;
+    f->align = align;
+    snprintf(f->name, sizeof f->name, "%s", cstr(rd64(heap + H_NAME)));
+    f->heap_size = rd64(heap + H_SIZE);
+    heap_room(c, heap, &f->free_b, &f->max_b);
     if (dual) {
         uint64_t h2 = rd64(heap + D_HEAP2);
-        f.over = rd64(heap + D_OVER);
+        f->over = rd64(heap + D_OVER);
         if (game_heap(h2)) {
-            snprintf(f.heap2, sizeof f.heap2, "%s", cstr(rd64(h2 + H_NAME)));
-            heap_room(c, h2, &f.free2, &f.max2);
-            f.has2 = 1;
+            snprintf(f->heap2, sizeof f->heap2, "%s", cstr(rd64(h2 + H_NAME)));
+            heap_room(c, h2, &f->free2, &f->max2);
+            f->has2 = 1;
         }
     }
     uint64_t parent = rd64(heap + H_PARENT);
-    if (game_heap(parent)) snprintf(f.parent, sizeof f.parent, "%s", cstr(rd64(parent + H_NAME)));
+    if (game_heap(parent)) snprintf(f->parent, sizeof f->parent, "%s", cstr(rd64(parent + H_NAME)));
+}
+
+static void record_fail(const RoomFail *f) {
     lock();
-    int logit = room_add_fail(&g_room, &f) && g_log && g_fail_logged < 200;
+    int logit = room_add_fail(&g_room, f) && g_log && g_fail_logged < 200;
     if (logit) g_fail_logged++;
     unlock();
     if (logit) {
         char line[512];
-        room_fail_text(&f, line, sizeof line);
+        room_fail_text(f, line, sizeof line);
         api->log("room: %s", line);
     }
 }
+
+static void note_fail(struct Cpu *c, int dual, uint64_t heap, uint64_t size, int64_t align) {
+    RoomFail f;
+    fill_fail(c, dual, heap, size, align, &f);
+    record_fail(&f);
+}
+
+// ---- the texture rescue: the extra memory and its heap (made at the first allocation it must give)
+static uint64_t g_rescue_lo, g_rescue_hi, g_rescue_heap;  // its heap's memory (lo 0: not made); set once
+static int g_rescue_making;
+static int64_t g_rescue_redirects;
+static SwModGuestFn g_ptr_orig[4];
+static const uint64_t PTR_FN[4] = {EXP_FREE, EXP_RESIZE_FRONT, EXP_RESIZE_BACK, EXP_REALLOC};
+
+// Reserve and commit size bytes in the first free run of address space from RESCUE_FROM to RESCUE_TO (64 MB steps:
+// only addresses no one has, Windows says). Its address, or 0 (and why).
+static uint64_t commit_extra(uint64_t size, char *why, size_t cap) {
+    const uint64_t step = 64ull << 20;
+    uint64_t a = RESCUE_FROM;
+    int tried = 0;
+    while (a + size <= RESCUE_TO) {
+        RoomMemInfo mi;
+        memset(&mi, 0, sizeof mi);
+        if (!VirtualQuery((const void *)(uintptr_t)a, &mi, sizeof mi) || !mi.region_size) break;
+        uint64_t end = mi.base + mi.region_size;
+        if (mi.state == ROOM_MEM_FREE && end >= a + size) {
+            tried++;
+            void *p = VirtualAlloc((void *)(uintptr_t)a, (size_t)size, ROOM_MEM_RESERVE | ROOM_MEM_COMMIT,
+                                   ROOM_PAGE_READWRITE);
+            if (p == (void *)(uintptr_t)a) return a;
+            if (p) break;  // (never: Windows gives the address asked or none)
+        }
+        uint64_t next = (end + step - 1) & ~(step - 1);
+        a = next > a ? next : a + step;
+    }
+    char mb[32];
+    room_mb(mb, sizeof mb, (int64_t)size);
+    snprintf(why, cap, tried ? "Windows gave no memory (%s asked: the PC's RAM and page file are full)"
+                             : "no free %s of address space above the guest's memory", mb);
+    return 0;
+}
+
+// Add the heap to the game's root heaps, under the heap tree's lock: then the heap lookup (`delete`) finds it.
+static int root_add(struct Cpu *c, uint64_t heap) {
+    SwModRegs *r = SWMOD_REGS(c);
+    r->x[0] = HEAP_TREE_CS;
+    api->guest_call(c, CS_LOCK);
+    volatile int32_t *count = (volatile int32_t *)(uintptr_t)ROOT_HEAPS;
+    uint64_t list = rd64(ROOT_HEAPS + 8);
+    int ok = room_root_slot_ok(count[0], count[1], list, ROOT_HEAPS + 0x10);
+    if (ok) {
+        ((volatile uint64_t *)(uintptr_t)list)[count[0]] = heap;
+        __atomic_store_n(&count[0], count[0] + 1, __ATOMIC_RELEASE);
+    }
+    r->x[0] = HEAP_TREE_CS;
+    api->guest_call(c, CS_UNLOCK);
+    return ok;
+}
+
+// Make the extra memory and its heap (registers: the caller saves them). 1 made, 0 not for this request (too big),
+// -1 never (why says it).
+static int rescue_make(struct Cpu *c, uint64_t need, char *why, size_t cap) {
+    lock();
+    int64_t size = room_rescue_size(&g_room, need);
+    unlock();
+    if (!size) {
+        snprintf(why, cap, "one allocation of %llu bytes is more than the extra memory can be", (unsigned long long)need);
+        return 0;
+    }
+    uint64_t vt = rd64(SAFESTRING_VT);
+    if (vt < BOTW_ADDR_MAIN || vt >= BOTW_ADDR_MAIN + (1ull << 32)) {
+        snprintf(why, cap, "the game's string class isn't where 1.9.0 has it");
+        return -1;
+    }
+    uint64_t base = commit_extra((uint64_t)size, why, cap), heap = base + ROOM_RESCUE_HEAD;
+    if (!base) return -1;
+    // its name (a sead SafeString, kept: the heap points at its text) in the first page, the heap after it
+    *(volatile uint64_t *)(uintptr_t)base = vt + 0x10;
+    *(volatile uint64_t *)(uintptr_t)(base + 8) = base + 0x10;
+    memcpy((void *)(uintptr_t)(base + 0x10), RESCUE_NAME, sizeof RESCUE_NAME);
+    SwModRegs *r = SWMOD_REGS(c);
+    r->x[0] = heap, r->x[1] = base, r->x[2] = 0, r->x[3] = heap, r->x[4] = (uint64_t)(size - ROOM_RESCUE_HEAD);
+    r->x[5] = 1, r->x[6] = 1;  // forward, with its own lock (game threads share it)
+    api->guest_call(c, EXP_CTOR);
+    r->x[0] = heap;
+    api->guest_call(c, EXP_INIT_FREE);
+    uint64_t free_b = vcall(c, heap, VT_FREE_SIZE, 0);
+    if (rd64(heap + H_SIZE) != (uint64_t)(size - ROOM_RESCUE_HEAD) || !free_b || free_b > (uint64_t)size) {
+        snprintf(why, cap, "the game's heap code didn't make the heap (size %llu, free %llu)",
+                 (unsigned long long)rd64(heap + H_SIZE), (unsigned long long)free_b);
+        return -1;
+    }
+    int root = root_add(c, heap);
+    lock();
+    g_room.rescue.base = base, g_room.rescue.size = (uint64_t)size, g_room.rescue.heap = heap;
+    g_room.rescue.root = root, g_room.rescue.state = 1, g_room.rescue.free_now = free_b;
+    unlock();
+    g_rescue_heap = heap, g_rescue_hi = base + (uint64_t)size;
+    __atomic_store_n(&g_rescue_lo, heap, __ATOMIC_RELEASE);
+    char mb[32];
+    room_mb(mb, sizeof mb, size);
+    api->log("room: made the extra memory for full heaps: %s, a game heap \"%s\" at %llx%s", mb, RESCUE_NAME,
+             (unsigned long long)heap, root ? "" : " (not among the root heaps: blocks freed with delete stay used)");
+    return 1;
+}
+
+// One allocation from the extra heap (registers: the caller saves them). 0: none.
+static uint64_t rescue_alloc(struct Cpu *c, uint64_t size, int64_t align) {
+    if (!__atomic_load_n(&g_rescue_lo, __ATOMIC_ACQUIRE)) {
+        int state;
+        lock();
+        state = g_room.rescue.state;
+        unlock();
+        if (state == 2 || __atomic_exchange_n(&g_rescue_making, 1, __ATOMIC_ACQUIRE)) return 0;  // (or making now)
+        char why[200] = "";
+        int ok = rescue_make(c, size, why, sizeof why);
+        if (ok < 0) {
+            lock();
+            g_room.rescue.state = 2;
+            snprintf(g_room.rescue.why, sizeof g_room.rescue.why, "%s", why);
+            unlock();
+            api->log("room: the extra memory for full heaps couldn't be made: %s", why);
+        } else if (!ok && g_log) {
+            static int said;  // (a texture system may ask again every frame: the first 10)
+            if (__atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) < 10) api->log("room: %s", why);
+        }
+        __atomic_store_n(&g_rescue_making, 0, __ATOMIC_RELEASE);
+        if (ok <= 0) return 0;
+    }
+    SwModRegs *r = SWMOD_REGS(c);
+    r->x[0] = g_rescue_heap, r->x[1] = size, r->x[2] = (uint64_t)align;
+    g_exp_orig(c);  // (the game's own tryAlloc, on the extra heap)
+    return r->x[0];
+}
+
+// ExpHeap free and resizes (dispatcher calls): a block of the extra heap goes to the extra heap, whichever heap the
+// game asks. Without this the game's code would only refuse it (it checks the block is its own first).
+static void ptr_common(struct Cpu *c, int i) {
+    SwModRegs *r = SWMOD_REGS(c);
+    uint64_t lo = __atomic_load_n(&g_rescue_lo, __ATOMIC_ACQUIRE), p = r->x[1];
+    int ours = lo && p >= lo && p < g_rescue_hi;
+    if (ours && r->x[0] != g_rescue_heap) {
+        r->x[0] = g_rescue_heap;
+        __atomic_fetch_add(&g_rescue_redirects, 1, __ATOMIC_RELAXED);
+    }
+    g_ptr_orig[i](c);
+    if (ours) {  // (its free bytes now, for `room`)
+        Saved s;
+        save(c, &s);
+        uint64_t free_b = vcall(c, g_rescue_heap, VT_FREE_SIZE, 0);
+        restore(c, &s);
+        lock();
+        g_room.rescue.free_now = free_b;
+        unlock();
+    }
+}
+static void ptr_0(struct Cpu *c) { ptr_common(c, 0); }
+static void ptr_1(struct Cpu *c) { ptr_common(c, 1); }
+static void ptr_2(struct Cpu *c) { ptr_common(c, 2); }
+static void ptr_3(struct Cpu *c) { ptr_common(c, 3); }
+static void (*const PTR_WRAP[4])(struct Cpu *) = {ptr_0, ptr_1, ptr_2, ptr_3};
 
 // ---- the wrappers
 static void exp_try_alloc(struct Cpu *c) {
@@ -172,8 +376,33 @@ static void exp_try_alloc(struct Cpu *c) {
     __atomic_fetch_add(&g_exp_fails, 1, __ATOMIC_RELAXED);
     Saved s;
     save(c, &s);
-    note_fail(c, 0, heap, size, align);
+    RoomFail f;
+    fill_fail(c, 0, heap, size, align, &f);
+    int want;
+    lock();
+    want = g_ptr_orig[0] && heap != g_rescue_heap && room_rescue_wanted(&g_room, f.name);
+    unlock();
+    uint64_t got = want ? rescue_alloc(c, size, align) : 0, free_b = 0;
+    if (got) free_b = vcall(c, g_rescue_heap, VT_FREE_SIZE, 0);
     restore(c, &s);
+    if (!got) {
+        if (want) {
+            lock();
+            g_room.rescue.refused++;
+            unlock();
+        }
+        record_fail(&f);
+        return;
+    }
+    r->x[0] = got;
+    char line[512], warn[400];
+    lock();
+    int logit = room_rescue_given(&g_room, size, free_b) && g_log;
+    int w = room_rescue_vram_warn(&g_room, warn, sizeof warn);
+    if (logit) room_rescue_line(&g_room, &f, line, sizeof line);
+    unlock();
+    if (logit) api->log("room: %s", line);
+    if (w) api->log("room: %s", warn);
 }
 
 static void dual_try_alloc(struct Cpu *c) {
@@ -376,16 +605,40 @@ static void cmd_room(int argc, char **argv, SwModReply *r) {
         unlock();
     } else if (argc >= 3 && !strcmp(argv[1], "log")) {
         g_log = strcmp(argv[2], "off") != 0;
+    } else if (argc >= 3 && !strcmp(argv[1], "rescue")) {
+        lock();
+        int ok = 1;
+        if (!strcmp(argv[2], "on")) g_room.rescue.on = 1;
+        else if (!strcmp(argv[2], "off")) g_room.rescue.on = 0;
+        else if (!strcmp(argv[2], "size") && argc >= 4) g_room.rescue.want_size = (int64_t)(atof(argv[3]) * 1048576.0);
+        else ok = room_rescue_add(&g_room, argv[2]);
+        unlock();
+        if (!ok) {
+            api->reply_fail(r, "can't rescue %s too (at most %d heaps)", argv[2], ROOM_RESCUE_HEAPS);
+            return;
+        }
     } else if (argc > 1) {
-        api->reply_fail(r, "usage: room [watch <actor> | boost <MB>|auto|off | log on|off]");
+        api->reply_fail(r, "usage: room [watch <actor> | boost <MB>|auto|off | rescue on|off|size <MB>|<heap> | log on|off]");
         return;
     }
     char *buf = (char *)malloc(16384);
     if (!buf) return;
     lock();
+    g_room.rescue.redirected = __atomic_load_n(&g_rescue_redirects, __ATOMIC_RELAXED);
     room_report(&g_room, buf, 16384);
     int nfails = g_room.nfails, nheaps = g_room.nheaps, nwatch = g_room.nwatch;
+    RoomRescue rs = g_room.rescue;
+    int64_t rs_used = room_rescue_used(&g_room);
     unlock();
+    api->reply_bool(r, "rescue_on", rs.on && g_ptr_orig[0]);
+    api->reply_int(r, "rescue_state", rs.state);
+    api->reply_int(r, "rescue_size", (int64_t)rs.size);
+    api->reply_int(r, "rescue_used", rs_used);
+    api->reply_int(r, "rescue_given", rs.given);
+    api->reply_int(r, "rescue_bytes", rs.given_bytes);
+    api->reply_int(r, "rescue_refused", rs.refused);
+    api->reply_int(r, "rescue_redirects", rs.redirected);
+    api->reply_bool(r, "rescue_root", rs.root);
     api->reply_int(r, "fails", nfails);
     api->reply_int(r, "exp_fails", g_exp_fails);
     api->reply_int(r, "dual_fails", g_dual_fails);
@@ -402,8 +655,8 @@ static void cmd_room(int argc, char **argv, SwModReply *r) {
 }
 
 static const SwModCommand commands[] = {
-    {"room", "[watch <actor> | boost <MB>|auto|off | log on|off]",
-     "More Room: heap failures, actor heaps it raised, the RAM cap", cmd_room, 0},
+    {"room", "[watch <actor> | boost <MB>|auto|off | rescue on|off|size <MB>|<heap> | log on|off]",
+     "More Room: heap failures, actor heaps it raised, the extra texture memory, the RAM cap", cmd_room, 0},
 };
 
 SWMOD_EXPORT int swmod_init(const SwModApi *a) {
@@ -434,9 +687,23 @@ SWMOD_EXPORT int swmod_init(const SwModApi *a) {
         g_hs_orig[i] = api->dispatch_lookup(HS_FN[i]);
         if (g_hs_orig[i]) api->hle_override(HS_FN[i], HS_WRAP[i], "room_actor_heap_size"), n++;
     }
+    // the texture rescue: only with all four of ExpHeap's block functions wrapped (else a rescued block couldn't be
+    // freed through the heap the game thinks it came from)
+    SwModGuestFn ptr_orig[4];
+    int nptr = 0;
+    for (int i = 0; i < 4; i++) nptr += (ptr_orig[i] = api->dispatch_lookup(PTR_FN[i])) != NULL;
+    if (nptr == 4) {
+        static const char *const names[4] = {"room_exp_free", "room_exp_resize_front", "room_exp_resize_back",
+                                             "room_exp_realloc"};
+        for (int i = 0; i < 4; i++) g_ptr_orig[i] = ptr_orig[i], api->hle_override(PTR_FN[i], PTR_WRAP[i], names[i]);
+    } else {
+        api->log("room: ExpHeap's free isn't in this game code: no texture rescue");
+    }
     api->control_register(commands, (int)(sizeof commands / sizeof *commands));
-    char cap[256];
+    char cap[256], rescue[400];
     room_cap_text(&g_room, cap, sizeof cap);
-    api->log("room: ready (%d actor heap size function%s); %s", n, n == 1 ? "" : "s", cap);
+    room_rescue_text(&g_room, rescue, sizeof rescue);
+    api->log("room: ready (%d actor heap size function%s); %s; %s", n, n == 1 ? "" : "s", cap,
+             nptr == 4 ? rescue : "no texture rescue");
     return 0;
 }
