@@ -239,7 +239,8 @@ class Checks(Temp):
         sigma = {"mod/\u03c3.txt": b"a", "mod/\u03c2.txt": b"b"}   # (Greek sigma and final sigma: one name to Windows)
         self.assertRefused(make_breath(self.tmp / "sigma.breath", sigma), "Windows sees as the same name",
                            unpack=False)
-        self.assertRefused(make_breath(self.tmp / "com.breath", {"mod/COM\u00b9.txt": b"x"}), "can't use safely",
+        # (the shared name check in romfs_mods now refuses device names like COM1 with superscripts first)
+        self.assertRefused(make_breath(self.tmp / "com.breath", {"mod/COM\u00b9.txt": b"x"}), "isn't safe",
                            unpack=False)
         flipped = {"mod/photo\u202egnp.dll": DLL}   # (shows as "photolld.png")
         self.assertRefused(make_breath(self.tmp / "flip.breath", flipped), "hidden marks", unpack=False)
