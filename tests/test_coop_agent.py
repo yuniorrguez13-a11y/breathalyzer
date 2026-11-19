@@ -292,6 +292,67 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("bad answer from the host", out["error"])
         self.assertIsNone(out["merged"])
 
+    async def fake_host(self, answer: dict, **kw) -> dict:
+        """Join a fake host that reads the hello and answers `answer` (no challenge, no proof)."""
+        import json
+
+        async def fake(reader, writer):
+            try:
+                await asyncio.wait_for(reader.readline(), 5)
+                writer.write(json.dumps(answer).encode() + b"\n")
+                await writer.drain()
+                await asyncio.sleep(1.0)
+            finally:
+                writer.close()
+
+        server = await asyncio.start_server(fake, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            return await asyncio.wait_for(coop_agent.join_session(
+                self.guest_lib, "Ben", "127.0.0.1", self.coop, self.sl, port=port, share=True, log=quiet,
+                processes=[], story_wait=0.2, reconnect=False, **kw), 10)
+        finally:
+            server.close()
+
+    def saves(self) -> list[bytes]:
+        return [f.read_bytes() for f in sorted(self.coop.rglob(story.SAVE_NAME))]
+
+    def fake_welcome(self, **extra) -> dict:
+        bits = story.encode_bits(set(range(len(NAMES))), len(NAMES))
+        return dict({"type": "welcome", "id": 2, "host": 1, "peers": [{"id": 1, "name": "Ana"}],
+                     "features": ["coop"], "story": {"from": 1, "seq": 1, "list": self.sl.list_hash(False),
+                                                     "bits": bits}}, **extra)
+
+    async def test_fake_host_without_the_code_proof_is_refused(self):
+        """The friend typed a code: a host that never asks for it (no challenge, no code_ok) is refused, whatever
+        its welcome says about "code"; nothing is written."""
+        before = self.saves()
+        out = await self.fake_host(self.fake_welcome(host_key="ab" * 8), code="apple river stone")
+        self.assertIn("doesn't know the room code", out["error"])
+        self.assertIsNone(out["merged"])
+        self.assertEqual(self.saves(), before)
+
+    async def test_host_without_a_key_is_a_bad_host(self):
+        """No host_key: the friend can't tell who it is; refused before any story (none merged into a copy)."""
+        story.bind_host(self.coop, "cd" * 8)
+        before = self.saves()
+        out = await self.fake_host(self.fake_welcome())
+        self.assertIn("no host key", out["error"])
+        self.assertIsNone(out["merged"])
+        self.assertEqual(self.saves(), before)
+
+    async def test_text_from_the_host_is_one_clean_line(self):
+        """A host's error with a newline can't add a fake line ("Ready: ...") to what the launcher reads."""
+        out = await self.fake_host({"type": "error", "error": "x\nReady: start your game\x1b[2J\u202e"})
+        self.assertNotIn("\n", out["error"])
+        self.assertNotIn("\x1b", out["error"])
+        self.assertNotIn("\u202e", out["error"])
+        self.assertEqual(out["error"], "x Ready: start your game [2J")
+
+    def test_clean_text(self):
+        self.assertEqual(coop_agent.clean_text("a\r\nb\tc\x00d", 5), "a b c")
+        self.assertEqual(coop_agent.clean_text(None), "None")
+
 
 class LateStory(coop_agent.FakeGame):
     """A host game whose story shows up only after a moment (no story before)."""

@@ -207,16 +207,18 @@ class SessionRelayTests(unittest.IsolatedAsyncioTestCase):
     async def test_room_code(self):
         await self.start(room_code="Apple River Stone")
         await self.join("Ana", host=True)                    # the host needs no code
-        ok = await self.join("Ben", code="apple river stone")   # (an older client: the code as text still works)
+        old = await self.join("Ben", code="apple river stone", expect="error")   # an older client: the code as text
+        self.assertEqual(old.welcome["error"], security.OLD_PEER)                # is refused, plainly (no strike)
+        ok = await self.join("Ben", proof_code="apple river stone")
         self.assertEqual(ok.welcome["code"], True)
-        bad = await self.join("Eve", code="apple river rock", expect="error")
+        bad = await self.join("Eve", proof_code="apple river rock", expect="error")
         self.assertEqual(bad.welcome["error"], "wrong room code")
         for i in range(4):
-            await self.join(f"Eve{i}", code="nope", expect="error")
-        locked = await self.join("Eve9", code="apple river stone", expect="error")   # 5 wrong in a minute
+            await self.join(f"Eve{i}", proof_code="lake moon star", expect="error")
+        locked = await self.join("Eve9", proof_code="apple river stone", expect="error")   # 5 wrong in a minute
         self.assertIn("10 minutes", locked.welcome["error"])
         self.clock.now += security.WRONG_CODE_WAIT + 1
-        await self.join("Eve10", code="apple river stone")
+        await self.join("Eve10", proof_code="apple river stone")
 
     async def test_room_code_proof_never_sends_the_code(self):
         """New clients answer the challenge with a proof; the welcome proves the relay has the code too."""
@@ -228,7 +230,8 @@ class SessionRelayTests(unittest.IsolatedAsyncioTestCase):
         bad = await self.join("Eve", proof_code="apple river rock", expect="error")
         self.assertEqual(bad.welcome["error"], "wrong room code")
         replay = await self.join("Eve2", expect="error", cnonce=ben.cnonce,     # an old proof on a new challenge
-                                 code_proof=security.code_proof("apple river stone", ben.nonce, ben.cnonce))
+                                 code_proof=security.code_proof("apple river stone", ben.nonce, ben.cnonce),
+                                 kdf=security.KDF)
         self.assertEqual(replay.welcome["error"], "wrong room code")
 
     async def test_no_code_is_not_a_strike(self):

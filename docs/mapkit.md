@@ -6,8 +6,10 @@ and pack it as the game wants. The castle date (`tools/castle_build.py`) and Dra
 (`tools/dragonbreath_stage2.py`) use these same helpers; a new map mod should `import mapkit` and nothing else.
 
 Status: **offline only.** The helpers make exactly the objects and packs the castle date and Dragonbreath stage 2
-write (`tests/test_mapkit.py` checks that, object for object); neither has been tried in the game yet. For now the
-low-level helpers still live in `castle_build.py` and mapkit re-exports them; your code won't notice when they move.
+write (`tests/test_mapkit.py` checks that, object for object); neither has been tried in the game yet. The code
+lives in mapkit (2026-11-18): both mods import it, their built files were byte-identical before and after the move,
+and `castle_build` keeps its old names (`CastleError`, `map_object`...) as aliases of mapkit's. mapkit doesn't load
+modman or the castle's other modules, so a mapkit-only mod needs only mapkit's own imports.
 
 ## The ideas in 30 seconds
 

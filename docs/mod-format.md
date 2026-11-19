@@ -184,6 +184,23 @@ or missing, deploy leaves it out, as if it were off.
   `python tools/modman.py disable <id>`.
 - modhost itself doesn't read `mod.toml`: modman checks it before the game starts.
 
+## Recipes record their inputs
+
+A mod built on the player's PC from their own game files (a recipe: Dragonbreath's moves, the Emotes animations)
+holds copies of the game's own files, made from the version the player had then. So it records what it read: a JSON
+file at the top of the mod folder with `"tool"` (the tool that built it, as `tools/<name>.py`) and `"inputs"` (each
+game file it read, as a path under `extracted\romfs`, and that file's SHA-256), as `moves.json` and `emotes.json` do:
+
+```json
+{"tool": "tools/dragonbreath_clips.py", "inputs": {"Pack/TitleBG.pack": "<64 hex digits>"}}
+```
+
+`deploy` compares these with the game files as they are now. When one differs (a game update), it rebuilds the mod
+when modman knows its tool (`REBUILDS` in `tools/modman.py`: the command that builds it again, keeping the mods'
+on/off and place), else it refuses that mod with one plain line: *Built for another game version: rebuild it*.
+A stale copy of the game's own files is never shipped. A dry run only says it. A recipe never turns itself on:
+the launcher turns a new recipe mod on after its build when the player picked it on.
+
 ## The examples in this repo
 
 [`native/examples/hello`](../native/examples/hello/mod.toml) and
@@ -204,7 +221,8 @@ python tools/modman.py run
 ## Not done yet
 
 The mod API has logging, control commands, `hle_override`, `guest_call` and (API 2) hooks before, after or instead
-of any function of `main`. Being built: (API 3) settings pages, mod pictures and font mods. Planned: events (each
-frame, save loaded, actor created), calling game functions by their code map name, and mods offering functions to
-other mods. Later, maybe: a script language such as Lua. For now, settings rules in `mod.toml` and C code in the DLL
-cover it.
+of any function of `main`. API 3 adds settings pages (in the game since the Mods page v2, 2026-11-18, commit
+65003e3), fonts (the easy-read font works in the game, same night) and mod pictures (built, not drawn in the game
+yet). Planned: events (each frame, save loaded, actor created), calling game functions by their code map name, and
+mods offering functions to other mods. Later, maybe: a script language such as Lua. For now, settings rules in
+`mod.toml` and C code in the DLL cover it.

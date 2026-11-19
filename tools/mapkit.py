@@ -14,16 +14,15 @@
 
 Full guide: docs/mapkit.md.
 
-FOR NOW this module is the new HOME, not yet the code's home: the low-level helpers still live in
-tools/castle_build.py (which tools/dragonbreath_stage2.py also imports), and mapkit re-exports them, so a new mod can
-`import mapkit` today and keep working when the code moves here. The steps for that move are in
-out/research/mapkit-handoff.md. The new helpers below (hash_id, FlowSpec, trigger_chain, flag_gate, talk_params,
-info_entries, yaz0_align) are mapkit's own and make exactly the objects both castle_build and dragonbreath_stage2
-write by hand today (tests/test_mapkit.py checks that, object for object).
+This module is the helpers' home: tools/castle_build.py and tools/dragonbreath_stage2.py both import it
+(castle_build keeps its old names as aliases of these). The higher-level helpers (hash_id, FlowSpec, trigger_chain,
+flag_gate, talk_params, info_entries, yaz0_align) make exactly the objects both mods wrote by hand before
+(tests/test_mapkit.py checks that, object for object).
 """
 from __future__ import annotations
 
 import copy
+import math
 import os
 import struct
 import sys
@@ -34,32 +33,208 @@ if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 
 import bcml_data as bd  # noqa: E402
-import castle_build as _cb  # noqa: E402  (the helpers' current home; see the docstring)
+import bcml_maps as bm  # noqa: E402
+import bnp  # noqa: E402
+import ukmm  # noqa: E402
+import wiiu_convert as wc  # noqa: E402
 
-# ---------------------------------------------------------------------------------------------- re-exported (castle_build)
 
-MapError = _cb.CastleError      # what every helper raises: something the mod's author (or player) has to fix
+class MapError(Exception):
+    """What every helper raises: something the mod's author (or player) has to fix. (castle_build.CastleError is
+    this same class.)"""
 
-map_object = _cb.map_object     # (key, actor, pos, ids, *, yaw=None, params=None, links=None, scale=None, extra=None)
-map_link = _cb.map_link         # (kind, dest_hash_id, params_or_None)
-tag_params = _cb.tag_params     # (flag=None): a LinkTag's parameters, reading `flag` when given
-srt_hash = _cb._srt_hash        # (key, pos, yaw): the SRTHash map_object writes
 
-check_flow = _cb.check_flow     # (spec) -> list of problems (empty: fine)
-build_flow = _cb.build_flow     # (spec) -> .bfevfl bytes, via tools/evfl.py
-evfl_ready = _cb.evfl_ready     # (shared) -> None when tools/evfl.py rebuilds that pack's flows byte for byte
-subflows_of = _cb.subflows_of   # (spec) -> the other flows it calls, sorted
-event_pack = _cb.event_pack     # (flow, data, shared, subflows, yaz0_align=0, *, source=..., other_files=False)
-carried_flows = _cb.carried_flows   # (specs, infos) -> flow -> the shared flows its pack must carry
+# ---------------------------------------------------------------------------------------------- packs
 
-read_pack = _cb._sarc_files     # (pack bytes, Yaz0 or not) -> name -> (bytes, alignment)
-unyaz0 = _cb._unyaz0            # (bytes) -> bytes, Yaz0 undone when it is Yaz0
+def unyaz0(data: bytes) -> bytes:
+    """The bytes with Yaz0 undone when they are Yaz0 (else as they are)."""
+    return wc.yaz0_decompress(data)[0] if data[:4] == b"Yaz0" else data
 
-TALK_INFO = _cb.TALK_INFO       # an event info entry for an NPC talk (InitTalk + Common)
-DOOR_INFO = _cb.DOOR_INFO       # an event info entry for a map EventTag's event (Common only)
-EVFL_API = _cb.EVFL_API
 
-SIGNAL = {"NoAutoDemoMember": False}            # the BasicSig link parameters the game's own triggers use
+def read_pack(data: bytes) -> dict[str, tuple[bytes, int]]:
+    """A pack's files (Yaz0 undone): name -> (bytes, alignment as stored)."""
+    try:
+        return {n: (d, a) for n, (d, a) in bnp.Blob(data).open().items()}
+    except (wc.FormatError, struct.error, IndexError) as e:
+        raise MapError(f"a pack can't be read ({e})") from None
+
+
+# ---------------------------------------------------------------------------------------------- map objects
+
+def srt_hash(key: str, pos, yaw) -> int:
+    """The SRTHash map_object writes (from the text of key, pos and yaw: keep yaw a float)."""
+    h = zlib.crc32(f"{key}:{pos}:{yaw}".encode())
+    return h - (1 << 32) if h >= 1 << 31 else h
+
+
+def map_object(key: str, actor: str, pos, ids: dict, *, yaw: float | None = None, params: dict | None = None,
+               links: list | None = None, scale=None, extra: dict | None = None) -> dict:
+    """A placed object: `key`'s HashId from `ids`, actor `actor` at `pos`, turned `yaw` degrees. params: its
+    !Parameters; links: its LinksToObj (map_link); scale: its Scale; extra: other fields (e.g. {"OnlyOne": True})."""
+    o: dict = {}
+    if params is not None:
+        o["!Parameters"] = params
+    o["HashId"] = ids[key]
+    if links:
+        o["LinksToObj"] = links
+    if extra:
+        o.update(extra)
+    if yaw is not None:
+        o["Rotate"] = bm.f32(math.radians(yaw))
+    o["SRTHash"] = srt_hash(key, pos, yaw)
+    if scale is not None:
+        o["Scale"] = [bm.f32(float(v)) for v in scale]
+    o["Translate"] = [bm.f32(float(v)) for v in pos]
+    o["UnitConfigName"] = actor
+    return o
+
+
+def map_link(kind: str, dest, params: dict | None) -> dict:
+    """A LinksToObj entry: a `kind` link (BasicSig, Create, Delete, PlacementLOD...) to HashId `dest`."""
+    out = {} if params is None else {"!Parameters": params}
+    out.update({"DefinitionName": kind, "DestUnitHashId": dest})
+    return out
+
+
+def tag_params(flag: str | None = None) -> dict:
+    """A LinkTag's parameters, reading save flag `flag` when given."""
+    p = {"IncrementSave": False, "MakeSaveFlag": 0, "NoChangeSignal": False}
+    if flag:
+        p["SaveFlag"] = flag
+    p["SaveFlagOnOffType"] = 0
+    return p
+
+
+# ---------------------------------------------------------------------------------------------- event flows
+
+def check_flow(spec: dict) -> list[str]:
+    """What's wrong with a flow description (an empty list: nothing)."""
+    out = []
+    ev = spec.get("events") or {}
+    for entry, key in (spec.get("entry_points") or {}).items():
+        if key not in ev:
+            out.append(f"{spec['name']}<{entry}> starts at {key}, which isn't an event")
+    for key, e in ev.items():
+        nxt = [e.get("next")] if e.get("kind") != "switch" else list((e.get("cases") or {}).values())
+        out += [f"{spec['name']}: {key} goes to {n}, which isn't an event" for n in nxt
+                if n is not None and n not in ev]
+        if e.get("kind") == "switch" and not e.get("cases"):
+            out.append(f"{spec['name']}: {key} has no cases")
+    return out
+
+
+EVFL_API = ("Flow", "params", "dump", "load", "round_trip", "NONE", "EvflError")
+
+
+def _evfl():
+    """tools/evfl.py, or None while it isn't there (or lacks what mapkit uses)."""
+    try:
+        import evfl  # noqa: PLC0415 (S0's event flow writer)
+    except ImportError:
+        return None
+    return evfl if all(hasattr(evfl, n) for n in EVFL_API) else None
+
+
+def evfl_ready(shared: dict[str, tuple[bytes, int]], source: str = "the event pack") -> str | None:
+    """None when tools/evfl.py can be trusted with our flows: it rebuilds every flow of the player's event pack
+    `shared` (source: whose pack it is, for the message) byte for byte. Else why not."""
+    evfl = _evfl()
+    if evfl is None:
+        return "tools/evfl.py isn't there yet" if not os.path.isfile(os.path.join(TOOLS, "evfl.py")) else \
+            f"tools/evfl.py lacks {', '.join(EVFL_API)}"
+    flows = {n: d for n, (d, _) in shared.items() if n.startswith("EventFlow/") and n.endswith(".bfevfl")}
+    if not flows:
+        return f"{source}'s event pack has no flows to check tools/evfl.py on"
+    for name, data in sorted(flows.items()):
+        try:
+            ok, _, why = evfl.round_trip(data)
+        except (struct.error, IndexError, ValueError, UnicodeDecodeError) as e:   # (a damaged file: not trusted)
+            ok, why = False, f"{type(e).__name__}: {e}"
+        if not ok:
+            return f"tools/evfl.py doesn't rebuild your {name} byte for byte yet ({why})"
+    return None
+
+
+def build_flow(spec: dict) -> bytes:
+    """The .bfevfl of a flow description, written by tools/evfl.py (evfl_ready first), checked by reading it back."""
+    evfl = _evfl()
+    if evfl is None:
+        raise MapError("tools/evfl.py isn't there yet")
+    try:
+        f = evfl.Flow(spec["name"])
+        at: dict[str, int] = {}
+        for key, e in spec["events"].items():
+            prm = evfl.params(**e["params"]) if e.get("params") else None
+            if e["kind"] == "action":
+                at[key] = f.act(e["actor"], e["action"], prm)
+            elif e["kind"] == "switch":
+                at[key] = f.switch(e["actor"], e["query"], None, prm)
+            elif e["kind"] == "subflow":
+                at[key] = f.subflow(e["flow"], e["entry"], prm)
+            else:
+                raise MapError(f"{spec['name']}: {key} is a {e['kind']!r} event, which mapkit doesn't write")
+        for key, e in spec["events"].items():
+            if e["kind"] == "switch":
+                for value, nxt in e["cases"].items():
+                    f.case(at[key], int(value), evfl.NONE if nxt is None else at[nxt])
+            elif e.get("next") is not None:
+                f.chain(at[key], at[e["next"]])
+        for name, key in spec["entry_points"].items():
+            f.entry(name, at[key])
+        data = evfl.dump(f)
+        if evfl.dump(evfl.load(data)) != data:
+            raise MapError(f"tools/evfl.py doesn't read back its own {spec['name']} flow the same")
+    except evfl.EvflError as e:
+        raise MapError(f"tools/evfl.py can't write the {spec['name']} flow ({e})") from None
+    return data
+
+
+def event_pack(flow: str, data: bytes, shared: dict[str, tuple[bytes, int]], subflows: list[str],
+               yaz0_align: int = 0, *, source: str, other_files: bool = False) -> tuple[bytes, int]:
+    """Event/<flow>.sbeventpack: our flow plus the game's shared flows it calls, copied from the player's event pack
+    `shared` (source: whose pack it is, for the message). other_files: also carry the pack's files that aren't flows
+    (an NPC's talk sounds, named by its event info's slink_user), as a mod that takes over an NPC's talk needs.
+    yaz0_align: the game pack's own (see yaz0_align). Returns (bytes, unpacked size)."""
+    items = [(f"EventFlow/{flow}.bfevfl", data, ukmm.new_alignment("x.bfevfl", data, 8))]
+    for sub in subflows:
+        name = f"EventFlow/{sub}.bfevfl"
+        if name not in shared:
+            raise MapError(f"{source}'s event pack has no {name}")
+        items.append((name, shared[name][0], shared[name][1]))
+    if other_files:
+        items += [(n, d, a) for n, (d, a) in sorted(shared.items()) if not n.startswith("EventFlow/")]
+    raw = bnp.sarc_build(items)
+    return ukmm.yaz0(raw, yaz0_align), len(raw)
+
+
+def subflows_of(spec: dict) -> list[str]:
+    """The other flows a flow description calls, sorted."""
+    return sorted({e["flow"] for e in spec["events"].values() if e.get("kind") == "subflow" and e.get("flow")})
+
+
+DOOR_INFO = {"is_timeline": False, "mode": "Seamless", "subfile": [{"file": "Common.bfevfl"}]}   # an event info
+#                                                       entry for a map EventTag's event (Common only)
+TALK_INFO = {"exist_enable_camera_input": True, "is_timeline": False, "mode": "Seamless",
+             "subfile": [{"file": "InitTalk.bfevfl"}, {"file": "Common.bfevfl"}]}   # an NPC talk (InitTalk + Common)
+
+
+def carried_flows(specs: dict[str, dict], infos: dict[str, dict]) -> dict[str, list[str]]:
+    """The game's shared flows each event pack carries: the ones its flow calls and the ones its event info entries
+    list (a villager's talk pack carries both InitTalk and Common, as its entry says)."""
+    out = {}
+    for name, spec in specs.items():
+        have = set(subflows_of(spec))
+        for key, info in infos.items():
+            if key.split("<", 1)[0] == name:
+                have |= {s["file"][:-len(".bfevfl")] for s in info.get("subfile") or []
+                         if isinstance(s, dict) and isinstance(s.get("file"), str) and s["file"].endswith(".bfevfl")}
+        out[name] = sorted(have - {name})
+    return out
+
+
+# ---------------------------------------------------------------------------------------------- constants
+
+SIGNAL ={"NoAutoDemoMember": False}            # the BasicSig link parameters the game's own triggers use
 AREA_BOX = {"AutoSave": False, "CameraPriority": 1, "CameraSet": "-", "ForceCalcInEvent": False, "Shape": "Box"}
 APPEAR = {"AppearFade": False}                  # a Create link's parameters
 

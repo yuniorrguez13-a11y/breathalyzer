@@ -246,3 +246,33 @@ layouts, raw and zlib arrays, and ASCII).
   size budget), so a broken or hostile file gives one `ReadError` sentence and never hangs.
 - **Not tried yet:** a real exported file (Blender, Maya, Mixamo, 3ds Max); everything above is checked against
   the hand-built test files only (**G** until then).
+
+## Weapon target (`tools/model_targets/weapon.py`)
+
+Converter stage 1: a sword-like rigid model in any format above -> a one-handed weapon mod, built on the player's PC
+from their own game files. Tests: `tests/test_model_targets_weapon.py` (a made-up GLB and OBJ sword and
+test_ak47's made-up game, with a stats file added to its donor pack).
+
+    python tools/model_targets/weapon.py build <model> --name "My Katana" --attack 30 --donor Weapon_Sword_047 \
+        --out <folder> [--desc ...] [--length 1.1] [--durability 40] [--mesh NAME ...] [--game <Savage Wind folder>]
+        [--share <folder>]
+
+- **Meshes:** every mesh with triangles, or only the `--mesh` ones. One rigid vertex list (skins are ignored, a
+  note says so). Each material's base colour picture (or its colour, linear -> sRGB) is one atlas slot (at most 8),
+  as `ak47_build.gather` does for GLB. Parts with open edges or double-sided materials also get back faces.
+- **Orientation:** the longest side is the blade, the next-longest the edge. The grip is the end nearest a bone or
+  empty named like `grip`, `handle` or `hilt`; with none, the end nearest the model's origin. Then
+  `ak47_build.to_weapon` turns it, scales it to `--length` metres (default: the donor's length) and puts the
+  grip end in the donor's hilt. The grip marker only picks the end; a pommel behind it is not moved forward yet.
+- **Mod:** the donor's model, textures and icon in their own formats (`ak47_build.build_model`, `make_textures`,
+  `build_icon`); the donor's actor pack with our model list, actor link and stats file
+  (`dragonbreath_build.actor_pack`; attack, its twin value and `--durability` set, the rest stays the donor's);
+  actor info (`attackPower`), the `IsGet_` flag, name/description texts in the donor's `ActorType/<profile>` file,
+  size entries. Output: `<out>/<mod id>/` (default id `weapon.<name>`, actor `Weapon_Sword_<Name>`).
+- **Never shared:** the built mod holds parts of the player's game (the donor's pack files), so it is private.
+  `--share <folder>` writes a recipe instead (the model file + `recipe.json`: target, model SHA-256, stats, texts,
+  licence; no game files), and only when the model may be shared: Scene meta `licence` with `may_share` true, or no
+  licence data and meta `share` == "shareable" (the player confirmed). A licence that says no always wins; then the
+  mod is built private only and a note says why.
+- **Not yet (G):** placing it in the world, two-handed / spear / shield targets, several shapes and materials (the
+  plan's stage 0 item 10), a real model checked in the game.

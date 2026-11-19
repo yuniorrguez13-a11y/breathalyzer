@@ -48,6 +48,7 @@ FIREWALL_AFTER = 60.0  # no friend reached the host in this long: say what to ch
 RECONNECT = (1.0, 2.0, 5.0, 10.0, 20.0, 30.0)
 GIVE_UP_AFTER = 600.0  # a friend's agent stops trying to reach a host that has been gone this long
 LINE_LIMIT = 4 * MAX_LINE
+MAX_PEERS = 64         # welcome peers kept (the relay's room cap is 8; more is a broken or fake host)
 ROOM = "coop"
 GAME_MINUTES_PER_SECOND = 1.0   # BotW: a day is 24 real minutes
 FATAL = ("wrong room code", "needs a room code", "too many wrong room codes", "can't join this session",
@@ -59,6 +60,13 @@ FIREWALL_HINT = ("No friend has reached you yet. If their Join list doesn't show
 
 def _fatal(reason) -> bool:
     return isinstance(reason, str) and any(f in reason for f in FATAL)
+
+
+def clean_text(v, limit: int = 200) -> str:
+    """Text from the network, safe to print for the launcher (which reads our output line by line): one line, no
+    control or format characters (newlines, escapes, bidi marks), at most `limit` characters."""
+    text = "".join(ch if ch.isprintable() else " " for ch in str(v))
+    return " ".join(text.split())[:limit]
 
 
 # -------------------------------------------------------------- stand-ins and the real game
@@ -286,6 +294,8 @@ class Line:
         """The next message ({} for a line that isn't one), None when the line closed. Raises TimeoutError."""
         try:
             line = await asyncio.wait_for(self.reader.readline(), timeout)
+        except asyncio.TimeoutError:   # (an OSError since Python 3.11: never "the line closed")
+            raise
         except ValueError:   # (a line over the limit)
             raise BadHost("bad answer from the host (a line too long)") from None
         except (ConnectionError, OSError):
@@ -312,8 +322,8 @@ def _check_welcome(msg: dict) -> dict:
     if not isinstance(peers, list):
         raise BadHost("bad answer from the host")
     out = dict(msg)
-    out["peers"] = [p for p in peers if isinstance(p, dict) and isinstance(p.get("id"), int)
-                    and isinstance(p.get("name"), str)]
+    out["peers"] = [dict(p, name=clean_text(p["name"], 32)) for p in peers[:MAX_PEERS]
+                    if isinstance(p, dict) and isinstance(p.get("id"), int) and isinstance(p.get("name"), str)]
     out["host_key"] = security.valid_fingerprint(msg.get("host_key"))
     for k in ("story", "time"):
         if not isinstance(out.get(k), dict):
@@ -333,7 +343,7 @@ async def _handshake(line: Line, hello: dict, code: str | None, timeout: float =
         if first is None:
             raise BadHost("the host closed the connection")
         if first.get("type") == "error":
-            raise BadHost(str(first.get("error"))[:200])
+            raise BadHost(clean_text(first.get("error")))
         if first.get("type") == "challenge":
             nonce = security.valid_nonce(first.get("nonce"))
     extra, cnonce = security.code_hello(code, nonce)
@@ -348,12 +358,13 @@ async def _handshake(line: Line, hello: dict, code: str | None, timeout: float =
             raise BadHost("the host closed the connection")
         kind = msg.get("type")
         if kind == "error":
-            raise BadHost(str(msg.get("error"))[:200])
+            raise BadHost(clean_text(msg.get("error")))
         if kind == "welcome":
             break
     welcome = _check_welcome(msg)
-    if welcome.get("code") is True and code and not security.answer_matches(code, nonce, cnonce,
-                                                                           welcome.get("code_ok")):
+    # (fail closed: with a code typed, the welcome MUST prove the code, whatever it says about "code"; a fake host
+    # that sends no challenge and no proof is refused)
+    if code and not security.answer_matches(code, nonce, cnonce, welcome.get("code_ok")):
         raise BadHost("this host doesn't know the room code: it may not be your friend's world")
     return welcome
 
@@ -596,7 +607,8 @@ async def join_session(library: Path, name: str, address: str, save_dir: Path, s
         """Add the host's story to the co-op copy (a worker thread). Returns what to say, or None."""
         try:
             res = story.merge_folder(save_dir, names, storyf.host_bits, backups, made_backup=st["made_backup"],
-                                     processes=processes, host_key=st["host_key"], check_words=security.check_words)
+                                     processes=processes, host_key=st["host_key"], check_words=security.check_words,
+                                     code_checked=bool(code))
         except story.GameRunning:
             storyf.changed = True
             if st["said_later"]:
@@ -628,6 +640,8 @@ async def join_session(library: Path, name: str, address: str, save_dir: Path, s
         try:
             line = await Line.open(address, port)
             welcome = await _handshake(line, hello, code)
+            if not welcome.get("host_key"):
+                raise BadHost("this host didn't say who it is (no host key): it may not be your friend's world")
         except (OSError, asyncio.TimeoutError, BadHost) as e:
             if line is not None:
                 line.close()
@@ -650,11 +664,18 @@ async def join_session(library: Path, name: str, address: str, save_dir: Path, s
                 log("The host's Breathalyzer is older: you see each other, nothing else is shared.")
             host_id = welcome.get("host")
             st["host"] = next((p["name"] for p in welcome["peers"] if p["id"] == host_id), st["host"])
-            if welcome.get("host_key"):
-                st["host_key"] = welcome["host_key"]
-                if check and security.check_words(welcome["host_key"]) != check:
-                    log("This host's check words don't match the Join list: story is off for this session.")
+            st["host_key"] = welcome["host_key"]
+            if check and security.check_words(welcome["host_key"]) != check:
+                log("This host's check words don't match the Join list: story is off for this session.")
+                st["sharing"] = False
+            if code and st["sharing"] is not False:   # (the code was checked: bind the copy to this host now)
+                try:
+                    await asyncio.to_thread(story.bind_host, save_dir, st["host_key"], security.check_words)
+                except story.WrongHost as e:
+                    log(f"{e}. Story is off for this session.")
                     st["sharing"] = False
+                except OSError as e:
+                    log(f"Couldn't mark the co-op copy for this host ({e}).")
             timef.host_id = host_id
             storyf.new_host(host_id)
             if out["joins"] > 1:
@@ -721,11 +742,11 @@ async def _follow(line: Line, game, timef, storyf, st, out, pending, n, stop, ti
             timef.host_id = msg["id"]   # (the host's agent reconnected: same host, new id)
             storyf.new_host(msg["id"])
         elif kind == "end":
-            reason[0] = out["ended"] = f"{msg.get('name')} ended the session"
+            reason[0] = out["ended"] = f"{clean_text(msg.get('name'), 32) or 'The host'} ended the session"
             log(out["ended"])
             return False
         elif kind == "bye":
-            reason[0] = str(msg.get("reason") or "the host closed the connection")[:200]
+            reason[0] = clean_text(msg.get("reason") or "the host closed the connection")
             if _fatal(reason[0]):
                 out["ended"] = out["ended"] or reason[0]
                 log(f"The host closed your connection: {reason[0]}.")

@@ -1,9 +1,11 @@
 """Base security for player-hosted sessions (docs/coop.md): the host alone controls the shared world.
 
-    room codes      3 words from WORDS (256 simple words), shown big, picked with word wheels; never in discovery and
-                    never sent as text: the relay sends a nonce ("challenge"), the friend answers code_proof() (an
-                    HMAC keyed by the code), and the relay proves it knows the code back (code_answer() in the
-                    welcome) before the friend trusts the host with anything
+    room codes      3 or 4 words from WORDS (256 simple words), shown big, picked with word wheels; never in discovery
+                    and never sent as text: the relay sends a nonce ("challenge", with "kdf"), the friend answers
+                    code_proof() (an HMAC keyed by scrypt(code, the friend's own nonce): slow on purpose, so one
+                    answer caught by a fake host can't be tried against every code in seconds), and the relay proves
+                    it knows the code back (code_answer() in the welcome) before the friend trusts the host
+                    (docs/multiplayer-security.md)
     host secret     <library>/mp/host.json: 32 random bytes that never leave the PC; the host's own client proves it
                     over 127.0.0.1, and only that connection is the host
     player key      <library>/mp/player.json: 128 random bits per install; only a fingerprint is ever sent
@@ -12,8 +14,9 @@
     limits          per message kind (KIND_RATES), wrong room codes (5 a minute from one address = 10 minutes out),
                     host-only messages from anyone else (3 in 10 s = kicked)
 
-Honest limits: a 3-word code is 16.7 million choices. It keeps strangers out and off the wire, but a fake host on
-your own network that gets one join answer can try every code on a fast PC. Check words help tell hosts apart; they
+Honest limits: a 3-word code is 16.7 million choices, 4 words 4.3 billion. A fake host on your own network that gets
+one join answer must run scrypt (about 0.14 s on a weak laptop) for every guess: weeks of CPU for 3 words, thousands
+of years for 4. Use 4 words beyond a trusted home network. Check words help tell hosts apart; they
 don't prove who a host is (a fake host can copy them). Play on networks you trust.
 
 There are no project servers: everything here runs on the players' own PCs.
@@ -28,6 +31,8 @@ import os
 import re
 import secrets
 import time
+import unicodedata
+from functools import lru_cache
 from pathlib import Path
 
 # Simple words, easy to read aloud and to tell apart. Index = one byte (check words and room codes use it).
@@ -50,7 +55,9 @@ WORDS = (
     "bison cloak comb dune fable glade jewel lark mango mitten nickel opal parrot pansy quilt saddle"
 ).split()
 _WORD_INDEX = {w: i for i, w in enumerate(WORDS)}
-CODE_WORDS = 3
+CODE_WORDS = 3          # the default room code length (what the word wheels show)
+LONG_CODE_WORDS = 4     # the longer code to offer beyond a trusted home network
+CODE_LENGTHS = (CODE_WORDS, LONG_CODE_WORDS)
 
 # Messages only the host may send. From anyone else the relay drops them; HOST_ONLY_STRIKES in HOST_ONLY_WINDOW
 # seconds gets that player kicked.
@@ -74,18 +81,20 @@ _CGNAT = ipaddress.ip_network("100.64.0.0/10")   # virtual-LAN tools (Tailscale,
 
 # -- room codes --
 
-def make_code(rng=secrets) -> str:
-    """A new room code: CODE_WORDS words from WORDS, joined by spaces ("apple river stone")."""
-    return " ".join(rng.choice(WORDS) for _ in range(CODE_WORDS))
+def make_code(rng=secrets, words: int = CODE_WORDS) -> str:
+    """A new room code: `words` (3 or 4) words from WORDS, joined by spaces ("apple river stone")."""
+    if words not in CODE_LENGTHS:
+        raise ValueError("a room code is 3 or 4 words")
+    return " ".join(rng.choice(WORDS) for _ in range(words))
 
 
 def normalize_code(text) -> str | None:
     """A room code as typed or picked ("Apple  River-stone") in its one form ("apple river stone"), or None if it
-    isn't CODE_WORDS words from the list."""
-    if not isinstance(text, str) or len(text) > 64:
+    isn't 3 or 4 words from the list."""
+    if not isinstance(text, str) or len(text) > 80:
         return None
     words = re.split(r"[\s,.-]+", text.strip().lower())
-    if len(words) != CODE_WORDS or any(w not in _WORD_INDEX for w in words):
+    if len(words) not in CODE_LENGTHS or any(w not in _WORD_INDEX for w in words):
         return None
     return " ".join(words)
 
@@ -109,28 +118,47 @@ def valid_nonce(v) -> str | None:
     return v if isinstance(v, str) and len(v) == NONCE_HEX and _HEX_RE.fullmatch(v) else None
 
 
-def _code_mac(code: str, text: str) -> str:
-    return hmac.new(normalize_code(code).encode(), text.encode(), hashlib.sha256).hexdigest()[:32]
+# The key behind code_proof and code_answer: scrypt of the code, salted with the friend's own nonce (so a fake host
+# can't build one table for everyone). Cost measured on the dev laptop (2026-11-18): n=2**14 0.14 s, 2**15 0.29 s;
+# 2**14 (16 MB) keeps a weak laptop's join quick and still makes every offline guess cost that much.
+KDF = "scrypt1"         # sent in the challenge and the hello; a hello without it is an older Breathalyzer
+SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
+OLD_PEER = "this room needs a newer Breathalyzer: please update Breathalyzer and try again"
+
+
+@lru_cache(maxsize=32)
+def _code_key(code: str, cnonce: str) -> bytes:
+    return hashlib.scrypt(code.encode(), salt=("breathalyzer-code1:" + cnonce).encode(), n=SCRYPT_N, r=SCRYPT_R,
+                          p=SCRYPT_P, maxmem=64 * 1024 * 1024, dklen=32)
+
+
+def _code_mac(code: str, cnonce: str, text: str) -> str:
+    return hmac.new(_code_key(normalize_code(code), cnonce), text.encode(), hashlib.sha256).hexdigest()[:32]
 
 
 def code_proof(code: str, nonce: str, cnonce: str) -> str:
     """A friend's answer to the relay's challenge: proves the room code without sending it."""
-    return _code_mac(code, f"breathalyzer-join:{nonce}:{cnonce}")
+    return _code_mac(code, cnonce, f"breathalyzer-join:{nonce}:{cnonce}")
 
 
 def code_answer(code: str, nonce: str, cnonce: str) -> str:
     """The relay's proof (in the welcome) that it knows the room code too: a fake host without it can't make it."""
-    return _code_mac(code, f"breathalyzer-host:{cnonce}:{nonce}")
+    return _code_mac(code, cnonce, f"breathalyzer-host:{cnonce}:{nonce}")
+
+
+def _proof_shape(v) -> bool:
+    return isinstance(v, str) and len(v) == 32 and _HEX_RE.fullmatch(v) is not None
 
 
 def proof_matches(code: str | None, nonce: str | None, cnonce, given) -> bool:
-    if not code or not nonce or valid_nonce(cnonce) is None or not isinstance(given, str):
+    """(Cheap checks first: only a well-formed answer costs the scrypt.)"""
+    if not code or not nonce or valid_nonce(cnonce) is None or not _proof_shape(given):
         return False
     return hmac.compare_digest(given.encode(), code_proof(code, nonce, cnonce).encode())
 
 
 def answer_matches(code: str | None, nonce, cnonce: str | None, given) -> bool:
-    if not code or valid_nonce(nonce) is None or not cnonce or not isinstance(given, str):
+    if not code or valid_nonce(nonce) is None or valid_nonce(cnonce) is None or not _proof_shape(given):
         return False
     return hmac.compare_digest(given.encode(), code_answer(code, nonce, cnonce).encode())
 
@@ -141,7 +169,28 @@ def code_hello(code: str | None, nonce: str | None) -> tuple[dict, str | None]:
     if not code or valid_nonce(nonce) is None or normalize_code(code) is None:
         return {}, None
     cnonce = new_nonce()
-    return {"cnonce": cnonce, "code_proof": code_proof(code, nonce, cnonce)}, cnonce
+    return {"cnonce": cnonce, "code_proof": code_proof(code, nonce, cnonce), "kdf": KDF}, cnonce
+
+
+# -- player names --
+
+# Letters from other scripts that look like Latin ones ("\u0410na" with a Cyrillic A), folded so look-alikes collide.
+_LOOKALIKE = str.maketrans({
+    "\u0430": "a", "\u0432": "b", "\u0435": "e", "\u0451": "e", "\u043a": "k", "\u043c": "m", "\u043d": "h",
+    "\u043e": "o", "\u0440": "p", "\u0441": "c", "\u0442": "t", "\u0443": "y", "\u0445": "x", "\u0456": "i",
+    "\u0457": "i", "\u0458": "j", "\u0455": "s", "\u0501": "d", "\u051b": "q", "\u051d": "w", "\u04bb": "h",
+    "\u03b1": "a", "\u03b2": "b", "\u03b5": "e", "\u03b7": "n", "\u03b9": "i", "\u03ba": "k", "\u03bd": "v",
+    "\u03bf": "o", "\u03c1": "p", "\u03c4": "t", "\u03c5": "u", "\u03c7": "x", "\u03f2": "c", "\u0131": "i",
+    "\u0142": "l", "\u00f8": "o", "0": "o", "1": "l",
+})
+
+
+def name_key(name: str) -> str:
+    """What two names must not share in one room: NFKC, case-folded, look-alike letters folded, accents and
+    separators (space _ . ' -) dropped. "Ana", "ANA", "A.na", "\u00c1na" and "\u0410na" (Cyrillic) are all "ana"."""
+    text = unicodedata.normalize("NFKC", str(name)).casefold().translate(_LOOKALIKE)
+    text = "".join(ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch))
+    return re.sub(r"[\s_.'-]+", "", text.translate(_LOOKALIKE))
 
 
 # -- the host secret and player keys --

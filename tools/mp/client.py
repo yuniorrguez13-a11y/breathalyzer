@@ -41,8 +41,8 @@ _TOOLS = str(Path(__file__).resolve().parent.parent)
 if _TOOLS not in sys.path:
     sys.path.insert(0, _TOOLS)
 from control import DEFAULT_PORT as GAME_PORT, Control, ControlError  # noqa: E402
-from mp import (DEFAULT_RELAY_PORT, DEFAULT_ROOM, ITEM_KEYS, PROTOCOL_VERSION, REL_KEYS, clean_state,  # noqa: E402
-                decode, encode, parse_hostport, safe_console, safe_name, valid_anim, valid_name, valid_on_back,
+from mp import (DEFAULT_RELAY_PORT, DEFAULT_ROOM, ITEM_KEYS, MAX_LINE, PROTOCOL_VERSION, REL_KEYS,  # noqa: E402
+                clean_state, decode, encode, parse_hostport, safe_console, safe_name, valid_anim, valid_name, valid_on_back,
                 valid_rel, valid_room)
 from mp import security, session as mp_session  # noqa: E402
 import charsel  # noqa: E402  (Who am I: ids, the wheel choice, this PC's built packs; no game data)
@@ -54,6 +54,10 @@ GIVE_UP = ("wrong room code", "needs a room code", "too many wrong room codes", 
            "doesn't know the room code")
 
 DEFAULT_HZ = 20.0
+MAX_PEERS = 16               # peers kept when the welcome gives no room cap (a fake host can't make us track more)
+PEERS_HARD_CAP = 64          # never more, whatever room cap the relay says
+LINE_LIMIT = 16 * MAX_LINE   # one line from the relay: a welcome carries every peer's last state (8 x under 4 KB);
+                             # longer is a broken or fake relay (the connection is dropped, then tried again)
 MAX_HZ = 24.0                # under the relay's 25 states a second (security.KIND_RATES), with room for jitter
 DEFAULT_DELAY = 0.1       # how far behind real time other players are drawn (s)
 STALE_AFTER = 3.0         # no news for this long: drawn grey
@@ -67,6 +71,13 @@ SPEED_GAP = 1.0           # s: no position for this long (a loading screen, a pa
 SPEED_HITCH = 0.15        # s: a step this long (and over 3 usual steps) is a frame hitch in the sender's own game
 SPEED_HOLD = 1.0          # s: a player shown at their newest sample for longer than this (no news) has speed 0
 LATE_ATTACK_SHOW = 0.3    # s: an attack the jitter buffer skipped (all of it came during a stall) is shown this long
+
+
+def clean_text(v, limit: int = 200) -> str:
+    """Text from the relay, safe to print for the launcher (which reads our output line by line): one line, no
+    control or format characters (newlines, escapes, bidi marks), at most `limit` characters."""
+    text = "".join(ch if ch.isprintable() else " " for ch in str(v))
+    return " ".join(text.split())[:limit]
 
 
 # ---------------------------------------------------------------- interpolation
@@ -352,6 +363,7 @@ class Session:
         self.peers: dict[int, Peer] = {}
         self.local: dict | None = None
         self.meter = SpeedMeter()      # our own speed, from our own positions and clock (sent as "speed")
+        self.max_peers = MAX_PEERS     # the welcome's room cap (minus us) when it gives one: new ids past it ignored
 
     def _add(self, p: dict) -> Peer | None:
         pid, name = p.get("id"), valid_name(p.get("name"))
@@ -359,6 +371,8 @@ class Session:
             return None
         peer = self.peers.get(pid)
         if peer is None:
+            if len(self.peers) >= self.max_peers:
+                return None
             peer = self.peers[pid] = Peer(pid, name, bool(p.get("bot")), self.delay)
         if "look" in p:   # (welcome peers and join carry it; a bad one is dropped, the peer stays)
             peer.look = mp_session.clean_look(p.get("look"))
@@ -370,8 +384,11 @@ class Session:
         with self.lock:
             if kind == "welcome":
                 self.my_id = msg.get("id")
-                self.room = msg.get("room", self.room)
+                self.room = valid_room(msg.get("room")) or self.room   # (shown and logged: never raw relay text)
                 self.peers = {}
+                cap = msg.get("room_cap")
+                self.max_peers = (min(cap - 1, PEERS_HARD_CAP) if isinstance(cap, int) and not isinstance(cap, bool)
+                                  and cap > 1 else MAX_PEERS)
                 for p in msg.get("peers") or []:
                     if not isinstance(p, dict):
                         continue
@@ -718,7 +735,7 @@ class RelayLink:
             try:
                 self.on_message(msg)
             except Exception as e:   # (a bad message must not end the connection)
-                self.log(f"Ignored a message: {e}")
+                self.log(f"Ignored a message: {clean_text(e)}")
 
     def send(self, msg: dict) -> bool:
         """Queue one message. False when not connected or the relay is not keeping up (the message is dropped)."""
@@ -738,7 +755,7 @@ class RelayLink:
         while not stop.is_set():
             try:
                 reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(self.host, self.port, limit=1 << 20), 5.0)
+                    asyncio.open_connection(self.host, self.port, limit=LINE_LIMIT), 5.0)
             except (OSError, asyncio.TimeoutError):
                 self.error = "can't reach the relay"
                 if not announced:
@@ -753,7 +770,7 @@ class RelayLink:
             except (OSError, ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError):
                 pass
             except Exception as e:   # (anything else, say a broken relay: say so, then reconnect as usual)
-                failed = f"{type(e).__name__}: {str(e)[:120]}"
+                failed = f"{type(e).__name__}: {clean_text(e, 120)}"
             finally:
                 was = self.connected
                 self.connected, self._writer, self.my_id, self.peer_count = False, None, None, 0
@@ -782,6 +799,8 @@ class RelayLink:
         hello = {"type": "hello", "name": self.name, "room": self.room, "version": PROTOCOL_VERSION}
         if self.bot:
             hello["bot"] = True
+        if self.code:   # (a features list, even empty: the relay's welcome then carries code_ok, its code proof)
+            hello["features"] = []
         if self.look is not None:
             hello["features"], hello["look"] = ["look"], self.look
         nonce = cnonce = None
@@ -814,7 +833,7 @@ class RelayLink:
             self.error = "no answer from the relay"
             return self.retry
         if msg["type"] == "error":
-            self.error = str(msg.get("error"))[:200]
+            self.error = clean_text(msg.get("error"))
             if any(g in self.error for g in GIVE_UP):
                 self.gave_up = self.error
                 self.log(f"The relay said no: {self.error}.")
@@ -823,11 +842,11 @@ class RelayLink:
             return max(self.retry, 10.0)
         if msg["type"] != "welcome":
             return self.retry
-        if msg.get("code") is True and self.code and not security.answer_matches(self.code, nonce, cnonce,
-                                                                                msg.get("code_ok")):
+        # (fail closed: with a code typed, the welcome MUST prove it, whatever it says about "code")
+        if self.code and not security.answer_matches(self.code, nonce, cnonce, msg.get("code_ok")):
             self.gave_up = self.error = "this host doesn't know the room code: it may not be your friend's world"
             return self.retry
-        self.my_id, self.room, self.error = msg.get("id"), msg.get("room", self.room), None
+        self.my_id, self.room, self.error = msg.get("id"), valid_room(msg.get("room")) or self.room, None
         self.speaks_look = "look" in (msg.get("features") or [])
         self.peer_count = len(msg.get("peers") or [])
         self.connected, self._writer = True, writer
@@ -854,15 +873,15 @@ class RelayLink:
                 elif kind == "leave":
                     self.peer_count = max(0, self.peer_count - 1)
                 elif kind == "error":
-                    text, at = str(msg.get("error"))[:200], self.clock()
+                    text, at = clean_text(msg.get("error")), self.clock()
                     if text.startswith("look changes too often"):
                         self.look_refused = True   # (not lost: the Runner sends the newest look again)
                     if text != self._last_error[0] or at - self._last_error[1] > 10.0:
                         self.log(f"Relay: {text}")
                         self._last_error = (text, at)
                 elif kind == "bye":
-                    self.log(f"The relay closed ({msg.get('reason') or 'no reason'}).")
-                    reason = str(msg.get("reason") or "")
+                    reason = clean_text(msg.get("reason") or "")
+                    self.log(f"The relay closed ({reason or 'no reason'}).")
                     if any(g in reason for g in GIVE_UP):
                         self.gave_up = reason
                 self._deliver(msg)

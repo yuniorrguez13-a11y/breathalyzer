@@ -817,7 +817,7 @@ def build(library: str | None = None, *, install: str | None = None, out: str | 
           on: bool = False, recipe_dir: str = RECIPE, log=None, test_spot: bool = False, events: bool = True,
           stage2: bool = True) -> dict:
     """Build the two mods and (add=True) put them in the library: the item always on, the main switch new as `on`
-    (off unless asked: it is off by default). test_spot: the developer's test blade (build_package). Returns
+    (off unless asked: it is off by default; a rebuild keeps its on/off. The launcher turns a picked recipe on itself). test_spot: the developer's test blade (build_package). Returns
     {"built", "entry", "main_entry", "notes"}."""
     recipe = load_recipe(recipe_dir)
     root = mm.resolve_library(library)
@@ -838,9 +838,6 @@ def build(library: str | None = None, *, install: str | None = None, out: str | 
         if add:
             entry, n1 = add_to_library(lib, built.folder, recipe.item_manifest["id"], log)
             main_entry, n2 = add_to_library(lib, built.main_folder, recipe.manifest["id"], log, new_on=on)
-            if on and not main_entry.get("enabled"):
-                main_entry["enabled"] = True
-                lib.save()
             notes = n1 + n2
         # stage 3 on its own: a moves build that fails is a note, the blade (built and added above) stays
         try:
@@ -1041,7 +1038,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--game", help=game_help)
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build", parents=[common], help="build the two mods and add them to the library")
-    b.add_argument("--on", action="store_true", help="turn the Dragonbreath switch on (a new one is off otherwise)")
+    b.add_argument("--on", action="store_true", help="add a new Dragonbreath switch on (it is off otherwise; a rebuild keeps on/off)")
     b.add_argument("--no-add", action="store_true", help="only write the mod folders (into --out)")
     b.add_argument("--out", help="where to write the mod folders (needed with --no-add; a new or empty folder)")
     b.add_argument("--optional", action="store_true", help="a build that can't be made says why and ends with 0")

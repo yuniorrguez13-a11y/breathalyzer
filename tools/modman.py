@@ -2614,6 +2614,142 @@ def hooks_text(hooks: dict[int, list[str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# --- stale builds: a mod built on the player's PC from their own game files records what it read (docs/mod-format.md,
+# "Recipes record their inputs"): a top-level JSON file with "tool" (the tool that built it) and "inputs" ({a path
+# under extracted\romfs: its SHA-256}). After a game update those files differ, and the built mod would ship a stale
+# copy of the game's own files over the new ones; deploy rebuilds it (a tool in REBUILDS) or refuses it.
+STALE_SAY = "Built for another game version: rebuild it"
+# the tool a record names -> the command (tools\<script> <args>; deploy adds --library and --game) that builds it
+# again (each keeps the mods' on/off and place)
+REBUILDS: dict[str, list[str]] = {
+    "tools/dragonbreath_clips.py": ["dragonbreath_build.py", "build", "--quiet"],
+    "tools/emote_build.py": ["emote_build.py", "build"],
+}
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+def build_records(root: str) -> list[dict]:
+    """The input records in a mod folder: its top-level *.json files holding {"tool": str, "inputs": {path: SHA-256}}
+    (other JSON files, and ones that can't be read, are not records)."""
+    out = []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return out
+    for n in names:
+        p = os.path.join(root, n)
+        if not n.lower().endswith(".json") or not os.path.isfile(p):
+            continue
+        try:
+            with open(p, encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            continue
+        inputs = rec.get("inputs") if isinstance(rec, dict) else None
+        if (isinstance(rec, dict) and isinstance(rec.get("tool"), str) and isinstance(inputs, dict) and inputs
+                and all(isinstance(k, str) and isinstance(v, str) and _SHA256_HEX.fullmatch(v)
+                        for k, v in inputs.items())):
+            out.append(rec)
+    return out
+
+
+def stale_inputs(root: str, romfs: str, cache: dict | None = None) -> tuple[list[str], set[str]]:
+    """(the recorded game files that differ now, or are gone; the tools whose records they are) for one mod folder.
+    cache: {path: SHA-256} shared between mods (each game file is read once per deploy)."""
+    cache = {} if cache is None else cache
+    changed: list[str] = []
+    tools: set[str] = set()
+    for rec in build_records(root):
+        for rel, want in sorted(rec["inputs"].items()):
+            parts = rel.replace("\\", "/").split("/")
+            if not rel or rel.startswith("/") or ".." in parts or ":" in rel:   # (never a path outside romfs)
+                got = None
+            else:
+                p = os.path.join(romfs, *parts)
+                if p not in cache:
+                    try:
+                        cache[p] = swr.file_sha256(p) if os.path.isfile(p) else None
+                    except OSError:
+                        cache[p] = None
+                got = cache[p]
+            if got != want:
+                changed.append(rel)
+                tools.add(rec["tool"])
+    return list(dict.fromkeys(changed)), tools
+
+
+def run_recipe_build(cmd: list[str], lib: Library, install: str) -> tuple[int, str]:
+    """Run one REBUILDS command (its own Python, the same as this one's): (exit code, what it printed)."""
+    exe = sys.executable or "python"
+    folder, base = os.path.split(exe)
+    if base.lower() == "pythonw.exe" and os.path.isfile(os.path.join(folder, "python.exe")):   # (a window's own)
+        exe = os.path.join(folder, "python.exe")
+    args = [exe, os.path.join(TOOLS, cmd[0]), *cmd[1:], "--library", lib.root, "--game", install]
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except OSError as e:
+        return 1, str(e)
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def check_stale_builds(lib: Library, install: str, *, dry_run: bool = False, runner=None) -> list[str]:
+    """The stale-build check of deploy: every enabled mod whose recorded inputs differ from the game files now is
+    rebuilt when its tool is in REBUILDS (not on a dry run: there it is only said), else refused. Returns notes;
+    raises ModmanError (one plain line per mod) for the ones that stay stale. The library is reloaded after a
+    rebuild (lib.mods changes in place)."""
+    runner = runner or run_recipe_build
+    romfs = os.path.join(install, "extracted", "romfs")
+    cache: dict = {}
+    notes: list[str] = []
+    refuse: list[str] = []
+    refused: set[str] = set()   # (their ids)
+    rebuilt: set[tuple[str, ...]] = set()
+
+    def stale_now() -> list[tuple[dict, list[str], set[str]]]:
+        found = []
+        for m in lib.enabled():
+            changed, tools = stale_inputs(os.path.join(lib.mods_dir, m["id"]), romfs, cache)
+            if changed:
+                found.append((m, changed, tools))
+        return found
+
+    for m, changed, tools in stale_now():
+        cmds = [REBUILDS.get(t) for t in sorted(tools)]
+        if not all(cmds):
+            refuse.append(f"{m['name']}: {STALE_SAY} ({_some(changed, 3)} changed).")
+            refused.add(m["id"])
+            continue
+        if dry_run:
+            notes.append(f"{m['name']}: built for another game version; deploy rebuilds it.")
+            continue
+        for cmd in cmds:
+            if tuple(cmd) in rebuilt:   # (one build can make more than one stale mod)
+                continue
+            rebuilt.add(tuple(cmd))
+            say(f"{m['name']} was built for another game version: rebuilding it ({cmd[0]})...")
+            code, text = runner(cmd, lib, install)
+            if code != 0:
+                last = [x.strip() for x in text.splitlines() if x.strip()][-1:]
+                refuse.append(f"{m['name']}: {STALE_SAY} (the rebuild failed"
+                              + (f": {one_line(last[0])}" if last else "") + ").")
+                refused.add(m["id"])
+    if rebuilt and not dry_run:
+        fresh = Library.load(lib.root)
+        if fresh is not None:
+            lib.mods[:] = fresh.mods
+        cache.clear()
+        for m, changed, _ in stale_now():
+            if m["id"] not in refused:
+                refuse.append(f"{m['name']}: {STALE_SAY} ({_some(changed, 3)} still differ after the rebuild).")
+        if not refuse:
+            notes.append("Rebuilt for this game version: " + ", ".join(sorted({c[0] for c in rebuilt})) + ".")
+    if refuse:
+        raise ModmanError("Can't deploy (rebuild it, or turn the mod off with python tools/modman.py disable <id>):\n"
+                          + "\n".join(f"  - {r}" for r in refuse))
+    return notes
+
+
 def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False, merge: bool = True) -> dict:
     """Build library\\deploy\\ from the enabled mods, in order (later mods win). Returns launch.json's contents
     (with "dry_run": true and nothing written for a dry run). merge: the packs and whole files two enabled mods
@@ -2625,9 +2761,10 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False, mer
     game = game_info(install)
     extracted = os.path.join(install, "extracted")
     exefs_dir = os.path.join(extracted, "exefs")
-    names = {m["id"]: m["name"] for m in lib.mods}
     attention: list[str] = []
-    notes: list[str] = []
+    # (a mod built from the game files of another game version is rebuilt or refused, never shipped stale)
+    notes: list[str] = check_stale_builds(lib, install, dry_run=dry_run)
+    names = {m["id"]: m["name"] for m in lib.mods}
     scans: list[tuple[dict, str, ModScan]] = []
     for m in lib.enabled():
         root = os.path.join(lib.mods_dir, m["id"])

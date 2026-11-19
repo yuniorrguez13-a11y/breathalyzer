@@ -554,6 +554,89 @@ class Deploy(Base):
         self.assertEqual(lib.read_bytes(), b"vanilla game code")
 
 
+class StaleBuilds(Base):
+    """A mod built from the player's game files records its inputs (docs/mod-format.md): deploy compares them with
+    the game files now, rebuilds a stale one when its tool is known, else refuses it; never ships it stale."""
+
+    GAME_TITLE = hashlib.sha256(b"game title").hexdigest()
+
+    def built(self, tool="tools/dragonbreath_clips.py", sha=None):
+        record = {"tool": tool, "version": 1, "inputs": {"Pack/Title.txt": sha or self.GAME_TITLE}}
+        return self.mod("Built", {"romfs/Pack/Title.txt": "built from the game title",
+                                  "moves.json": json.dumps(record), "info.json": json.dumps({"name": "x"})})
+
+    def test_a_fresh_build_deploys(self):
+        self.built()
+        with mock.patch.object(mm, "run_recipe_build") as run:
+            launch, _ = self.deploy()
+        run.assert_not_called()
+        self.assertEqual((self.deploy_dir / "overlay" / "Pack" / "Title.txt").read_text(), "built from the game title")
+
+    def test_an_unknown_tool_is_refused(self):
+        self.built(tool="tools/someone_elses.py", sha="0" * 64)
+        with mock.patch.object(mm, "run_recipe_build") as run, self.assertRaises(mm.ModmanError) as e:
+            self.deploy()
+        run.assert_not_called()
+        self.assertIn("Built: Built for another game version: rebuild it (Pack/Title.txt changed).", str(e.exception))
+        self.assertFalse((self.deploy_dir / "overlay" / "Pack" / "Title.txt").exists())   # (nothing stale shipped)
+        quiet(mm.main, ["disable", "built", "--library", str(self.libdir)])                 # (off: deploys again)
+        self.deploy()
+
+    def test_a_known_tool_rebuilds_it(self):
+        entry = self.built(sha="0" * 64)
+        calls = []
+
+        def rebuild(cmd, lib, install):
+            calls.append((cmd, lib.root, install))
+            rec = Path(lib.mods_dir) / entry["id"] / "moves.json"
+            rec.write_text(json.dumps({"tool": "tools/dragonbreath_clips.py", "inputs": {
+                "Pack/Title.txt": self.GAME_TITLE}}), encoding="utf-8")
+            return 0, "Built.\n"
+
+        with mock.patch.object(mm, "run_recipe_build", side_effect=rebuild):
+            launch, out = self.deploy()
+        self.assertEqual(calls, [(["dragonbreath_build.py", "build", "--quiet"], str(self.libdir), str(self.install))])
+        self.assertIn("rebuilding it (dragonbreath_build.py)", out)
+        self.assertIn("Rebuilt for this game version: dragonbreath_build.py.", launch["notes"])
+
+    def test_a_rebuild_that_fixes_nothing_is_refused(self):
+        self.built(sha="0" * 64)
+        with mock.patch.object(mm, "run_recipe_build", return_value=(0, "")) as run, \
+                self.assertRaises(mm.ModmanError) as e:
+            self.deploy()
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("Built for another game version: rebuild it (Pack/Title.txt still differ after the rebuild)",
+                      str(e.exception))
+        with mock.patch.object(mm, "run_recipe_build", return_value=(1, "line\nNo game files.\n")), \
+                self.assertRaises(mm.ModmanError) as e:
+            self.deploy()
+        self.assertIn("rebuild it (the rebuild failed: No game files.)", str(e.exception))
+
+    def test_a_dry_run_only_says_it(self):
+        self.built(sha="0" * 64)
+        with mock.patch.object(mm, "run_recipe_build") as run:
+            launch, _ = self.deploy(dry_run=True)
+        run.assert_not_called()
+        self.assertIn("Built: built for another game version; deploy rebuilds it.", launch["notes"])
+
+    def test_the_rebuild_commands_parse(self):
+        """Each REBUILDS command parses with the --library and --game deploy adds (and none needs --on)."""
+        import test_bundled_commands as tbc
+        for tool, cmd in mm.REBUILDS.items():
+            self.assertTrue((Path(mm.TOOLS).parent / tool).is_file(), tool)
+            self.assertNotIn("--on", cmd)
+            self.assertEqual(tbc.parse_problem(cmd[0], [*cmd[1:], "--library", "X:/l", "--game", "X:/g"]), "", cmd)
+
+    def test_records_only_and_no_path_outside_romfs(self):
+        root = self.tmp / "rec"
+        write(root, {"a.json": json.dumps({"tool": "t", "inputs": {"../../savagewind.exe": "0" * 64}}),
+                     "b.json": "not json", "c.json": json.dumps({"inputs": {"x": "0" * 64}}),
+                     "d.json": json.dumps({"tool": "t", "inputs": {"x": "short"}})})
+        self.assertEqual([r["tool"] for r in mm.build_records(str(root))], ["t"])
+        changed, tools = mm.stale_inputs(str(root), str(self.extracted / "romfs"))
+        self.assertEqual((changed, tools), (["../../savagewind.exe"], {"t"}))
+
+
 class DeploySafety(Base):
     def test_repeat_keeps_the_game_files_behind_junctions(self):
         self.mod("Data", {"exefs/data.pchtxt": DATA_PATCH})

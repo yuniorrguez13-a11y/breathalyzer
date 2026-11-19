@@ -409,17 +409,38 @@ class WrongHost(ValueError):
     """This co-op copy belongs to another host's world."""
 
 
-def _check_host(folder: Path, host_key: str | None, check_words=None) -> dict:
+def _check_host(folder: Path, host_key: str | None, check_words=None, code_checked: bool = False) -> dict:
     """The copy's mark, after checking it is for this host (its key fingerprint, and the check words it was made
-    for). A copy not bound yet is bound to this host (the caller writes the mark)."""
+    for). A copy not bound yet is bound to this host (the caller writes the mark). Fails closed: a copy bound to a
+    host is refused to a host that gives no key, and a copy bound at a room-code join ("coded") is refused to a join
+    without the code (a host key alone is public: anyone who saw it can say it)."""
     mark = read_mark(folder)
+    name = Path(folder).name
     if host_key is None:
+        if mark.get("host") is not None:
+            raise WrongHost(f"{name} belongs to one host's world and this host gave no key: its story isn't added")
         return mark
     if mark.get("host") not in (None, host_key):
-        raise WrongHost(f"{Path(folder).name} is the co-op copy of another host's world: its story isn't added")
+        raise WrongHost(f"{name} is the co-op copy of another host's world: its story isn't added")
     if check_words is not None and mark.get("check") not in (None, check_words(host_key)):
-        raise WrongHost(f"{Path(folder).name} was made for another host (other check words): its story isn't added")
+        raise WrongHost(f"{name} was made for another host (other check words): its story isn't added")
+    if mark.get("coded") is True and not code_checked:
+        raise WrongHost(f"{name} was joined with a room code: join with the code to add its story")
     return mark
+
+
+def bind_host(folder: Path, host_key: str, check_words=None) -> bool:
+    """A join whose room code was checked: bind the co-op copy to this host's key now (before any story comes), and
+    mark it "coded" so later story needs the code too. A copy bound to another key raises WrongHost (and stays as it
+    is). Not a co-op copy, or no key: nothing is done. Returns True when the mark was written."""
+    if not host_key or not is_coop_copy(folder):
+        return False
+    mark = _check_host(folder, host_key, check_words, code_checked=True)
+    if mark.get("host") == host_key and mark.get("coded") is True:
+        return False
+    mark["host"], mark["coded"] = host_key, True
+    _write_mark(folder, mark)
+    return True
 
 
 # -- the game's lock on a save folder --
@@ -608,18 +629,20 @@ class MergeResult:
 
 
 def merge_folder(folder: Path, names: list[str], bits, backups: Path, *, made_backup: bool = False,
-                 processes=None, host_key: str | None = None, check_words=None) -> MergeResult:
+                 processes=None, host_key: str | None = None, check_words=None,
+                 code_checked: bool = False) -> MergeResult:
     """Story at join: add the host's settled bits to every numbered slot of a friend's co-op copy.
 
     Holds the game's lock on the folder the whole time (GameRunning if a game uses it). Nothing to add: nothing is
     written, no backup. Else: the first merge ever keeps <backups>/before-coop/; a later one makes a timestamped
     backup (once a session: pass made_backup=True after the first). Every slot's .new is written and checked before
     any is renamed. `host_key`: the host's key fingerprint; a copy bound to another host is refused (WrongHost), an
-    unbound one is bound to this host."""
+    unbound one is bound to this host. `code_checked`: this join proved the room code (bind_host); a copy bound at
+    such a join is refused without it, and so is a bound copy with no `host_key`."""
     _need_copy(folder)
     folder = Path(folder)
     with hold(folder, processes):
-        mark = _check_host(folder, host_key, check_words)
+        mark = _check_host(folder, host_key, check_words, code_checked)
         files = slot_files(folder)
         if not files:
             raise FileNotFoundError(f"no {SAVE_NAME} in {folder}")
@@ -633,8 +656,10 @@ def merge_folder(folder: Path, names: list[str], bits, backups: Path, *, made_ba
             added[str(f)] = names_added
             if changed:
                 plans.append((f, data, new, changed))
-        if host_key is not None and mark.get("host") is None:
+        if host_key is not None and (mark.get("host") is None or (code_checked and mark.get("coded") is not True)):
             mark["host"] = host_key
+            if code_checked:
+                mark["coded"] = True
             _write_mark(folder, mark)
         if not plans:
             return MergeResult(None, added)

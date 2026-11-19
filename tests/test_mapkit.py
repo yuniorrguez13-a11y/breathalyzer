@@ -1,6 +1,6 @@
 """Tests for tools/mapkit.py (the shared map, event and flow helpers). Made-up data and the repo's own recipes only
 (castle/ and dragonbreath's stage 2 recipe): no game files are read. The equivalence tests pin mapkit's helpers to
-the objects castle_build and dragonbreath_stage2 write by hand today, so moving the code later can't change a map."""
+the objects castle_build and dragonbreath_stage2 wrote by hand, so the move into mapkit can't change a map."""
 import struct
 import sys
 import unittest
@@ -19,14 +19,31 @@ def by_hid(objs: list[dict]) -> dict[int, dict]:
 
 
 class ReexportTests(unittest.TestCase):
-    def test_same_objects_as_castle_build(self):
+    def test_castle_builds_names_are_mapkits(self):
         for name, theirs in (("map_object", cb.map_object), ("map_link", cb.map_link), ("tag_params", cb.tag_params),
                              ("check_flow", cb.check_flow), ("build_flow", cb.build_flow),
-                             ("evfl_ready", cb.evfl_ready), ("subflows_of", cb.subflows_of),
-                             ("event_pack", cb.event_pack), ("carried_flows", cb.carried_flows),
-                             ("MapError", cb.CastleError), ("TALK_INFO", cb.TALK_INFO), ("DOOR_INFO", cb.DOOR_INFO)):
+                             ("subflows_of", cb.subflows_of), ("carried_flows", cb.carried_flows),
+                             ("MapError", cb.CastleError), ("TALK_INFO", cb.TALK_INFO), ("DOOR_INFO", cb.DOOR_INFO),
+                             ("srt_hash", cb._srt_hash), ("map_object", cb._obj), ("map_link", cb._link),
+                             ("tag_params", cb._tag_params), ("read_pack", cb._sarc_files), ("unyaz0", cb._unyaz0),
+                             ("EVFL_API", cb.EVFL_API)):
             with self.subTest(name):
                 self.assertIs(getattr(mk, name), theirs)
+
+    def test_castle_error_catches_map_errors(self):
+        with self.assertRaises(cb.CastleError):
+            mk.read_pack(b"not a pack")
+
+    def test_castle_wrappers_name_the_villager(self):
+        # castle_build's evfl_ready and event_pack are mapkit's with source=VILLAGER (mapkit's own needs a source)
+        self.assertIn(cb.VILLAGER, cb.evfl_ready({}) or "")
+        self.assertIn("the event pack", mk.evfl_ready({}) or "")
+        with self.assertRaises(mk.MapError) as e:
+            cb.event_pack("F", b"x", {}, ["Common"])
+        self.assertIn(cb.VILLAGER, str(e.exception))
+        with self.assertRaises(mk.MapError) as e:
+            mk.event_pack("F", b"x", {}, ["Common"], source="Npc_X")
+        self.assertIn("Npc_X's event pack has no EventFlow/Common.bfevfl", str(e.exception))
 
     def test_all_names_exist(self):
         for name in mk.__all__:

@@ -649,6 +649,27 @@ class SessionTests(unittest.TestCase):
         s.handle({"type": "disconnected"}, now=53.0)
         self.assertEqual((s.my_id, s.peers), (None, {}))
 
+    def test_peers_are_capped(self):
+        """A broken or fake host streaming new ids can't make the client track more peers than the room holds."""
+        s = client.Session("Me")
+        s.handle({"type": "welcome", "id": 1, "room": "r", "room_cap": 3, "peers": []}, now=1.0)
+        for pid in range(2, 50):
+            s.handle(dict(state(x=1.0, t=1.0), id=pid, name=f"P{pid}"), now=1.0)
+        for pid in range(100, 150):
+            s.handle({"type": "join", "id": pid, "name": "J"}, now=1.0)
+        self.assertEqual(sorted(s.peers), [2, 3])
+        s.handle({"type": "leave", "id": 3}, now=2.0)
+        s.handle({"type": "join", "id": 7, "name": "Cy"}, now=2.0)   # (a slot came free)
+        self.assertEqual(sorted(s.peers), [2, 7])
+        s.handle({"type": "welcome", "id": 1, "room": "r", "room_cap": 10 ** 9, "peers": []}, now=3.0)
+        self.assertEqual(s.max_peers, client.PEERS_HARD_CAP)
+        s.handle({"type": "welcome", "id": 1, "room": "r", "peers": []}, now=3.0)
+        self.assertEqual(s.max_peers, client.MAX_PEERS)
+
+    def test_relay_text_is_one_clean_line(self):
+        self.assertEqual(client.clean_text("banned\nReady: go\x1b[0m‮"), "banned Ready: go [0m")
+        self.assertEqual(len(client.clean_text("x" * 999)), 200)
+
     def test_local_state_from_game_replies(self):
         s = client.Session("Me")
         msg = s.update_local(POS, CAM, now=12.34567)

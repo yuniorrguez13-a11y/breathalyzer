@@ -249,6 +249,12 @@ your game's files. The details are in [ukmm](ukmm.md).
   `deploy` merges their changes into one table (the larger size wins). Other files aren't merged: merge such mods
   with UKMM (Switch mode) first and add UKMM's output folder as one mod.
 - **Two ExeFS patches that change the same bytes** stop the deploy: turn one off.
+- **A mod built for another game version** (one built on your PC from your game files, which records the files it
+  read: [mod-format.md](mod-format.md#recipes-record-their-inputs)) is rebuilt by `deploy` when modman knows how
+  (Dragonbreath's moves, the Emotes animations), else `deploy` refuses it: *Built for another game version: rebuild
+  it*. Its old copy of the game's files is never used over the new game.
+- **A recipe mod picked on** in the window or the launcher's mod picker is built, then turned on by the window (the
+  recipe's own build commands don't turn it on).
 - **Cheats from several mods** are all kept, each mod's in its own [group](cheats.md#groups) with its own master
   code. `tools/cheats.py` starts each group from fresh registers, so a mod's cheats work as they would in its own
   file. A mod whose master code can't run (a bad word or an unknown opcode) is left out, and *Needs attention* says

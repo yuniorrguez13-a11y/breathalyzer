@@ -28,8 +28,8 @@ item mod (giruka.dragonbreath-item, stays on so saves load):
   logs/texts.json     the names of the 4 tempered levels (Dragonbreath +1..+4)
 
 The 4 tempered levels' actor packs, actor info and icons are stage 1's builder's job (level_recipes() says what
-each one is; dragonbreath_build.build_package makes them with the base blade's model). Flows are described as castle_build's flow specs and
-written by tools/evfl.py through castle_build.build_flow.
+each one is; dragonbreath_build.build_package makes them with the base blade's model). Flows are described as mapkit's flow specs and
+written by tools/evfl.py through mapkit.build_flow (docs/mapkit.md).
 """
 from __future__ import annotations
 
@@ -44,7 +44,6 @@ import re
 import struct
 import sys
 import textwrap
-import zlib
 from dataclasses import dataclass, field
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
@@ -53,7 +52,8 @@ import ak47_build as ak  # noqa: E402
 import bcml_data as bd  # noqa: E402
 import bcml_maps as bm  # noqa: E402
 import bnp  # noqa: E402
-import castle_build as cb  # noqa: E402
+import castle_build as cb  # noqa: E402  (check_logs, VILLAGER)
+import mapkit as mk  # noqa: E402  (the map, event and flow helpers: docs/mapkit.md)
 import ukmm  # noqa: E402
 
 REPO = os.path.dirname(TOOLS)
@@ -71,12 +71,11 @@ STEPS = ("Ready", "Get", "Finish")       # quest steps; each takes over Rohan's 
 ITEM_RE = re.compile(r"(Item|Weapon)_[A-Za-z0-9_]{1,40}")
 CHEST_FLAG_LIKE = "MainField_TBox_Field_Stone_"
 FADE = {"IsWaitFinish": True, "Frame": 0, "Color": 1, "DispMode": "NoLogo"}   # Rohan's own forging fade
-TALK_INFO = {"exist_enable_camera_input": True, "is_timeline": False, "mode": "Seamless",
-             "subfile": [{"file": "InitTalk.bfevfl"}, {"file": "Common.bfevfl"}]}
+TALK_INFO = mk.TALK_INFO     # Rohan's talk when the game's event info has none (InitTalk + Common)
 PLACED_PARAMS = {"AddParam": 0, "AddSpecialFlag": 0, "DropTable": "Normal", "EnemyOwnItem": False,
                  "IsCreateSharpWeapon": False, "IsEmitLandNoise": False, "IsFixedPlace": False, "IsPlayerPut": False,
                  "IsWeaponCreateByRawLife": False, "LevelSensorMode": 0, "Life": -1, "SharpWeaponJudgeType": 0}
-DEMO_INFO = {"is_timeline": False, "mode": "Seamless", "subfile": [{"file": "Common.bfevfl"}]}
+DEMO_INFO = mk.DOOR_INFO     # the first-draw scene: a map EventTag's event (Common only)
 
 
 class Stage2Error(Exception):
@@ -335,31 +334,18 @@ def flag(name: str, st: Stage2 | None = None) -> str:
     return f"{st.quest['name'] if st else FLOW}_{name}"
 
 
-class _Spec:
-    """Builds a castle_build flow spec with short keys."""
-
-    def __init__(self, name: str):
-        self.spec = {"name": name, "entry_points": {}, "events": {}}
+class _Spec(mk.FlowSpec):
+    """mapkit's FlowSpec (a mapkit flow spec with short keys), raising Stage2Error for a key used twice."""
 
     def ev(self, key: str, e: dict) -> str:
-        if key in self.spec["events"]:
-            raise Stage2Error(f"two events called {key}")
-        self.spec["events"][key] = e
-        return key
-
-    def act(self, key, actor, action, params, nxt):
-        return self.ev(key, {"kind": "action", "actor": actor, "action": action, "params": params, "next": nxt})
-
-    def sw(self, key, actor, query, params, cases):
-        return self.ev(key, {"kind": "switch", "actor": actor, "query": query, "params": params, "cases": cases})
-
-    def sub(self, key, flow, entry, params, nxt):
-        return self.ev(key, {"kind": "subflow", "flow": flow, "entry": entry, "params": params, "next": nxt})
+        try:
+            return super().ev(key, e)
+        except mk.MapError as err:
+            raise Stage2Error(str(err)) from None
 
 
 def _talk(st: Stage2, actor: str, label: str, close: bool) -> dict:
-    return {"MessageId": f"EventFlowMsg/{FLOW}:{label}", "IsWaitFinish": True, "IsCloseMessageDialog": close,
-            "ASName": "", "IsBecomingSpeaker": True, "IsOverWriteLabelActorName": False}
+    return mk.talk_params(FLOW, label, close)
 
 
 def _flag_on(name: str) -> dict:
@@ -544,9 +530,9 @@ def flow_spec(st: Stage2) -> dict:
 
 def flow_problems(st: Stage2, spec: dict, labels: set[str] | None = None, items: set[str] | None = None,
                   flags: set[str] | None = None) -> list[str]:
-    """castle_build's flow checks plus ours: every message has a label, every item and flag exists, every event is
+    """mapkit's flow checks plus ours: every message has a label, every item and flag exists, every event is
     reachable from an entry."""
-    out = cb.check_flow(spec)
+    out = mk.check_flow(spec)
     labels = set(messages(st)) if labels is None else labels
     ev = spec["events"]
     seen: set[str] = set()
@@ -628,11 +614,9 @@ def quests_log(st: Stage2, nodes: list) -> dict:
 
 
 def event_infos(spec: dict, game_talk: dict | None = None) -> dict:
-    out = {}
-    for entry in spec["entry_points"]:
-        info = DEMO_INFO if entry == "FirstDraw" else (game_talk if isinstance(game_talk, dict) else TALK_INFO)
-        out[f"{spec['name']}<{entry}>"] = copy.deepcopy(info)
-    return out
+    """The event info entries: FirstDraw as a map EventTag's event (DEMO_INFO), the rest as Rohan's own talk
+    (TALK_INFO when the game's has none)."""
+    return mk.info_entries(spec, game_talk, {"FirstDraw": DEMO_INFO})
 
 
 # ------------------------------------------------------------------------------------------------ the map
@@ -648,11 +632,7 @@ def local_to_world(cave: dict, along: float, across: float) -> tuple[float, floa
 
 def hid(key: str, used: set[int]) -> bd.U32:
     """A HashId for one of our objects: from its name, so a rebuild gives the same one; never one in use."""
-    h = zlib.crc32(f"giruka.dragonbreath/stage2/{key}".encode())
-    while h in used or h == 0:
-        h = (h + 1) & 0xFFFFFFFF
-    used.add(h)
-    return bd.U32(h)
+    return mk.hash_id("giruka.dragonbreath/stage2", key, used)
 
 
 def _strip(params: dict | None) -> dict | None:
@@ -708,19 +688,19 @@ def cave_objects(st: Stage2, used: set[int], ground, params_like: dict[str, dict
 
     # the rock (the game's Gorko Tunnel pair: the near model links its far model as PlacementLOD)
     pos = [cave["origin"][0], oy, cave["origin"][2]]
-    res.static.append(cb.map_object("rock_far", cave["rock_far"], pos, ids, yaw=yaw, extra={"OnlyOne": True}))
-    res.static.append(cb.map_object("rock", cave["rock"], pos, ids, yaw=yaw, extra={"OnlyOne": True},
-                              links=[cb.map_link("PlacementLOD", ids["rock_far"], None)]))
+    res.static.append(mk.map_object("rock_far", cave["rock_far"], pos, ids, yaw=yaw, extra={"OnlyOne": True}))
+    res.static.append(mk.map_object("rock", cave["rock"], pos, ids, yaw=yaw, extra={"OnlyOne": True},
+                              links=[mk.map_link("PlacementLOD", ids["rock_far"], None)]))
     for o in cave["objects"]:
         a = o["actor"]
         p = params_for(a, o.get("params"))
         if a.startswith("Item_"):
             p = dict(p or PLACED_PARAMS)      # (a loose item: the params stage 1's blade lies with)
             res.loose[o["key"]] = (a, int(ids[o["key"]]))
-        res.dynamic.append(cb.map_object(o["key"], a, spot(o["key"], o["at"], float(o.get("lift", 0.0))), ids,
+        res.dynamic.append(mk.map_object(o["key"], a, spot(o["key"], o["at"], float(o.get("lift", 0.0))), ids,
                                    yaw=yaw + float(o.get("yaw", 0.0)), params=p))
     ch = cave["chest"]
-    res.dynamic.append(cb.map_object("chest", ch["actor"], spot("chest", ch["at"]), ids, yaw=yaw + float(ch.get("yaw", 0)),
+    res.dynamic.append(mk.map_object("chest", ch["actor"], spot("chest", ch["at"]), ids, yaw=yaw + float(ch.get("yaw", 0)),
                                params=params_for(ch["actor"], {"DropActor": chest_drop, "EnableRevival": False})))
     res.chest_hid = int(ids["chest"])
     if not with_events:
@@ -729,29 +709,17 @@ def cave_objects(st: Stage2, used: set[int], ground, params_like: dict[str, dict
         return res
     # Daruk's spirit: made while Dragonbreath_DarukOn is on (a LinkTagAnd that only reads the flag)
     dk = cave["daruk"]
-    res.dynamic.append(cb.map_object("daruk", dk["actor"], spot("daruk", dk["at"]), ids, yaw=yaw + float(dk.get("yaw", 0)),
+    res.dynamic.append(mk.map_object("daruk", dk["actor"], spot("daruk", dk["at"]), ids, yaw=yaw + float(dk.get("yaw", 0)),
                                params=params_for(dk["actor"]), extra={"OnlyOne": True}))
-    res.dynamic.append(cb.map_object("daruk_gate", "LinkTagAnd", spot("daruk_gate", dk["at"]), ids,
-                               params=cb.tag_params(flag("DarukOn", st)),
-                               links=[cb.map_link("Create", ids["daruk"], {"AppearFade": False})]))
+    res.dynamic.append(mk.flag_gate("daruk_gate", spot("daruk_gate", dk["at"]), ids, flag("DarukOn", st),
+                                    creates=["daruk"]))
     # the first-draw trigger: made once the blade is got (IsGet), deleted once the scene has played (FirstDraw)
     fa = cave["first_draw_area"]
     at = spot("fd_area", fa["at"])
-    sig = {"NoAutoDemoMember": False}
-    res.dynamic.append(cb.map_object("fd_area", "Area", at, ids, yaw=yaw, scale=fa.get("half", [3.0, 3.0, 3.0]),
-                               params={"AutoSave": False, "CameraPriority": 1, "CameraSet": "-",
-                                       "ForceCalcInEvent": False, "Shape": "Box"},
-                               links=[cb.map_link("BasicSig", ids["fd_relay"], sig)]))
-    res.dynamic.append(cb.map_object("fd_relay", "LinkTagAnd", at, ids, params=cb.tag_params(),
-                               links=[cb.map_link("BasicSig", ids["fd_event"], sig)]))
-    res.dynamic.append(cb.map_object("fd_event", "EventTag", at, ids,
-                               params={"EventFlowEntryName": "FirstDraw", "EventFlowName": FLOW,
-                                       "IsEndlessEvent": False, "LaunchEventByOffSignal": False,
-                                       "LaunchEventByOnSignal": True}))
-    res.dynamic.append(cb.map_object("fd_gate", "LinkTagAnd", at, ids, params=cb.tag_params(f"IsGet_{st.base_actor}"),
-                               links=[cb.map_link("Create", ids["fd_area"], {"AppearFade": False})]))
-    res.dynamic.append(cb.map_object("fd_off", "LinkTagAnd", at, ids, params=cb.tag_params(flag("FirstDraw", st)),
-                               links=[cb.map_link("Delete", ids["fd_area"], None)]))
+    res.dynamic += mk.trigger_chain("fd", at, ids, flow=FLOW, entry="FirstDraw", half=fa.get("half", [3.0, 3.0, 3.0]),
+                                    yaw=yaw)
+    res.dynamic.append(mk.flag_gate("fd_gate", at, ids, f"IsGet_{st.base_actor}", creates=["fd_area"]))
+    res.dynamic.append(mk.flag_gate("fd_off", at, ids, flag("FirstDraw", st), deletes=["fd_area"]))
     res.static.sort(key=lambda o: int(o["HashId"]))
     res.dynamic.sort(key=lambda o: int(o["HashId"]))
     return res
@@ -854,7 +822,7 @@ def merge_logs(folder: str, logs: dict[str, object]) -> None:
 def check_logs(logs: dict[str, str]) -> None:
     try:
         cb.check_logs(logs)
-    except cb.CastleError as e:
+    except mk.MapError as e:
         raise Stage2Error(str(e).replace("the castle's", "Dragonbreath stage 2's")) from None
 
 
@@ -876,7 +844,7 @@ def game_eventinfo(game) -> dict:
     return bd.byml_load(_unyaz0(game.bootup().child("Event/EventInfo.product.sbyml").raw))
 
 
-_unyaz0 = ak._unyaz0
+_unyaz0 = mk.unyaz0
 
 
 def smith_pack(game, st: Stage2) -> dict[str, tuple[bytes, int]]:
@@ -923,7 +891,7 @@ def build_stage2(game, st: Stage2, item_dir: str, main_dir: str, *, used: set[in
     shared = smith_pack(game, st)
     why = None if events else "turned off"
     if why is None:
-        why = cb.evfl_ready(shared)
+        why = mk.evfl_ready(shared, source=st.smith_actor)
     if why:
         res.notes.append(f"event flows not built ({why}): the cave and chest are placed, but no quest, talk or "
                          "first-draw scene")
@@ -937,18 +905,18 @@ def build_stage2(game, st: Stage2, item_dir: str, main_dir: str, *, used: set[in
     else:
         _log(log, "Writing the event flow (tools/evfl.py)...")
         try:
-            data = cb.build_flow(spec)
-        except cb.CastleError as e:
+            data = mk.build_flow(spec)
+        except mk.MapError as e:
             raise Stage2Error(str(e)) from None
         infos = event_infos(spec, (game_eventinfo(game) or {}).get(f"{st.smith_actor}<Talk>"))
         raw = game.read(f"Event/{st.smith_actor}.sbeventpack")
-        align = struct.unpack_from(">I", raw, 8)[0] if raw[:4] == b"Yaz0" else 0
+        align = mk.yaz0_align(raw)
         # the game's InitTalk and Common, Rohan's own flow (his Boulder Breaker re-forge) and his pack's other files
         # (the forging sounds his talk's event info names as slink_user)
         try:
-            pdata, plen = cb.event_pack(FLOW, data, shared, sorted({"InitTalk", "Common", st.smith_actor}), align,
+            pdata, plen = mk.event_pack(FLOW, data, shared, sorted({"InitTalk", "Common", st.smith_actor}), align,
                                         source=st.smith_actor, other_files=True)
-        except cb.CastleError as e:
+        except mk.MapError as e:
             raise Stage2Error(str(e)) from None
         ak._write(os.path.join(main_dir, ak.BASE_TID, "romfs", "Event", f"{FLOW}.sbeventpack"), pdata)
         main_logs["eventinfo.yml"] = infos
@@ -1025,16 +993,16 @@ def check(library: str | None = None, *, install: str | None = None, folder: str
     # the flow: evfl rebuilds Rohan's pack, ours writes and reads back, every action/query is a known one
     try:
         shared = smith_pack(game, st)
-        why = cb.evfl_ready(shared)
+        why = mk.evfl_ready(shared, source=st.smith_actor)
         if why:
             out.append(why)
         else:
             spec = flow_spec(st)
             cm = cave_objects(st, set(), lambda x, z: 0.0, {}, chest_drop=st.base_actor)
             out += flow_problems(st, spec, items=items | set(st.level_actors()), flags=all_flags(st, cm))
-            cb.build_flow(spec)
+            mk.build_flow(spec)
             out += unknown_calls(spec, known_calls(game, st, log))
-    except (Stage2Error, cb.CastleError) as e:
+    except (Stage2Error, mk.MapError) as e:
         out.append(str(e))
     # Daruk's poses the scene asks for are in his AS list
     try:

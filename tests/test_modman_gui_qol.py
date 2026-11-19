@@ -4,6 +4,7 @@ on/off, the last mods that worked, search, mod sets, mod info, pictures, setting
 Everything is made up in temp folders and no game starts (Popen is mocked). The one window test keeps its window
 hidden (root.withdraw())."""
 import sys
+import unittest
 from pathlib import Path
 from unittest import mock
 
@@ -431,6 +432,44 @@ class HiddenWindow(GuiBase):
         view.on_play()
         self.settle()
         self.assertEqual(FakeProc.started[0].argv, [str(self.install / "savagewind.exe")])
+
+
+class RecipePickedOn(unittest.TestCase):
+    """A new recipe mod picked on is built, then turned on by the window: its build never has to turn it on (the
+    Dragonbreath build's old --on). The fixture is test_launcher's mod picker (Picker), borrowed, not inherited."""
+    PERF = "botw-mod-loader.perf-effects"
+
+    def setUp(self):
+        import test_launcher as tl
+        self.tl = tl
+        tl.Picker.setUp(self)
+
+    def make(self, *args, **kw):
+        return self.tl.Play.make(self, *args, **kw)
+
+    def test_a_new_recipe_picked_on_is_turned_on(self):
+        ctl = self.make(mods=[])
+        fake = self.mm
+
+        def toggle(lever, value):   # (the recipe's build adds its mod OFF, as Dragonbreath's does without --on)
+            if not any(m["id"] == self.PERF for m in fake.mods):
+                fake.mods.append({"id": self.PERF, "name": "Performance: effects off", "enabled": False,
+                                  "kinds": ["romfs"]})
+            return 0
+
+        fake.cmd_toggle = toggle
+        with mock.patch.object(gui, "TOOLS", str(self.app / "tools")):
+            ctl.install_picked([m for m in self.mods if m["id"] == self.PERF], {self.PERF: True})
+        self.assertTrue(ctl.settle())
+        self.assertTrue(ctl.row(self.PERF).on)
+        self.assertEqual(ctl.status.lines, ["Your mods are ready.", "Press Play. You can turn them on or off below."])
+
+    def test_a_new_recipe_left_off_gets_no_switch_step(self):
+        ctl = self.make(mods=[])
+        ctl.install_picked([m for m in self.mods if m["id"] == self.PERF], {self.PERF: False})
+        self.assertTrue(ctl.settle())
+        self.assertEqual([r.id for r in ctl.listing.rows], [])
+        self.assertEqual(ctl.status.kind, "ok")
 
 
 if __name__ == "__main__":

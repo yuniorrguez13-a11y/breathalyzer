@@ -15,11 +15,18 @@ Co-op and base security (docs/coop.md; tools/mp/session.py, security.py), used w
   (checked before the ban list). time, weather, story, rules, kick, ban, end and code are host-only: from anyone else
   they are dropped, and 3 in 10 s get that player cut off and kicked. Every relayed co-op line carries "from" (the
   sender's id), written by the relay.
-- `room_code`: 3 words. With a code set, every new connection first gets {"type":"challenge","nonce":..}; the hello
-  answers with "cnonce" and "code_proof" (security.code_proof: the code is never sent) and the welcome carries
-  "code_ok" (security.code_answer) so the friend knows this relay has the code. A plain "code" (older clients) still
-  works. A hello with no code is told "this world needs a room code" (no strike); wrong ones are refused, 5 a minute
-  from one address make it wait 10 minutes.
+- `room_code`: 3 or 4 words. With a code set, every new connection first gets
+  {"type":"challenge","nonce":..,"kdf":"scrypt1"}; the hello answers with "cnonce", "code_proof" (security.code_proof:
+  an HMAC keyed by scrypt of the code, never the code) and "kdf", and the welcome carries "code_ok"
+  (security.code_answer) so the friend knows this relay has the code. A hello from an older Breathalyzer (no "kdf",
+  or the plain "code") is told security.OLD_PEER ("please update Breathalyzer"; no strike): its answer can be cracked
+  offline. A hello with no code is told "this world needs a room code" (no strike); wrong ones are refused, 5 a minute
+  from one address make it wait 10 minutes (checked before the scrypt runs).
+- Slots (docs/multiplayer-security.md): RESERVED_LOCAL of max_clients are kept for this PC (the host's own lines and
+  its reconnects); another PC may hold MAX_PER_ADDRESS connections (pending ones count) and one player key
+  MAX_PER_KEY joined ones. With host_secret, another PC may only open HOST_ROOMS (or a room this PC opened).
+- Names are unique per room (security.name_key: case, accents, separators and look-alike letters folded), and
+  find_player takes "#id" (the id `players` shows) so a kick hits the right one.
 - `bans` (security.BanList): banned or kicked keys and addresses can't join (never loopback by address). A kick or
   ban closes every connection of that player in every room (same key, same address, or on this PC the same name).
   `lan_only`: home-network addresses only.
@@ -43,7 +50,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from mp import (DEFAULT_RELAY_PORT, MAX_LINE, PROTOCOL_VERSION, clean_state, decode, encode, finite,  # noqa: E402
+from mp import (DEFAULT_RELAY_PORT, DEFAULT_ROOM, MAX_LINE, PROTOCOL_VERSION, clean_state, decode, encode, finite,  # noqa: E402
                 safe_console, valid_name, valid_room)
 from mp import security, session  # noqa: E402
 
@@ -52,6 +59,10 @@ DEFAULT_ROOM_CAP = 8
 DEFAULT_MAX_CLIENTS = 64
 FLOOD_FACTOR = 5           # cut a client off after this many seconds' worth of dropped messages (decays at the rate)
 MAX_BUFFER = 256 * 1024    # bytes waiting to go to one client before it counts as too slow
+RESERVED_LOCAL = 4         # slots only this PC (127.0.0.1: the host's own lines, its reconnects) may take
+MAX_PER_ADDRESS = 4        # connections (joined or not) from one other PC
+MAX_PER_KEY = 2            # joined connections with one player key from another PC (co-op line + ghost line)
+HOST_ROOMS = ("coop", DEFAULT_ROOM)   # with a host secret, the rooms another PC may open
 
 
 class _Conn:
@@ -111,7 +122,7 @@ class Relay:
         self.host_secret = host_secret
         self.room_code = security.normalize_code(room_code) if room_code else None
         if room_code and self.room_code is None:
-            raise ValueError("a room code is 3 words from the word list")
+            raise ValueError("a room code is 3 or 4 words from the word list")
         self.bans = bans if bans is not None else security.BanList(clock=clock)
         self.lan_only = lan_only
         self.default_rules = {"friends_story": bool(friends_story)}
@@ -282,7 +293,10 @@ class Relay:
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         conn = _Conn(writer, self.rate, self.clock(), asyncio.get_running_loop().time() + self.hello_timeout)
-        if self._closed or len(self._conns) >= self.max_clients:
+        local = security.is_loopback(conn.ip)
+        if self._closed or len(self._conns) >= self.max_clients or (
+                not local and sum(1 for c in self._conns if not security.is_loopback(c.ip))
+                >= self.max_clients - min(RESERVED_LOCAL, self.max_clients - 1)):
             self._fail(conn, "relay full" if not self._closed else "relay stopped")
             return
         if self.lan_only and not security.address_allowed(conn.ip):
@@ -295,9 +309,12 @@ class Relay:
                 >= security.MAX_PENDING_PER_ADDRESS:
             self._fail(conn, "too many connections from your address")
             return
+        if not local and conn.ip is not None and sum(1 for c in self._conns if c.ip == conn.ip) >= MAX_PER_ADDRESS:
+            self._fail(conn, "too many connections from your address")
+            return
         self._conns.add(conn)
         if self.room_code:   # (prove the code without sending it: security.code_proof)
-            self._send(conn, {"type": "challenge", "nonce": conn.nonce})
+            self._send(conn, {"type": "challenge", "nonce": conn.nonce, "kdf": security.KDF})
         lines = self._lines(reader, conn)
         try:
             async for line in lines:
@@ -343,11 +360,23 @@ class Relay:
         if room is None:
             self._fail(conn, "bad room (1-32 of A-Z a-z 0-9 _ -)")
             return
+        local = security.is_loopback(conn.ip)
         members = self.rooms.get(room, {})
+        if (self.host_secret is not None and not local and room not in HOST_ROOMS
+                and not any(security.is_loopback(c.ip) for c in members.values())):
+            self._fail(conn, f"no room {room} in this session")
+            return
         if len(members) >= self.room_cap:
             self._fail(conn, f"room {room} is full ({self.room_cap} players)")
             return
+        nkey = security.name_key(name)
+        if any(security.name_key(c.name) == nkey for c in members.values()):
+            self._fail(conn, f"the name {name} is taken in this room: pick another (if it's you, wait 30 s)")
+            return
         key = security.valid_fingerprint(msg.get("key"))
+        if not local and key is not None and sum(1 for c in self._conns if c.joined and c.key == key) >= MAX_PER_KEY:
+            self._fail(conn, "too many connections with your player key")
+            return
         info = self.room_info.get(room)
         is_host = (self.host_secret is not None and security.is_loopback(conn.ip)
                    and security.host_proof_matches(self.host_secret, room, msg.get("host_proof"))
@@ -364,12 +393,13 @@ class Relay:
             if proof is None and not plain:
                 self._fail(conn, "this world needs a room code")   # (no strike: nothing was tried)
                 return
-            if proof is not None:
-                ok = security.proof_matches(self.room_code, conn.nonce, cnonce, proof)
-                if ok:
-                    code_ok = security.code_answer(self.room_code, conn.nonce, cnonce)
-            else:   # (an older client sends the code itself)
-                ok = security.code_matches(self.room_code, plain)
+            if proof is None or msg.get("kdf") != security.KDF:
+                # (an older Breathalyzer: the plain code, or an answer a fake host could crack offline in a minute)
+                self._fail(conn, security.OLD_PEER)
+                return
+            ok = security.proof_matches(self.room_code, conn.nonce, cnonce, proof)
+            if ok:
+                code_ok = security.code_answer(self.room_code, conn.nonce, cnonce)
             if not ok:
                 self._wrong_codes.wrong(conn.ip)
                 self._fail(conn, "wrong room code")
@@ -523,7 +553,7 @@ class Relay:
             code = msg.get("code")
             norm = security.normalize_code(code) if code else None
             if code and norm is None:
-                self._send(conn, {"type": "error", "error": "a room code is 3 words from the word list"})
+                self._send(conn, {"type": "error", "error": "a room code is 3 or 4 words from the word list"})
                 return
             self.room_code = norm
         elif kind == "end":
@@ -567,15 +597,24 @@ class Relay:
         return closed
 
     def find_player(self, name_or_id, room: str | None = None) -> _Conn | None:
-        """A joined player by id or (case-insensitive) name; the host never."""
+        """A joined player by id (an int, or "#5" / "5" as `players` shows it) or by name (security.name_key, so
+        look-alikes match too); the host never. A name that fits connections of more than one player is None: kick
+        by id then."""
+        if isinstance(name_or_id, str) and name_or_id.strip().lstrip("#").isdigit():
+            name_or_id = int(name_or_id.strip().lstrip("#"))
+        found = []
         for members in ([self.rooms.get(room, {})] if room else list(self.rooms.values())):
             for c in list(members.values()):
                 if c.host:
                     continue
-                if (isinstance(name_or_id, int) and c.id == name_or_id) or \
-                        (isinstance(name_or_id, str) and c.name and c.name.lower() == name_or_id.strip().lower()):
+                if isinstance(name_or_id, int) and not isinstance(name_or_id, bool) and c.id == name_or_id:
                     return c
-        return None
+                if isinstance(name_or_id, str) and c.name and name_or_id.strip() and \
+                        security.name_key(c.name) == security.name_key(name_or_id.strip()):
+                    found.append(c)
+        if not found or any(not (c is found[0] or self._same_player(found[0], c)) for c in found):
+            return None
+        return found[0]
 
     def players(self) -> list[dict]:
         """Everyone joined, for the host's `players` command."""

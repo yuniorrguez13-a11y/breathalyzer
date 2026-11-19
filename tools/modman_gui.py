@@ -2743,7 +2743,7 @@ class LaunchController(Controller):
         """Put the picked bundled mods (launcher.read_bundled) into the library, one step after the other in the
         background: each code mod not there yet is added (modman add, then its after_add commands), then turned on
         or off as picked; a recipe mod turned on and not there yet is built from the player's game files (its build
-        commands). A recipe that stays off is built only when it is picked later. A mod with after_on gets its bonus
+        commands), then turned on (a recipe never has to turn itself on). A recipe that stays off is built only when it is picked later. A mod with after_on gets its bonus
         built (those commands) when it goes in turned on and the library has no after_on_makes yet. An easter egg
         left OFF stays out of the library (so nothing lists it; the switch puts it in), and is called Easter eggs
         while it goes in, its id and title left out of Details (they are secret). done: what the status says when
@@ -2768,7 +2768,7 @@ class LaunchController(Controller):
                               hide=hide) for cmd in m.get("after_add") or []]
             if on and m.get("after_on") and m.get("after_on_makes") not in have:
                 steps += self.bonus_steps(m, title)
-            if m["kind"] == "code" or not new:
+            if m["kind"] == "code" or not new or on:   # (a new recipe picked on: its build adds it, this turns it on)
                 steps.append(Job("enable" if on else "disable", ["enable" if on else "disable", m["id"]],
                                  name=title, mod_id=m["id"], in_process=True, hide=hide))
         self.installing, self.install_total = [], len(steps)

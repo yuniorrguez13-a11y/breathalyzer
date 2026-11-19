@@ -161,7 +161,7 @@ build = [["castle_build.py", "build"]]
 # Dragonbreath, by giruka (docs/dragonbreath.md): a lost Goron blade forged for Daruk. A recipe: built on the
 # player's PC from their own game files when first turned on (tools/dragonbreath_build.py). It also makes the secret
 # item mod giruka.dragonbreath-item (no part_of: it stays on, so a save that holds the blade keeps loading).
-# --on: the launcher adds no enable step for a new recipe mod, so the build turns the switch on itself.
+# (No --on: the launcher turns a new recipe mod on after its build when it was picked on.)
 id = "botw-mod-loader.dragonbreath"
 title = "Dragonbreath"
 description = "A lost Goron blade forged for Daruk. Rohan in Goron City knows where it is."
@@ -171,7 +171,7 @@ tags = ["Experimental", "Built from your game files the first time (about 1 minu
 ready = false
 kind = "recipe"
 folder = "assets/dragonbreath"
-build = [["dragonbreath_build.py", "build", "--on", "--quiet"]]
+build = [["dragonbreath_build.py", "build", "--quiet"]]
 
 # Left out of the beta (no visible change or fps gain was measured), so not listed even with --with-experimental:
 # "Performance: shorter shadows" (botw-mod-loader.perf-shadows, recipe native/examples/perf_shadows,

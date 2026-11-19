@@ -224,6 +224,44 @@ class SaveTests(unittest.TestCase):
                                check_words=lambda fp: "other words here now")
         self.assertEqual(before, self.slots())
 
+    def test_a_bound_copy_needs_a_host_key(self):
+        """A copy bound to one host: a host that gives no key (a fake one leaves it out) adds nothing."""
+        story.merge_folder(self.coop.parent, NAMES, {0}, self.backups, processes=[], host_key="aa" * 8)
+        before = self.slots()
+        with self.assertRaises(story.WrongHost):
+            story.merge_folder(self.coop.parent, NAMES, self.host, self.backups, processes=[], host_key=None)
+        self.assertEqual(before, self.slots())
+
+    def test_bound_at_a_code_checked_join(self):
+        """bind_host (a join whose room code was checked) binds the copy before any story, marks it "coded", and
+        refuses another key after; story for a coded copy needs a code-checked join (a host key alone is public)."""
+        before = self.slots()
+        self.assertTrue(story.bind_host(self.coop.parent, "aa" * 8))
+        self.assertFalse(story.bind_host(self.coop.parent, "aa" * 8))   # (already: nothing written)
+        mark = story.read_mark(self.coop.parent)
+        self.assertEqual((mark["host"], mark["coded"], mark["coop_copy"]), ("aa" * 8, True, True))
+        self.assertEqual(before, self.slots())
+        with self.assertRaises(story.WrongHost):
+            story.bind_host(self.coop.parent, "bb" * 8)
+        self.assertEqual(story.read_mark(self.coop.parent)["host"], "aa" * 8)
+        with self.assertRaises(story.WrongHost):   # (same key, but no code this time)
+            story.merge_folder(self.coop.parent, NAMES, self.host, self.backups, processes=[], host_key="aa" * 8)
+        self.assertEqual(before, self.slots())
+        res = story.merge_folder(self.coop.parent, NAMES, self.host, self.backups, processes=[], host_key="aa" * 8,
+                                 code_checked=True)
+        self.assertIsNotNone(res.backup)
+        self.assertNotEqual(before, self.slots())
+
+    def test_a_code_checked_merge_marks_the_copy_coded(self):
+        story.merge_folder(self.coop.parent, NAMES, {0}, self.backups, processes=[], host_key="aa" * 8,
+                           code_checked=True)
+        self.assertIs(story.read_mark(self.coop.parent).get("coded"), True)
+
+    def test_bind_host_skips_what_isnt_a_copy(self):
+        (self.coop.parent / story.COPY_MARK).unlink()
+        self.assertFalse(story.bind_host(self.coop.parent, "aa" * 8))
+        self.assertFalse((self.coop.parent / story.COPY_MARK).exists())
+
     def test_only_coop_copies(self):
         (self.coop.parent / story.COPY_MARK).unlink()          # (as if it were your own save)
         before = {p: p.read_bytes() for p in story.slot_files(self.coop)}

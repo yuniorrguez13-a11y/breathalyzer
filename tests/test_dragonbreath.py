@@ -253,7 +253,7 @@ tags = ["Experimental", "Built from your game files the first time (about 1 minu
 ready = false
 kind = "recipe"
 folder = "assets/dragonbreath"
-build = [["dragonbreath_build.py", "build", "--on", "--quiet"]]
+build = [["dragonbreath_build.py", "build", "--quiet"]]
 '''
 
 
@@ -311,7 +311,7 @@ class RecipeTests(unittest.TestCase):
         """The command the packaging entry will run (out/research/dragonbreath-handoff.md) parses with the
         launcher's --library at the end."""
         import test_bundled_commands as tbc
-        self.assertEqual(tbc.parse_problem("dragonbreath_build.py", ["build", "--on", "--quiet", "--library", "X:/l"]),
+        self.assertEqual(tbc.parse_problem("dragonbreath_build.py", ["build", "--quiet", "--library", "X:/l"]),
                          "")
 
     def test_no_bundled_entry_yet(self):
@@ -324,6 +324,7 @@ class RecipeTests(unittest.TestCase):
                 self.assertIs(m["ready"], False)
                 self.assertEqual(m["default"], "off")
                 self.assertEqual(m["folder"], "assets/dragonbreath")
+                self.assertNotIn("--on", [a for cmd in m["build"] for a in cmd])   # (the launcher turns it on)
 
 
 # --------------------------------------------------------------------------------------------- building
@@ -572,7 +573,11 @@ class LibraryTests(unittest.TestCase):
                          ("giruka.dragonbreath-item", "botw-mod-loader.dragonbreath"))
         on = {m["id"]: m["enabled"] for m in self.lib().mods}
         self.assertEqual(on, {"giruka.dragonbreath-item": True, "botw-mod-loader.dragonbreath": False})
-        self.build(on=True)                                                 # --on: the switch on
+        self.build(on=True)                       # --on only sets a NEW switch: a rebuild keeps it off (no force-on)
+        self.assertFalse({m["id"]: m["enabled"] for m in self.lib().mods}["botw-mod-loader.dragonbreath"])
+        with quiet():
+            db.clean(self.libdir, recipe_dir=self.recipe_dir)
+        self.build(on=True)                                                 # --on: a new switch on
         self.assertTrue({m["id"]: m["enabled"] for m in self.lib().mods}["botw-mod-loader.dragonbreath"])
         lib = self.lib()
         for m in lib.mods:
