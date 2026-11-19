@@ -1,0 +1,30 @@
+{
+ "id": "rush1",
+ "slot": "CutJustRush",
+ "part": 1,
+ "name": "Flurry 1: cross",
+ "by": "giruka",
+ "about": "Flurry Rush cut 1: a flat cut from the right across to the left.",
+ "frames": 8,
+ "next": 8,
+ "max_turn": 85,
+ "hits": [
+  {
+   "start": 2,
+   "end": 4,
+   "side": "Right",
+   "at": [
+    0,
+    1.05,
+    0.85
+   ]
+  }
+ ],
+ "keys": [
+  {"f": 0, "pose": "ready", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.32, -0.04, 0.12]}}, "blade": {"Wrist_R": [-0.9, 0.1, 0.4]}, "turn": {"Spine_1": [6, -20, 0]}},
+  {"f": 2, "pose": "ready", "ease": "linear", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.22, -0.06, 0.32]}}, "blade": {"Wrist_R": [-0.6, 0.1, 0.8]}, "turn": {"Spine_1": [6, -10, 0]}},
+  {"f": 3, "pose": "ready", "ease": "linear", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.01, -0.04, 0.31]}}, "blade": {"Wrist_R": [0.106, 0.136, 0.985]}, "turn": {"Spine_1": [6.0, 2.0, 0.0]}},
+  {"f": 4, "pose": "ready", "ease": "linear", "reach": {"Wrist_R": {"on": "Spine_2", "at": [0.2, -0.02, 0.3]}}, "blade": {"Wrist_R": [0.75, 0.1, 0.65]}, "turn": {"Spine_1": [6, 14, 0]}},
+  {"f": 8, "pose": "ready", "ease": "out", "reach": {"Wrist_R": {"on": "Spine_2", "at": [0.24, 0.02, 0.14]}}, "blade": {"Wrist_R": [0.85, 0.2, -0.45]}, "turn": {"Spine_1": [6, 20, 0]}}
+ ]
+}

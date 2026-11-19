@@ -1,0 +1,44 @@
+{
+ "id": "sf",
+ "slot": "CutSF",
+ "part": 1,
+ "name": "Finisher: flip cut",
+ "by": "giruka",
+ "about": "Front flip: a deep crouch, a tucked forward somersault with the blade held back, and a downward cut as Link lands.",
+ "frames": 24,
+ "next": 12,
+ "max_turn": 90,
+ "hits": [
+  {
+   "start": 7,
+   "end": 10,
+   "side": "Right",
+   "at": [
+    0,
+    0.75,
+    0.85
+   ]
+  }
+ ],
+ "expect": [
+  {
+   "f": 24,
+   "feet_on_ground": true
+  }
+ ],
+ "keys": [
+  {"f": 0, "pose": "ready"},
+  {"f": 1, "pose": "low", "ease": "hit", "hips": [0, -0.3, 0.02], "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.25, 0.32, 0.16]}}, "blade": {"Wrist_R": [0, 0.3, -0.95]}, "elbow": {"R": [-1, -0.4, 0], "L": [1, -0.4, 0]}},
+  {"f": 2, "pose": "tuck", "ease": "hit", "hips": [0, 0.3, 0.04], "spin": [70, 0, 0], "elbow": {"R": [-1, -0.4, 0], "L": [1, -0.4, 0]}},
+  {"f": 3, "pose": "tuck", "ease": "linear", "hips": [0, 0.5, 0.06], "spin": [150, 0, 0], "elbow": {"R": [-1, -0.4, 0], "L": [1, -0.4, 0]}},
+  {"f": 4, "pose": "tuck", "ease": "linear", "hips": [0, 0.45, 0.08], "spin": [-130, 0, 0], "elbow": {"R": [-1, -0.4, 0], "L": [1, -0.4, 0]}},
+  {"f": 5, "pose": "tuck", "ease": "linear", "hips": [0, 0.2, 0.08], "spin": [-60, 0, 0], "step": {"Ankle_L": [0.04, 0.5, 0.1], "Ankle_R": [-0.04, 0.5, 0.1]}, "elbow": {"R": [-1, -0.4, 0], "L": [1, -0.4, 0]}},
+  {"f": 6, "pose": "ready", "ease": "hit", "hips": [0, -0.1, 0.05], "step": {"Ankle_L": [0.06, 0, 0.18], "Ankle_R": [-0.06, 0, -0.12]}, "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.16, 0.4, 0.12]}, "Wrist_L": {"on": "Spine_2", "at": [0.2, 0.12, 0.25]}}, "blade": {"Wrist_R": [0, 0.7, -0.7]}, "turn": {"Spine_1": [4, 0, 0]}, "elbow": {"R": [-1, -0.4, 0], "L": [1, -0.4, 0]}},
+  {"f": 7, "pose": "ready", "ease": "linear", "hips": [0, -0.12, 0.05], "step": {"Ankle_L": [0.06, 0, 0.18], "Ankle_R": [-0.06, 0, -0.12]}, "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.1, 0.38, 0.28]}, "Wrist_L": {"on": "Spine_2", "at": [0.2, 0.12, 0.25]}}, "blade": {"Wrist_R": [0, 0.95, 0.3]}, "turn": {"Spine_1": [8, 0, 0], "Head": [-6, 0, 0]}, "elbow": {"R": [-1, -0.4, 0], "L": [1, -0.4, 0]}},
+  {"f": 8, "pose": "low", "ease": "linear", "hips": [0, -0.2, 0.05], "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.07, 0.16, 0.42]}, "Wrist_L": {"on": "Spine_2", "at": [0.22, 0.0, 0.22]}}, "blade": {"Wrist_R": [0, 0.5, 0.87]}, "turn": {"Spine_1": [16, 0, 0], "Head": [-12, 0, 0]}, "elbow": {"R": [-1, -0.4, 0], "L": [1, -0.4, 0]}},
+  {"f": 9, "pose": "low", "ease": "linear", "hips": [0, -0.26, 0.06], "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.06, -0.04, 0.42]}}, "blade": {"Wrist_R": [0, 0.0, 1.0]}, "turn": {"Spine_1": [22, 0, 0], "Head": [-16, 0, 0]}, "elbow": {"R": [-1, -0.4, 0], "L": [1, -0.4, 0]}},
+  {"f": 10, "pose": "low", "ease": "linear", "hips": [0, -0.3, 0.06], "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.06, -0.2, 0.4]}}, "blade": {"Wrist_R": [0, -0.5, 0.87]}, "turn": {"Spine_1": [26, 0, 0], "Head": [-18, 0, 0]}},
+  {"f": 14, "pose": "low", "ease": "out", "hips": [0, -0.3, 0.06], "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.08, -0.22, 0.38]}}, "blade": {"Wrist_R": [0.05, -0.55, 0.83]}, "turn": {"Spine_1": [24, 0, 0], "Head": [-16, 0, 0]}},
+  {"f": 24, "pose": "ready", "ease": "smooth"}
+ ]
+}

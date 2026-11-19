@@ -1,0 +1,33 @@
+{
+ "id": "s3b",
+ "slot": "CutS3",
+ "part": 2,
+ "name": "Combo 3: spin, cut 2",
+ "by": "giruka",
+ "about": "Full spin, second half: the blade tucks in past the back, then whips out of the turn in a second cut across the front.",
+ "frames": 14,
+ "next": 6,
+ "max_turn": 85,
+ "hits": [
+  {
+   "start": 2,
+   "end": 5,
+   "side": "Left",
+   "at": [
+    0,
+    1.0,
+    0.85
+   ]
+  }
+ ],
+ "keys": [
+  {"f": 0, "pose": "spin_out", "spin": [0, -160, 0]},
+  {"f": 1, "pose": "spin_out", "ease": "linear", "spin": [0, -90, 0]},
+  {"f": 2, "pose": "ready", "ease": "hit", "spin": [0, -25, 0], "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.3, -0.1, 0.24]}}, "blade": {"Wrist_R": [-0.75, 0.05, 0.66]}},
+  {"f": 3, "pose": "ready", "ease": "linear", "spin": [0, -12, 0], "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.16, -0.06, 0.32]}}, "blade": {"Wrist_R": [-0.3, 0.12, 0.95]}, "turn": {"Spine_1": [8, -4, 0]}},
+  {"f": 4, "pose": "ready", "ease": "linear", "reach": {"Wrist_R": {"on": "Spine_2", "at": [0.02, -0.03, 0.33]}}, "blade": {"Wrist_R": [0.15, 0.2, 0.97]}, "turn": {"Spine_1": [8, 4, 0]}},
+  {"f": 5, "pose": "ready", "ease": "linear", "reach": {"Wrist_R": {"on": "Spine_2", "at": [0.2, 0.0, 0.3]}}, "blade": {"Wrist_R": [0.6, 0.25, 0.76]}, "turn": {"Spine_1": [8, 12, 0], "Head": [-6, -10, 0]}},
+  {"f": 7, "pose": "ready", "ease": "out", "reach": {"Wrist_R": {"on": "Spine_2", "at": [0.26, 0.06, 0.12]}}, "blade": {"Wrist_R": [0.75, 0.35, -0.56]}, "turn": {"Spine_1": [6, 22, 0], "Head": [-4, -18, 0]}},
+  {"f": 14, "pose": "ready"}
+ ]
+}

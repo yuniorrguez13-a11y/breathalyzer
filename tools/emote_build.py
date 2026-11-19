@@ -140,12 +140,20 @@ BODY_BONES = (["Root", "Skl_Root", "Spine_1", "Spine_2", "Neck", "Head", "Waist"
               + [f"{b}_{s}" for s in "LR" for b in ("Clavicle", "Arm_1", "Arm_2", "Wrist", "Leg_1", "Leg_2",
                                                      "Ankle", "Toe")]
               + [f"Finger_{c}_{j}_{s}" for s in "LR" for c in "ABCDE" for j in (1, 2, 3)])
+# Held weapons and acrobatics (added for Dragonbreath's attacks, usable by any clip):
+#   "blade": {"Wrist_R": [x, y, z]} turns the hand so the weapon in it (its bone Weapon_R / Weapon_L, the length along
+#     the bone's +Z) points that way, the hand kept as near the forearm's line as it can; {"dir": [...], "edge": [...]}
+#     also turns the edge (the bone's +X). Solver(fixed={"Weapon_R": (rotation, translation)}) holds a grip (such as
+#     the game's own sword clips') on every frame.
+#   "spin": [x, y, z] degrees turns the whole solved pose about the hips (hands, feet and blade stay where the key puts
+#     them on the body): a spin about y, a flip about x. Keys at most 180 degrees apart (a full turn: 0, 120, -120, 0).
+#   top-level "max_turn": the most a joint may turn in one frame for the pose check (attacks are fast: up to 90).
 KEY_FIELDS = {"f", "pose", "mirror", "ease", "reset", "free", "aim", "palm", "reach", "step", "elbow", "knee",
-              "hand", "turn", "local", "rest", "hips", "feet", "heel", "note"}
+              "hand", "turn", "local", "rest", "hips", "feet", "heel", "blade", "spin", "note"}
 POSE_FIELDS = KEY_FIELDS - {"f", "pose", "mirror", "ease", "reset", "free"}
 TOP_FIELDS = {"id", "name", "aliases", "page", "slot", "by", "about", "kind", "frames", "loop", "face", "morph",
               "poses", "keys", "expect", "clip", "set", "fallback", "key", "note", "contact", "button_text", "ease",
-              "lag", "breath", "start", "end"}
+              "lag", "breath", "start", "end", "max_turn"}
 BUTTON_TEXT_MAX = 80
 CONTACTS = ("Wrist_L", "Wrist_R", "hands", "arms")
 EXPECTS = {"above", "below", "left_of", "right_of", "in_front", "behind", "near", "far", "thumb", "feet_on_ground"}
@@ -269,6 +277,23 @@ def rot_between(u, v):
             return I3
         ax = cross(u, (1.0, 0.0, 0.0) if abs(u[0]) < 0.9 else (0.0, 1.0, 0.0))
     return axis_angle(ax, math.acos(c))
+
+
+SWING_VIA_FRONT = -0.866                       # a bone turning more than 150 degrees goes by way of the front
+
+
+def swing(u, v):
+    """rot_between for aiming a bone, except that a turn of more than 150 degrees (an arm from hanging down to straight
+    up) goes by way of Link's front (+z): the plain smallest turn about a nearly arbitrary axis there gives the bone a
+    twist that flips with a millimetre of difference in the target, so a clip snapped it round between two frames."""
+    u, v = unit(u), unit(v)
+    if dot(u, v) > SWING_VIA_FRONT:
+        return rot_between(u, v)
+    mid = vsub((0.0, 0.0, 1.0), vscale(u, u[2]))
+    if vlen(mid) < 1e-3:
+        return rot_between(u, v)
+    mid = unit(mid)
+    return mmul(rot_between(mid, v), rot_between(u, mid))
 
 
 def frame_cols(a, b):
@@ -479,11 +504,13 @@ class State:
     hips: tuple = (0.0, 0.0, 0.0)
     feet: str = "planted"
     heel: dict = field(default_factory=dict)      # "R"/"L" -> degrees: the heel up, the ball of the foot down
+    blade: dict = field(default_factory=dict)     # wrist -> (blade direction, edge direction or None): a held weapon
+    spin: tuple = (0.0, 0.0, 0.0)                 # the whole solved pose turned about the hips (spins, flips)
 
     def copy(self) -> State:
         return State(dict(self.aim), dict(self.palm), dict(self.reach), dict(self.step), dict(self.hint),
                      dict(self.hand), dict(self.turn), dict(self.local), set(self.rest), tuple(self.hips), self.feet,
-                     dict(self.heel))
+                     dict(self.heel), dict(self.blade), tuple(self.spin))
 
 
 def _side_swap(name: str) -> str:
@@ -515,7 +542,9 @@ def mirror_state(st: State) -> State:
                  {_side_swap(k): (v[0], -v[1], -v[2]) for k, v in st.turn.items()},
                  {_side_swap(k): (v[0], -v[1], -v[2]) for k, v in st.local.items()},
                  {_side_swap(k) for k in st.rest}, _mx(st.hips), st.feet,
-                 {_side_swap(k): v for k, v in st.heel.items()})
+                 {_side_swap(k): v for k, v in st.heel.items()},
+                 {_side_swap(k): (_mx(v[0]), None if v[1] is None else _mx(v[1])) for k, v in st.blade.items()},
+                 (st.spin[0], -st.spin[1], -st.spin[2]))
 
 
 def _vec(v, what: str) -> tuple:
@@ -568,6 +597,19 @@ def apply_fields(st: State, src: dict, skel: Skeleton | None, what: str) -> None
             raise EmoteError(f"{what}: step is for {', '.join(CHAINS)}, not {k}")
         st.step[k] = _vec(v, f"{what} step {k}")
         st.reach.pop(k, None)
+    for k, v in (src.get("blade") or {}).items():
+        if k not in ("Wrist_L", "Wrist_R"):
+            raise EmoteError(f"{what}: blade is for Wrist_L or Wrist_R (the hand that holds it), not {k}")
+        if isinstance(v, dict):
+            if set(v) - {"dir", "edge"} or "dir" not in v:
+                raise EmoteError(f"{what}: blade {k} {{\"dir\": [x, y, z], \"edge\": [x, y, z]}} (edge optional)")
+            d = _vec(v["dir"], f"{what} blade {k} dir")
+            e = _vec(v["edge"], f"{what} blade {k} edge") if "edge" in v else None
+        else:
+            d, e = _vec(v, f"{what} blade {k}"), None
+        if vlen(d) < 1e-6 or (e is not None and vlen(vsub(e, vscale(unit(d), dot(e, unit(d))))) < 1e-6):
+            raise EmoteError(f"{what}: blade {k}: the direction can't be zero, the edge not along it")
+        st.blade[k] = (unit(d), e)
     for fname in ("elbow", "knee"):
         for k, v in (src.get(fname) or {}).items():
             end = _end_bone(k, fname)
@@ -592,6 +634,11 @@ def apply_fields(st: State, src: dict, skel: Skeleton | None, what: str) -> None
         st.rest |= set(bones(src["rest"], "rest"))
     if "hips" in src:
         st.hips = _vec(src["hips"], f"{what} hips")
+    if "spin" in src:
+        st.spin = _vec(src["spin"], f"{what} spin")
+        if max(abs(a) for a in st.spin) > 180:
+            raise EmoteError(f"{what}: spin is -180 to 180 degrees per axis (a full turn: keys 120 degrees apart, "
+                             "the next one past 180 written as its negative)")
     if "feet" in src:
         if src["feet"] not in ("planted", "free"):
             raise EmoteError(f"{what}: feet is planted or free")
@@ -615,13 +662,14 @@ def free_bones(st: State, names: list[str], skel: Skeleton | None) -> None:
             st.heel.pop(n, None)
             gone |= {f"Wrist_{n}", f"Ankle_{n}"}
         gone |= set(skel.match(n)) if skel is not None else {n}
-    for d in (st.aim, st.palm, st.reach, st.step, st.hint, st.turn, st.local):
+    for d in (st.aim, st.palm, st.reach, st.step, st.hint, st.turn, st.local, st.blade):
         for k in list(d):
             if k in gone:
                 del d[k]
     st.rest -= gone
     if "Skl_Root" in gone:
         st.hips = (0.0, 0.0, 0.0)
+        st.spin = (0.0, 0.0, 0.0)
 
 
 def key_states(spec: dict, skel: Skeleton | None = None) -> list[tuple[int, State, str]]:
@@ -681,23 +729,73 @@ def default_hint(end: str, skel: Skeleton, idle_P) -> tuple:
 
 
 class Solver:
-    """Solves key states into local rotations on one skeleton and idle pose (caches the idle pose's world frames)."""
+    """Solves key states into local rotations on one skeleton and idle pose (caches the idle pose's world frames).
+    fixed: {bone: (local rotation matrix, local translation)} held the same on every frame, such as a weapon bone
+    with the grip of the game's own sword clips (Weapon_R); a key's "blade" turns the hand so that bone's weapon
+    points where the key says."""
 
-    def __init__(self, skel: Skeleton, idle: Idle):
+    def __init__(self, skel: Skeleton, idle: Idle, fixed: dict | None = None):
         self.skel, self.idle = skel, idle
+        self.fixed = dict(fixed or {})
         self.idle_W, self.idle_P = fk(skel, idle.rots, idle.trans)
         self.hints = {e: default_hint(e, skel, self.idle_P) for e in CHAINS if all(skel.has(n) for n in (e, *CHAINS[e]))}
 
     def solve(self, st: State) -> tuple[list, list]:
-        return solve_pose(self.skel, self.idle, st, self.hints, self.idle_W, self.idle_P)
+        return solve_pose(self.skel, self.idle, st, self.hints, self.idle_W, self.idle_P, self.fixed)
 
 
-def solve_pose(skel: Skeleton, idle: Idle, st: State, hints: dict, idle_W=None, idle_P=None):
+WEAPON_BONE = {"Wrist_R": "Weapon_R", "Wrist_L": "Weapon_L"}
+WEAPON_AXIS = (0.0, 0.0, 1.0)                  # a held weapon's length in its bone's frame (the game's swords: +Z)
+WEAPON_EDGE = (1.0, 0.0, 0.0)                  # its edge (Dragonbreath's model: +X)
+
+
+def weapon_local(skel: Skeleton, idle: Idle, wrist: str, fixed: dict | None = None):
+    """The weapon bone's local rotation in its wrist's frame (fixed grip, else the idle pose's), or None."""
+    wb = WEAPON_BONE.get(wrist)
+    if wb is None or not skel.has(wb):
+        return None
+    if fixed and wb in fixed:
+        return fixed[wb][0]
+    return idle.rots[skel.idx[wb]]
+
+
+def weapon_line(skel: Skeleton, Wr, Wp, wrist: str = "Wrist_R", length: float = 1.0):
+    """(grip, tip, edge direction) of the weapon held in that hand (its weapon bone: Weapon_R / Weapon_L), in model
+    space; None when the skeleton has no weapon bone there."""
+    wb = WEAPON_BONE.get(wrist)
+    if wb is None or not skel.has(wb):
+        return None
+    i = skel.idx[wb]
+    return Wp[i], vadd(Wp[i], vscale(mvec(Wr[i], WEAPON_AXIS), length)), mvec(Wr[i], WEAPON_EDGE)
+
+
+def _blade_frame(W, u, g, x, want_dir, want_edge, fore):
+    """The wrist's world rotation that turns its weapon axis g (local) to want_dir; the edge (local x) toward
+    want_edge, or else the hand (local u, wrist to knuckles) kept as near the forearm's line (fore) as it can."""
+    b = unit(want_dir)
+    if want_edge is not None:
+        e = unit(vsub(want_edge, vscale(b, dot(want_edge, b))))
+        return mmul(frame_cols(b, e), mT(frame_cols(g, x)))
+    a = vsub(fore, vscale(b, dot(fore, b)))
+    if vlen(a) < 1e-6:
+        a = vsub(mvec(W, u), vscale(b, dot(mvec(W, u), b)))
+    if vlen(a) < 1e-6:
+        a = (0.0, 1.0, 0.0) if abs(b[1]) < 0.9 else (1.0, 0.0, 0.0)
+        a = vsub(a, vscale(b, dot(a, b)))
+    up = unit(vsub(u, vscale(g, dot(u, g))))
+    return mmul(frame_cols(b, unit(a)), mT(frame_cols(g, up)))
+
+
+def solve_pose(skel: Skeleton, idle: Idle, st: State, hints: dict, idle_W=None, idle_P=None, fixed=None):
     """Local rotation matrices and translations of every bone for one state, on the idle pose."""
     if idle_W is None:
         idle_W, idle_P = fk(skel, idle.rots, idle.trans)
+    fixed = fixed or {}
     n = len(skel.bones)
     trans = [tuple(t) for t in idle.trans]
+    for name, (_r, t) in fixed.items():
+        if skel.has(name):
+            trans[skel.idx[name]] = tuple(t)
     if "Skl_Root" in skel.idx and any(st.hips):
         r = skel.idx["Skl_Root"]
         trans[r] = vadd(trans[r], st.hips)
@@ -790,13 +888,41 @@ def solve_pose(skel: Skeleton, idle: Idle, st: State, hints: dict, idle_W=None, 
                 W = mmul(frame_cols(a, unit(s)), mT(frame_cols(u, v)))
         elif aim and name in TIP and skel.has(TIP[name]):
             u = skel.bones[skel.idx[TIP[name]]].t
-            W = mmul(rot_between(mvec(W, u), aim), W)
+            W = mmul(swing(mvec(W, u), aim), W)
+        if name in st.blade and name in TIP and skel.has(TIP[name]):
+            Lw = weapon_local(skel, idle, name, fixed)
+            if Lw is None:
+                raise EmoteError(f"blade {name}: the skeleton has no {WEAPON_BONE.get(name, 'weapon')} bone")
+            u = unit(skel.bones[skel.idx[TIP[name]]].t)
+            want_dir, want_edge = st.blade[name]
+            fore = mvec(Wpar, unit(trans[i]))
+            W = _blade_frame(W, u, mvec(Lw, WEAPON_AXIS), mvec(Lw, WEAPON_EDGE), want_dir, want_edge, fore)
+        if name in fixed:
+            W = mmul(Wpar, fixed[name][0])
         if name in lock:
             W = lock[name]
         if name in st.turn:
             W = mmul(deg_m(st.turn[name]), W)
         rots[i] = mmul(mT(Wpar), W)
         Wr[i], Wp[i] = W, pos
+    # spin: the pose solved upright (hands, feet and blade where the keys say, in the body's own frame), then the
+    # whole body turned about the hips as one piece: a spin or a flip keeps the arms where they were on the body
+    # A turn mostly about the vertical goes on the hip bone's children (Waist, Spine_1...: in their frames it is an
+    # outer Euler angle), a flip on the hip bone itself: the clip's Euler curves stay clear of the 90-degree middle
+    # angle (gimbal lock), where they would swing wildly between two frames
+    if any(st.spin) and skel.has("Skl_Root"):
+        r = skel.idx["Skl_Root"]
+        par = skel.bones[r].parent
+        Wpar = Wr[par] if par >= 0 else I3
+        R = deg_m(st.spin)
+        kids = [k for k, b in enumerate(skel.bones) if b.parent == r]
+        if kids and abs(st.spin[1]) >= max(abs(st.spin[0]), abs(st.spin[2])):
+            C = mmul(mT(Wr[r]), mmul(R, Wr[r]))
+            for k in kids:
+                rots[k] = mmul(C, rots[k])
+                trans[k] = tuple(mvec(C, trans[k]))
+        else:
+            rots[r] = mmul(mT(Wpar), mmul(R, Wr[r]))
     return rots, trans
 
 
@@ -1440,6 +1566,10 @@ def lint_one(d: dict, skel: Skeleton | None = None) -> list[str]:
         for k in lag:
             if not any(fnmatch.fnmatchcase(x, k) for x in BODY_BONES):
                 p.append(f"{eid}: lag {k} matches none of Link's body bones")
+    mt = d.get("max_turn", JUMP_DEG)
+    if not isinstance(mt, (int, float)) or isinstance(mt, bool) or not JUMP_DEG <= mt <= 90:
+        p.append(f"{eid}: max_turn (the most a joint may turn in one frame, for fast moves such as attacks) is "
+                 f"{JUMP_DEG:.0f} to 90 degrees")
     br = d.get("breath")
     if br is not None:
         ok = (isinstance(br, list) and len(br) == 2 and all(isinstance(x, (int, float)) and not isinstance(x, bool)
@@ -1548,6 +1678,15 @@ def run_expect(skel: Skeleton, clip: Clip, e: dict, idle_P) -> str | None:
     return None if ok else f"frame {fr}: {a} isn't {k.replace('_', ' ')} {b} ({pa[axis]:.3f} vs {pb[axis]:.3f})"
 
 
+def _facing(skel: Skeleton, Wr) -> tuple:
+    """The way the hips face on this frame (model +z when standing; turned along in a spin or a flip)."""
+    for n in ("Waist", "Skl_Root"):
+        if skel.has(n):
+            i = skel.idx[n]
+            return mvec(Wr[i], mvec(mT(skel.rest_W[i]), (0.0, 0.0, 1.0)))
+    return (0.0, 0.0, 1.0)
+
+
 def sanity(skel: Skeleton, clip: Clip, idle_P) -> list[str]:
     """Pose sanity on every frame: no joint jumps (except snaps), no hand deep in the body, elbows and knees bend the
     human way, planted feet stay put."""
@@ -1586,15 +1725,17 @@ def sanity(skel: Skeleton, clip: Clip, idle_P) -> list[str]:
                     out.append(f"frame {fr}: elbow {s} bends {bend:.0f} degrees (at most 155)")
             if all(skel.has(x) for x in (f"Leg_1_{s}", f"Leg_2_{s}", f"Ankle_{s}")):
                 S, K, A = (Wp[skel.idx[x]] for x in (f"Leg_1_{s}", f"Leg_2_{s}", f"Ankle_{s}"))
-                if dot(vsub(K, vscale(vadd(S, A), 0.5)), (0.0, 0.0, 1.0)) < -0.03:
+                if dot(vsub(K, vscale(vadd(S, A), 0.5)), _facing(skel, Wr)) < -0.03:
                     out.append(f"frame {fr}: knee {s} bends backward")
-    if worst[0] > JUMP_DEG:
-        out.append(f"frame {worst[2]}: {worst[1]} turns {worst[0]:.0f} degrees in one frame (at most {JUMP_DEG:.0f})")
+    jump = float(spec.get("max_turn", JUMP_DEG))
+    if worst[0] > jump:
+        out.append(f"frame {worst[2]}: {worst[1]} turns {worst[0]:.0f} degrees in one frame (at most {jump:.0f})")
     # planted feet: frames whose two keys are both planted with no ankle move
     ks = key_states(spec, skel)
 
     def planted(st: State) -> bool:
-        return st.feet == "planted" and not st.heel and not ({"Ankle_L", "Ankle_R"} & (set(st.step) | set(st.reach)))
+        return (st.feet == "planted" and not st.heel and not any(st.spin)
+                and not ({"Ankle_L", "Ankle_R"} & (set(st.step) | set(st.reach))))
     for fr, (rots, trans) in enumerate(clip.frames):
         k0 = max((i for i, (f, _, _) in enumerate(ks) if f <= fr), default=0)
         k1 = min(k0 + 1, len(ks) - 1)
@@ -1770,14 +1911,20 @@ def first_face(data: bytes) -> str | None:
 
 def aslist_log(emotes: list[dict]) -> bnp.Pio:
     """logs/aslist.aamp: our archive and the sets, sorted by name bytes."""
-    defs = sorted((SET_PREFIX + d["id"], BAS_PREFIX + d["id"]) for d in emotes)
-    defs.sort(key=lambda t: t[0].encode())
+    return anim_list_log(ARCHIVE, [(SET_PREFIX + d["id"], BAS_PREFIX + d["id"]) for d in emotes])
+
+
+def anim_list_log(archive: str, defs: list[tuple[str, str]] = ()) -> bnp.Pio:
+    """An animation list log (logs/aslist.aamp, merged at deploy with tools/bnp.py's aslist_merge) that adds the
+    archive Model/<archive> to Link's list and the sets (name, file name), sorted by name bytes. No sets: only the
+    archive (a mod whose clips are played by sets the game already has, such as a wrapped Player_CutS1.bas)."""
+    defs = sorted(defs, key=lambda t: t[0].encode())
     objs = {}
     for i, (name, filename) in enumerate(defs):
         objs[zlib.crc32(f"ASDefine_{i}".encode())] = bnp.PObj({bnp.P_NAME: (8, name.encode()),
                                                                 bnp.P_FILENAME: (8, filename.encode())})
     body = bnp.PList(lists={
-        bnp.ADD_RESES: bnp.PList(objs={zlib.crc32(b"AddRes_0"): bnp.PObj({bnp.P_ANIM: (8, ARCHIVE.encode())})}),
+        bnp.ADD_RESES: bnp.PList(objs={zlib.crc32(b"AddRes_0"): bnp.PObj({bnp.P_ANIM: (8, archive.encode())})}),
         bnp.AS_DEFINES: bnp.PList(objs=objs),
         bnp.CF_DEFINES: bnp.PList()})
     ft = bnp.PObj({zlib.crc32(b"File0"): (20, ASLIST_PATH.encode())})
@@ -1992,10 +2139,7 @@ def solve_all(prep: Prepared, emotes: list[dict], log=None, checks: bool = True)
 
 def build_package(game: Game, emotes: list[dict], out: str, *, log=None, strict: bool = True) -> Built:
     """Write giruka.emotes-anims (a package folder) into out/<PKG_ID>. Reads only the player's game files."""
-    from wiiu_model import checks, nx_model
-    from wiiu_model.neutral import ResFile
     import ukmm
-    import wiiu_convert as wc
     folder = os.path.join(out, PKG_ID)
     if os.path.isdir(folder) and os.listdir(folder):
         raise EmoteError(f"{folder} isn't empty")
@@ -2058,26 +2202,13 @@ def build_package(game: Game, emotes: list[dict], out: str, *, log=None, strict:
     for d in emotes:
         if d["kind"] in ("keys", "game_clip") and CLIP_PREFIX + d["id"] in game_clips:
             raise EmoteError(f"Your game already has a clip called {CLIP_PREFIX}{d['id']}")
-    anims = [to_skel_anim(cd) for cd in datas] + [copy_clip(a, CLIP_PREFIX + eid) for eid, a in copies.items()]
-    rf = ResFile(ARCHIVE, [res.models[0]], anims, [], [], dict(res.extra))
-    data = nx_model.write(rf)
-    bad = checks.switch_model_problems(data)
-    if bad:
-        raise EmoteError(f"the archive fails its self-check: {'; '.join(map(str, bad[:3]))}")
-    worst = readback(prep.skel, data, datas)
-    if worst > READBACK_DEG:
-        raise EmoteError(f"the archive reads back {worst:.3f} degrees off (at most {READBACK_DEG})")
-    bad = copies_problems(data, {CLIP_PREFIX + eid: a for eid, a in copies.items()})
-    if bad:
-        raise EmoteError("the copied game clips read back changed: " + "; ".join(bad[:3]))
+    pa = game.anim_blob()
+    data, yz, worst = write_anim_archive(prep.skel, res, datas, ARCHIVE, pa.align,
+                                         {CLIP_PREFIX + eid: a for eid, a in copies.items()})
     built.readback_deg = worst
-    built.clips = len(anims)
+    built.clips = len(datas) + len(copies)
     built.copied = {eid: a.name for eid, a in copies.items()}
     built.archive_size = len(data)
-    pa = game.anim_blob()
-    yz = ukmm.yaz0(data, pa.align)
-    if wc.yaz0_decompress(yz)[0] != data:
-        raise EmoteError("the archive's Yaz0 doesn't round-trip")
 
     # the sets
     bas_files: dict[str, bytes] = {}
@@ -2160,6 +2291,35 @@ def build_package(game: Game, emotes: list[dict], out: str, *, log=None, strict:
         f"- sets: {built.sets} ({', '.join(SET_PREFIX + d['id'] for d in emotes)})",
         *[f"- note: {n}" for n in built.notes], ""]))
     return built
+
+
+def write_anim_archive(skel: Skeleton, res, datas: list[ClipData], archive: str, align: int,
+                       copies: dict | None = None) -> tuple[bytes, bytes, float]:
+    """Our clips (and copies of game clips: {our name: the game's SkelAnim}) as one animation archive called
+    archive, with the game's dummy skeleton model from res (Player_Animation): (data, data with Yaz0, read-back
+    degrees). Raises EmoteError when its self-check, the read-back or the Yaz0 round trip fails. Any mod that ships
+    its own Link clips can use it (the emotes, Dragonbreath's attacks)."""
+    from wiiu_model import checks, nx_model
+    from wiiu_model.neutral import ResFile
+    import ukmm
+    import wiiu_convert as wc
+    copies = dict(copies or {})
+    anims = [to_skel_anim(cd) for cd in datas] + [copy_clip(a, n) for n, a in copies.items()]
+    rf = ResFile(archive, [res.models[0]], anims, [], [], dict(res.extra))
+    data = nx_model.write(rf)
+    bad = checks.switch_model_problems(data)
+    if bad:
+        raise EmoteError(f"the archive fails its self-check: {'; '.join(map(str, bad[:3]))}")
+    worst = readback(skel, data, datas)
+    if worst > READBACK_DEG:
+        raise EmoteError(f"the archive reads back {worst:.3f} degrees off (at most {READBACK_DEG})")
+    bad = copies_problems(data, copies)
+    if bad:
+        raise EmoteError("the copied game clips read back changed: " + "; ".join(bad[:3]))
+    yz = ukmm.yaz0(data, align)
+    if wc.yaz0_decompress(yz)[0] != data:
+        raise EmoteError("the archive's Yaz0 doesn't round-trip")
+    return data, yz, worst
 
 
 def copy_clip(a, name: str):

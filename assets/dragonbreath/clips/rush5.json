@@ -1,0 +1,31 @@
+{
+ "id": "rush5",
+ "slot": "CutJustRush",
+ "part": 5,
+ "name": "Flurry 5: wide spin",
+ "by": "giruka",
+ "about": "Flurry Rush cut 5: a wide spinning cut, the last of the flurry, ending in a low guard.",
+ "frames": 14,
+ "next": 14,
+ "max_turn": 85,
+ "hits": [
+  {
+   "start": 4,
+   "end": 7,
+   "side": "Left",
+   "at": [
+    0,
+    1.0,
+    0.95
+   ]
+  }
+ ],
+ "keys": [
+  {"f": 0, "pose": "ready", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.3, 0.22, 0.08]}}, "blade": {"Wrist_R": [-0.45, 0.75, -0.48]}, "turn": {"Spine_1": [0, -22, 0]}},
+  {"f": 2, "pose": "spin_out", "ease": "hit", "spin": [0, -100, 0]},
+  {"f": 4, "pose": "spin_out", "ease": "linear", "spin": [0, -10, 0]},
+  {"f": 7, "pose": "spin_out", "ease": "linear", "spin": [0, 120, 0]},
+  {"f": 9, "pose": "ready", "ease": "hit", "spin": [0, 60, 0], "reach": {"Wrist_R": {"on": "Spine_2", "at": [0.26, 0.06, 0.12]}}, "blade": {"Wrist_R": [0.75, 0.35, -0.56]}},
+  {"f": 14, "pose": "low", "ease": "smooth", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.2, -0.2, 0.2]}}, "blade": {"Wrist_R": [-0.5, -0.3, 0.8]}}
+ ]
+}

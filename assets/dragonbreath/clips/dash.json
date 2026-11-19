@@ -1,0 +1,32 @@
+{
+ "id": "dash",
+ "slot": "CutDash",
+ "part": 1,
+ "name": "Dash: lunge thrust",
+ "by": "giruka",
+ "about": "Low dashing lunge: Link drops low, drives forward on the front leg and thrusts the blade straight ahead, then springs back up.",
+ "frames": 20,
+ "next": 20,
+ "max_turn": 85,
+ "hits": [
+  {
+   "start": 2,
+   "end": 5,
+   "side": "Left",
+   "at": [
+    0,
+    0.95,
+    1.2
+   ]
+  }
+ ],
+ "keys": [
+  {"f": 0, "pose": "ready"},
+  {"f": 1, "pose": "low", "ease": "hit", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.24, -0.12, -0.04]}}, "blade": {"Wrist_R": [-0.1, 0.05, 1.0]}},
+  {"f": 3, "pose": "low", "ease": "linear", "hips": [0, -0.2, 0.24], "step": {"Ankle_L": [0.06, 0, 0.48], "Ankle_R": [-0.06, 0, -0.1]}, "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.08, 0.02, 0.5]}}, "blade": {"Wrist_R": [0, 0.05, 1.0]}, "turn": {"Spine_1": [18, 0, 0], "Head": [-14, 0, 0]}},
+  {"f": 4, "pose": "low", "ease": "linear", "hips": [0, -0.2, 0.24], "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.07, 0.03, 0.51]}}, "blade": {"Wrist_R": [0.025, 0.075, 0.997]}, "turn": {"Spine_1": [19.0, 0.0, 0.0], "Head": [-15.0, 0.0, 0.0]}, "step": {"Ankle_L": [0.06, 0, 0.48], "Ankle_R": [-0.06, 0, -0.1]}},
+  {"f": 5, "pose": "low", "ease": "out", "hips": [0, -0.2, 0.24], "step": {"Ankle_L": [0.06, 0, 0.48], "Ankle_R": [-0.06, 0, -0.1]}, "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.06, 0.04, 0.52]}}, "blade": {"Wrist_R": [0.05, 0.1, 1.0]}, "turn": {"Spine_1": [20, 0, 0], "Head": [-16, 0, 0]}},
+  {"f": 10, "pose": "ready", "ease": "smooth", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.24, 0.04, 0.2]}}, "blade": {"Wrist_R": [-0.3, 0.9, 0.3]}},
+  {"f": 20, "pose": "ready"}
+ ]
+}

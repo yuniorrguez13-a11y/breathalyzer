@@ -1,0 +1,33 @@
+{
+ "id": "s1",
+ "slot": "CutS1",
+ "part": 1,
+ "name": "Combo 1: hip snap",
+ "by": "giruka",
+ "about": "Low cross cut: the blade snaps out of a low right-hip draw across to the left, then a quick downward flick (the tail plays only if no next attack).",
+ "frames": 14,
+ "next": 5,
+ "max_turn": 85,
+ "hits": [
+  {
+   "start": 2,
+   "end": 4,
+   "side": "Left",
+   "at": [
+    0,
+    1.0,
+    0.85
+   ]
+  }
+ ],
+ "keys": [
+  {"f": 0, "pose": "ready"},
+  {"f": 1, "pose": "low", "ease": "hit", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.3, -0.2, 0.12]}}, "blade": {"Wrist_R": [-0.85, 0.0, 0.5]}},
+  {"f": 2, "pose": "ready", "ease": "linear", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.22, -0.14, 0.32]}}, "blade": {"Wrist_R": [-0.55, 0.05, 0.83]}, "turn": {"Spine_1": [10, -14, 0], "Head": [-8, 14, 0]}},
+  {"f": 3, "ease": "linear", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.01, -0.07, 0.31]}}, "blade": {"Wrist_R": [0.03, 0.17, 0.98]}, "turn": {"Spine_1": [9.0, -1.0, 0.0], "Head": [-7.0, 2.0, 0.0]}},
+  {"f": 4, "ease": "linear", "reach": {"Wrist_R": {"on": "Spine_2", "at": [0.2, 0.0, 0.3]}}, "blade": {"Wrist_R": [0.6, 0.25, 0.76]}, "turn": {"Spine_1": [8, 12, 0], "Head": [-6, -10, 0]}},
+  {"f": 6, "ease": "out", "reach": {"Wrist_R": {"on": "Spine_2", "at": [0.26, 0.06, 0.12]}}, "blade": {"Wrist_R": [0.75, 0.35, -0.56]}, "turn": {"Spine_1": [6, 22, 0], "Head": [-4, -18, 0]}},
+  {"f": 9, "ease": "hit", "reach": {"Wrist_R": {"on": "Spine_2", "at": [0.02, -0.1, 0.32]}}, "blade": {"Wrist_R": [0.2, -0.85, 0.48]}, "turn": {"Spine_1": [10, 4, 0], "Head": [-8, 0, 0]}},
+  {"f": 14, "pose": "ready"}
+ ]
+}

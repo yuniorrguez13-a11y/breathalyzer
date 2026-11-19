@@ -1,0 +1,31 @@
+{
+ "id": "rush3",
+ "slot": "CutJustRush",
+ "part": 3,
+ "name": "Flurry 3: twirl drop",
+ "by": "giruka",
+ "about": "Flurry Rush cut 3: a quick half-twirl of the body, then a diagonal cut down from high right to low left.",
+ "frames": 10,
+ "next": 10,
+ "max_turn": 90,
+ "hits": [
+  {
+   "start": 4,
+   "end": 6,
+   "side": "Left",
+   "at": [
+    0,
+    0.95,
+    0.85
+   ]
+  }
+ ],
+ "keys": [
+  {"f": 0, "pose": "ready", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.32, 0.1, 0.1]}}, "blade": {"Wrist_R": [-0.8, 0.45, -0.4]}, "turn": {"Spine_1": [6, -20, 0]}},
+  {"f": 2, "pose": "ready", "ease": "linear", "spin": [0, -60, 0], "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.26, 0.3, 0.1]}}, "blade": {"Wrist_R": [-0.3, 0.9, -0.3]}},
+  {"f": 4, "pose": "ready", "ease": "linear", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.2, 0.24, 0.3]}}, "blade": {"Wrist_R": [-0.45, 0.65, 0.6]}, "turn": {"Spine_1": [6, -10, 0]}},
+  {"f": 5, "pose": "ready", "ease": "linear", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.05, 0.05, 0.32]}}, "blade": {"Wrist_R": [0.035, 0.21, 0.977]}, "turn": {"Spine_1": [10.0, 1.0, 0.0]}},
+  {"f": 6, "pose": "ready", "ease": "linear", "reach": {"Wrist_R": {"on": "Spine_2", "at": [0.1, -0.14, 0.34]}}, "blade": {"Wrist_R": [0.5, -0.35, 0.79]}, "turn": {"Spine_1": [14, 12, 0]}},
+  {"f": 10, "pose": "ready", "ease": "out", "reach": {"Wrist_R": {"on": "Spine_2", "at": [0.2, -0.24, 0.14]}}, "blade": {"Wrist_R": [0.6, -0.7, -0.3]}, "turn": {"Spine_1": [14, 16, 0]}}
+ ]
+}

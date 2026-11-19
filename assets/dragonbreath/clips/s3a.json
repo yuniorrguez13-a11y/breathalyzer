@@ -1,0 +1,28 @@
+{
+ "id": "s3a",
+ "slot": "CutS3",
+ "part": 1,
+ "name": "Combo 3: spin, cut 1",
+ "by": "giruka",
+ "about": "Full spin, first half: the arm flies out to the right and Link whirls to his left, the blade sweeping across the front.",
+ "frames": 5,
+ "next": 5,
+ "max_turn": 85,
+ "hits": [
+  {
+   "start": 2,
+   "end": 4,
+   "side": "Left",
+   "at": [
+    0,
+    1.0,
+    0.95
+   ]
+  }
+ ],
+ "keys": [
+  {"f": 0, "pose": "spin_out", "turn": {"Spine_1": [4, -24, 0]}},
+  {"f": 2, "pose": "spin_out", "ease": "linear", "spin": [0, 80, 0]},
+  {"f": 5, "pose": "spin_out", "ease": "linear", "spin": [0, -160, 0]}
+ ]
+}

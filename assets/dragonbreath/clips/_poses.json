@@ -1,0 +1,288 @@
+{
+ "about": "Shared stances for Dragonbreath's attack clips (our own keys, by giruka). Every clip may use these by name; a clip's own poses win. Hands follow the chest (reach on Spine_2), the blade direction is in Link's axes (x his left, y up, z forward).",
+ "poses": {
+  "ready": {
+   "hips": [
+    0,
+    -0.12,
+    0.02
+   ],
+   "step": {
+    "Ankle_L": [
+     0.03,
+     0,
+     0.16
+    ],
+    "Ankle_R": [
+     -0.03,
+     0,
+     -0.14
+    ]
+   },
+   "knee": {
+    "L": [
+     0.25,
+     0,
+     1
+    ],
+    "R": [
+     -0.25,
+     0,
+     1
+    ]
+   },
+   "reach": {
+    "Wrist_R": {
+     "on": "Spine_2",
+     "at": [
+      -0.2,
+      -0.12,
+      0.28
+     ]
+    },
+    "Wrist_L": {
+     "on": "Spine_2",
+     "at": [
+      0.24,
+      -0.1,
+      0.14
+     ]
+    }
+   },
+   "blade": {
+    "Wrist_R": [
+     0.15,
+     0.55,
+     0.82
+    ]
+   },
+   "hand": {
+    "R": "grip",
+    "L": "open"
+   },
+   "turn": {
+    "Spine_1": [
+     8,
+     -8,
+     0
+    ],
+    "Head": [
+     -6,
+     8,
+     0
+    ]
+   }
+  },
+  "low": {
+   "hips": [
+    0,
+    -0.26,
+    0.04
+   ],
+   "step": {
+    "Ankle_L": [
+     0.06,
+     0,
+     0.22
+    ],
+    "Ankle_R": [
+     -0.06,
+     0,
+     -0.2
+    ]
+   },
+   "knee": {
+    "L": [
+     0.3,
+     0,
+     1
+    ],
+    "R": [
+     -0.3,
+     0,
+     1
+    ]
+   },
+   "reach": {
+    "Wrist_R": {
+     "on": "Spine_2",
+     "at": [
+      -0.28,
+      -0.24,
+      0.02
+     ]
+    },
+    "Wrist_L": {
+     "on": "Spine_2",
+     "at": [
+      0.24,
+      -0.12,
+      0.18
+     ]
+    }
+   },
+   "blade": {
+    "Wrist_R": [
+     -0.35,
+     -0.3,
+     -0.88
+    ]
+   },
+   "hand": {
+    "R": "grip",
+    "L": "open"
+   },
+   "turn": {
+    "Spine_1": [
+     16,
+     -22,
+     0
+    ],
+    "Head": [
+     -14,
+     22,
+     0
+    ]
+   }
+  },
+  "spin_out": {
+   "hips": [
+    0,
+    -0.1,
+    0
+   ],
+   "step": {
+    "Ankle_L": [
+     0.05,
+     0,
+     0.1
+    ],
+    "Ankle_R": [
+     -0.05,
+     0,
+     -0.08
+    ]
+   },
+   "knee": {
+    "L": [
+     0.25,
+     0,
+     1
+    ],
+    "R": [
+     -0.25,
+     0,
+     1
+    ]
+   },
+   "reach": {
+    "Wrist_R": {
+     "on": "Spine_2",
+     "at": [
+      -0.6,
+      0.02,
+      0.1
+     ]
+    },
+    "Wrist_L": {
+     "on": "Spine_2",
+     "at": [
+      0.3,
+      0.0,
+      -0.05
+     ]
+    }
+   },
+   "blade": {
+    "Wrist_R": [
+     -0.88,
+     0.05,
+     0.47
+    ]
+   },
+   "hand": {
+    "R": "grip",
+    "L": "open"
+   },
+   "turn": {
+    "Spine_1": [
+     4,
+     -10,
+     0
+    ]
+   }
+  },
+  "tuck": {
+   "hips": [
+    0,
+    0.45,
+    0
+   ],
+   "step": {
+    "Ankle_L": [
+     0.04,
+     0.85,
+     0.1
+    ],
+    "Ankle_R": [
+     -0.04,
+     0.85,
+     0.1
+    ]
+   },
+   "knee": {
+    "L": [
+     0.1,
+     0.2,
+     1
+    ],
+    "R": [
+     -0.1,
+     0.2,
+     1
+    ]
+   },
+   "reach": {
+    "Wrist_R": {
+     "on": "Spine_2",
+     "at": [
+      -0.16,
+      0.42,
+      0.12
+     ]
+    },
+    "Wrist_L": {
+     "on": "Spine_2",
+     "at": [
+      0.2,
+      0.15,
+      0.25
+     ]
+    }
+   },
+   "blade": {
+    "Wrist_R": [
+     0,
+     0.25,
+     -0.97
+    ]
+   },
+   "hand": {
+    "R": "grip",
+    "L": "fist"
+   },
+   "turn": {
+    "Spine_1": [
+     24,
+     0,
+     0
+    ],
+    "Head": [
+     -10,
+     0,
+     0
+    ]
+   }
+  }
+ }
+}

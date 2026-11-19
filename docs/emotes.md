@@ -171,6 +171,7 @@ his feet. Angles are in degrees. Bones use Link's names (`Arm_1_R` upper arm, `A
 | `keys` | the keyframes: `{"f": frame, ...}`; what a key says stays until a later key changes it |
 | `expect` | checks on the solved pose, such as `{"f": 12, "above": ["Wrist_R", "Head"]}` |
 | `contact` | hands that may touch the body (`Wrist_R`, `Wrist_L`) |
+| `max_turn` | the most a joint may turn in one frame for the pose check (fast attack clips: up to 90) |
 
 In a key:
 
@@ -187,6 +188,8 @@ In a key:
 | `turn {bone: [x,y,z]}` | degrees about Link's axes: head nod `[15,0,0]`, shake `[0,15,0]`, tilt `[0,0,15]`; on `Spine_1` the whole upper body |
 | `local {bone: [x,y,z]}` | degrees in the bone's own frame (fine finger work) |
 | `rest [bones]` | the skeleton's own rest pose for these bones (`Finger_*_R` works) |
+| `blade {Wrist_R: [x,y,z]}` | turn the hand so the weapon it holds points that way; `{"dir": [x,y,z], "edge": [x,y,z]}` also sets which way the edge faces (weapon clips use the game's own sword grip) |
+| `spin [x,y,z]` | degrees: turn the whole solved pose about the hips (spins and flips; hands, feet and blade turn with it) |
 | `hips [x,y,z]` | move the whole body; the feet stay planted, so the knees bend |
 | `feet` | `planted` (default) or `free` |
 | `reset`, `free [bones]` | everything back to standing, or only these bones |

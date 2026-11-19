@@ -711,7 +711,8 @@ def build(library: str | None = None, *, install: str | None = None, out: str | 
     out = os.path.abspath(out)
     try:
         built = build_package(game, recipe, out, log=log, used=set(other_hash_ids(lib, recipe)))
-        entry = main_entry = None
+        moves = build_moves(game.install, out, log, os.path.join(recipe_dir, "clips"))
+        entry = main_entry = moves_entry = None
         notes: list[str] = []
         if add:
             entry, n1 = add_to_library(lib, built.folder, recipe.item_manifest["id"], log)
@@ -720,10 +721,35 @@ def build(library: str | None = None, *, install: str | None = None, out: str | 
                 main_entry["enabled"] = True
                 lib.save()
             notes = n1 + n2
-        return {"built": built, "entry": entry, "main_entry": main_entry, "notes": notes}
+            if moves is not None:
+                moves_entry, n3 = add_to_library(lib, moves.folder, moves_id(), log)
+                notes += n3
+        return {"built": built, "entry": entry, "main_entry": main_entry, "moves": moves, "moves_entry": moves_entry,
+                "notes": notes}
     finally:
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+def moves_id() -> str:
+    import dragonbreath_clips as dc
+    return dc.PKG_ID
+
+
+def build_moves(install: str, out: str, log=None, folder: str | None = None):
+    """Stage 3: our own attack clips (tools/dragonbreath_clips.py, the recipe's clips folder) as the hidden package
+    giruka.dragonbreath-moves (part of the Dragonbreath switch). None when the recipe has no clip files; a failure
+    says why and stops the build."""
+    import dragonbreath_clips as dc
+    import emote_build as eb
+    folder = folder or dc.CLIPS
+    clips = dc.load_clips(folder) if os.path.isdir(folder) else []
+    if not clips:
+        return None
+    try:
+        return dc.build_package(eb.find_game(install), clips, out, log=log)
+    except (dc.ClipError, eb.EmoteError) as e:
+        raise DragonError(f"the fast moves (stage 3) can't be built: {e}") from None
 
 
 # ------------------------------------------------------------------------------------------------ check
@@ -807,7 +833,25 @@ def check(library: str | None = None, *, install: str | None = None, recipe_dir:
                                "test spot")
         except (ak.AkError, OSError, bm.LogError, wc.FormatError, struct.error, IndexError) as e:
             out.append(f"the map unit {unit_name} can't be read ({e})")
+    out += moves_problems(game.install, os.path.join(recipe_dir, "clips"), log)
     return out
+
+
+def moves_problems(install: str, folder: str, log=None) -> list[str]:
+    """Stage 3's clip checks on Link's own skeleton (tools/dragonbreath_clips.py check), when the recipe has clips."""
+    import dragonbreath_clips as dc
+    import emote_build as eb
+    clips = dc.load_clips(folder) if os.path.isdir(folder) else []
+    if not clips:
+        return []
+    bad = [f"clips: {p}" for p in dc.lint(clips)]
+    if bad:
+        return bad
+    try:
+        _solved, reps = dc.check_all(dc.game_rig(eb.find_game(install), log), clips, log)
+    except (dc.ClipError, eb.EmoteError) as e:
+        return [f"clips: {e}"]
+    return [f"clip {r.cid}: {p}" for r in reps for p in r.problems]
 
 
 # ------------------------------------------------------------------------------------------------ clean
@@ -819,7 +863,7 @@ def clean(library: str | None = None, *, item: bool = False, recipe_dir: str = R
     if lib is None:
         raise DragonError("No mod library here.")
     gone = []
-    for mid in [recipe.manifest["id"]] + ([recipe.item_manifest["id"]] if item else []):
+    for mid in [recipe.manifest["id"], moves_id()] + ([recipe.item_manifest["id"]] if item else []):
         if any(m["id"] == mid for m in lib.mods):
             mm.remove_mod(lib, mid)
             gone.append(mid)
@@ -904,7 +948,11 @@ def main(argv: list[str] | None = None) -> int:
             f"{made.folder} and {made.main_folder}"
         print(f"Dragonbreath built ({made.vertices} vertices, {made.triangles} triangles): {where}.")
         print(f"  test spot: x={made.spot[0]:.1f} y={made.spot[1]:.1f} z={made.spot[2]:.1f}")
-        for n in made.notes + r["notes"]:
+        mv = r.get("moves")
+        if mv is not None:
+            print(f"  fast moves: {mv.clips} clips in {', '.join(mv.sets)} ({mv.folder}), "
+                  f"{mv.speed['hits_per_second_x']:.1f}x the hits per second of the game's combo")
+        for n in made.notes + r["notes"] + (mv.notes if mv is not None else []):
             print(f"  note: {n}")
         if r["entry"]:
             print("Next: python tools/modman.py deploy")

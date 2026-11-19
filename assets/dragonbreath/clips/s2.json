@@ -1,0 +1,33 @@
+{
+ "id": "s2",
+ "slot": "CutS2",
+ "part": 1,
+ "name": "Combo 2: rising return",
+ "by": "giruka",
+ "about": "Reverse rising cut: from the left low up past the right shoulder, the blade then rests back over the shoulder for a beat.",
+ "frames": 14,
+ "next": 5,
+ "max_turn": 85,
+ "hits": [
+  {
+   "start": 2,
+   "end": 4,
+   "side": "Right",
+   "at": [
+    0,
+    1.05,
+    0.85
+   ]
+  }
+ ],
+ "keys": [
+  {"f": 0, "pose": "ready", "reach": {"Wrist_R": {"on": "Spine_2", "at": [0.26, 0.06, 0.12]}}, "blade": {"Wrist_R": [0.75, 0.35, -0.56]}, "turn": {"Spine_1": [6, 22, 0], "Head": [-4, -18, 0]}},
+  {"f": 1, "ease": "hit", "reach": {"Wrist_R": {"on": "Spine_2", "at": [0.2, -0.26, 0.16]}}, "blade": {"Wrist_R": [0.5, -0.6, 0.62]}, "turn": {"Spine_1": [14, 24, 0], "Head": [-10, -20, 0]}},
+  {"f": 2, "ease": "linear", "reach": {"Wrist_R": {"on": "Spine_2", "at": [0.06, -0.2, 0.36]}}, "blade": {"Wrist_R": [0.42, -0.2, 0.88]}, "turn": {"Spine_1": [10, 10, 0], "Head": [-8, -8, 0]}},
+  {"f": 3, "ease": "linear", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.12, -0.03, 0.32]}}, "blade": {"Wrist_R": [-0.137, 0.26, 0.956]}, "turn": {"Spine_1": [6.0, -3.0, 0.0], "Head": [-5.0, 2.0, 0.0]}},
+  {"f": 4, "ease": "linear", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.3, 0.14, 0.28]}}, "blade": {"Wrist_R": [-0.62, 0.58, 0.52]}, "turn": {"Spine_1": [2, -16, 0], "Head": [-2, 12, 0]}},
+  {"f": 6, "ease": "out", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.3, 0.22, 0.08]}}, "blade": {"Wrist_R": [-0.45, 0.75, -0.48]}, "turn": {"Spine_1": [0, -22, 0], "Head": [0, 16, 0]}},
+  {"f": 9, "ease": "smooth", "reach": {"Wrist_R": {"on": "Spine_2", "at": [-0.3, 0.12, 0.2]}}, "blade": {"Wrist_R": [-0.3, 0.85, -0.4]}, "turn": {"Spine_1": [2, -12, 0], "Head": [-4, 8, 0]}},
+  {"f": 14, "pose": "ready"}
+ ]
+}
