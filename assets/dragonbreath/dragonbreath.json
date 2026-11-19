@@ -1,0 +1,58 @@
+{
+ "format": 1,
+ "actor": "Weapon_Sword_Dragonbreath",
+ "donor": "Weapon_Sword_047",
+ "about_donor": "the Royal Guard's Sword: a plain metal one-handed sword (one shape, colour/normal/shine textures, no glow, no fire), held and carried like any one-handed sword",
+ "stats": {
+  "attack": 40,
+  "life": 1000,
+  "life_infinite": true,
+  "throwable": false,
+  "subtype": "Dragonbreath",
+  "guardian_ratio": 0.25,
+  "guardians_from": "Weapon_Sword_013",
+  "guardians_leave_out": [
+   "Enemy_Ganon",
+   "Enemy_SiteBoss_"
+  ]
+ },
+ "tags": {
+  "drop": [
+   "ZukanWeapon",
+   "RevivalBloodyMoon",
+   "AmiiboTreasure",
+   "AmiiboNoDropBeginning",
+   "AmiiboOnlyDropBeginning"
+  ],
+  "add": [
+   "CannotSell",
+   "RevivalNone",
+   "NotRandomSet",
+   "ApplyHighGradeGetDemo"
+  ]
+ },
+ "texts": {
+  "name": "Dragonbreath",
+  "desc": "Goron masters forged this slim blade\nfor Daruk, but it slipped from his great\nhands. Swift as a breath of flame, it\nrivals even the Master Sword."
+ },
+ "blade": {
+  "base_width": 0.022,
+  "tip_width": 0.015,
+  "thickness": 0.006,
+  "sori": 0.015,
+  "tip_len": 0.045,
+  "guard_r": 0.036,
+  "edge_side": 1,
+  "preview_hilt": -0.2129,
+  "preview_top": 1.0512
+ },
+ "test_spot": {
+  "unit": "D-6_Dynamic",
+  "x": -1031.0,
+  "z": 1812.0,
+  "ground": 251.2,
+  "lift": 0.25,
+  "yaw": 120.0,
+  "about": "about 3 m from where the test save's checks stand Link (-1033.6, 252.3, 1809.3), open ground on the Great Plateau near its start"
+ }
+}

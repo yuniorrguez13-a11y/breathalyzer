@@ -1,0 +1,17 @@
+# Dragonbreath, a Breathalyzer weapon mod by giruka (docs/dragonbreath.md). The main switch: off by default.
+# This folder is a recipe, not a mod you add as it is: it holds no game files. tools/dragonbreath_build.py builds two
+# mods on your PC from your own game files (the Royal Guard's Sword's actor, model and icon as the base) and the
+# model it makes in code, then adds them to your mod library:
+#   python tools/dragonbreath_build.py build --on
+# This mod.toml is the main switch's (botw-mod-loader.dragonbreath): for now it holds only the test spot, one
+# Dragonbreath lying near the test save's start on the Great Plateau. Later stages add the cave, the Goron smith and
+# the fast moves here. item.toml is the other mod's (giruka.dragonbreath-item: the blade's actor, model, icon, texts
+# and flags): no part_of, so it stays on while this switch is off and a save that holds the blade keeps loading.
+
+[mod]
+id = "botw-mod-loader.dragonbreath"
+name = "Dragonbreath"
+version = "0.1.0"
+authors = ["giruka"]
+description = "A lost Goron blade forged for Daruk. Test stage: one lies at the plateau start."
+game_versions = ["1.9.0"]

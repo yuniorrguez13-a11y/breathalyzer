@@ -812,6 +812,7 @@ ENCODERS = {   # nn::gfx attribute format -> (bytes per vertex, encoder of a val
     0x0B02: (4, lambda v: bytes(_snorm8(c) for c in (*v[:3], v[3] if len(v) > 3 else 1.0))),   # 8_8_8_8 snorm
     0x1205: (4, lambda v: _f16(v[0]) + _f16(v[1])),                              # 16_16 float
     0x1305: (8, lambda v: struct.pack("<2f", v[0], v[1])),                       # 32_32 float
+    0x1201: (4, lambda v: struct.pack("<2H", *(max(0, min(65535, round(c * 65535))) for c in v[:2]))),   # 16_16 unorm
 }
 
 
