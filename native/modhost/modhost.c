@@ -127,6 +127,7 @@ typedef struct {
     int nhooks;
     bool ok;
     bool told_no_slots;  // the "no hook slots" line was logged for it
+    bool switched_off;   // its swmod_init failed: its hooks and overrides were taken out (the DLL stays loaded)
     int settings;        // its mod's index in settings.txt (settings.c), -1: none
     HMODULE h;
     SwModApi api;
@@ -578,6 +579,9 @@ static uint64_t api_find_site(const char *name) {
 static struct {
     uint64_t addr;
     int mod;
+    bool pending;      // asked for during its mod's swmod_init: sent to Savage Wind only once that init returns 0
+    SwModGuestFn fn;
+    const char *name;
 } g_start_ovr[MAX_START_OVERRIDES];  // the overrides of mods loaded at game start
 static int g_nstart_ovr;
 
@@ -688,17 +692,51 @@ static void api_hle_override(uint64_t addr, SwModGuestFn fn, const char *name) {
         hot_override(m, addr, a, fn, name);
         return;
     }
+    // During its swmod_init it is only queued: Savage Wind can't take an override back, so it goes in once the init
+    // returned 0 (start_overrides_done), and a failed init leaves nothing running.
+    bool queue = m && m == g_current && GetCurrentThreadId() == g_current_tid;
     reg_lock();  // (a mod loaded at game start may call from a game thread)
     if (g_nstart_ovr < MAX_START_OVERRIDES) {
         g_start_ovr[g_nstart_ovr].addr = addr;
+        g_start_ovr[g_nstart_ovr].pending = queue;
+        g_start_ovr[g_nstart_ovr].fn = fn;
+        g_start_ovr[g_nstart_ovr].name = name;
         g_start_ovr[g_nstart_ovr++].mod = m ? m->id : 0;
+    } else {
+        queue = false;  // (no room to queue it: it goes in now, as before)
     }
     if (m && !list_has(m->overrides, a)) list_add(m->overrides, sizeof m->overrides, a);
     reg_unlock();
-    hle_override(addr, (HostFn)fn, name ? name : "mod");
+    if (!queue) hle_override(addr, (HostFn)fn, name ? name : "mod");
 }
+
+// A mod loaded at game start finished its swmod_init: its queued overrides go in (ok), or are dropped (it failed).
+static void start_overrides_done(Mod *m, bool ok) {
+    reg_lock();
+    int j = 0;
+    for (int k = 0; k < g_nstart_ovr; k++) {
+        if (g_start_ovr[k].pending && g_start_ovr[k].mod == m->id) {
+            if (!ok) continue;
+            g_start_ovr[k].pending = false;
+            hle_override(g_start_ovr[k].addr, (HostFn)g_start_ovr[k].fn,
+                         g_start_ovr[k].name ? g_start_ovr[k].name : "mod");
+        }
+        g_start_ovr[j++] = g_start_ovr[k];
+    }
+    g_nstart_ovr = j;
+    if (!ok) m->overrides[0] = 0;
+    reg_unlock();
+}
+
 static void api_guest_call(struct Cpu *c, uint64_t addr) {
-    if (c) guest_call(c, addr);
+    if (!c) return;
+    if (!addr) {  // (Savage Wind stops the game with FATAL for an address with no function: refuse it here)
+        Mod *m = calling_mod();
+        host_log("mod %s: guest_call to address 0 refused (a site or pattern that wasn't found?)",
+                 m ? m->file : "?");
+        return;
+    }
+    guest_call(c, addr);
 }
 static struct Cpu *api_current_cpu(void) { return kernel_current_cpu(); }
 
@@ -874,6 +912,73 @@ static int api_hook(uint64_t addr, SwModHookBefore before, SwModHookAfter after,
     return SWMOD_HOOK_OK;
 }
 
+// Stand-ins for the hooks of a switched-off mod in a list a game thread may still run (they do nothing).
+static bool off_before(struct Cpu *c) { (void)c; return false; }
+static void off_after(struct Cpu *c) { (void)c; }
+static void off_replace(struct Cpu *c, SwModGuestFn orig) { orig(c); }
+
+// Points every entry of h that is one of g's functions at a stand-in (one pointer store each: a thread reading the
+// list sees the old function or the stand-in, and both stay loaded).
+static void off_in_list(HookList *h, const HookReg *g) {
+    for (int i = 0; i < h->nbefore; i++)
+        if (g->before && h->before[i] == g->before) __atomic_store_n(&h->before[i], off_before, __ATOMIC_SEQ_CST);
+    for (int i = 0; i < h->nafter; i++)
+        if (g->after && h->after[i] == g->after) __atomic_store_n(&h->after[i], off_after, __ATOMIC_SEQ_CST);
+    if (g->replace && h->replace == g->replace) __atomic_store_n(&h->replace, off_replace, __ATOMIC_SEQ_CST);
+}
+
+// A mod whose swmod_init failed: take its hooks (and, for a mod loaded while the game runs, its overrides and
+// commands) out without waiting. The DLL stays loaded. A list a game thread may still run isn't rewritten (only its
+// entries of this mod become stand-ins) and is marked dirty, so a later publish or modunload waits for it first.
+static void switch_off(Mod *m) {
+    for (int k = 0; k < g_nstates; k++) {
+        HookState *st = &g_states[k];
+        if (!has_regs_of(st, m->id)) continue;
+        if (m->hot)
+            for (int i = 0; i < st->nregs; i++)
+                if (st->regs[i].mod == m->id) {
+                    off_in_list(&st->hot[0], &st->regs[i]);
+                    off_in_list(&st->hot[1], &st->regs[i]);
+                }
+        int j = 0;
+        for (int i = 0; i < st->nregs; i++)
+            if (st->regs[i].mod != m->id) st->regs[j++] = st->regs[i];
+        st->nregs = j;
+        if (m->hot) {  // game threads may run it right now
+            if (!has_hot_regs(st, 0)) publish(st, 0);  // (back to the plain list: no hot list is rewritten)
+            st->gate.dirty = true;
+        } else {       // loaded at game start: no game code runs yet, so the plain list is rebuilt in place
+            memset(&st->plain, 0, sizeof st->plain);
+            for (int i = 0; i < st->nregs; i++) {
+                const HookReg *g = &st->regs[i];
+                if (g->before) st->plain.before[st->plain.nbefore++] = g->before;
+                if (g->after) st->plain.after[st->plain.nafter++] = g->after;
+                if (g->replace) st->plain.replace = g->replace;
+            }
+        }
+        if (!j) {  // no hooks left: calls go straight on to the function again
+            for (uint32_t i = 0; g_hooks && i < g_hooks->count; i++)
+                if (g_hooks->slots[i].user == st) __atomic_store_n(&g_hooks->slots[i].entry, NULL, __ATOMIC_RELEASE);
+        }
+    }
+    for (int k = 0; k < g_nhot_ovr; k++)
+        if (g_hot_ovr[k].mod == m->id) {
+            __atomic_store_n(&g_hot_ovr[k].active, 0, __ATOMIC_SEQ_CST);
+            __atomic_store_n(&g_hot_ovr[k].fn, NULL, __ATOMIC_SEQ_CST);
+            g_hot_ovr[k].mod = 0;
+            g_hot_ovr[k].gate.dirty = true;
+        }
+    for (int k = 0; k < g_nhot_cmds; k++)
+        if (g_hot_cmds[k].mod == m->id) {
+            g_hot_cmds[k].fn = NULL;
+            g_hot_cmds[k].mod = 0;
+        }
+    m->hooks[0] = 0;
+    m->overrides[0] = 0;
+    m->nhooks = 0;
+    m->switched_off = true;
+}
+
 // The hook slots of the loaded game code, if it was built with them.
 static void load_hooks(void) {
     SwHookTableFn fn = (SwHookTableFn)GetProcAddress(g_real_h, SWHOOK_EXPORT);
@@ -952,6 +1057,12 @@ static bool unload_mod(Mod *m, bool call_exit, char *why, size_t cap) {
 
     // 1. something replaced earlier may still be in use: wait for that first (nothing is changed yet)
     bool ok = true;
+    if (m->switched_off) {  // (its lists were taken out without a wait: every dirty one may still run its code)
+        for (int k = 0; k < g_nstates && ok; k++)
+            if (g_states[k].gate.dirty) ok = gate_sync(&g_states[k].gate, until);
+        for (int k = 0; k < g_nhot_ovr && ok; k++)
+            if (g_hot_ovr[k].gate.dirty) ok = gate_sync(&g_hot_ovr[k].gate, until);
+    }
     for (int k = 0; k < n && ok; k++)
         if (sts[k]->gate.dirty) ok = gate_sync(&sts[k]->gate, until);
     for (int k = 0; k < no && ok; k++)
@@ -1206,8 +1317,11 @@ static Mod *init_hot(HotFile *hf, char *err, size_t cap) {
         host_log("modload %s: swmod_init failed (code %d); unloaded again", want, rc);
         return NULL;
     }
-    snprintf(m->status, sizeof m->status, "init failed (code %d), still loaded", rc);
-    snprintf(err, cap, "%s: swmod_init failed (code %d), and it can't be unloaded yet: %s", want, rc, why);
+    switch_off(m);  // (it can't be freed yet, but nothing of it runs any more)
+    snprintf(m->status, sizeof m->status, "init failed (code %d), switched off, still loaded", rc);
+    snprintf(err, cap, "%s: swmod_init failed (code %d): its hooks and overrides were switched off, but it can't be "
+             "unloaded yet: %s", want, rc, why);
+    host_log("modload %s: swmod_init failed (code %d); switched off, still loaded", want, rc);
     return NULL;
 }
 
@@ -1471,8 +1585,13 @@ static void load_one(const wchar_t *dir, const wchar_t *file) {
     int rc = init(&m->api);
     g_current = NULL;
     m->ok = rc == 0;
+    start_overrides_done(m, m->ok);  // (a failed init: its overrides never go in)
     if (m->ok) copy_str(m->status, sizeof m->status, "ok");
-    else snprintf(m->status, sizeof m->status, "init failed (code %d)", rc);
+    else {
+        switch_off(m);  // (its hooks come out again: no game code runs yet)
+        snprintf(m->status, sizeof m->status, "init failed (code %d)", rc);
+        host_log("mod %s: swmod_init failed (code %d): its hooks and overrides were taken out", m->file, rc);
+    }
     log_loaded("mod ", m);
 }
 

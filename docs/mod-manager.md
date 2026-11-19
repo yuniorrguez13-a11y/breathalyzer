@@ -141,6 +141,14 @@ Plain-word helpers around **Play**. The window has a button for each (see [Windo
 A mod can have several kinds (say RomFS files plus cheats). A mod's `toggles.txt` next to its cheat file decides
 which of its cheats run; without one, all of them run.
 
+**A mod with code is added off until you say OK.** Code (its DLLs, helpers too) runs on your PC like a program, with
+your rights. `add` puts such a mod in OFF and `list` shows it as `(needs OK: code)`; turn it on only if you trust who
+made it: `python tools/modman.py enable <id> --allow-code` (or `add <path> --allow-code`). `enable --all`, a mod set
+and "use last good" leave it off, and deploy never loads it, even from a hand-edited `modman.json`. A code file whose
+name has hidden or text-flipping characters is refused. The launcher adds Breathalyzer's own code mods and a `.breath`
+whose Careful box named its code with that OK. A `.zip` that lists more than 200,000 files is refused before it is
+opened.
+
 ## mod.toml, hooks and the examples
 
 A `mod.toml` ([format](mod-format.md)) gives a mod an id, a version, the game versions and mod API it needs, its

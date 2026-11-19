@@ -2769,7 +2769,10 @@ class LaunchController(Controller):
             if on and m.get("after_on") and m.get("after_on_makes") not in have:
                 steps += self.bonus_steps(m, title)
             if m["kind"] == "code" or not new or on:   # (a new recipe picked on: its build adds it, this turns it on)
-                steps.append(Job("enable" if on else "disable", ["enable" if on else "disable", m["id"]],
+                # (a code mod comes in off until OK'd: --allow-code, as these are Breathalyzer's own files from
+                # bundled-mods.toml and the picker's switch is the player's OK)
+                ok = ["--allow-code"] if on and m["kind"] == "code" else []
+                steps.append(Job("enable" if on else "disable", ["enable" if on else "disable", m["id"]] + ok,
                                  name=title, mod_id=m["id"], in_process=True, hide=hide))
         self.installing, self.install_total = [], len(steps)
         self.install_mods = list(dict.fromkeys(j.mod_id for j in steps))   # ("Adding mod 2 of 5": mods, not steps)
@@ -2867,7 +2870,10 @@ class LaunchController(Controller):
         self.breath = None
         title = rec.manifest.title
         # (--name=<title> in one piece: a title starting with "-" isn't taken for an option)
-        job = Job("add", ["add", rec.payload, f"--name={title}"], name=title)
+        # (--allow-code only when the Careful box named code: the player saw it and pressed "Add this mod"; a
+        # surprise DLL lands off, and _breath_added removes it)
+        job = Job("add", ["add", rec.payload, f"--name={title}"] + (["--allow-code"] if rec.code or rec.maybe_code
+                                                                   else []), name=title)
         self.adding_breath = (job, rec, {r.id for r in self.listing.rows})
         self._start(job)
         self.status = Status("busy", [f"Adding {title}...", "A big mod takes a minute."])

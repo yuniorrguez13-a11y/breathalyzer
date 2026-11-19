@@ -28,6 +28,7 @@ static void cmd_probe(int argc, char **argv, SwModReply *r) {
     if (f) f(&cpu);
     api->guest_call(&cpu, 0x7000003000ull);  // passed on
     api->guest_call(NULL, 0x7000003004ull);  // dropped by the host
+    api->guest_call(&cpu, 0);                // refused by the host (Savage Wind would stop with FATAL)
     api->reply_str(r, "mod", api->mod_name);
     api->reply_str(r, "game", api->game_version);
     api->reply_str(r, "host", api->host_version);
@@ -73,8 +74,8 @@ SWMOD_EXPORT int swmod_init(const SwModApi *a) {
     if (!SWMOD_API_OK(a, 1)) return 1;
 #ifdef PROBE_FAIL
     (void)commands;
-    (void)replacement;
     (void)registered;
+    a->hle_override(0x7000001100ull, replacement, "bad_override");  // dropped: its init fails
     a->log("probe: failing on purpose");
     return 7;
 #else

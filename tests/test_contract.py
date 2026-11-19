@@ -292,7 +292,7 @@ class Hooks(Tmp):
 
     def add(self, name: str, files: dict):
         src = write(self.tmp / "downloads" / name, files)
-        return quiet(mm.add_mod, self.lib, str(src))[0]
+        return quiet(mm.add_mod, self.lib, str(src), allow_code=True)[0]   # (code mods need an OK now)
 
     def add_all(self):
         opts = MOD_TOML.format(id="test.opts", name="Opts", extra='title_picture = "title.png"\n[data]\nromfs = "romfs"'

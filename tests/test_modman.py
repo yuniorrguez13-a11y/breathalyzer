@@ -182,6 +182,7 @@ class Base(unittest.TestCase):
 
     def mod(self, name, files, *, zip_it=False, **kw):
         src = make_zip(self.dl / f"{name}.zip", files) if zip_it else write(self.dl / name, files)
+        kw.setdefault("allow_code", True)   # (the player's OK for a mod with code; CodeNeedsOk tests without it)
         entry, scan, notes = quiet(mm.add_mod, self.lib, str(src), **kw)[0]
         return entry
 
@@ -1422,6 +1423,108 @@ class HelperDlls(Base):
         self.assertIn("both have util.dll: Three's is used", " ".join(launch["attention"]))
 
 
+class CodeNeedsOk(Base):
+    """A mod with code (DLLs deploy would load) comes in OFF until the player says OK (--allow-code)."""
+
+    def add(self, name, files, *, zip_it=False, **kw):
+        return self.mod(name, files, zip_it=zip_it, allow_code=False, **kw)
+
+    def cli(self, *args):
+        return quiet(mm.main, [*args, "--library", str(self.libdir)])
+
+    def test_folder_zip_and_bare_dll_come_in_off(self):
+        self.build_host()
+        e = self.add("Folder", {"a.dll": make_pe(exports=("swmod_init",)), "romfs/Pack/T.txt": "t"})
+        self.assertEqual((e["enabled"], e["needs_ok"], e["code"]), (False, "code", ["a.dll"]))
+        z = self.add("Zipped", {"sub/b.dll": make_pe(exports=("swmod_init",))}, zip_it=True)
+        self.assertEqual((z["enabled"], z["code"]), (False, ["sub/b.dll"]))
+        dll = write(self.dl / "bare", {"c.dll": make_pe(exports=("swmod_init",))}) / "c.dll"
+        b = quiet(mm.add_mod, self.lib, str(dll))[0][0]
+        self.assertEqual((b["enabled"], b["needs_ok"]), (False, "code"))
+        self.assertEqual(self.lib.enabled(), [])
+        launch, _ = self.deploy()
+        mods = self.deploy_dir / "native" / "mods"
+        self.assertFalse(mods.is_dir() and os.listdir(mods))
+
+    def test_helper_dlls_are_named_too(self):   # (deploy copies helpers next to the mod DLL)
+        e = self.add("Helper", {"m.dll": make_pe(exports=("swmod_init",)), "libs/util.dll": make_pe(exports=("f",))})
+        self.assertEqual((e["enabled"], e["code"]), (False, ["libs/util.dll", "m.dll"]))
+
+    def test_no_code_and_allow_code_come_in_on(self):
+        self.assertTrue(self.add("Plain", {"romfs/Pack/T.txt": "t"})["enabled"])
+        e = self.mod("Trusted", {"t.dll": make_pe(exports=("swmod_init",))})   # (allow_code=True)
+        self.assertEqual((e["enabled"], "needs_ok" in e), (True, False))
+
+    def test_enable_needs_allow_code_and_all_skips_it(self):
+        self.add("Coded", {"a.dll": make_pe(exports=("swmod_init",))})
+        self.add("Plain", {"romfs/Pack/T.txt": "t"})
+        self.cli("disable", "plain")
+        code, out = self.cli("enable", "coded")
+        self.assertNotEqual(code, 0)
+        self.assertIn("enable coded --allow-code", out)
+        code, out = self.cli("enable", "--all")
+        self.assertIn("need your OK: Coded", out)
+        self.assertEqual({m["id"]: m["enabled"] for m in self.lib.mods}, {"coded": False, "plain": True})
+        code, out = self.cli("list")
+        self.assertIn("(needs OK: code)", out)
+        self.cli("enable", "coded", "--allow-code")
+        m = self.lib.mods[0]
+        self.assertEqual((m["enabled"], "needs_ok" in m), (True, False))
+
+    def test_cli_add_says_off_and_allow_code_adds_on(self):
+        src = write(self.dl / "Cli", {"x.dll": make_pe(exports=("swmod_init",))})
+        code, out = self.cli("add", str(src))
+        self.assertIn("Added OFF: it has code (x.dll)", out)
+        self.assertNotIn("Run deploy to use it", out)
+        src2 = write(self.dl / "Cli2", {"y.dll": make_pe(exports=("swmod_init",))})
+        code, out = self.cli("add", str(src2), "--allow-code")
+        self.assertIn("Run deploy to use it", out)
+        self.assertEqual([m["enabled"] for m in self.lib.mods], [False, True])
+
+    def test_profile_last_good_and_hand_edited_json_keep_it_off(self):
+        self.add("Coded", {"a.dll": make_pe(exports=("swmod_init",))})
+        lib = self.lib
+        notes = mm.apply_profile(lib, {"mods": [{"id": "coded", "enabled": True}]})
+        self.assertFalse(lib.mods[0]["enabled"])
+        self.assertIn("need your OK: Coded", " ".join(notes))
+        cfg = self.libdir / mm.CONFIG
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        data["mods"][0]["enabled"] = True
+        cfg.write_text(json.dumps(data), encoding="utf-8")
+        self.assertFalse(self.lib.mods[0]["enabled"])
+        self.assertEqual(self.lib.enabled(), [])
+        lib = self.lib
+        lib.mods[0]["enabled"] = True   # (a path that forgot the check: still never deployed)
+        self.assertEqual(lib.enabled(), [])
+        lib.mods[0]["enabled"] = False
+        with mock.patch.object(mm, "last_good", return_value={"set": {"mods": [{"id": "coded", "name": "Coded"}]},
+                                                               "start": {"time": "now"}}):
+            mm.use_last_good(lib)
+        self.assertFalse(lib.mods[0]["enabled"])
+
+    def test_a_zip_listing_too_many_files_is_refused_before_zipfile_reads_it(self):
+        many = mm.bnp.MAX_MEMBERS + 1   # (only the end record says so: no need to write 200,000 files)
+        end = b"PK\x05\x06" + bytes(4) + (0xFFFF).to_bytes(2, "little") * 2 + bytes(4) + bytes(4) + bytes(2)
+        zip64 = (b"PK\x06\x06" + (44).to_bytes(8, "little") + b"\x2d\x00\x2d\x00" + bytes(8)
+                 + many.to_bytes(8, "little") * 2 + (100).to_bytes(8, "little") + bytes(8))
+        locator = b"PK\x06\x07" + bytes(4) + (4).to_bytes(8, "little") + (1).to_bytes(4, "little")
+        z = self.dl / "many.zip"
+        z.parent.mkdir(parents=True, exist_ok=True)
+        z.write_bytes(b"junk" + zip64 + locator + end)
+        with mock.patch.object(mm.zipfile, "ZipFile", side_effect=AssertionError("ZipFile opened")):
+            for f in (mm.extract_zip, lambda p: mm.check_zip(p)):
+                with self.assertRaises(mm.ModmanError) as cm:
+                    f(*([str(z), str(self.tmp / "out")] if f is mm.extract_zip else [str(z)]))
+                self.assertIn(f"holds {many} files", str(cm.exception))
+
+    def test_hidden_characters_in_a_code_file_name_are_refused(self):
+        with self.assertRaises(mm.ModmanError) as cm:
+            self.add("Trick", {"evil‮lld.dll": make_pe(exports=("swmod_init",))})
+        self.assertIn("hidden characters", str(cm.exception))
+        with self.assertRaises(mm.ModmanError):   # (an OK doesn't make a hidden name all right)
+            self.mod("Trick2", {"a​.dll": make_pe(exports=("swmod_init",))})
+
+
 class StaleDeploys(RunBase):
     def test_moved_library_is_caught_by_status_and_run(self):
         self.mod("Romfs", {"romfs/Pack/Title.txt": "t"})
@@ -1882,7 +1985,8 @@ class ExampleMods(Base):
     def test_add_and_deploy_both_examples(self):
         self.build_examples()
         for x in ("hello", "stamina_hook"):
-            code, out = quiet(mm.main, ["add", str(REPO / "native" / "examples" / x), "--library", str(self.libdir)])
+            code, out = quiet(mm.main, ["add", str(REPO / "native" / "examples" / x), "--library", str(self.libdir),
+                                        "--allow-code"])
             self.assertEqual(code, 0, out)
             self.assertIn("taken from", out)
         self.assertEqual([(m["id"], m["version"], m["kinds"]) for m in self.lib.mods],
@@ -2089,7 +2193,7 @@ class ManifestRefusals(Base):
 
     def native(self, name, toml):
         src = write(self.dl / name, {"mod.toml": toml, "m.dll": make_pe(exports=("swmod_init",))})
-        return quiet(mm.add_mod, self.lib, str(src), name=name)[0][0]
+        return quiet(mm.add_mod, self.lib, str(src), name=name, allow_code=True)[0][0]
 
     def good_deploy(self):
         self.mod("Good", {"romfs/Pack/Title.txt": "good"})
@@ -2261,7 +2365,7 @@ class ManifestEdgeCases(Base):
                 self.assertIn(want, "\n".join(errs))
                 self.assertLess(len("\n".join(errs)), 1000)  # (long values are cut short in the message)
         src = write(self.dl / "Huge", {"mod.toml": cases["loader_api"][0], "m.dll": self.DLL})
-        code, out = quiet(mm.main, ["add", str(src), "--library", str(self.libdir)])
+        code, out = quiet(mm.main, ["add", str(src), "--library", str(self.libdir), "--allow-code"])
         self.assertEqual(code, 2, out)
         self.assertIn("Not added: Huge's mod.toml can't be used", out)
         self.assertEqual(os.listdir(self.libdir / "mods"), [])
@@ -2287,7 +2391,7 @@ class ManifestEdgeCases(Base):
                          [H1])
         self.build_host()  # (a name from --name, or a hand-edited config.json, is made one line)
         src = write(self.dl / "Evil", {"mod.toml": hook_toml("a.evil", [H1], "m.dll"), "m.dll": self.DLL})
-        e = quiet(mm.add_mod, self.lib, str(src), name="Evil\u20280x7000000804")[0][0]
+        e = quiet(mm.add_mod, self.lib, str(src), name="Evil\u20280x7000000804", allow_code=True)[0][0]
         self.assertEqual(e["name"], "Evil 0x7000000804")
         lib = self.lib
         lib.mods[0]["name"] = "Evil\u20290x7000000808"
@@ -2326,7 +2430,8 @@ class ManifestEdgeCases(Base):
         write(self.libdir / "mods" / "base-lib", {"mod.toml": mod_toml("someone.base", version="1.0")})
         quiet(mm.main, ["disable", "base-lib", "--library", str(self.libdir)])
         _, _, notes = quiet(mm.add_mod, self.lib, str(write(self.dl / "Top", {
-            "mod.toml": mod_toml("someone.top", dll="t.dll", deps={"someone.base": ">=1.0"}), "t.dll": self.DLL})))[0]
+            "mod.toml": mod_toml("someone.top", dll="t.dll", deps={"someone.base": ">=1.0"}), "t.dll": self.DLL})),
+            allow_code=True)[0]
         want = "needs someone.base >=1.0, which is turned off: python tools/modman.py enable base-lib"
         self.assertIn(f"{want} (deploy refuses until then)", notes)
         with self.assertRaises(mm.ModmanError) as cm:

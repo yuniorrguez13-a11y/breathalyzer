@@ -472,8 +472,8 @@ class Library:
     def enabled(self) -> list[dict]:
         """The mods that are on. A mod that is part of another one (its mod.toml's [mod] part_of, kept as
         "part_of" in its entry) counts as on only while that mod is in the library and on too."""
-        on = {m["id"] for m in self.mods if m.get("enabled")}
-        return [m for m in self.mods if m.get("enabled")
+        on = {m["id"] for m in self.mods if m.get("enabled") and not m.get("needs_ok")}
+        return [m for m in self.mods if m.get("enabled") and not m.get("needs_ok")   # (code not OK'd: never deployed)
                 and (not isinstance(m.get("part_of"), str) or m["part_of"] in on)]
 
     @classmethod
@@ -496,7 +496,9 @@ class Library:
             m["name"] = one_line(m.get("name", m["id"]))  # (names go into one-line comments of deploy files)
             if "version" in m and not (isinstance(m["version"], str) and VERSION_RE.fullmatch(m["version"])):
                 del m["version"]  # (a hand-edited one modman couldn't compare)
-            m["enabled"] = bool(m.get("enabled"))
+            if m.get("needs_ok") and m["needs_ok"] != "code":
+                m["needs_ok"] = "code"   # (a hand-edited value: still waits for the player's OK)
+            m["enabled"] = bool(m.get("enabled")) and not m.get("needs_ok")
             kinds = m.get("kinds")
             m["kinds"] = [k for k in kinds if k in KINDS] if isinstance(kinds, list) else []
             if "wiiu" in m:  # (converted from Wii U: keep only counts modman can print)
@@ -1497,6 +1499,10 @@ def extract_zip(src: str, dest: str) -> tuple[int, list[str]]:
     ".."), password-protected members and compression methods Python can't read, before writing anything."""
     notes: list[str] = []
     name = os.path.basename(src)
+    try:
+        bnp.check_zip_counts(src, name)   # (before ZipFile reads the whole list of files into memory)
+    except bnp.BnpError as e:
+        raise ModmanError(str(e)) from None
     with zipfile.ZipFile(src) as zf:
         plan: list[tuple[zipfile.ZipInfo, list[str]]] = []
         seen: dict[str, zipfile.ZipInfo] = {}
@@ -1564,6 +1570,10 @@ def check_zip_member(info: zipfile.ZipInfo, name: str) -> None:
 def check_zip(src: str) -> None:
     """extract_zip's checks for a .zip modman reads without extracting it (a Wii U mod wiiu_convert reads)."""
     name = os.path.basename(src)
+    try:
+        bnp.check_zip_counts(src, name)
+    except bnp.BnpError as e:
+        raise ModmanError(str(e)) from None
     try:
         with zipfile.ZipFile(src) as zf:
             for info in zf.infolist():
@@ -1851,7 +1861,8 @@ def convert_wiiu(src: str, stage: str, name: str, game: str | None = None):
 
 
 def add_download(lib: Library, src: str, name: str | None = None, *, convert: bool = True,
-                 bnp_options: list[str] = (), bnp_no_options: bool = False) -> tuple[dict, ModScan, list[str]]:
+                 bnp_options: list[str] = (), bnp_no_options: bool = False,
+                 allow_code: bool = False) -> tuple[dict, ModScan, list[str]]:
     """add_mod for a download it can't use as it is (bnp.packed_download: a .rar, a .7z that isn't a .bnp, a .zip
     holding archives): unpacked into a work folder in the library (tools/bnp.py unpack_download: every name and
     size checked, at most 3 archives deep, nothing run), the mod in it added, the work folder removed. Several mods
@@ -1870,7 +1881,7 @@ def add_download(lib: Library, src: str, name: str | None = None, *, convert: bo
         except bnp.BnpError as e:
             raise ModmanError(str(e)) from None
         entry, scan, notes = add_mod(lib, found.path, name, convert=convert, bnp_options=picks,
-                                     bnp_no_options=bnp_no_options, download=src)
+                                     bnp_no_options=bnp_no_options, download=src, allow_code=allow_code)
     finally:
         if os.path.lexists(work):
             remove_tree(work)
@@ -1881,8 +1892,9 @@ def add_download(lib: Library, src: str, name: str | None = None, *, convert: bo
 
 def add_mod(lib: Library, src: str, name: str | None = None, *, convert: bool = True,
             bnp_options: list[str] = (), bnp_no_options: bool = False,
-            download: str | None = None) -> tuple[dict, ModScan, list[str]]:
-    """Inspect, store and record a mod. Returns (its config entry, its scan, notes). A mod with a mod.toml gets its
+            download: str | None = None, allow_code: bool = False) -> tuple[dict, ModScan, list[str]]:
+    """Inspect, store and record a mod. A mod with code (the DLLs deploy would load: scan.dlls + scan.helpers) comes
+    in OFF with "needs_ok": "code" unless allow_code (the player said OK); only turn_on clears that. Returns (its config entry, its scan, notes). A mod with a mod.toml gets its
     id, name and version from it (--name still picks the name). A Wii U mod is converted into the library (its
     notes start with what was converted), unless convert is False: then it is refused as before. A packed download
     goes through add_download (`download`: the one src was unpacked from, by add_download only)."""
@@ -1985,6 +1997,9 @@ def add_mod(lib: Library, src: str, name: str | None = None, *, convert: bool = 
         if note:
             notes.append(note)
         scan = scan_mod(stage, game, name)
+        code = sorted({os.path.relpath(p, stage).replace(os.sep, "/") for p in scan.dlls + scan.helpers})
+        if any(ch in bnp.HIDDEN for c in code for ch in c):
+            raise ModmanError(f"Not added: a code file in {name} has hidden characters in its name.")
         if scan.manifest_errors:
             raise ModmanError(f"Not added: {name}'s mod.toml can't be used:"
                               + "".join(f"\n  - {e}" for e in scan.manifest_errors))
@@ -2030,8 +2045,10 @@ def add_mod(lib: Library, src: str, name: str | None = None, *, convert: bool = 
         if os.path.lexists(stage):
             remove_tree(stage)
         raise
-    entry = {"id": mod_id, "name": name, "enabled": True, "kinds": scan.kinds, "source": download or src,
-             "added": _now()}
+    entry = {"id": mod_id, "name": name, "enabled": not code or allow_code, "kinds": scan.kinds,
+             "source": download or src, "added": _now()}
+    if code and not allow_code:
+        entry["needs_ok"], entry["code"] = "code", code
     if man:
         entry["version"] = man.version
         if man.part_of:
@@ -3655,7 +3672,10 @@ def apply_profile(lib: Library, data: dict) -> list[str]:
     new = [by_id[x["id"]] for x in rows if x["id"] in by_id]
     added = [m for m in lib.mods if m["id"] not in on]
     for m in new:
-        m["enabled"] = on[m["id"]]
+        m["enabled"] = on[m["id"]] and not m.get("needs_ok")
+    waiting = [m["name"] for m in new if on[m["id"]] and m.get("needs_ok")]
+    if waiting:
+        notes.append(f"Left off, they have code and need your OK: {_some(waiting)}.")
     for m in added:
         m["enabled"] = False
     gone = [x["id"] for x in rows if x["id"] not in by_id]
@@ -4223,7 +4243,7 @@ def use_last_good(lib: Library) -> list[str]:
     for m in lib.mods:
         if m.get("secret") is True or is_modmenu(lib, m):   # (the Mod menu stays as it is: the game promises it)
             continue
-        m["enabled"] = m["id"] in rank
+        m["enabled"] = m["id"] in rank and not m.get("needs_ok")   # (code not OK'd stays off)
     lib.save()
     notes = [f"On: {_some([m['name'] for m in listed], 8) or 'no mods'} (as on {good['start']['time']})."]
     gone = [m["name"] for m in good["set"]["mods"] if m["id"] not in have]
@@ -4537,11 +4557,21 @@ def is_modmenu(lib: Library, m: dict) -> bool:
     return bool(man and getattr(man, "id", None) == MODMENU_ID)
 
 
+def turn_on(m: dict, allow_code: bool = False) -> None:
+    """Turn a mod on by the player's command. A mod with code not OK'd yet ("needs_ok") needs allow_code."""
+    if m.get("needs_ok") and not allow_code:
+        raise ModmanError(f"{m['name']} has code ({_some([str(c) for c in m.get('code') or []], 3)}). Code runs on "
+                          f"your PC like a program. To turn it on anyway: python tools/modman.py enable {m['id']} "
+                          "--allow-code")
+    m.pop("needs_ok", None)
+    m["enabled"] = True
+
+
 def set_all(lib: Library, on: bool) -> list[str]:
     """Turn every mod on or off (not the hidden ones: [mod] secret, which their own switch keeps; not the Mod menu
     mod, which stays as it is). Returns the names of the mods that changed."""
     hit = [m for m in lib.mods if bool(m.get("enabled")) != on and m.get("secret") is not True
-           and not is_modmenu(lib, m)]
+           and not is_modmenu(lib, m) and not (on and m.get("needs_ok"))]   # (code not OK'd stays off)
     for m in hit:
         m["enabled"] = on
     lib.save()
@@ -4574,7 +4604,8 @@ def cmd_init(args) -> int:
 def cmd_add(args) -> int:
     lib = open_library(args, create=True)
     entry, scan, notes = add_mod(lib, args.path, args.name, convert=not args.no_convert,
-                                 bnp_options=args.bnp_option, bnp_no_options=args.bnp_no_options)
+                                 bnp_options=args.bnp_option, bnp_no_options=args.bnp_no_options,
+                                 allow_code=getattr(args, "allow_code", False))
     version = f" {entry['version']}" if entry.get("version") else ""
     say(f"Added #{len(lib.mods)} {entry['id']}{version} ({', '.join(entry['kinds'])}): {entry['name']}"
         + (" (from its mod.toml)" if scan.manifest else ""))
@@ -4583,6 +4614,11 @@ def cmd_add(args) -> int:
         say(f"  {n}")
     for p in scan.problems:
         say(f"  not used: {p}")
+    if entry.get("needs_ok"):
+        say(f"Added OFF: it has code ({_some(entry['code'], 3)}). Code runs on your PC like a program, with your "
+            "rights.")
+        say(f"Only turn it on if you trust who made it: python tools/modman.py enable {entry['id']} --allow-code")
+        return 0
     say("Run deploy to use it.")
     return 0
 
@@ -4606,7 +4642,8 @@ def cmd_list(args) -> int:
         waits = m["enabled"] and m["id"] not in used   # ([mod] part_of: on, but its main mod is off)
         say(f"  {k:>2}  {'on ' if m['enabled'] else 'off'}  {m['id']:<{w}}  {str(m.get('version') or '-'):<{vw}}  "
             f"{', '.join(m['kinds']) or '-':<{kw}}  {m['name']}" + (f"  ({wiiu})" if wiiu else "")
-            + (f"  (used only while {m['part_of']} is on)" if waits else ""))
+            + (f"  (used only while {m['part_of']} is on)" if waits else "")
+            + ("  (needs OK: code)" if m.get("needs_ok") else ""))
     return 0
 
 
@@ -4618,12 +4655,18 @@ def cmd_enable(args, on: bool) -> int:
         names = set_all(lib, on)
         say(f"Turned {'on' if on else 'off'} {len(names)} mod(s)" + (f": {_some(names, 8)}." if names else ".")
             + " Run deploy to apply.")
+        waiting = [m["name"] for m in lib.mods if on and m.get("needs_ok")]
+        if waiting:
+            say(f"Left off, they have code and need your OK: {_some(waiting, 8)}.")
         return 0
     if not args.mod:
         raise ModmanError(f"Say which mod: python tools/modman.py {'enable' if on else 'disable'} <id or number> "
                           "(or --all)")
     _, m = lib.find(args.mod)
-    m["enabled"] = on
+    if on:
+        turn_on(m, getattr(args, "allow_code", False))
+    else:
+        m["enabled"] = False
     lib.save()
     say(f"{m['id']} is {'on' if on else 'off'}. Run deploy to apply.")
     return 0
@@ -5039,12 +5082,17 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--bnp-no-options", "--no-options", action="store_true",
                    help="leave out the options a BCML or UKMM package turns on by default (--option ones still go "
                         "in)")
+    p.add_argument("--allow-code", action="store_true",
+                   help="you trust who made it: a mod with code (DLLs) comes in on (without this it comes in off)")
     p = sub.add_parser("list", parents=[common], help="show the mods in order")
     p.add_argument("--find", metavar="TEXT", help="only the mods whose name, id or kind has this text")
     for name in ("enable", "disable"):
         p = sub.add_parser(name, parents=[common], help=f"turn a mod {'on' if name == 'enable' else 'off'}")
         p.add_argument("mod", nargs="?", help="id or number from list")
         p.add_argument("--all", action="store_true", help=f"turn every mod {'on' if name == 'enable' else 'off'}")
+        if name == "enable":
+            p.add_argument("--allow-code", action="store_true",
+                           help="you trust who made it: turn on a mod with code (DLLs) that waits for your OK")
     p = sub.add_parser("move", parents=[common], help="move a mod to a position (later mods win)")
     p.add_argument("mod", help="id or number from list")
     p.add_argument("position", type=int)

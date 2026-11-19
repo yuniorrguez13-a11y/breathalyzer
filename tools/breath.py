@@ -152,9 +152,7 @@ class Manifest:
 # ---------------------------------------------------------------------------------------------------- small parts
 
 # (marks that turn text around or hide it: a title could pretend to be something else with them)
-BIDI = set("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
-HIDDEN = BIDI | set("\u00ad\u180e\u200b\u200c\u200d\u2028\u2029\u2060\u2061\u2062\u2063\u2064\ufeff") \
-    | {chr(c) for c in range(0xE0000, 0xE0080)}   # (U+E0000 to U+E007F: the invisible tag letters)
+BIDI, HIDDEN = bnp.BIDI, bnp.HIDDEN   # (one list: modman checks code file names with it too)
 # (COM1-3 and LPT1-3 written with small raised digits: Windows keeps those names too)
 RESERVED_SUPER = re.compile("^(?:com|lpt)[\u00b9\u00b2\u00b3]$", re.IGNORECASE)
 
@@ -212,54 +210,22 @@ def safe_rel(raw: str, where: str = "This .breath file") -> list[str]:
     """bnp.py's name rules for one file name: its parts, or BreathError in plain words. Also refused here: hidden
     marks that turn text around (a DLL can pass for a picture with them), and COM1-3/LPT1-3 written with raised
     digits, which Windows keeps too."""
+    # (these two first: bnp.check_name refuses them too now, with less telling words)
+    if any(c in BIDI for c in raw):
+        raise BreathError(f"Not added: {where} holds a file name with hidden marks that turn text around ({raw!r}): "
+                          "made to hide what the file is.")
+    if any(RESERVED_SUPER.match(p.split(".", 1)[0].rstrip()) for p in raw.replace("\\", "/").split("/")):
+        raise BreathError(f"Not added: {where} holds a name Windows can't use safely ({raw!r}).")
     try:
         parts = bnp.check_name(raw, where)
     except bnp.BnpError:
         raise BreathError(f"Not added: {where} holds a file with a name that isn't safe ({raw!r}).") from None
     if parts[0].startswith("-"):
         raise BreathError(f"Not added: {where} holds a name starting with '-' ({raw!r}).")
-    if any(c in BIDI for c in raw):
-        raise BreathError(f"Not added: {where} holds a file name with hidden marks that turn text around ({raw!r}): "
-                          "made to hide what the file is.")
-    if any(RESERVED_SUPER.match(p.split(".", 1)[0].rstrip()) for p in parts):
-        raise BreathError(f"Not added: {where} holds a name Windows can't use safely ({raw!r}).")
     return parts
 
 
-def _u16(b: bytes, at: int) -> int:
-    return int.from_bytes(b[at:at + 2], "little")
-
-
-def _u32(b: bytes, at: int) -> int:
-    return int.from_bytes(b[at:at + 4], "little")
-
-
-def _u64(b: bytes, at: int) -> int:
-    return int.from_bytes(b[at:at + 8], "little")
-
-
-def zip_counts(f, size: int) -> tuple[int, int]:
-    """(how many files, bytes of the list of files) a zip says it has, from its end records only: the last 64 KB and
-    22 bytes, and the Zip64 record when there is one. Nothing else is read. ValueError: no end record (not a zip)."""
-    tail_len = min(size, (1 << 16) + 22)
-    f.seek(size - tail_len)
-    tail = f.read(tail_len)
-    at = tail.rfind(b"PK\x05\x06")
-    if at < 0 or len(tail) - at < 22:
-        raise ValueError("no end of central directory record")
-    entries, cd_size = _u16(tail, at + 10), _u32(tail, at + 12)
-    end_at = size - tail_len + at
-    if end_at >= 20:
-        f.seek(end_at - 20)
-        loc = f.read(20)
-        if len(loc) == 20 and loc[:4] == b"PK\x06\x07":   # (Zip64: the real counts are in its own record)
-            rec_at = _u64(loc, 8)
-            if rec_at + 56 <= size:
-                f.seek(rec_at)
-                rec = f.read(56)
-                if rec[:4] == b"PK\x06\x06":
-                    entries, cd_size = _u64(rec, 32), _u64(rec, 40)   # (what zipfile reads too)
-    return entries, cd_size
+zip_counts = bnp.zip_counts   # (in bnp.py: modman checks a zip with it too)
 
 
 def check_counts(f, size: int, name: str, members: int | None = None) -> None:

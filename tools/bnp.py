@@ -72,6 +72,12 @@ RSTB_REL = f"{BASE_TID}/romfs/{rm.RSTB}"
 DLC_CANON = "Aoc/0010/"               # how the size table names DLC files
 MAX_INFO = 1 << 20
 MAX_MEMBERS = 200_000
+MAX_CD = 64 << 20                     # a zip's list of files (central directory): never more than this
+# (marks that turn text around or hide it: a name could pretend to be something else with them; breath.py and
+# modman.py use these too)
+BIDI = set("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+HIDDEN = BIDI | set("\u00ad\u180e\u200b\u200c\u200d\u2028\u2029\u2060\u2061\u2062\u2063\u2064\ufeff") \
+    | {chr(c) for c in range(0xE0000, 0xE0080)}   # (U+E0000 to U+E007F: the invisible tag letters)
 MAX_UNPACKED = 20 << 30               # a package listing more (BotW's whole RomFS is ~15 GB) is refused
 MAX_MEMBER = 4 << 30                  # and one listing a single file bigger than this
 SPARE_MIN = 2 << 30                   # free space kept on the drive when extracting: this, or 1% of it if more
@@ -259,6 +265,57 @@ def _list_tar(exe: str, path: str) -> list[tuple[str, int | None, str, bool]]:
         link = kind in ("l", "h")
         out.append((name, size, "link" if link else "dir" if kind == "d" or name.endswith("/") else "file", link))
     return out
+
+
+def _u16(b: bytes, at: int) -> int:
+    return int.from_bytes(b[at:at + 2], "little")
+
+
+def _u32(b: bytes, at: int) -> int:
+    return int.from_bytes(b[at:at + 4], "little")
+
+
+def _u64(b: bytes, at: int) -> int:
+    return int.from_bytes(b[at:at + 8], "little")
+
+
+def zip_counts(f, size: int) -> tuple[int, int]:
+    """(how many files, bytes of the list of files) a zip says it has, from its end records only: the last 64 KB and
+    22 bytes, and the Zip64 record when there is one. Nothing else is read. ValueError: no end record (not a zip)."""
+    tail_len = min(size, (1 << 16) + 22)
+    f.seek(size - tail_len)
+    tail = f.read(tail_len)
+    at = tail.rfind(b"PK\x05\x06")
+    if at < 0 or len(tail) - at < 22:
+        raise ValueError("no end of central directory record")
+    entries, cd_size = _u16(tail, at + 10), _u32(tail, at + 12)
+    end_at = size - tail_len + at
+    if end_at >= 20:
+        f.seek(end_at - 20)
+        loc = f.read(20)
+        if len(loc) == 20 and loc[:4] == b"PK\x06\x07":   # (Zip64: the real counts are in its own record)
+            rec_at = _u64(loc, 8)
+            if rec_at + 56 <= size:
+                f.seek(rec_at)
+                rec = f.read(56)
+                if rec[:4] == b"PK\x06\x06":
+                    entries, cd_size = _u64(rec, 32), _u64(rec, 40)   # (what zipfile reads too)
+    return entries, cd_size
+
+
+def check_zip_counts(path: str, name: str | None = None) -> None:
+    """Refuse a player's zip whose list of files is too long (more than MAX_MEMBERS files, or a list over MAX_CD),
+    before Python's zipfile reads all of it into memory. A file with no zip end record is left to zipfile."""
+    name = name or os.path.basename(path)
+    try:
+        with open(path, "rb") as f:
+            entries, cd_size = zip_counts(f, os.path.getsize(path))
+    except (ValueError, OSError):
+        return
+    if entries > MAX_MEMBERS:
+        raise BnpError(f"Not added: {name} holds {entries} files: too many for a mod.")
+    if cd_size > MAX_CD:
+        raise BnpError(f"Not added: {name}'s list of files is far too big ({cd_size >> 20} MB): damaged, or not a mod.")
 
 
 def check_name(raw: str, archive: str = "the package") -> list[str]:

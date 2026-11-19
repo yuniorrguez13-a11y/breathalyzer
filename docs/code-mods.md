@@ -103,6 +103,12 @@ the mods in load order; a mod loaded again gets a new one.
 A status is `ok`, `init failed (code N)`, `load failed (error N)` (a Windows error code; 193 = not a 64-bit DLL) or
 `loaded, no swmod_init`.
 
+A mod loaded at game start whose `swmod_init` fails leaves nothing running: its hooks are taken out again, and its
+`hle_override` calls (held back until `swmod_init` returns 0) never reach the game. Its DLL stays loaded.
+
+`guest_call` to address 0 (a site or pattern that wasn't found) is refused with a log line naming the mod; the call
+does nothing. Savage Wind would stop the game with FATAL.
+
 ## Load a mod while the game runs
 
 You can load a mod into the running game, change its code, and load the new build, without a restart. This needs
@@ -151,7 +157,9 @@ function needs a rebuild of the game code.
   After the unload it runs the game's own function again.
 - Then modhost calls the mod's `swmod_exit(api)`, if it exports one, and frees the DLL.
 - If `swmod_init` fails (returns nonzero), modhost unloads the mod again at once and says why. `swmod_exit` is not
-  called then.
+  called then. If a game thread is still in one of its new hooks, it can't be freed yet: its hooks, overrides and
+  commands are switched off anyway (status `init failed (code N), switched off, still loaded`); `modunload` frees it
+  later.
 - A thread that saw the mod's hooks just before the unload, and gets to them only after it, runs the game's own
   function: it never reaches the freed DLL.
 
