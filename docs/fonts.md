@@ -144,5 +144,6 @@ Offline (tests/test_font.py, with made-up fonts and archives; and on the game's 
 - External_00 stays byte for byte; the cache is used on the second deploy;
 - the chooser, the deploy check's inputs and the mod-set round trip.
 
-Not yet checked in the game (the final game check): that the symbols show on the Mods page, that other texts look
-the same, the look of the easy-read font and of NormalS_00's ring.
+In the game (2026-11-18, with the Mods page v2, commit 65003e3): the symbols # $ % @ ^ ` { | } ~ show on the Mods
+page and the easy-read font works. Not yet checked in the game: that other texts look the same, and the look of
+NormalS_00's ring.

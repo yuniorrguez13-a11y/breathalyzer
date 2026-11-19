@@ -164,4 +164,6 @@ own game:
 4. Deployed with `tools/romfs_mods.py`: the title menu showed "WIIUMOD!" and the save loaded and played normally.
 
 The pack came out 52 KB bigger (our Yaz0 encoder) and still loaded; this pack has no size table entry.
-Still not tried: a real Wii U mod, and maps or actor data in game.
+Real Wii U mods since then: the Linkle icon and dialogue packages (`.bnp`) and the Linkle dialogue fix, with Linkle
+3.0.1, passed in the game as the Linkle set (2026-11-12, 7 of 7 checks, commit 13c7cd3; see [bnp](bnp.md#tested)).
+Still not checked on their own in game: a Wii U mod's maps or actor data.

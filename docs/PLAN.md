@@ -6,13 +6,13 @@ Its open PR #430 adds data mods through BCML. Code mods don't exist yet.
 
 ## Phases
 
-| # | Phase | Effort (part-time) | Status (2026-11-07) |
+| # | Phase | Effort (part-time) | Status (2026-11-07; phases 3 and 4 updated 2026-11-18) |
 |---|---|---|---|
 | 0 | Setup: dump, play, rebuild game code | 1-2 weeks | Done: game set up and playing; headless rebuild works. Building Savage Wind itself from source not needed yet |
 | 1 | Code map: names for 1.9.0 functions, struct layouts, docs | first 200 functions in 3-6 weeks | Tool done: 64k code addresses named from the game's own C++ type info, on the player's PC. Human-readable names for key systems still to do |
 | 2 | Mod loader + SDK: hooks, DLL mods, `mod.toml`, existing mods ([MOD-COMPAT](MOD-COMPAT.md)) | 2-4 months | Works in game: RomFS overlay, ExeFS patches (data and code), cheats, native DLL mods, hooks on any game function (via a rebuild), and a mod manager (command line and a large-print window) that deploys and starts them all. Wii U data mods convert on the PC (text, maps, actor data; a converted Wii U text mod tested in game) |
-| 3 | Multiplayer showcase: "ghost Link" for 2-4 players | 1-3 months | Works as a first version: relay, client, radar, and a native mod that shows each other player as a stand-in character that follows and turns with them and plays the game's own stand, walk and run animations (tested in game, 17k animation switches without a crash). Tested on two real PCs over home Wi-Fi (2026-11-07). Next: a Link-like model, turn and jump poses |
-| 4 | Release: code only, clean checks, mirrors | 2-4 weeks | Clean check and release zip tool done (`tools/make_release.py`: allow-list, leak and secret checks, same zip every time). Not released |
+| 3 | Multiplayer showcase: "ghost Link" for 2-4 players | 1-3 months | Works as a first version: relay, client, radar, and a native mod that shows each other player as a stand-in character that follows and turns with them and plays the game's own stand, walk and run animations (tested in game, 17k animation switches without a crash). Tested on two real PCs over home Wi-Fi (2026-11-07). Since then, in game on one PC: the Link body (ghost 0.5.0), held items (0.6.2, 2026-11-12) and Who am I with 9 characters (2026-11-13, commit 92c0d2f). Next: these on two PCs |
+| 4 | Release: code only, clean checks, mirrors | 2-4 weeks | Clean check and release zip tool done (`tools/make_release.py`: allow-list, leak and secret checks, same zip every time). Early version 0.3.0-early.1 is public on GitHub Releases (the web page links it since 2026-11-16, commit 012c73e) |
 
 ## Key facts
 

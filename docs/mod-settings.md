@@ -6,7 +6,8 @@ Rows can lock or hide while other rows change. The rules are written in `mod.tom
 reacts in C (mod API 3, [`native/modhost/swmod.h`](../native/modhost/swmod.h)). There is no script language for now
 (Lua may come later).
 
-What works now (checked without the game, see [What is verified](#what-is-verified)):
+What works now (checked without the game, and the game's pages in the game on 2026-11-18; see
+[What is verified](#what-is-verified)):
 
 - Checking `[[settings]]` and `[[pages]]` at `add` and `deploy` (`tools/mod_settings.py`).
 - Values saved per mod in `<library>\settings\<mod id>.json`, by the game and by the PC tools.
@@ -290,8 +291,11 @@ Checked on this PC without the game (`tests/test_mod_settings.py`):
   a mod loaded with `modload` loses its watcher at `modunload`, a mod without settings.txt gets its defaults, and a
   change made just before the game closes is still saved.
 
-Not verified yet (needs the game): the Mod menu's pages, key capture, held left/right on a slider, how a locked
-ON/OFF row looks, and rebuilding a page for `show_if`.
+In the game (2026-11-18, with the Mods page v2, commit 65003e3): the Mod menu's pages and sub-pages, every row type
+live (ON/OFF, slider, choice, button, key capture, text), and locked rows saying why. Not done yet: rebuilding a page
+for `show_if` without closing and opening it again, and a grey look for a locked ON/OFF row.
+
+Not verified yet (needs the game): held left/right on a slider.
 
 ## Later
 

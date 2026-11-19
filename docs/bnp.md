@@ -280,9 +280,11 @@ that is 138 of its 162 files, all its voice lines.
 
 - Wii U packages: made up ones in `tests/test_wiiu_packages.py` (options merged in Wii U form, the conversion, a Wii
   U Havok file swapped for the game's twin or left out, log paths and keys, instance sizes, text choice sizes, the
-  size table worked out again); and 4 real ones in a scratch library on 2026-11-12, not in the game yet (Linkle
-  armor icons, Linkle dialogue with the diary and the Riju "Linkle 3" options, Fierce Deity, Girly Animation Pack:
-  results in [MOD-COMPAT](MOD-COMPAT.md#wii-u-packages-2026-11-12-scratch-library-not-in-the-game-yet)).
+  size table worked out again); and 4 real ones in a scratch library on 2026-11-12 (Linkle armor icons, Linkle
+  dialogue with the diary and the Riju "Linkle 3" options, Fierce Deity, Girly Animation Pack: results in
+  [MOD-COMPAT](MOD-COMPAT.md#wii-u-packages-2026-11-12-scratch-library)). The Linkle set (Linkle
+  3.0.1 with the icon and dialogue packages and the dialogue fix) passed in the game the same day (7 of 7 checks,
+  commit 13c7cd3); Fierce Deity and the Girly Animation Pack weren't tried in the game.
 - Made-up packages only, in `tests/test_bnp.py`: listing and extracting with 7-Zip and with `tar.exe`, refused names
   (`..`, names starting with `-`, names twice, names beyond ASCII with `tar.exe`) and links (junctions too), reading
   a file by the archive's own name with the tool that listed it, read-only files, options, packs filled (nested

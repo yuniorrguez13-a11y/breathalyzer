@@ -9,6 +9,9 @@ python tools/modman.py profile                    # the sets, and the one in use
 python tools/modman.py profile new "Hard mode"    # a new set, made from the mods as they are now; it is in use
 python tools/modman.py profile use Default        # switch; then deploy
 python tools/modman.py profile remove "Hard mode"
+python tools/modman.py profile copy Default "Hard mode"     # a copy; it uses the normal saves until own-save is on
+python tools/modman.py profile rename "Hard mode" Speedrun
+python tools/modman.py profile own-save Speedrun on --copy  # its own save folder, started from the save in use
 ```
 
 - **Default** is the set you had before you made any. A library that never used sets stays as it was.
@@ -21,8 +24,10 @@ python tools/modman.py profile remove "Hard mode"
 - Switching is refused while Savage Wind runs (the game may be writing the settings).
 - Names: up to 40 letters, digits, spaces, `.`, `-` and `_`, starting with a letter or digit. Case doesn't matter.
 
-Not yet: a set with its own saves (`SAVAGEWIND_SAVE_DIR`), a set picked in the game, and sets in the Mod Manager
-window.
+Added with the Mods page v2 (2026-11-18, commit 65003e3): `copy`, `rename`, `delete` and `own-save <name> on|off`
+(the set's own save folder, `<library>\profiles\<file name>\save`), a save backup before a start with a different
+set, mod sets in the Mod Manager window, and the set chooser on the game's Mods page (*More*; checked in the game
+that night).
 
 ## Files
 

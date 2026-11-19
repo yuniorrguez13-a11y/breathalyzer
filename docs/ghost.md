@@ -31,7 +31,7 @@ tried between two PCs, and attacks with a real weapon are not checked (the test 
   See [Held items](#held-items-060-opt-in).
 - The check, with one game and the bot: `python tools\mp\ghost_ingame_check.py --link --spot -1033.6 252.3 1809.3 132`
   (see [In-game check](#in-game-check)).
-- **Who am I** (0.8.0, not yet run in the game): `iam zelda` in the console picks who your friends see you as, and
+- **Who am I** (0.8.0, checked in the game on one PC 2026-11-13, commit 92c0d2f): `iam zelda` in the console picks who your friends see you as, and
   `client.py --ghost-looks` shows each player as the one they picked (Zelda, a Goron, a Bokoblin...). See
   [Who am I](#who-am-i-080) and [charsel](charsel.md).
 
@@ -101,7 +101,7 @@ one wins.
 | `--ghost-sync` | (0.5.0, checked in game on one PC) Also share animations and say what the other player holds. Use it on both PCs, each with ghost mod 0.5.0 (implies `--ghost`) |
 | `--ghost-link` | (0.5.0, checked in game on one PC) Show the other player with the [Link body](#link-body-050-opt-in) (implies `--ghost-sync`; not together with `--ghost-actor`) |
 | `--ghost-items` | (0.6.0, checked in game on one PC) The ghost also holds what the other player holds. Needs `--ghost-link` (or `--ghost-looks`) and ghost mod 0.6.0 on your PC (implies `--ghost-sync`). Holding is checked on the Link body only |
-| `--ghost-looks [DIR]` | (0.8.0, not yet run in the game) Show each player as the one they picked on the Who am I wheel, from the characters this PC built (`tools\charsel.py build`); a pick this PC lacks is the Link body (implies `--ghost-link`). See [Who am I](#who-am-i-080) |
+| `--ghost-looks [DIR]` | (0.8.0, checked in game on one PC, 2026-11-13) Show each player as the one they picked on the Who am I wheel, from the characters this PC built (`tools\charsel.py build`); a pick this PC lacks is the Link body (implies `--ghost-link`). See [Who am I](#who-am-i-080) |
 | `--look NAME` / `--no-look` | Who you are for the others (default: your pick on the wheel, else Link) / say nothing (join as a visitor, as before) |
 
 The `ghost` reply of 0.5.0 also has `version`, `takes_anim` and `has_self` (the client looks for these), `remote`
@@ -413,7 +413,8 @@ a second, and some of the game's code paths would meet a missing pointer that is
 
 ## Who am I (0.8.0)
 
-Not yet run in the game. Pick who your friends see you as ([charsel](charsel.md)): on the wheel, with
+Checked in the game on one PC (2026-11-13, commits 92c0d2f and 5cbeca3): `iam` listed the names, took `iam goron`,
+refused a name not on the list, and the ghost showed each pick. Pick who your friends see you as ([charsel](charsel.md)): on the wheel, with
 `python tools\charsel.py pick zelda`, or in the game's console (F12) with **`iam zelda`**. (`look` is taken: the game
 uses it for the camera.) `iam` only keeps the word you typed, under the lock: no game call, no game memory, so it is
 player safe and the command works without developer mode. The list and your pick travel through the client's control

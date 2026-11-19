@@ -21,12 +21,15 @@ Once per release, on the build PC, in this order:
 3. `python tools/packaging/build_starter.py` makes `Start Breathalyzer.exe` in `out\packaging-work\starter`.
 4. Then:
 
+The public download is 0.3.0-early.1 (the web page links it since commit 012c73e, 2026-11-16), so the next
+release needs a higher number. In the examples below, `0.4.0-beta.1` stands for it (the number isn't picked yet).
+
 ```
-python tools/make_release.py --edition players --version 0.2.0-beta.1 --dry-run   # list both; write nothing
-python tools/make_release.py --edition players --version 0.2.0-beta.1             # write both
-python tools/make_release.py --edition core --version 0.2.0-beta.1                # only the one without mods
-python tools/make_release.py --edition plus --version 0.2.0-beta.1                # only the one with our mods
-python tools/make_release.py --edition plus --version 0.2.0-beta.1 --with-experimental   # + mods not ready yet
+python tools/make_release.py --edition players --version 0.4.0-beta.1 --dry-run   # list both; write nothing
+python tools/make_release.py --edition players --version 0.4.0-beta.1             # write both
+python tools/make_release.py --edition core --version 0.4.0-beta.1                # only the one without mods
+python tools/make_release.py --edition plus --version 0.4.0-beta.1                # only the one with our mods
+python tools/make_release.py --edition plus --version 0.4.0-beta.1 --with-experimental   # + mods not ready yet
 python tools/make_release.py --dry-run                                             # the source zip: list only
 python tools/make_release.py --version 0.1.0-dev                                   # the source zip
 python tools/make_release.py --version 0.1.0-dev --with-binaries                   # + the DLLs we built
@@ -69,7 +72,7 @@ Exit codes:
 ## What's in the player zips
 
 ```
-breathalyzer-plus-0.2.0-beta.1\
+breathalyzer-plus-0.4.0-beta.1\
   Start Breathalyzer.exe            the program players open (28 KB, ours)
   READ ME FIRST.txt                 unpack, start, point at Savage Wind, Play
   SHA256SUMS.txt
@@ -175,13 +178,14 @@ copy of its mod.toml whose `name` and `description` are the player text (the dev
 out), so the game's Mods page says the same as the picker.
 
 Ready now: Mods page in the game (on), Show Position (on), Infinite Stamina (off), Teleport Up (off), Performance:
-effects off (off, built from your game files). Not ready yet: Ghost multiplayer, the secret word easter egg, Castle
-date, Performance: shorter shadows.
+effects off (off, built from your game files). Not ready yet: Ghost multiplayer, Characters for multiplayer, the
+secret word easter egg, Castle date, Dragonbreath. Performance: shorter shadows is left out even with
+`--with-experimental` (no change was measured).
 
 `app\bundled-mods.json` is what the launcher's mod picker reads:
 
 ```
-{"format": 1, "edition": "plus", "version": "0.2.0-beta.1", "mods": [
+{"format": 1, "edition": "plus", "version": "0.4.0-beta.1", "mods": [
   {"id": "botw-mod-loader.basics-show-pos", "title": "Show Position",
    "description": "Type where in the game's console (F12) to see where Link is.", "default": "on",
    "why": "...", "tags": [], "experimental": false, "kind": "code", "folder": "bundled-mods/basics-show-pos"},
@@ -260,7 +264,7 @@ The self-test DLLs in `build\native\selftest` never go in.
 To check a download in PowerShell:
 
 ```
-Get-FileHash breathalyzer-0.2.0-beta.1.zip -Algorithm SHA256
+Get-FileHash breathalyzer-0.4.0-beta.1.zip -Algorithm SHA256
 ```
 
 ## Same input, same zip
@@ -294,7 +298,7 @@ The same zips and hashes on every site. Never a game file; store pages may show 
 
 | Site | Role | Notes |
 |---|---|---|
-| GitHub Releases | home: the code (MIT), the downloads and their hashes, bug reports | tag `v0.2.0-beta.1`, marked pre-release; both zips, both SHA-256 lists, short notes (needs Savage Wind 0.4.1-alpha.4 and your own 1.9.0 game files, which zip to take, the SmartScreen note) |
+| GitHub Releases | home: the code (MIT), the downloads and their hashes, bug reports | tag `v<version>` (the public one: `v0.3.0-early.1`), marked pre-release; both zips, both SHA-256 lists, short notes (needs Savage Wind 0.4.1-alpha.4 and your own 1.9.0 game files, which zip to take, the SmartScreen note) |
 | itch.io | the player page: easy download, devlogs, comments | kind Tool, "No payments"; both zips tagged Windows, named "Breathalyzer" and "Breathalyzer Plus"; can start Restricted (testers with keys) |
 | GameBanana | where BotW modders look | BotW > Tools; mark it beta; credit giruka, and Savage Wind Recomp as what it needs |
 

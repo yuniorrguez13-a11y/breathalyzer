@@ -231,8 +231,9 @@ nothing that can't be shared goes in `tools/emotes/`.
   the timers (manager `*(Link+0x1870)` `+0x138`/`+0x13c` <- `+0x1dc`/`+0x1e0`). `emotedbg rd` answers the state
   (`th`: asked, flying, down), the game's launch values, the arc, the direction, the cooldown and why the pose was
   used instead. `emotedbg ragdoll slip` is the first physics try (the slip-fall in place, no push), `pose` the clip
-  only; `emotedbg throw 0.2 1.5` changes the arc. Not tried in the game yet: the flight, the landing pose, the get-up
-  press.
+  only; `emotedbg throw 0.2 1.5` changes the arc. Game check 2026-11-13 (commit 14dc1ed): thrown about 4.5 m
+  forward, a limp tumble, he gets up by himself, hearts unchanged. The second press (get up sooner) has no recorded
+  game check.
 - **Why the model stood idle (round 2):** Link's model has two skeletal animation targets (`Player_Link.bmodellist`
   `AnmTarget_0` and `_1`): slot 0 of his animation holder moves the lower body, slot 1 the upper body (from `Spine_1`
   down, without the face). His body play puts a set on slot 0 and flags him (`+0xc48` bit `0x1000`); later that
@@ -263,4 +264,5 @@ nothing that can't be shared goes in `tools/emotes/`.
   icons are our own shapes (lines, circles, polygons). `emote state` has `wheel` (`up`, `down`, `off: <why>`).
 - Tests: `python -m unittest tests.test_emote_build` (the math, the data, the list merge, a full build with your
   files, and the DLL's own self-test, the wheel's 22 rows included).
-- Next: the wheel's first game check, and emotes your friends see in multiplayer.
+- The wheel worked in the game when the Emotes Short was recorded (finished 2026-11-15). Next: emotes your friends
+  see in multiplayer.

@@ -285,4 +285,5 @@ changed. Everything about them is in [mod settings](mod-settings.md); the exampl
   (developer mode) changes one as the Mod menu does.
 - Checked without the game (`tests/test_mod_settings.py`, the fake game of `build_native.py selftest`): the getters,
   watchers, locks, presets, the values file, a mod loaded with `modload`, and Python and C agreeing on 280 condition
-  cases. Not yet in the game.
+  cases. In the game (2026-11-18, Mods page v2, commit 65003e3): the settings pages and every row type, live; see
+  [mod settings](mod-settings.md#what-is-verified) for what is still open.
