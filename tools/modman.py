@@ -1634,10 +1634,7 @@ def example_dll(src: str, stage: str) -> str | None:
     dst = os.path.join(stage, *man.rel(man.dll).split("/"))
     if os.path.isfile(dst):
         return None
-    base = os.path.basename(dst).lower()
-    examples = (*bn.EXAMPLES, *bn.HOOK_EXAMPLES, *getattr(bn, "GHOST_EXAMPLES", ()),
-                *getattr(bn, "SETTINGS_EXAMPLES", ()))
-    target = next((t for t in examples if t.filename.lower() == base), None)
+    target = _example_target(dst)
     if target is None:
         return None
     built = str(target.output(Path(MODHOST_DIR)))
@@ -1645,8 +1642,92 @@ def example_dll(src: str, stage: str) -> str | None:
         raise ModmanError(f"Not added: {target.filename} isn't built yet. Run python tools/build_native.py build, "
                           "then add the example again.")
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    shutil.copyfile(built, dst)  # (a copy: the next build replaces the built one, the library keeps this one)
-    return f"{man.dll}: taken from {built} (built by build_native.py; add the example again after a rebuild)"
+    shutil.copyfile(built, dst)  # (a copy: the next build replaces the built one; deploy takes a newer one, below)
+    return f"{man.dll}: taken from {built} (built by build_native.py; a deploy takes a newer build)"
+
+
+def _example_target(dll: str):
+    """The build_native.py target that builds an example's DLL (by file name), or None."""
+    base = os.path.basename(dll).lower()
+    examples = (*bn.EXAMPLES, *bn.HOOK_EXAMPLES, *getattr(bn, "GHOST_EXAMPLES", ()),
+                *getattr(bn, "SETTINGS_EXAMPLES", ()))
+    return next((t for t in examples if t.filename.lower() == base), None)
+
+
+def example_build(lib: "Library", m: dict) -> tuple[str, str, str] | None:
+    """For a library mod added from an example in this repo (its entry's source is native/examples/<x>, as
+    example_dll takes it): (its example folder, the DLL build_native.py builds, the library copy of that DLL). None
+    for any other mod, or when the example, its mod.toml or the build isn't there."""
+    src = m.get("source")
+    if not isinstance(src, str) or not src or not _inside(src, EXAMPLES_DIR) or not os.path.isdir(src):
+        return None
+    try:
+        man, _, _ = read_manifest(src)
+    except OSError:
+        return None
+    if not man or not man.dll or man.id != m.get("id"):
+        return None
+    target = _example_target(man.dll)
+    built = str(target.output(Path(MODHOST_DIR))) if target is not None else ""
+    if not built or not os.path.isfile(built):
+        return None
+    return src, built, os.path.join(lib.mods_dir, m["id"], *man.rel(man.dll).split("/"))
+
+
+def stale_example(lib: "Library", m: dict) -> tuple[str, str, str] | None:
+    """example_build, when build_native.py built that DLL again since the library took its copy (other bytes, and a
+    newer file: the copy is made at add time, so it is never older than the build it came from). Else None."""
+    eb = example_build(lib, m)
+    if eb is None:
+        return None
+    _, built, copy = eb
+    try:
+        if os.path.isfile(copy) and (os.stat(built).st_mtime <= os.stat(copy).st_mtime or _same_bytes(built, copy)):
+            return None
+    except OSError:
+        return None
+    return eb
+
+
+def refresh_examples(lib: "Library", *, dry_run: bool = False) -> list[str]:
+    """Deploy's first step: an enabled mod added from an example in this repo takes the example's newer build
+    (stale_example), with the example's own files again (mod.toml: its version, hooks and settings go with its code).
+    Before 2026-11-21 the library kept the DLL of the day it was added ("add the example again after a rebuild"), so
+    the default library ran ghost 0.3.1 from Nov 7 long after 0.9.x was built. Files are replaced by a rename (a hard
+    link in the library never writes into the example); nothing is deleted. Returns notes."""
+    notes: list[str] = []
+    changed = False
+    for m in lib.enabled():
+        eb = stale_example(lib, m)
+        if eb is None:
+            continue
+        src, built, copy = eb
+        root = os.path.join(lib.mods_dir, m["id"])
+        if not os.path.isdir(root) or _is_link(root):
+            continue
+        if dry_run:
+            notes.append(f"{m['name']}: a newer build of {os.path.basename(built)} is taken")
+            continue
+        try:
+            files = [(path, os.path.join(root, *rel.split("/"))) for path, rel, _ in walk_files(src)]
+            for from_, to in files + [(built, copy)]:
+                if os.path.isfile(to) and _same_bytes(from_, to):
+                    continue
+                os.makedirs(os.path.dirname(to), exist_ok=True)
+                tmp = f"{to}.modman-new"
+                shutil.copyfile(from_, tmp)
+                os.replace(tmp, to)
+        except OSError as e:
+            notes.append(f"{m['name']}: couldn't take the new build of {os.path.basename(built)} ({e})")
+            continue
+        man, _, _ = read_manifest(root)
+        if man and man.version and m.get("version") != man.version:
+            m["version"] = man.version
+            changed = True
+        notes.append(f"{m['name']}: took the new build of {os.path.basename(built)} (built by build_native.py)")
+    if changed:
+        lib.save()
+    return notes
 
 
 def library_ids(lib: Library, scans: list[tuple[dict, str, ModScan]] = ()) -> dict[str, tuple[dict, str | None]]:
@@ -2281,8 +2362,9 @@ def game_folders(extracted: str) -> list[str]:
 def inputs_hash(lib: Library) -> str:
     """What a deploy is made from: the library's place (launch.json holds full paths into it), the Savage Wind folder
     and its game files (with the DLC folders set up), the enabled mods in order and their files (names, sizes,
-    times), modhost when a native mod is on, and (when their tools are there and use any) the deploy settings and
-    the font. `run` and `status` compare it."""
+    times), modhost when a native mod is on, a newer build of a mod added from an example in this repo
+    (refresh_examples), and (when their tools are there and use any) the deploy settings and the font. `run` and
+    `status` compare it."""
     h = hashlib.sha256()
     install = lib.install or ""
     enabled = lib.enabled()
@@ -2306,6 +2388,10 @@ def inputs_hash(lib: Library) -> str:
             h.update(b"missing")
     if any("native" in m.get("kinds", []) for m in enabled):
         h.update(json.dumps(_stat_key(os.path.join(MODHOST_DIR, "modhost.dll"))).encode())
+    for m in enabled:  # (a mod from an example in this repo: a newer build of it is deployed, refresh_examples)
+        eb = stale_example(lib, m)
+        if eb is not None:
+            h.update(json.dumps({"example_build": [m["id"], *_stat_key(eb[1])]}).encode())
     values = deploy_setting_values(lib, rels)  # (only when a mod has applies = "deploy" settings: else as before)
     if values:
         h.update(json.dumps({"deploy_settings": values}, sort_keys=True).encode())
@@ -2781,6 +2867,7 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False, mer
     attention: list[str] = []
     # (a mod built from the game files of another game version is rebuilt or refused, never shipped stale)
     notes: list[str] = check_stale_builds(lib, install, dry_run=dry_run)
+    notes += refresh_examples(lib, dry_run=dry_run)  # (an example from this repo: its newer build, never an old one)
     names = {m["id"]: m["name"] for m in lib.mods}
     scans: list[tuple[dict, str, ModScan]] = []
     for m in lib.enabled():
@@ -3122,10 +3209,15 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False, mer
                 with open(d.add_file("native/settings.txt"), "w", encoding="utf-8", newline="\n") as f:
                     f.write(txt)
 
+    if sources:  # (Linkle's body: whether this deploy's Link model is The Linkle Mod's, for the ghost mod's `iam`)
+        lk = linkle_made(lib, os.path.join(extracted, "romfs"), attention)
+        if lk:
+            made["linkle"] = lk
     launch = _launch(lib, h, exe, man, rep, root_dir, game_lib, rebuild if code_patches else "none", native, d,
                      merged, game, attention, notes, patch_files, hooks=hooks, hook_rebuild=rebuild,
                      hooks_file=hooks_file, settings=deploy_values)
-    if made:  # (what the makers say about what they made: font.py's symbols_full and font name, for modmenu.sync)
+    if made:  # (what the makers say about what they made: font.py's symbols_full and font name, for modmenu.sync;
+        #        "linkle": linkle_made)
         launch["made"] = made
     write_json(d.add_file(LAUNCH), launch)
     d.save(complete=True)
@@ -3186,6 +3278,33 @@ def title_picture_choice(lib: Library, scans: list[tuple[dict, str, ModScan]]) -
         if s.manifest and s.manifest.title_picture:
             return os.path.join(root, *s.manifest.rel(s.manifest.title_picture).split("/"))
     return None
+
+
+def linkle_made(lib: Library, romfs: str | None, attention: list[str]) -> dict | None:
+    """launch.json's "made" -> "linkle" (out/research/linkle-live-swap-design.md 2.4, phase 0): {"body": "restart",
+    "start": "linkle", "mod": its id} when the mod that gives this deploy its Link model (charsel.player_model_mod:
+    the last enabled one whose Link model isn't the game's own) is The Linkle Mod (charsel.is_linkle_mod: "linkle" in
+    its id or name AND its files replace Link's model): her body is Link's own, picked by a restart (stage 1). None
+    otherwise. The ghost mod's `iam` reads it (native/examples/ghost/iam.c) instead of guessing from mod names: her
+    add-ons alone (title screen, armor icons, dialogue) made it say her body was on with The Linkle Mod off (review
+    N8). "live" (her copies beside Link's, switched in the game: an invasive feature, off by default) is phase 2.
+    "owned" (review 2026-11-21): true when Who am I turned that mod on (charsel.linkle_owned), false when you did on
+    Home. Picking Link in Who am I turns off only its own, so with false `iam` says to turn it off on Home instead.
+    Left out when charsel can't tell (the ghost then says both ways)."""
+    if feature("charsel", "is_linkle_mod") is None:
+        return None
+    pm = _feature_call("charsel", "player_model_mod", lib.root, romfs if romfs and os.path.isdir(romfs) else None,
+                       problems=attention, what="Linkle's body")
+    if not isinstance(pm, dict) or not isinstance(pm.get("id"), str):
+        return None
+    if not _feature_call("charsel", "is_linkle_mod", pm["id"], str(pm.get("name") or ""), lib.root,
+                         problems=attention, what="Linkle's body"):
+        return None
+    made = {"body": "restart", "start": "linkle", "mod": pm["id"]}
+    owned = _feature_call("charsel", "linkle_owned", problems=attention, what="Linkle's body")
+    if isinstance(owned, list):
+        made["owned"] = pm["id"] in owned
+    return made
 
 
 DEPLOY_FILE_TOPS = ("pictures", "fonts")   # where a maker's files for deploy\ may go (deploy\pictures\atlas.json)

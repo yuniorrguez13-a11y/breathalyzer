@@ -2020,6 +2020,144 @@ class ExampleMods(Base):
         self.assertEqual(e["kinds"], ["native"])
         self.assertTrue(any("taken from" in n for n in notes))
 
+    def rebuild(self, rel: str, data: bytes) -> None:
+        """build_native.py builds a DLL again (newer than any copy the library took)."""
+        p = self.host_dir / rel
+        p.write_bytes(data)
+        later = os.stat(p).st_mtime + 60
+        os.utime(p, (later, later))
+
+    def test_deploy_takes_a_newer_build(self):
+        """2026-11-21: the default library ran ghost 0.3.1 from Nov 7 long after 0.9.x was built (an example kept the
+        DLL of the day it was added). Now a deploy takes the example's newer build, and its mod.toml with it."""
+        self.build_examples()
+        src = write(self.dl / "Ex", {"mod.toml": mod_toml("botw-mod-loader.ex", version="0.3.1", dll="hello.dll"),
+                                     "ex.c": "old source"})
+        with mock.patch.object(mm, "EXAMPLES_DIR", str(self.dl)):
+            e, _, _ = quiet(mm.add_mod, self.lib, str(src), allow_code=True)[0]
+            stored = self.libdir / "mods" / e["id"] / "hello.dll"
+            old = stored.read_bytes()
+            launch, out = self.deploy()
+            self.assertNotIn("took the new build", " ".join(launch["notes"]))  # (nothing newer yet)
+            hash1 = launch["hash"]
+            self.assertEqual(mm.inputs_hash(self.lib), hash1)
+            new = make_pe(exports=("swmod_init", "newer"))
+            self.rebuild("mods/hello.dll", new)
+            write(src, {"mod.toml": mod_toml("botw-mod-loader.ex", version="0.9.9", dll="hello.dll"),
+                        "ex.c": "new source"})
+            self.assertNotEqual(mm.inputs_hash(self.lib), hash1)   # (status: not up to date, so Play deploys)
+            dry, _ = self.deploy(dry_run=True)
+            self.assertEqual(stored.read_bytes(), old)              # (a dry run only says it)
+            self.assertIn("a newer build of hello.dll is taken", " ".join(dry["notes"]))
+            launch, out = self.deploy()
+            self.assertIn("took the new build of hello.dll", " ".join(launch["notes"]))
+            self.assertEqual(stored.read_bytes(), new)
+            self.assertEqual((self.deploy_dir / "native" / "mods" / "hello.dll").read_bytes(), new)
+            self.assertIn('version = "0.9.9"', (self.libdir / "mods" / e["id"] / "mod.toml").read_text())
+            self.assertEqual((self.libdir / "mods" / e["id"] / "ex.c").read_text(), "new source")
+            self.assertEqual(next(m for m in self.lib.mods if m["id"] == e["id"])["version"], "0.9.9")
+            self.assertEqual(mm.inputs_hash(self.lib), launch["hash"])  # (up to date after it)
+            self.assertEqual((src / "ex.c").read_text(), "new source")  # (the example itself untouched)
+            again, _ = self.deploy()
+            self.assertNotIn("took the new build", " ".join(again["notes"]))
+
+    def test_an_older_build_or_another_mod_is_left_alone(self):
+        self.build_examples()
+        src = write(self.dl / "Ex", {"mod.toml": mod_toml("botw-mod-loader.ex", dll="hello.dll")})
+        other = write(self.dl / "Other", {"mod.toml": mod_toml("someone.other", dll="other.dll"),
+                                          "other.dll": make_pe(exports=("swmod_init",))})
+        with mock.patch.object(mm, "EXAMPLES_DIR", str(self.dl)):
+            e, _, _ = quiet(mm.add_mod, self.lib, str(src), allow_code=True)[0]
+            o, _, _ = quiet(mm.add_mod, self.lib, str(other), allow_code=True)[0]
+            stored = self.libdir / "mods" / e["id"] / "hello.dll"
+            kept = stored.read_bytes()
+            p = self.host_dir / "mods" / "hello.dll"   # (other bytes, but older than the library's copy)
+            p.write_bytes(make_pe(exports=("swmod_init", "older")))
+            older = os.stat(stored).st_mtime - 60
+            os.utime(p, (older, older))
+            launch, _ = self.deploy()
+            self.assertEqual(stored.read_bytes(), kept)
+            self.assertNotIn("took the new build", " ".join(launch["notes"]))
+            self.rebuild("mods/hello.dll", make_pe(exports=("swmod_init", "newer")))
+            quiet(mm.main, ["disable", e["id"], "--library", str(self.libdir)])   # (off: not deployed, not touched)
+            self.deploy()
+            self.assertEqual(stored.read_bytes(), kept)
+            self.assertIsNone(mm.example_build(self.lib, next(m for m in self.lib.mods if m["id"] == o["id"])))
+
+
+class MadeLinkle(Base):
+    """launch.json's made.linkle (out/research/linkle-live-swap-design.md, phase 0): modman says itself whether her
+    body is on, so the ghost mod's `iam` no longer guesses from mod names (review N8)."""
+
+    LINKLE = {"romfs/Model/Link.sbfres": "her body", "romfs/Model/Armor_001_Upper.sbfres": "her armor"}
+
+    def setUp(self):
+        super().setUp()
+        write(self.extracted / "romfs", {"Model/Link.sbfres": "game link", "Model/Armor_001_Upper.sbfres": "game",
+                                         "UI/StockItem/Armor_001.txt": "icon", "Message/Msg.txt": "msg"})
+        self.home = self.tmp / "breathalyzer"   # (charsel's state: what Who am I turned on; never this PC's own)
+        p = mock.patch.dict(os.environ, {"BREATHALYZER_HOME": str(self.home)})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def who_am_i_turned_on(self, *ids):
+        """charsel's state as Who am I leaves it after it turned these Linkle Mods on (charsel.linkle_switched)."""
+        self.home.mkdir(parents=True, exist_ok=True)
+        (self.home / "charsel.json").write_text(json.dumps({"format": 1, "linkle_owned": list(ids)}), encoding="utf-8")
+
+    def addons(self):
+        self.mod("[LINKLE Switch] Title Screen", {"romfs/Pack/Title.txt": "her title"})
+        self.mod("Unofficial Linkle 3.0 Armor Icons", {"romfs/UI/StockItem/Armor_001.txt": "her icon"})
+        self.mod("Linkle Dialogue Fix", {"romfs/Message/Msg.txt": "her words"})
+
+    def made(self) -> dict | None:
+        launch, _ = self.deploy()
+        on_disk = json.loads((self.deploy_dir / "launch.json").read_text(encoding="utf-8"))
+        self.assertEqual((launch.get("made") or {}).get("linkle"), (on_disk.get("made") or {}).get("linkle"))
+        return (launch.get("made") or {}).get("linkle")
+
+    def test_the_linkle_mod_on_is_restart(self):
+        self.addons()
+        self.mod("The Linkle Mod", self.LINKLE)
+        self.who_am_i_turned_on("the-linkle-mod")
+        self.assertEqual(self.made(), {"body": "restart", "start": "linkle", "mod": "the-linkle-mod", "owned": True})
+
+    def test_turned_on_on_home_is_not_owned(self):
+        """Review 2026-11-21: you turned The Linkle Mod on yourself (Home): Who am I won't turn it off, so `iam link`
+        must say to turn it off on Home. Another Linkle Mod that Who am I turned on once doesn't count."""
+        self.mod("The Linkle Mod", self.LINKLE)
+        self.assertEqual(self.made(), {"body": "restart", "start": "linkle", "mod": "the-linkle-mod", "owned": False})
+        self.who_am_i_turned_on("an-older-linkle-mod")
+        self.assertIs(self.made()["owned"], False)
+
+    def test_owned_left_out_when_charsel_cant_tell(self):
+        self.mod("The Linkle Mod", self.LINKLE)
+        real = mm.feature
+        without = lambda m, f=None: None if f == "linkle_owned" else real(m, f)  # noqa: E731
+        with mock.patch.object(mm, "feature", side_effect=without):
+            made = mm.linkle_made(self.lib, str(self.extracted / "romfs"), [])
+        self.assertEqual(made, {"body": "restart", "start": "linkle", "mod": "the-linkle-mod"})
+
+    def test_add_ons_alone_give_nothing(self):
+        self.addons()                                   # (N8: these made `iam` say her body was on)
+        self.mod("The Linkle Mod", self.LINKLE)
+        quiet(mm.main, ["disable", "the-linkle-mod", "--library", str(self.libdir)])
+        self.assertIsNone(self.made())
+
+    def test_a_later_body_wins_over_hers(self):
+        self.mod("The Linkle Mod", self.LINKLE)
+        self.mod("Play as Zelda", {"romfs/Model/Link.sbfres": "zelda body"})
+        self.assertIsNone(self.made())
+
+    def test_a_linkle_named_mod_without_her_body_gives_nothing(self):
+        self.mod("Linkle Hair Recolor", {"romfs/Model/Armor_001_Upper.sbfres": "recolor"})
+        self.assertIsNone(self.made())
+
+    def test_without_charsel_nothing(self):
+        self.mod("The Linkle Mod", self.LINKLE)
+        with mock.patch.object(mm, "feature", return_value=None):
+            self.assertIsNone(mm.linkle_made(self.lib, str(self.extracted / "romfs"), []))
+
 
 class Hooks(RunBase):
     def hook_mod(self, name, mod_id, hooks, **kw):

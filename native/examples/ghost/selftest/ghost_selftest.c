@@ -1159,11 +1159,15 @@ static void check_coop(void) {
 // ------------------------------------------------------------------ 0.8.0 Who am I (iam.c): `iam` and `ghost looks`
 // Fake replies: the fields the commands give, their console line and their failure.
 static char g_rep_fail[512], g_rep_text[512], g_rep_iam[64];
+static char g_rep_body[32], g_rep_body_mode[32], g_rep_body_err[64];  // (0.9.9: the `ghost` reply's body fields)
 static int64_t g_rep_seq, g_rep_looks;
 static int g_rep_has_iam;
 static void rep_str(SwModReply *r, const char *k, const char *v) {
     (void)r;
     if (!strcmp(k, "iam")) snprintf(g_rep_iam, sizeof g_rep_iam, "%s", v);
+    if (!strcmp(k, "body")) snprintf(g_rep_body, sizeof g_rep_body, "%s", v);
+    if (!strcmp(k, "body_mode")) snprintf(g_rep_body_mode, sizeof g_rep_body_mode, "%s", v);
+    if (!strcmp(k, "body_err")) snprintf(g_rep_body_err, sizeof g_rep_body_err, "%s", v);
 }
 static void rep_int(SwModReply *r, const char *k, int64_t v) {
     (void)r;
@@ -1202,44 +1206,201 @@ static void run_line(void (*fn)(int, char **, SwModReply *), const char *line) {
     fn(argc, argv, (SwModReply *)(void *)g_rep_text);
 }
 
-// 0.9.8 Linkle by restart: `iam linkle` spawns no costume (pup_id: none) and says whether her body is on, from the
-// deploy's launch.json (its top "mods" list: a mod with linkle in its id or name), else how to get it in plain words.
-static int g_fake_linkle;
-static int fake_linkle(void) { return g_fake_linkle; }
+// 0.9.8 Linkle by restart: `iam linkle` spawns no costume (pup_id: none) and says whether her body is on, else how to
+// get it in plain words. 0.9.9 (phase 0 of out/research/linkle-live-swap-design.md): from launch.json's made.linkle,
+// which modman writes itself (no more mod names: review N8, her add-ons alone made `iam` say her body was on).
+static IamBody g_fake_body;
+static int fake_body(IamBody *out) {
+    *out = g_fake_body;
+    return out->mode;
+}
+static void set_body_owned(int mode, const char *start, int owned) {  // (and forget the body read before)
+    g_fake_body.mode = mode;
+    g_fake_body.owned = owned;
+    snprintf(g_fake_body.start, sizeof g_fake_body.start, "%s", start);
+    lock();
+    g_iam_body_have = 0;
+    unlock();
+}
+static void set_body(int mode, const char *start) { set_body_owned(mode, start, 1); }  // (Who am I turned it on)
+static void report_body(void) {
+    g_rep_body[0] = g_rep_body_mode[0] = 0;
+    snprintf(g_rep_body_err, sizeof g_rep_body_err, "(not given)");
+    iam_report((SwModReply *)(void *)g_rep_text);
+}
 static void check_iam_linkle(void) {
-    static const char *const ON = "{\n \"env\": {\"X\": \"linkle\"},\n \"mods\": [\n  {\n   \"id\": \"the-linkle-mod\",\n"
-                                  "   \"name\": \"The Linkle Mod\",\n   \"kinds\": [\n    \"romfs\"\n   ]\n  }\n ],\n"
-                                  " \"parts\": {\"native\": {\"mods\": [\"ghost.dll\"]}}\n}\n";
-    static const char *const OFF = "{\n \"mods\": [\n  {\n   \"id\": \"giruka.ak47\",\n   \"name\": \"Extra item\",\n"
-                                   "   \"kinds\": [\"romfs\", \"linkle\"]\n  }\n ],\n \"notes\": [\"Better Sprint replaces 2 "
-                                   "of Linkle's files\"]\n}\n";
-    static const char *const BY_NAME = "{\"mods\": [{\"id\": \"x.y\", \"name\": \"LINKLE body\"}]}";
-    int parse = iam_launch_linkle(ON) == 1 && iam_launch_linkle(OFF) == 0 && iam_launch_linkle(BY_NAME) == 1 &&
-                iam_launch_linkle("{\"mods\": [{\"id\": \"a\"") == -1 && iam_launch_linkle("{}") == -1 &&
-                iam_launch_linkle(NULL) == -1 && iam_linkle_file("Z:\\no\\such\\launch.json") == -1;
-    check("iam", "linkle_launch_read", parse, "on %d off %d name %d cut %d", iam_launch_linkle(ON),
-          iam_launch_linkle(OFF), iam_launch_linkle(BY_NAME), iam_launch_linkle("{\"mods\": [{\"id\": \"a\""));
-    int (*was)(void) = g_iam_linkle;
-    g_iam_linkle = fake_linkle;
-    g_fake_linkle = 1;
+    // the made.linkle parse: restart, live, missing, cut short, add-ons only, and look-alikes that aren't it
+    static const char *const RESTART =
+        "{\n \"tool\": \"modman\",\n \"env\": {\"SAVAGEWIND_ROMFS_OVERLAY\": \"C:\\\\lib\\\\deploy\\\\overlay\"},\n"
+        " \"mods\": [\n  {\n   \"id\": \"the-linkle-mod\",\n   \"name\": \"The Linkle Mod\",\n"
+        "   \"kinds\": [\"romfs\"]\n  }\n ],\n"
+        " \"notes\": [\"say \\\"made\\\": {\\\"linkle\\\": {\\\"body\\\": \\\"live\\\"}}\"],\n"
+        " \"made\": {\n  \"fonts\": {\"font\": \"x\", \"symbols_full\": true},\n"
+        "  \"linkle\": {\n   \"body\": \"restart\",\n   \"start\": \"linkle\",\n"
+        "   \"mod\": \"the-linkle-mod\"\n  }\n }\n}\n";
+    static const char *const LIVE = "{\"made\": {\"linkle\": {\"start\": \"link\", \"body\": \"live\", \"map\": "
+                                    "\"linkle-live.json\"}}}";
+    static const char *const MISSING = "{\"mods\": [], \"made\": {\"fonts\": {\"font\": \"x\"}}}";
+    static const char *const ADDONS =  // (review N8: her add-ons alone, The Linkle Mod off: no made.linkle)
+        "{\n \"mods\": [\n  {\"id\": \"linkle-switch-title-screen-natural-1-0\", \"name\": \"[LINKLE Switch] Title "
+        "Screen\"},\n  {\"id\": \"unofficial-linkle-3-0-armor-icons\", \"name\": \"Unofficial Linkle 3.0 Armor "
+        "Icons\"},\n  {\"id\": \"the-legend-of-linkle-dialogue-mod-v118\", \"name\": \"The Legend of Linkle Dialogue "
+        "Mod\"},\n  {\"id\": \"linkle-dialogue-fix\", \"name\": \"Linkle Dialogue Fix\"}\n ],\n"
+        " \"linkle\": {\"body\": \"restart\"},\n"
+        " \"made\": {\"fonts\": {\"linkle\": {\"body\": \"restart\"}},\n"
+        "  \"list\": [{\"linkle\": {\"body\": \"restart\"}}]}\n}\n";
+    IamBody b;
+    char cut[1024];
+    snprintf(cut, sizeof cut, "%s", RESTART);
+    cut[strstr(RESTART, "\"restart\"") - RESTART + 9] = 0;  // (cut right after "restart")
+    int restart = iam_launch_body(RESTART, &b) == IAM_BODY_RESTART && !strcmp(b.start, "linkle");
+    int live = iam_launch_body(LIVE, &b) == IAM_BODY_LIVE && !strcmp(b.start, "link");
+    int missing = iam_launch_body(MISSING, &b) == IAM_BODY_NONE && !*b.start && iam_launch_body("{}", &b) == 0;
+    int addons = iam_launch_body(ADDONS, &b) == IAM_BODY_NONE;
+    int cut_short = iam_launch_body(cut, &b) == IAM_BODY_UNKNOWN &&
+                    iam_launch_body("{\"made\": {\"linkle\": {", &b) == -1 &&
+                    iam_launch_body("{\"made\": \"x", &b) == -1;
+    int other = iam_launch_body(NULL, &b) == -1 && iam_launch_body("", &b) == -1 && iam_launch_body("[1]", &b) == -1 &&
+                iam_launch_body("{}}", &b) == 0 &&
+                iam_launch_body("{\"made\": {\"linkle\": {\"body\": \"beside\"}}}", &b) == IAM_BODY_NONE &&
+                iam_launch_body("{\"made\": {\"linkle\": {\"body\": \"restartrestartrestart\"}}}", &b) == IAM_BODY_NONE
+                && iam_body_file("Z:\\no\\such\\launch.json", &b) == IAM_BODY_UNKNOWN;
+    check("iam", "made_linkle_parse", restart && live && missing && addons && cut_short && other,
+          "restart %d live %d missing %d addons %d cut %d other %d", restart, live, missing, addons, cut_short, other);
+    // made.linkle.owned (review 2026-11-21): who turned The Linkle Mod on. true / false only there: not given is -1, a
+    // string, a true elsewhere (another "owned", one in an array, a "true" string) is nothing
+    int own_none = iam_launch_body(RESTART, &b) == IAM_BODY_RESTART && b.owned == -1;
+    int own_yes = iam_launch_body("{\"made\": {\"linkle\": {\"owned\": true, \"body\": \"restart\"}}}", &b) ==
+                      IAM_BODY_RESTART && b.owned == 1;
+    int own_no = iam_launch_body("{\"made\": {\"linkle\": {\"body\": \"restart\", \"mod\": \"true\", \"owned\": "
+                                 "false, \"start\": \"linkle\"}}}", &b) == IAM_BODY_RESTART && b.owned == 0 &&
+                 !strcmp(b.start, "linkle");
+    int own_alike =
+        iam_launch_body("{\"owned\": true, \"made\": {\"fonts\": {\"owned\": true, \"symbols_full\": true},\n"
+                        " \"linkle\": {\"body\": \"restart\", \"x\": [true, {\"owned\": true}], \"owned\": \"yes\"}}}",
+                        &b) == IAM_BODY_RESTART && b.owned == -1 &&
+        iam_launch_body("{\"made\": {\"linkle\": {\"body\": \"restart\", \"owned\": true", &b) == -1 &&
+        iam_launch_body("{\"made\": {\"fonts\": {\"owned\": true}}}", &b) == IAM_BODY_NONE && b.owned == -1;
+    check("iam", "made_linkle_owned", own_none && own_yes && own_no && own_alike, "none %d yes %d no %d alike %d",
+          own_none, own_yes, own_no, own_alike);
+
+    report_body();  // (the client asks: a pick says "a few seconds")
+    // her body on (restart): `iam linkle` says so, and `iam` too
+    set_body(IAM_BODY_RESTART, "linkle");
     run_line(cmd_iam, "iam linkle");
     int on = !strcmp(g_rep_iam, "linkle") && strstr(g_rep_text, "You are Linkle (her body is on).") &&
-             !strstr(g_rep_text, "pick Linkle") && !*g_rep_fail;
-    char on_text[400];
+             strstr(g_rep_text, "Your friends see Linkle in a few seconds") && !strstr(g_rep_text, "pick Linkle") &&
+             !*g_rep_fail;
+    char on_text[512];
     snprintf(on_text, sizeof on_text, "%s", g_rep_text);
     run_line(cmd_iam, "iam");
-    int on_now = strstr(g_rep_text, "You are linkle") && strstr(g_rep_text, "her body is on");
-    g_fake_linkle = 0;
-    run_line(cmd_iam, "iam linkel");
-    int off = !strcmp(g_rep_iam, "linkle") && strstr(g_rep_text, "Your friends see you as Linkle") &&
-              strstr(g_rep_text, "pick Linkle in Breathalyzer") && strstr(g_rep_text, "restarts once") &&
-              !strstr(g_rep_text, "her body is on") && !*g_rep_fail;
-    g_fake_linkle = -1;  // (no deploy known: the same words as off)
+    int on_now = strstr(g_rep_text, "You are linkle. Her body is on.") != 0;
+    check("iam", "linkle_body_words", on && on_now, "on %d (%s) now %d (%s)", on, on_text, on_now, g_rep_text);
+    // her body on, `iam link`: your body stays hers until a restart from Breathalyzer; friends see Link at once
+    run_line(cmd_iam, "iam link");
+    int link = !strcmp(g_rep_iam, "link") && strstr(g_rep_text, "Your body is Linkle.") &&
+               strstr(g_rep_text, "pick Link in Breathalyzer (Multiplayer > Who am I)") &&
+               strstr(g_rep_text, "restarts once") && strstr(g_rep_text, "Your friends see Link in a few seconds") &&
+               !strstr(g_rep_text, "see yourself as Link") && !*g_rep_fail;
+    char link_text[512];
+    snprintf(link_text, sizeof link_text, "%s", g_rep_text);
     run_line(cmd_iam, "iam");
-    int unknown = strstr(g_rep_text, "pick Linkle in Breathalyzer") != 0;
-    g_iam_linkle = was;
-    check("iam", "linkle_body_words", on && on_now && off && unknown, "on %d (%s) now %d off %d (%s) unknown %d", on,
-          on_text, on_now, off, g_rep_text, unknown);
+    int link_now = strstr(g_rep_text, "You are link. Your body is Linkle.") != 0;
+    run_line(cmd_iam, "iam zelda");  // (a costume covers her: its own words)
+    int zelda = strstr(g_rep_text, "You are zelda now") && !strstr(g_rep_text, "Your body is");
+    run_line(cmd_iam, "iam self off");
+    int self_off = strstr(g_rep_text, "your own body (Linkle)") != 0;
+    run_line(cmd_iam, "iam self on");
+    check("iam", "linkle_restart_link_words", link && link_now && zelda && self_off,
+          "link %d (%s) now %d zelda %d self_off %d (%s)", link, link_text, link_now, zelda, self_off, g_rep_text);
+    // review 2026-11-21: you turned The Linkle Mod on yourself on Home (owned false): Who am I won't turn it off, so
+    // the way back is Home; an older modman (no owned) gets both ways
+    set_body_owned(IAM_BODY_RESTART, "linkle", 0);
+    run_line(cmd_iam, "iam link");
+    int home = strstr(g_rep_text, "Your body is Linkle.") &&
+               strstr(g_rep_text, "turn The Linkle Mod off on Breathalyzer's Home, then restart the game") &&
+               !strstr(g_rep_text, "pick Link in") && strstr(g_rep_text, "Your friends see Link in a few seconds");
+    char home_text[512];
+    snprintf(home_text, sizeof home_text, "%s", g_rep_text);
+    run_line(cmd_iam, "iam");
+    int home_now = strstr(g_rep_text, "You are link. Your body is Linkle.") &&
+                   strstr(g_rep_text, "on Breathalyzer's Home") && !strstr(g_rep_text, "pick Link in");
+    set_body_owned(IAM_BODY_RESTART, "linkle", -1);
+    run_line(cmd_iam, "iam link");
+    int both = strstr(g_rep_text, "pick Link in Breathalyzer (Multiplayer > Who am I), or turn The Linkle Mod off on "
+                                  "Home") != 0;
+    check("iam", "linkle_link_words_home", home && home_now && both, "home %d (%s) now %d both %d (%s)", home,
+          home_text, home_now, both, g_rep_text);
+    // her body on and no pick known yet (single player, or before the client gave one): you are Linkle, not Link
+    set_body(IAM_BODY_RESTART, "linkle");
+    char kept_want[IAM_WORD + 1], kept_cur[IAM_WORD + 1];
+    lock();
+    memcpy(kept_want, g_iam.want, sizeof kept_want);
+    memcpy(kept_cur, g_iam.current, sizeof kept_cur);
+    g_iam.want[0] = g_iam.current[0] = 0;
+    unlock();
+    run_line(cmd_iam, "iam");
+    int no_pick = !strcmp(g_rep_iam, "linkle") && strstr(g_rep_text, "You are linkle. Her body is on.") &&
+                  !strstr(g_rep_text, "Your body is Linkle");
+    char no_pick_text[512];
+    snprintf(no_pick_text, sizeof no_pick_text, "%s", g_rep_text);
+    set_body(IAM_BODY_NONE, "");
+    run_line(cmd_iam, "iam");
+    int no_pick_off = !strcmp(g_rep_iam, "link") && strstr(g_rep_text, "You are link.") &&
+                      !strstr(g_rep_text, "Linkle");
+    lock();
+    memcpy(g_iam.want, kept_want, sizeof kept_want);
+    memcpy(g_iam.current, kept_cur, sizeof kept_cur);
+    unlock();
+    check("iam", "linkle_no_pick_is_her", no_pick && no_pick_off, "on %d (%s) off %d (%s)", no_pick, no_pick_text,
+          no_pick_off, g_rep_text);
+    // her body off: `iam linkle` says her body is off (not "your body is Link": a play-as mod may give it another
+    // look) and how to change it; `iam link` is plain again
+    set_body(IAM_BODY_NONE, "");
+    run_line(cmd_iam, "iam linkel");
+    int off = !strcmp(g_rep_iam, "linkle") && strstr(g_rep_text, "Her body is off.") &&
+              !strstr(g_rep_text, "Your body is Link") &&
+              strstr(g_rep_text, "pick Linkle in Breathalyzer (Multiplayer > Who am I)") &&
+              strstr(g_rep_text, "restarts once") && strstr(g_rep_text, "Your friends see Linkle in a few seconds") &&
+              !strstr(g_rep_text, "her body is on") && !*g_rep_fail;
+    char off_text[512];
+    snprintf(off_text, sizeof off_text, "%s", g_rep_text);
+    run_line(cmd_iam, "iam link");
+    int off_link = strstr(g_rep_text, "You are link now") && !strstr(g_rep_text, "Your body is Linkle");
+    set_body(IAM_BODY_UNKNOWN, "");  // (no deploy known: the same words as off)
+    run_line(cmd_iam, "iam linkle");
+    int unknown = strstr(g_rep_text, "Her body is off.") && strstr(g_rep_text, "pick Linkle in Breathalyzer");
+    check("iam", "linkle_off_words", off && off_link && unknown, "off %d (%s) link %d unknown %d (%s)", off, off_text,
+          off_link, unknown, g_rep_text);
+    // "live" from a later modman: this ghost can't switch: stage 1 words, and body_err for the launcher
+    set_body(IAM_BODY_LIVE, "linkle");
+    run_line(cmd_iam, "iam linkle");
+    int live_words = strstr(g_rep_text, "Her body is off.") && strstr(g_rep_text, "pick Linkle in Breathalyzer") &&
+                     !strstr(g_rep_text, "her body is on");
+    report_body();
+    int live_rep = !strcmp(g_rep_body, "link") && !strcmp(g_rep_body_mode, "restart") &&
+                   !strcmp(g_rep_body_err, IAM_NO_LIVE);
+    check("iam", "linkle_live_not_here", live_words && live_rep, "words %d (%s) body %s mode %s err %s", live_words,
+          g_rep_text, g_rep_body, g_rep_body_mode, g_rep_body_err);
+    // the `ghost` reply's body, body_mode and body_err
+    set_body(IAM_BODY_RESTART, "linkle");
+    report_body();
+    int rep_on = !strcmp(g_rep_body, "linkle") && !strcmp(g_rep_body_mode, "restart") && !*g_rep_body_err;
+    set_body(IAM_BODY_NONE, "");
+    report_body();
+    int rep_off = !strcmp(g_rep_body, "link") && !strcmp(g_rep_body_mode, "none") && !*g_rep_body_err;
+    set_body(IAM_BODY_UNKNOWN, "");
+    report_body();
+    int rep_unknown = !*g_rep_body && !strcmp(g_rep_body_mode, "none") && !*g_rep_body_err;
+    check("iam", "report_body", rep_on && rep_off && rep_unknown, "on %d off %d unknown %d (body %s mode %s err %s)",
+          rep_on, rep_off, rep_unknown, g_rep_body, g_rep_body_mode, g_rep_body_err);
+    // read once: a second ask doesn't read launch.json again
+    set_body(IAM_BODY_RESTART, "linkle");
+    report_body();
+    g_fake_body.mode = IAM_BODY_NONE;  // (changed behind its back: the first read stays)
+    report_body();
+    check("iam", "body_read_once", !strcmp(g_rep_body, "linkle"), "body %s", g_rep_body);
+    set_body(IAM_BODY_NONE, "");
 }
 
 static void check_iam(void) {
@@ -1248,6 +1409,8 @@ static void check_iam(void) {
     lock();
     memset(&g_iam, 0, sizeof g_iam);
     unlock();
+    g_iam_body_read = fake_body;  // (0.9.9: no launch.json of this PC's own: no Linkle body until a row says so)
+    set_body(IAM_BODY_NONE, "");
     // before any client: `iam` says to start it; a word is kept as typed (the client checks it when it starts)
     run_line(cmd_iam, "iam");
     check("iam", "no_list_says_start", strstr(g_rep_text, "Start the multiplayer client") != 0 && !*g_rep_fail,
@@ -1333,6 +1496,8 @@ static void check_iam(void) {
     check("iam", "client_list_fits", g_rep_looks == 11 && !*g_rep_fail, "looks %lld fail %s", (long long)g_rep_looks,
           g_rep_fail);
     check_iam_linkle();
+    g_iam_body_read = iam_body_real;
+    set_body(IAM_BODY_NONE, "");
     lock();
     memset(&g_iam, 0, sizeof g_iam);
     unlock();

@@ -2401,9 +2401,10 @@ class LaunchController(Controller):
     plain words. While the game is open, Play waits (watch() notices when it closes)."""
 
     def __init__(self, backend: LaunchBackend, clock=time.monotonic, port: int | None = None, dev: bool = False,
-                 dev_ids=(), egg_ids=(), after_on=()):
+                 dev_ids=(), egg_ids=(), after_on=(), file_log: bool = False):
         self.port_arg = port                        # --port (tests, developers): always opens that control port
         self.dev = dev                              # Settings > Developer commands
+        self.file_log = file_log                    # Settings > File log: the game lists the files it opens
         self.dev_ids = set(DEV_MODS) | set(dev_ids)  # mods whose commands need developer mode
         self.egg_ids = set(egg_ids)                 # the easter eggs: one Easter eggs row on Home for all of them
         # the bundled mods with after_on (launcher.read_bundled): their bonus is built when they are first turned on
@@ -2616,7 +2617,7 @@ class LaunchController(Controller):
         self.step = job
         if job.action == "play":
             job.args = self.play_args()
-            job.env = dict(self.play_env)
+            job.env = {**self.play_env, **({la.ENV_FILE_LOG: "1"} if self.file_log else {})}
         self._start(job)
         if self.installing is not None:
             n = len(self.install_mods)
@@ -3502,7 +3503,8 @@ class LauncherView(BigText):
         self.ctl = LaunchController(backend, port=self.port or self.settings.port, dev=self.settings.dev,
                                     dev_ids={m["id"] for m in self.bundled if m.get("developer")},
                                     egg_ids={m["id"] for m in self.eggs},
-                                    after_on=[m for m in self.bundled if m.get("after_on")])
+                                    after_on=[m for m in self.bundled if m.get("after_on")],
+                                    file_log=self.settings.file_log)
         warn = next((s for s in rep.screens if not s.blocks), None)
         if warn is not None:
             self.ctl.status = Status("warn", [warn.heading + ".", warn.line])
@@ -4249,6 +4251,8 @@ class LauncherView(BigText):
              [("Turn off" if s.hide_while_playing else "Turn on", self.on_hide)]),
             ("Developer commands", [("text", self.dev_text())],
              [("Turn off" if s.dev else "Turn on", self.on_dev)]),
+            *([("File log", [("text", "ON: fslog.log lists the files the game opens" if s.file_log else "OFF")],
+                [("Turn off" if s.file_log else "Turn on", self.on_file_log)])] if s.dev or s.file_log else []),
             ("Shortcut", [("text", "On your desktop")], [("Make one", self.on_shortcut)]),
             (".breath files", [("text", breath[0])], breath[1]),
         ]
@@ -4340,6 +4344,16 @@ class LauncherView(BigText):
         self.save_settings()
         if self.ctl is not None:
             self.ctl.dev = self.settings.dev
+        self.show_settings()
+
+    def on_file_log(self) -> None:
+        """File log ON: Play starts the game with SWMOD_FILE_LOG=1, and modhost writes fslog.log in the Savage Wind
+        folder: every file the game opens (docs/code-mods.md, "File log"). Only a list: nothing is changed. The row
+        shows while Developer commands is ON (or the file log is). OFF by default."""
+        self.settings.file_log = not self.settings.file_log
+        self.save_settings()
+        if self.ctl is not None:
+            self.ctl.file_log = self.settings.file_log
         self.show_settings()
 
     def on_shortcut(self) -> None:

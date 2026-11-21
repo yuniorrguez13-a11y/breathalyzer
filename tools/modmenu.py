@@ -1175,7 +1175,9 @@ def add_to_library(lib: mm.Library, folder: str) -> tuple[dict, bool]:
             raise MenuError("The new Mod menu build can't be added, so the old one stays:"
                             + "".join(f"\n  - {e}" for e in scan.manifest_errors or scan.problems or ["no DLL"]))
         mm.remove_mod(lib, MOD_ID)
-    entry, _, _ = mm.add_mod(lib, folder)
+    # (allow_code: this is Breathalyzer's own Mod menu, built from its source by the player's own setup command, so
+    # that command is the OK; a replaced copy then keeps its old on/off below)
+    entry, _, _ = mm.add_mod(lib, folder, allow_code=True)
     if old:
         i, m = old
         lib.mods.insert(i, lib.mods.pop())

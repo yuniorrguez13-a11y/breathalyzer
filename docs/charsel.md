@@ -198,8 +198,27 @@ the inventory showed Link, "terribly wrong". So Linkle is no longer a costume:
 - **No Linkle Mod in your mods:** her button says Needs a mod; picking her keeps the pick (friends see Linkle) and
   says how to add the mod (Home > Add mod, its BotW Switch version).
 - **In the game,** `iam linkle` spawns no puppet (Link shows: her body when the mod is on). It answers "You are Linkle
-  (her body is on)." when The Linkle Mod is in the game's deploy (the ghost mod reads the deploy's `launch.json`, next
-  to `SAVAGEWIND_ROMFS_OVERLAY`), else how to pick her in Breathalyzer (one restart).
+  (her body is on)." when her body is in the game's deploy, else "Her body is off." and how to pick her in
+  Breathalyzer (one restart). (Not "Your body is Link": a play-as mod may give the body another look.) Your friends
+  see the pick at once either way. `iam` alone with her body on and no pick known yet (single player, or before the
+  multiplayer client starts) says "You are linkle".
+- **How the game knows** (2026-11-21, phase 0 of `out\research\linkle-live-swap-design.md`): `modman deploy` writes
+  `"made": {"linkle": {"body": "restart", "start": "linkle", "mod": "<id>", "owned": true}}` into
+  `deploy\launch.json` when the mod that gives the deploy its Link model (`player_model_mod`) is The Linkle Mod
+  (`is_linkle_mod`). The ghost mod reads it once (`launch.json` next to `SAVAGEWIND_ROMFS_OVERLAY`; `iam.c`). No more
+  guessing from mod names: her add-ons alone (title screen, armor icons, dialogue) made `iam` say her body was on with
+  The Linkle Mod off (review N8).
+- **`iam link` with her body on** says: "Your body is Linkle. To be Link again, pick Link in Breathalyzer
+  (Multiplayer > Who am I): the game restarts once." Friends see Link at once. `iam` alone says the same while your
+  pick is Link. Other picks show their costume over her, as over Link.
+- **`owned`** (review 2026-11-21): `true` when Who am I turned The Linkle Mod on (`charsel.linkle_owned`), `false`
+  when you turned it on yourself on Home. Picking Link in Who am I turns off only its own, so with `false` the words
+  are "turn The Linkle Mod off on Breathalyzer's Home, then restart the game". Without the key (an older deploy) `iam`
+  says both ways.
+- **The `ghost` reply** has `body` (`linkle`, `link`, or empty when no deploy is known), `body_mode` (`none`,
+  `restart`) and `body_err`. `body: live` in `launch.json` (her copies beside Link's, switched in the game) is phase 2
+  and OFF by default: this ghost can't switch yet, so it says the restart words and `body_err` is "no live switch in
+  this ghost" (the launcher can then offer the restart).
 - **Friends** see her as before (review C1, 2026-11-18 night): each PC still builds her costume from The Linkle Mod's
   files (on or off: `linkle_costume`, its pack on `Dm_Npc_UMii_Hylia_BodyS_M_012`), and Looks shows a friend who
   picked Linkle as it. Only the self-puppet is gone (the ghost DLL has no `linkle` slot). The costume wears her outfit

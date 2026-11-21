@@ -89,14 +89,21 @@ class Header(unittest.TestCase):
         self.assertIn("let go first", self.helpers["botw_teleport_up"])
 
     def test_addresses_are_in_the_table(self):
+        """Every address botw.h names is a row of docs/addresses.md that was checked in game, unless its doc says
+        (not tested in game): then the row says research only (as for offsets, below)."""
         _, rows, _ = parse_table()
         status = {r.address: r.status for r in rows if r.address is not None}
         found = {int(h, 16) for h in ADDR_RE.findall(read(HEADER))}
         self.assertIn(0x7001e13ed0, found)  # (the scan works)
+        untested = {int(v, 16) for n, v in re.findall(r"^#define\s+(BOTW_\w+)\s+0x([0-9a-fA-F]+)(?:ull)?\s*$",
+                                                       read(HEADER), re.M) if self.symbols[n].startswith(NOT_TESTED)}
+        self.assertIn(0x7000e8fae0, untested)  # (the file log's open: research only until a game run)
         for a in sorted(found):
             with self.subTest(address=hex(a)):
                 self.assertIn(a, status, "listed in docs/addresses.md")
-                if a not in (0x7240000000, 0x7320000000):  # (the heap and guest memory: bounds of the pointer check)
+                if a in untested:
+                    self.assertEqual(status[a], "research only", "not tested in game")
+                elif a not in (0x7240000000, 0x7320000000):  # (the heap and guest memory: bounds of the pointer check)
                     self.assertIn(status[a], {"used in a mod", "verified"}, "checked in game")
 
     def test_offsets_are_in_the_table(self):

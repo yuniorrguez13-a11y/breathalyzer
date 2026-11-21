@@ -159,6 +159,9 @@ files**, and in Breathalyzer Plus the mod picker again.
   game's developer mode, like `up` (Teleport Up) and `infstamina off` (Infinite Stamina). While a mod that needs
   them is ON, Play turns developer mode on by itself, and Settings says so ("OFF, but ON while Teleport Up is on").
   **Turn on** keeps it on for every Play. Developer mode opens the game's control port 7777 on this PC only.
+- **File log** (OFF at first; the row shows while Developer commands is ON): **Turn on**, then Play. The game writes
+  `fslog.log` in the Savage Wind folder: every file it opens, one line each. It only lists them; nothing changes. In
+  the game, F12 `fslog off` pauses it and `fslog on` goes on. See [code mods](code-mods.md#file-log).
 - **Make one** puts a shortcut to `Start Breathalyzer.exe` on your desktop. After you unpack a new Breathalyzer,
   make it again from the new one.
 

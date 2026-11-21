@@ -295,3 +295,45 @@ changed. Everything about them is in [mod settings](mod-settings.md); the exampl
   watchers, locks, presets, the values file, a mod loaded with `modload`, and Python and C agreeing on 280 condition
   cases. In the game (2026-11-18, Mods page v2, commit 65003e3): the settings pages and every row type, live; see
   [mod settings](mod-settings.md#what-is-verified) for what is still open.
+
+## File log
+
+modhost can list every file the game opens, one line each, in `fslog.log`. It is for finding out which files a change
+needs (the first step of the Linkle live swap). It only writes the list: every open goes on to the game as it came,
+and nothing is redirected. **OFF by default.**
+
+- **Turn it on:** Breathalyzer, Settings, File log: Turn on. The row is there while Developer commands is ON (or the
+  file log is). It works from the next Play, when at least one code mod is ON (modhost only runs then; the game's Mods
+  page is one). Without Breathalyzer, set `SWMOD_FILE_LOG=1` before `modman run`, or before you start the game with
+  modhost.
+- **The file:** `fslog.log` in the Savage Wind folder, next to `savagewind.log`. The game before keeps its list as
+  `fslog.prev.log`.
+- **In the game (F12):** `fslog` shows the counts, `fslog off` pauses the list, `fslog on` goes on, and
+  `fslog mark <words>` adds a line of your own (`fslog mark fast travel`), so a moment is easy to find later. The
+  command is only there while the file log is on. Any player can use it.
+- **What it wraps:** the four file opens of the game's file devices (sead `doOpen_`: `0x7000e8fae0`, `0x7000e92690`,
+  `0x700115cba0`, `0x7000eaba98`, in [addresses](addresses.md); `BOTW_ADDR_FILE_OPEN` to `_4` in `botw.h`), with
+  `hle_override`, after the mods loaded. A mod that overrides one of them at game start keeps it (the log skips that
+  one and says so); a mod loaded with `modload` can't override them while the log is on. It needs a `modhost.dll`
+  built after 2026-11-21 (`python tools/build_native.py build`, then Play).
+
+A line, tab separated: `time thread fn mode result ms device path note`. `time` is seconds since the log started;
+`fn` the end of the open's address (`e8fae0`); `mode` w3; `result` `ok` (the device came back), `fail` (0) or
+`ret=<hex>`; `ms` how long the open took; `device` the device's class (its vtable); `path` the path in x2, cut at 255
+bytes, `(no path)` or `(unreadable)`. Lines that start with `#` are notes (start, pause, marks, limits, the end).
+
+Limits, so a storm of opens can't fill the disk or slow the game:
+
+- The same open (function, mode, result and path) gets one line a second. The others in that second become one
+  `+N more until <time>` line, with the time of the first, written when the second is over.
+- 1000 lines a second at most (`SWMOD_FILE_LOG_RATE`); one note counts the rest. (Threads can finish out of order:
+  a long open that started in an earlier second counts in the newer one, so the count never goes back.)
+- 20 MB in all (`SWMOD_FILE_LOG_MAX`, in bytes), then a note says it stopped.
+- Game threads only add lines to memory; a thread of modhost writes them to the file every 250 ms. What is left is
+  written when the game closes, and `fslog` writes it at once.
+
+Checked without the game: `python tools/build_native.py selftest` wraps the four opens of its fake game and checks
+the lines, the repeats, the pause, the marks, both limits, paths that can't be read (also pointers into memory Windows
+says can't be read: not committed, no access, a guard page, and a path that runs into such a page, cut with `...`) and
+the previous log. A second run checks the overlap rules: a mod that overrides one of the four at game start keeps it,
+and `modload` is refused one the log wraps. Not run in the game yet.

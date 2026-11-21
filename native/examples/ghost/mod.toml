@@ -3,7 +3,7 @@
 #   python tools/build_native.py build
 #   python tools/modman.py add native/examples/ghost
 # ghost.dll isn't in this folder: for the examples in this repo, modman takes it from build\native\ghost-mods,
-# where build_native.py puts it (docs/mod-format.md). Add the example again after you rebuild it.
+# where build_native.py puts it (docs/mod-format.md). After a rebuild, the next deploy (Play) takes the new build.
 # It needs no hook slots: it wraps a per-frame game job through hle_override.
 
 [mod]

@@ -580,9 +580,10 @@ static struct {
     uint64_t addr;
     int mod;
     bool pending;      // asked for during its mod's swmod_init: sent to Savage Wind only once that init returns 0
+    bool fslog;        // modhost's own: the file log's wrapper (fslog.c), not a mod's
     SwModGuestFn fn;
     const char *name;
-} g_start_ovr[MAX_START_OVERRIDES];  // the overrides of mods loaded at game start
+} g_start_ovr[MAX_START_OVERRIDES];  // the overrides of mods loaded at game start (and the file log's)
 static int g_nstart_ovr;
 
 #define MAX_HOT_OVERRIDES 32
@@ -635,8 +636,11 @@ static void hot_override(Mod *m, uint64_t addr, const char *a, SwModGuestFn fn, 
     for (int k = 0; k < g_nstart_ovr && !why; k++)
         if (g_start_ovr[k].addr == addr) {
             const Mod *o = mod_by_id(g_start_ovr[k].mod);
-            snprintf(buf, sizeof buf, "%s (loaded at game start) overrides it already, and the first override wins",
-                     o ? o->file : "a mod");
+            if (g_start_ovr[k].fslog)
+                snprintf(buf, sizeof buf, "modhost's file log wraps it (File log is on), and the first override wins");
+            else
+                snprintf(buf, sizeof buf, "%s (loaded at game start) overrides it already, and the first override "
+                         "wins", o ? o->file : "a mod");
             why = buf;
         }
     reg_unlock();
@@ -699,6 +703,7 @@ static void api_hle_override(uint64_t addr, SwModGuestFn fn, const char *name) {
     if (g_nstart_ovr < MAX_START_OVERRIDES) {
         g_start_ovr[g_nstart_ovr].addr = addr;
         g_start_ovr[g_nstart_ovr].pending = queue;
+        g_start_ovr[g_nstart_ovr].fslog = false;
         g_start_ovr[g_nstart_ovr].fn = fn;
         g_start_ovr[g_nstart_ovr].name = name;
         g_start_ovr[g_nstart_ovr++].mod = m ? m->id : 0;
@@ -1000,6 +1005,10 @@ static void join_args(int from, int argc, char **argv, char *out, size_t cap);
 // ------------------------------------------------------------------ the overlay host (swmod_overlay.h): overlay.c
 // (mods draw over the game with Savage Wind's ImGui; an export of modhost.dll, nothing is patched until one asks)
 #include "overlay.c"
+
+// ------------------------------------------------------------------ the file log: fslog.c
+// (only with the file_log setting on: the game's file opens, one line each, in fslog.log; log only, no redirect)
+#include "fslog.c"
 
 static void fill_api(SwModApi *a, const char *mod_name) {
     memset(a, 0, sizeof *a);
@@ -1662,6 +1671,7 @@ GAMELIB_EXPORT const GameLibTables *swgame_tables(void) {
     done = true;
     host_log("modhost %s (mod API %d)", MODHOST_VERSION, SWMOD_API_VERSION);
     read_wait_ms();
+    st_host_load();  // (modhost's own settings: the file log)
     const GameLibTables *t = load_real();
     if (!t) return NULL;
     g_real = t;
@@ -1686,7 +1696,9 @@ GAMELIB_EXPORT const GameLibTables *swgame_tables(void) {
                      : i ? "couldn't add the command %s (the name is taken?): mods can't be loaded while the game runs"
                          : "couldn't add the command %s (the name is taken?): see these [modhost] lines instead",
                      host_cmds[i].name);
+    fl_setup();    // (the file log's `fslog` command, only when it is on)
     load_hooks();
     load_mods();
+    fl_install();  // (after the mods: their own overrides go in first; only when the file log is on)
     return t;
 }

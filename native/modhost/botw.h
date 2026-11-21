@@ -52,6 +52,14 @@ extern "C" {
 #define BOTW_ADDR_STAMINA_SETTER 0x7000cc7410ull
 //: Game job that runs once per frame on a game thread; botw_on_frame wraps it.
 #define BOTW_ADDR_FRAME_JOB 0x7001129af8ull
+//: (not tested in game) Game function: open a file (sead doOpen_, nn::fs devices). x0 device, x2 path (char* at +8), w3 mode; x0 = device, or 0.
+#define BOTW_ADDR_FILE_OPEN 0x7000e8fae0ull
+//: (not tested in game) The same open of another file device class (maybe the one for TitleBG.pack). Same registers.
+#define BOTW_ADDR_FILE_OPEN_2 0x7000e92690ull
+//: (not tested in game) The same open of a third file device class. Same registers.
+#define BOTW_ADDR_FILE_OPEN_3 0x700115cba0ull
+//: (not tested in game) The same open of a fourth file device class. Same registers.
+#define BOTW_ADDR_FILE_OPEN_4 0x7000eaba98ull
 
 //: Offset in the player info block: Link's actor (u64).
 #define BOTW_PI_PLAYER 0x60

@@ -173,6 +173,17 @@ class AddressTable(unittest.TestCase):
                 with self.subTest(file=rel(p)):
                     self.assertFalse(made_up & addresses_in(p.read_text(encoding="utf-8")))
 
+    def test_file_open_rows(self):
+        """The four file opens modhost's file log wraps (docs/code-mods.md "File log"): research only until a game run
+        checks them, and named where botw.h, the selftest and the docs have them."""
+        self.assertIn("File open (modhost's file log)", self.groups)
+        for a in (0x7000e8fae0, 0x7000e92690, 0x700115cba0, 0x7000eaba98):
+            with self.subTest(address=hex(a)):
+                r = self.listed[a]
+                self.assertEqual(r.status, "research only")
+                for f in ("native/modhost/botw.h", "tools/build_native.py", "docs/code-mods.md"):
+                    self.assertIn(f, r.files)
+
     def test_linked(self):
         self.assertIn("(docs/addresses.md)", read("README.md"))
         self.assertIn("(addresses.md)", read("docs/code-mods.md"))

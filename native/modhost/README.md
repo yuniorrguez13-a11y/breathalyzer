@@ -13,6 +13,7 @@ code library, and modhost loads the real one plus your mods. How to install and 
 | `settings.c` | Mod settings (API 3, [docs/mod-settings.md](../../docs/mod-settings.md)): reads `settings.txt`, keeps the values, runs watchers, saves `<library>\settings\<id>.json`, and the `modsettings` / `modset` commands. It is `#include`d by `modhost.c` (compiled alone it is empty), so modhost still builds from `modhost.c`. |
 | `swmod_overlay.h` | Overlays: draw over the game with Savage Wind's own ImGui and hold the game's input while you do (`swmod_overlay_add`, an export of modhost.dll; see "Overlays" below). |
 | `overlay.c` | The overlay host. `#include`d by `modhost.c` like `settings.c`. Nothing is patched until a mod adds an overlay. |
+| `fslog.c` | The file log: with the file_log setting on (`SWMOD_FILE_LOG=1`, Breathalyzer's Settings > File log), the game's file opens, one line each, in `fslog.log`, and the `fslog` command ([docs/code-mods.md](../../docs/code-mods.md#file-log)). Log only. `#include`d by `modhost.c` like `settings.c`. Off: nothing is wrapped. |
 | `botw.h` | Plain-named helpers for the most basic game values (BotW 1.9.0): [docs/game-basics.md](../../docs/game-basics.md). |
 | `sw_runtime.h` | Savage Wind runtime declarations the host uses (copied from Savage Wind, MIT). Mods don't use it. |
 | `platform_min.h` | Hand-written Win32 / C runtime declarations (the zig that ships with Savage Wind has no `windows.h` or `stdio.h`). |

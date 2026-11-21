@@ -82,6 +82,7 @@ class FakeModman:
         self.calls.append(list(argv))
         assert argv[-2] == "--library", argv
         cmd, *rest = argv[:-2]
+        rest = [a for a in rest if a != "--allow-code"]   # (the player's OK for a code mod: a flag, not an argument)
         return getattr(self, "cmd_" + cmd)(*rest)
 
     def cmd_enable(self, ref, on=True):

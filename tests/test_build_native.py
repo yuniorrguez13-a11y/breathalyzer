@@ -1081,8 +1081,163 @@ class RaceSelftestChecks(unittest.TestCase):
         self.assertTrue(bad[0].startswith("modload doesn't wait for a game thread"))
 
 
+def good_fslog_results() -> list:
+    """Made-up file log runs, as the selftest should see them: [a, a_text, a_log, b, b_text, b_prev, c, c_text] for
+    bn.selftest_expect_fslog (replies by step name of bn.fslog_steps, fslog_rate_steps and fslog_cap_steps)."""
+    dev = 4096
+
+    def okd(**data):
+        return {"ok": True, "data": data}
+
+    def line(fn, mode, res, path, device="1234abcd"):
+        return f"0.003\t123\t{fn}\t{mode}\t{res}\t0.001\t{device}\t{path}\t"
+
+    opens = {k: sum(1 for _, ln in bn.fslog_steps() if ln.startswith(f"#open {v:#x} "))
+             for k, v in bn.FSLOG_FNS.items()}
+    a = {k: okd() for k, _ in bn.fslog_steps()}
+    a.update({
+        "status0": okd(on=True, paused=False, full=False, wrapped=4, file="C:\\x\\fslog.log"),
+        "overrides": okd(count=4, **{f"{i}.addr": v for i, v in enumerate(bn.FSLOG_FNS.values())},
+                         **{f"{i}.name": f"modhost_fslog_{k}" for i, k in enumerate(bn.FSLOG_FNS)}),
+        "ok": okd(x0=dev, x1=1, dev=dev), "fail": okd(x0=0, x1=2, dev=dev), "nopath": okd(x0=0, x1=3, dev=dev),
+        "badstr": okd(x0=0, x1=4, dev=dev), "badobj": okd(x0=0, x1=4, dev=dev), "long": okd(x0=dev, x1=1, dev=dev),
+        **{k: okd(x0=0, x1=4, dev=dev) for k, _ in bn.FSLOG_UNREADABLE}, "edge": okd(x0=dev, x1=1, dev=dev),
+        "paused_open": okd(x0=dev, x1=1, dev=dev), "off_status": okd(paused=True),
+        "bad_arg": {"ok": False, "error": "usage: fslog [on|off|mark <words>]"},
+        "status1": okd(paused=False, opens=sum(opens.values()), unreadable=2 + len(bn.FSLOG_UNREADABLE),
+                       **{f"opens.{k}": n for k, n in opens.items()}),
+    })
+    a.update({f"again{i}": okd(x0=dev, x1=1, dev=dev) for i in range(bn.FSLOG_REPEATS)})
+    a_text = "\n".join([
+        "# fslog: the files the game opened (made up)", bn.FSLOG_HEADER,
+        line("e8fae0", 0, "ok", bn.FSLOG_ARMOR), line("e92690", 1, "fail", "missing/Model/Nope.sbfres"),
+        line("15cba0", 0, "fail", "(no path)"), line("eaba98", 0, "fail", "(unreadable)"),
+        line("eaba98", 3, "fail", "(unreadable)", "-"),
+        *[line("eaba98", m, "fail", "(unreadable)") for _, m in bn.FSLOG_UNREADABLE],
+        line("e8fae0", 0, "ok", bn.FSLOG_EDGE + "..."), line("e8fae0", 0, "ok", bn.FSLOG_LONG[:255] + "..."),
+        line("e8fae0", 2, "ok", "Pack/A?B.pack"), "# 0.003 paused (fslog off)",
+        "# 0.004 resumed (fslog on): 1 opens while paused were not written", "# 0.004 mark: fast travel now",
+        f"0.003\t-\te8fae0\t0\tok\t-\t-\t{bn.FSLOG_ARMOR}\t+{bn.FSLOG_REPEATS} more until 0.003",
+        "# 1.114 game closed: 28 opens", ""])
+    a_log = "[modhost] file log: on, 4 of 4 file opens wrapped, writing C:\\x\\fslog.log\n"
+    b = {"status": okd(rate_dropped=7)}
+    b_text = "\n".join([bn.FSLOG_HEADER, *[line("e8fae0", 0, "ok", f"Burst/File{i:02d}.bin") for i in range(5)],
+                        "# 1.043 7 opens not written in the second before: more than 5 lines a second", ""])
+    c = {"status": okd(full=True), "on_full": {"ok": False, "error": "The file log is full. Restart the game."},
+         "after": okd(x0=dev, x1=1, dev=dev), f"fill{bn.FSLOG_FILL - 1}": okd(x0=dev, x1=1, dev=dev)}
+    c_text = "\n".join([bn.FSLOG_HEADER, *[line("e8fae0", 0, "ok", f"Cap/{i:02d}.bin") for i in range(3)],
+                        "# 0.005 stopped: the log reached its size limit (4 KB). Nothing more is written.",
+                        "# 0.014 game closed: 41 opens", ""])
+    return [a, a_text, a_log, b, b_text, a_text, c, c_text]
+
+
+class FileLogSelftestChecks(unittest.TestCase):
+    """selftest_expect_fslog: passes a good made-up run, and catches each thing the file log must do."""
+
+    def test_good_runs_pass(self):
+        self.assertEqual(bn.selftest_expect_fslog(*good_fslog_results()), [])
+
+    def test_steps_open_each_function(self):
+        lines = [ln for _, ln in bn.fslog_steps()]
+        for addr in bn.FSLOG_FNS.values():
+            self.assertTrue(any(ln.startswith(f"#open {addr:#x} ") for ln in lines), hex(addr))
+        self.assertEqual(set(bn.FSLOG_FNS.values()), {0x7000e8fae0, 0x7000e92690, 0x700115cba0, 0x7000eaba98})
+
+    def test_problems_are_caught(self):
+        def bad(i, change):
+            r = good_fslog_results()
+            r[i] = change(r[i])
+            if i == 1:
+                r[5] = r[1]  # (run B's fslog.prev.log is run A's log)
+            return bn.selftest_expect_fslog(*r)
+
+        armor = f"0.003\t123\te8fae0\t0\tok\t0.001\t1234abcd\t{bn.FSLOG_ARMOR}\t"
+        every_time = lambda t: "\n".join(ln for ln in t.splitlines() if "more until" not in ln) + (  # noqa: E731
+            "\n" + armor) * bn.FSLOG_REPEATS
+        self.assertEqual(len(bad(1, every_time)), 1)                                      # repeats not counted
+        self.assertEqual(len(bad(1, lambda t: t + "0.004\t1\te8fae0\t0\tok\t0.0\t-\tPaused/NotWritten.bin\t\n")),
+                         1)                                                               # written while paused
+        self.assertEqual(len(bad(1, lambda t: t.replace("\tPack/A?B.pack", "\tPack/A\tB.pack"))), 2)  # (10 columns)
+        self.assertEqual(len(bad(2, lambda log: "")), 1)                                  # savagewind.log silent
+        self.assertEqual(len(bad(4, lambda t: t.replace("# 1.043 7 opens", "# 1.043 6 opens"))), 1)  # rate count
+        self.assertEqual(len(bad(5, lambda t: "")), 1)                                    # no fslog.prev.log
+        self.assertEqual(len(bad(7, lambda t: t + "x" * 4096)), 1)                        # over the size limit
+        self.assertEqual(len(bad(7, lambda t: t + "0.1\t1\te8fae0\t0\tok\t0.0\t-\tCap/after.bin\t\n")), 1)
+        self.assertEqual(len(bad(0, lambda a: {**a, "badobj": {"ok": False, "error": "no override"}})), 1)
+        self.assertEqual(len(bad(0, lambda a: {**a, "guard": {"ok": False, "error": "crashed"}})), 1)  # (in memory)
+        no_guard = lambda t: "\n".join(ln for ln in t.splitlines() if "\t6\tfail\t" not in ln)  # noqa: E731
+        self.assertEqual(len(bad(1, no_guard)), 1)                                        # guard page line missing
+        self.assertEqual(len(bad(1, lambda t: t.replace(bn.FSLOG_EDGE + "...", bn.FSLOG_EDGE))), 1)  # not cut
+        self.assertEqual(len(bad(0, lambda a: {**a, "overrides": {"ok": True, "data": {"count": 5}}})), 1)
+
+
+def good_fslog_overlap() -> list:
+    """A made-up run D, as the selftest should see it: [d, d_text, d_log] for bn.selftest_expect_fslog_overlap."""
+    dev = 4096
+
+    def okd(**data):
+        return {"ok": True, "data": data}
+
+    def overrides(*names):
+        return okd(count=len(names), **{f"{i}.name": n for i, n in enumerate(names)})
+
+    start = ("fslog_probe_start", "modhost_fslog_e8fae0", "modhost_fslog_15cba0", "modhost_fslog_eaba98")
+    d = {"status": okd(wrapped=3), "overrides": overrides(*start), "mine": okd(x0=0x7777, x1=9, dev=dev),
+         "load": {"ok": True, "data": {"notes": bn.FSLOG_OVER_REFUSED},
+                  "text": f"fslogover loaded (id 2)\n{bn.FSLOG_OVER_REFUSED}"},
+         "overrides_after": overrides(*start), "after": okd(x0=dev, x1=1, dev=dev),
+         "status_after": okd(**{"opens.e92690": 0, "opens.e8fae0": 1})}
+    d_text = "\n".join([bn.FSLOG_HEADER, bn.FSLOG_OVER_NOTE,
+                        "0.010\t123\te8fae0\t0\tok\t0.001\t1234abcd\tModel/After.sbfres\t", ""])
+    d_log = "\n".join([*bn.FSLOG_OVER_LOG, "[modhost] file log: on, 3 of 4 file opens wrapped, writing C:\\x\\fslog.log"])
+    return [d, d_text, d_log]
+
+
+class FileLogOverlapChecks(unittest.TestCase):
+    """selftest_expect_fslog_overlap (review 2026-11-21: the overlap rules were never run): a mod's own override at
+    game start wins over the file log, and modload is refused what the file log wraps."""
+
+    def test_good_run_passes(self):
+        self.assertEqual(bn.selftest_expect_fslog_overlap(*good_fslog_overlap()), [])
+
+    def test_steps(self):
+        lines = [ln for _, ln in bn.fslog_overlap_steps(Path("C:/run"))]
+        self.assertIn(f"#open {bn.FSLOG_FNS['e92690']:#x} dev 0 Model/Mine.sbfres", lines)
+        self.assertTrue(any(ln.startswith("modload ") and bn.FSLOG_OVER_FILE in ln for ln in lines))
+        self.assertEqual([t.name for t in bn.SELFTEST_FSLOG], ["fslog_probe", "fslog_probe_hot"])
+        self.assertEqual(bn.SELFTEST_FSLOG[1].defines, ("FSLOG_PROBE_HOT",))
+
+    def test_problems_are_caught(self):
+        def bad(i, change):
+            r = good_fslog_overlap()
+            r[i] = change(r[i])
+            return bn.selftest_expect_fslog_overlap(*r)
+
+        def step(k, v):
+            return lambda d: {**d, k: v}
+
+        wrapped_all = {"ok": True, "data": {"wrapped": 4}}
+        self.assertEqual(len(bad(0, step("status", wrapped_all))), 1)                       # the mod's one wrapped
+        self.assertEqual(len(bad(0, step("mine", {"ok": True, "data": {"x0": 4096, "x1": 2}}))), 1)  # log ran first
+        self.assertEqual(len(bad(0, step("load", {"ok": True, "data": {"notes": ""}, "text": "loaded"}))), 1)
+        self.assertEqual(len(bad(0, step("overrides_after", {"ok": True, "data": {"count": 5}}))), 1)
+        self.assertEqual(len(bad(1, lambda t: t.replace(bn.FSLOG_OVER_NOTE + "\n", ""))), 1)   # no note why
+        self.assertEqual(len(bad(1, lambda t: t + "0.1\t1\te92690\t0\tok\t0.0\t-\tModel/Mine.sbfres\t\n")), 1)
+        self.assertEqual(len(bad(2, lambda log: "")), len(bn.FSLOG_OVER_LOG) + 1)          # savagewind.log silent
+
+
 class FakeGameRun(unittest.TestCase):
     """_run_fake_game with a stand-in child (no DLLs): its UTF-8 log must come through intact."""
+
+    def test_file_log_only_when_a_run_asks(self):
+        """A SWMOD_FILE_LOG left in this shell doesn't reach the fake game; a run that asks for it gets it."""
+        child = "import json, os; print(json.dumps({'log': os.environ.get('SWMOD_FILE_LOG')}))"
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(bn, "_CHILD", child), \
+                mock.patch.dict(os.environ, {"SWMOD_FILE_LOG": "1", "SWMOD_FILE_LOG_MAX": "5"}):
+            (Path(d) / "selftest").mkdir()
+            plain, _ = bn._run_fake_game(Path(d), Path(d) / "game.dll", Path(d) / "mods", ())
+            asked, _ = bn._run_fake_game(Path(d), Path(d) / "game.dll", Path(d) / "mods", (), {"SWMOD_FILE_LOG": "on"})
+        self.assertEqual((plain, asked), ({"log": None}, {"log": "on"}))
 
     def test_utf8_log(self):
         child = ("import json, sys; sys.stderr.buffer.write('[modhost] mod \u0441\u0430\u0448\u0430.dll: ok\\n'"

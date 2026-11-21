@@ -252,6 +252,44 @@ EXPORT struct Cpu *kernel_current_cpu(void) { return NULL; }
 // control_text lines. "#overrides" lists the hle_override calls instead, "#guest_calls" the guest_call calls and
 // "#commands" the registered command names. "#call <addr> [x0] [x1]" calls the override the dispatcher would pick for
 // addr (the first one for it, as in Savage Wind) on a fresh Cpu and answers its x0.
+// "#open <addr> <device> <mode> <path>" calls it as the game's file devices call their open (modhost's file log): x0 the
+// device ("dev": a made-up device object, else a number), x1 a handle, x2 a sead::SafeString* with the path ("-": x2 =
+// 0; "!bad": its char* can't be read; "!badobj": x2 itself can't be read), w3 the mode. It answers x0, x1 and "dev",
+// the made-up device's address.
+// "!bad" and "!badobj" are below 64 KB, which fslog.c refuses before it asks Windows. In the game a bad path is more
+// likely a pointer into the guest window that Windows says can't be read (review 2026-11-21), so these are pointers
+// into pages of one reserved block, like that window: "!uncommitted" (reserved, not committed), "!noaccess"
+// (PAGE_NOACCESS), "!guard" (a guard page: reading it once would raise), "!noaccessobj" (x2 itself in the no-access
+// page), "!halfobj" (x2's first 8 bytes readable, its char* not) and "!edge:<text>" (the text with no 0 after it, its
+// last byte the last one of a read/write page, the next page not committed: the log must cut it there with "...").
+static uint64_t g_fake_dev[2] = {0x1234abcdull, 0};  // (its vtable: not a game address)
+static struct {
+    uint64_t vptr;
+    const char *str;
+} g_fake_path;
+static char g_fake_text[512];
+
+#define FAKE_PAGE 4096u
+__declspec(dllimport) void *WINAPI VirtualAlloc(void *addr, size_t size, DWORD type, DWORD protect);
+// The block: page 0 read/write, 1 reserved only, 2 no access, 3 read/write + guard. NULL if Windows refused.
+static uint8_t *fake_pages(void) {
+    static uint8_t *pages;
+    if (!pages) {
+        uint8_t *p = VirtualAlloc(NULL, 4 * FAKE_PAGE, 0x2000u /* MEM_RESERVE */, 0x01u /* PAGE_NOACCESS */);
+        if (p && VirtualAlloc(p, FAKE_PAGE, 0x1000u /* MEM_COMMIT */, 0x04u /* PAGE_READWRITE */) &&
+            VirtualAlloc(p + 2 * FAKE_PAGE, FAKE_PAGE, 0x1000u, 0x01u) &&
+            VirtualAlloc(p + 3 * FAKE_PAGE, FAKE_PAGE, 0x1000u, 0x04u | 0x100u /* PAGE_GUARD */))
+            pages = p;
+    }
+    return pages;
+}
+
+static int find_override(uint64_t addr) {
+    for (int i = 0; i < g_noverrides; i++)
+        if (g_overrides[i].addr == addr) return i;
+    return -1;
+}
+
 EXPORT int fake_run(const char *line, char *out, int cap) {
     builtins();
     static Reply r, e;
@@ -285,11 +323,53 @@ EXPORT int fake_run(const char *line, char *out, int cap) {
             snprintf(k, sizeof k, "%d", i);
             control_field_str(&r, k, g_cmds[i].name);
         }
+    } else if (!strcmp(argv[0], "#open") && argc > 4) {
+        int found = find_override(strtoull(argv[1], NULL, 0));
+        if (found < 0) {
+            control_fail(&r, "no override for %s", argv[1]);
+        } else {
+            static uint64_t cpu[128] __attribute__((aligned(16)));  // (the release's Cpu layout is 1 KiB)
+            memset(cpu, 0, sizeof cpu);
+            snprintf(g_fake_text, sizeof g_fake_text, "%s", argv[4]);
+            g_fake_path.vptr = 0x5afe;
+            g_fake_path.str = g_fake_text;
+            cpu[0] = !strcmp(argv[2], "dev") ? (uint64_t)(uintptr_t)g_fake_dev : strtoull(argv[2], NULL, 0);
+            cpu[1] = 0x1000;
+            cpu[2] = (uint64_t)(uintptr_t)&g_fake_path;
+            cpu[3] = strtoull(argv[3], NULL, 0);
+            const char *a = argv[4];
+            size_t edge = !strncmp(a, "!edge:", 6) ? strlen(a + 6) : 0;
+            bool paged = edge || !strcmp(a, "!uncommitted") || !strcmp(a, "!noaccess") || !strcmp(a, "!guard") ||
+                         !strcmp(a, "!noaccessobj") || !strcmp(a, "!halfobj");
+            uint8_t *pg = paged ? fake_pages() : NULL;
+            if (!strcmp(a, "-")) cpu[2] = 0;
+            else if (!strcmp(a, "!bad")) g_fake_path.str = (const char *)(uintptr_t)0x10;
+            else if (!strcmp(a, "!badobj")) cpu[2] = 0x20;
+            else if (paged && (!pg || edge >= FAKE_PAGE)) pg = NULL;  // (refused below)
+            else if (!strcmp(a, "!uncommitted")) g_fake_path.str = (const char *)(pg + FAKE_PAGE);
+            else if (!strcmp(a, "!noaccess")) g_fake_path.str = (const char *)(pg + 2 * FAKE_PAGE);
+            else if (!strcmp(a, "!guard")) g_fake_path.str = (const char *)(pg + 3 * FAKE_PAGE);
+            else if (!strcmp(a, "!noaccessobj")) cpu[2] = (uint64_t)(uintptr_t)(pg + 2 * FAKE_PAGE + 16);
+            else if (!strcmp(a, "!halfobj")) {
+                uint64_t vptr = 0x5afe;
+                memcpy(pg + FAKE_PAGE - 8, &vptr, 8);  // (its char* would be the first 8 bytes of page 1)
+                cpu[2] = (uint64_t)(uintptr_t)(pg + FAKE_PAGE - 8);
+            } else if (edge) {
+                memcpy(pg + FAKE_PAGE - edge, a + 6, edge);  // (no 0 after it: page 1 isn't committed)
+                g_fake_path.str = (const char *)(pg + FAKE_PAGE - edge);
+            }
+            if (paged && !pg) {
+                control_fail(&r, "can't set up the self-test's pages for %s", a);
+            } else {
+                g_overrides[found].fn((struct Cpu *)(void *)cpu);
+                control_field_int(&r, "x0", (int64_t)cpu[0]);
+                control_field_int(&r, "x1", (int64_t)cpu[1]);
+                control_field_int(&r, "dev", (int64_t)(intptr_t)g_fake_dev);
+            }
+        }
     } else if (!strcmp(argv[0], "#call") && argc > 1) {
         uint64_t addr = strtoull(argv[1], NULL, 0);
-        int found = -1;
-        for (int i = 0; i < g_noverrides && found < 0; i++)
-            if (g_overrides[i].addr == addr) found = i;
+        int found = find_override(addr);
         if (found < 0) {
             control_fail(&r, "no override for %s", argv[1]);
         } else {

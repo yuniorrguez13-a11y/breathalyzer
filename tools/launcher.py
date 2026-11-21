@@ -63,6 +63,7 @@ DOWNLOAD_PAGE = f"https://github.com/Revivedx/SavageWindRecomp/releases/tag/v{SU
 LIBRARY_NAME = "modloader"        # (modman.LIBRARY_NAME: the library goes next to the Savage Wind folder)
 ENV_LIBRARY = "SWMOD_LIBRARY"
 ENV_DATA_ROOT = "SAVAGEWIND_DATA_ROOT"
+ENV_FILE_LOG = "SWMOD_FILE_LOG"   # Settings > File log: modhost lists the files the game opens (docs/code-mods.md)
 MIN_FREE = 2 * 2**30              # code mods need about this much: the rebuilt game code and its cache
 MAX_LOOK = 300                    # folders looked into next to Breathalyzer, at most
 DEFAULT_SIZE, MIN_SIZE, MAX_SIZE = 20, 10, 40
@@ -88,9 +89,10 @@ class Settings:
     hide_while_playing: bool = False
     picked: str = ""                  # the bundled mods list the player answered in the mod picker (read_bundled)
     dev: bool = False                 # Settings > Developer commands: Play opens the control port (developer mode)
+    file_log: bool = False            # Settings > File log: Play starts the game with SWMOD_FILE_LOG=1 (fslog.log)
     extra: dict = field(default_factory=dict)   # keys a newer launcher wrote: kept as they are
 
-    KEYS = ("install", "library", "size", "dark", "port", "hide_while_playing", "picked", "dev")
+    KEYS = ("install", "library", "size", "dark", "port", "hide_while_playing", "picked", "dev", "file_log")
 
 
 def home_dir(env: dict | None = None) -> str:
@@ -128,7 +130,7 @@ def load_settings(path: str) -> tuple[Settings, str | None]:
             setattr(s, key, data[key])
     if type(data.get("size")) is int and MIN_SIZE <= data["size"] <= MAX_SIZE:
         s.size = data["size"]
-    for key in ("dark", "hide_while_playing", "dev"):
+    for key in ("dark", "hide_while_playing", "dev", "file_log"):
         if type(data.get(key)) is bool:
             setattr(s, key, data[key])
     if type(data.get("port")) is int and 1 <= data["port"] <= 65535:

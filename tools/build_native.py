@@ -143,6 +143,13 @@ SELFTEST_RACE = (
     Target("misuse_rearm", (_ST / "hot_misuse.c",), runtime=False, subdir="selftest/misuse",
            defines=("MISUSE_REARM",), export="swmod_init"),
 )
+# The file log's overlap run (run D): a mod loaded at game start that overrides one of the four file opens, and one for
+# modload that overrides another (selftest/fslog_probe.c).
+SELFTEST_FSLOG = (
+    Target("fslog_probe", (_ST / "fslog_probe.c",), runtime=False, subdir="selftest/fslog-start", export="swmod_init"),
+    Target("fslog_probe_hot", (_ST / "fslog_probe.c",), runtime=False, subdir="selftest/fslog-hot",
+           defines=("FSLOG_PROBE_HOT",), export="swmod_init"),
+)
 
 
 def hooked_game_target(out: Path) -> Target:
@@ -1003,6 +1010,273 @@ def selftest_expect_race(steps: dict, ms: dict, log: str) -> list[str]:
     return bad
 
 
+# The file log runs (fslog.c): modhost with SWMOD_FILE_LOG=1 on the fake game, which has made-up functions at BotW
+# 1.9.0's four file-open addresses (botw.h BOTW_ADDR_FILE_OPEN...), and no mods. "#open" calls a wrapper as the game's
+# file devices would (fake_runtime.c). Run A tries every kind of line, run B the lines-a-second limit, run C the size
+# limit; each run keeps the one before as fslog.prev.log.
+FSLOG_FNS = {"e8fae0": 0x7000e8fae0, "e92690": 0x7000e92690, "15cba0": 0x700115cba0, "eaba98": 0x7000eaba98}
+FSLOG_ARMOR = "Model/Armor_001.sbfres"
+FSLOG_REPEATS = 20
+FSLOG_LONG = "Pack/" + "L" * 300
+FSLOG_ENV = {"SWMOD_FILE_LOG": "1"}
+FSLOG_RATE_ENV = {"SWMOD_FILE_LOG": "on", "SWMOD_FILE_LOG_RATE": "5"}
+FSLOG_CAP_ENV = {"SWMOD_FILE_LOG": "1", "SWMOD_FILE_LOG_MAX": "4096"}
+FSLOG_BURST, FSLOG_FILL = 12, 40
+FSLOG_HEADER = "# time\tthread\tfn\tmode\tresult\tms\tdevice\tpath\tnote"
+# Paths in memory Windows says can't be read, as a bad pointer into the guest window would be (review 2026-11-21: 0x10
+# and 0x20 never reach VirtualQuery): fake_runtime.c's pages. Each its own mode, so each gets its own line.
+FSLOG_UNREADABLE = (("uncommitted", 4), ("noaccess", 5), ("guard", 6), ("noaccessobj", 7), ("halfobj", 8))
+FSLOG_EDGE = "Model/Edge.sbfres"  # (its last byte the last one before a page that isn't committed: cut with "...")
+
+
+def fslog_steps() -> list[tuple[str, str]]:
+    """Run A's steps: (name, control line or !sleep), in order."""
+    e8, e9, c15, ea = (f"{a:#x}" for a in FSLOG_FNS.values())
+    return [
+        ("status0", "fslog"), ("overrides", "#overrides"), ("ok", f"#open {e8} dev 0 {FSLOG_ARMOR}"),
+        *[(f"again{i}", f"#open {e8} dev 0 {FSLOG_ARMOR}") for i in range(FSLOG_REPEATS)],
+        ("fail", f"#open {e9} dev 1 missing/Model/Nope.sbfres"), ("nopath", f"#open {c15} dev 0 -"),
+        ("badstr", f"#open {ea} dev 0 !bad"), ("badobj", f"#open {ea} 0 3 !badobj"),
+        *[(k, f"#open {ea} dev {mode} !{k}") for k, mode in FSLOG_UNREADABLE],
+        ("edge", f"#open {e8} dev 0 !edge:{FSLOG_EDGE}"),
+        ("long", f"#open {e8} dev 0 {FSLOG_LONG}"), ("tab", f'#open {e8} dev 2 "Pack/A\tB.pack"'),
+        ("off", "fslog off"), ("paused_open", f"#open {e8} dev 0 Paused/NotWritten.bin"), ("off_status", "fslog"),
+        ("on", "fslog on"), ("mark", "fslog mark fast travel now"), ("wait", "!sleep 1100"), ("status1", "fslog"),
+        ("bad_arg", "fslog sideways"),
+    ]
+
+
+def fslog_rate_steps() -> list[tuple[str, str]]:
+    """Run B: more different opens at once than the 5 lines a second it allows."""
+    e8 = f"{FSLOG_FNS['e8fae0']:#x}"
+    return [*[(f"burst{i}", f"#open {e8} dev 0 Burst/File{i:02d}.bin") for i in range(FSLOG_BURST)],
+            ("wait", "!sleep 1100"), ("status", "fslog")]
+
+
+def fslog_cap_steps() -> list[tuple[str, str]]:
+    """Run C: long lines until the 4096-byte limit stops the log; the opens still work after that."""
+    e8 = f"{FSLOG_FNS['e8fae0']:#x}"
+    return [*[(f"fill{i}", f"#open {e8} dev 0 Cap/{'c' * 150}{i:02d}.bin") for i in range(FSLOG_FILL)],
+            ("status", "fslog"), ("on_full", "fslog on"), ("after", f"#open {e8} dev 0 Cap/after.bin")]
+
+
+def fslog_rows(text: str) -> list[list[str]]:
+    """The open lines of a file log (not the # notes), split on tabs."""
+    return [ln.split("\t") for ln in text.splitlines() if ln and not ln.startswith("#")]
+
+
+def fslog_runs(out: Path) -> tuple:
+    """Run A, B and C (each in a new fake game) and read the fslog.log each wrote. Returns (a, a_text, a_log, b,
+    b_text, b_prev, c, c_text) for selftest_expect_fslog."""
+    st = out / "selftest"
+    mods = st / "fslog-mods"  # (no mods)
+    mods.mkdir(parents=True, exist_ok=True)
+    file, prev = st / "fslog.log", st / "fslog.prev.log"
+    for f in (file, prev):
+        f.unlink(missing_ok=True)
+    got = []
+    for steps, env in ((fslog_steps(), FSLOG_ENV), (fslog_rate_steps(), FSLOG_RATE_ENV),
+                       (fslog_cap_steps(), FSLOG_CAP_ENV)):
+        res, log = _run_fake_game(out, st / "fake_swgame.dll", mods, [ln for _, ln in steps], env)
+        text = file.read_text(encoding="utf-8", errors="replace") if file.is_file() else ""
+        before = prev.read_text(encoding="utf-8", errors="replace") if prev.is_file() else ""
+        got.append((dict(zip((k for k, _ in steps), res.get("steps", []))), text, log, before))
+    (a, a_text, a_log, _), (b, b_text, _, b_prev), (c, c_text, _, _) = got
+    return a, a_text, a_log, b, b_text, b_prev, c, c_text
+
+
+def selftest_expect_fslog(a: dict, a_text: str, a_log: str, b: dict, b_text: str, b_prev: str, c: dict,
+                          c_text: str) -> list[str]:
+    """The file log runs: a, b and c map each step's name (fslog_steps, fslog_rate_steps, fslog_cap_steps) to its
+    reply; *_text is the fslog.log each run wrote, b_prev the fslog.prev.log after run B. Returns the failures."""
+    bad = []
+
+    def want(cond, what):
+        if not cond:
+            bad.append(what)
+
+    def data(k, where=a):
+        return where.get(k, {}).get("data", {})
+
+    def x0(k, where=a):
+        return data(k, where).get("x0")
+
+    s0 = data("status0")
+    want((s0.get("on"), s0.get("paused"), s0.get("full"), s0.get("wrapped")) == (True, False, False, 4)
+         and str(s0.get("file", "")).endswith("fslog.log"), f"fslog: the log is on, with 4 opens wrapped ({s0})")
+    o = data("overrides")
+    addrs = {o.get(f"{i}.addr") for i in range(o.get("count", 0))}
+    names = [str(o.get(f"{i}.name", "")) for i in range(o.get("count", 0))]
+    want(o.get("count") == 4 and addrs == set(FSLOG_FNS.values())
+         and all(n.startswith("modhost_fslog_") for n in names),
+         f"modhost overrides the 4 file opens, and nothing else ({o})")
+    dev = data("ok").get("dev")
+    want(dev and x0("ok") == dev and data("ok").get("x1") == 1,
+         f"an open goes on to the game's function ({a.get('ok')})")
+    want(all(x0(f"again{i}") == dev for i in range(FSLOG_REPEATS)), "the same open again works each time")
+    want(x0("fail") == 0 and data("fail").get("x1") == 2, f"a failed open answers 0 ({a.get('fail')})")
+    want(x0("nopath") == 0 and data("nopath").get("x1") == 3, "no path: the game's function still runs")
+    want(x0("badstr") == 0 and x0("badobj") == 0 and data("badobj").get("x1") == 4,
+         "a path that can't be read: no crash, the game's function still runs")
+    unread_steps = {k: a.get(k) for k, _ in FSLOG_UNREADABLE}
+    want(all(x0(k) == 0 and data(k).get("x1") == 4 for k in unread_steps),
+         "a path in memory that can't be read (not committed, no access, a guard page, half an object): no crash, the "
+         f"game's function still runs ({unread_steps})")
+    want(x0("edge") == dev and data("edge").get("x1") == 1,
+         f"a path that runs into memory that can't be read: the game's function runs ({a.get('edge')})")
+    want(x0("long") == dev and x0("paused_open") == dev, "a long path and an open while paused work")
+    want(data("off_status").get("paused") is True, "fslog off pauses")
+    want(a.get("bad_arg", {}).get("ok") is False, "fslog with a wrong word says how to use it")
+    s1 = data("status1")
+    opens = {k: sum(1 for _, ln in fslog_steps() if ln.startswith(f"#open {v:#x} ")) for k, v in FSLOG_FNS.items()}
+    want(s1.get("paused") is False and s1.get("opens") == sum(opens.values())
+         and all(s1.get(f"opens.{k}") == n for k, n in opens.items())
+         and s1.get("unreadable") == 2 + len(FSLOG_UNREADABLE),
+         f"fslog counts every open, each function's own, and the paths it couldn't read ({s1})")
+
+    rows = fslog_rows(a_text)
+    notes = [ln for ln in a_text.splitlines() if ln.startswith("#")]
+    want(rows and all(len(r) == 9 for r in rows), "every line has 9 columns")
+    want(FSLOG_HEADER in notes, "the log names its columns")
+    rows = [r for r in rows if len(r) == 9]
+    armor = [r for r in rows if r[7] == FSLOG_ARMOR]
+    full = [r for r in armor if r[1] != "-"]
+    more = [int(r[8].split()[0].lstrip("+")) for r in armor if r[1] == "-" and r[8].startswith("+")]
+    want(full and len(full) + sum(more) == FSLOG_REPEATS + 1 and len(full) <= 3 and sum(more) >= FSLOG_REPEATS - 2,
+         f"the same open again within a second is counted, not written each time ({len(full)} lines, more {more})")
+    if full:
+        r = full[0]
+        want(r[2:5] == ["e8fae0", "0", "ok"] and r[6] == "1234abcd" and r[1].isdigit()
+             and re.fullmatch(r"\d+\.\d{3}", r[0]) and re.fullmatch(r"\d+\.\d{3}", r[5]),
+             f"an open's line: time, thread, function, mode, result, ms, device class, path ({r})")
+
+    def one(path):
+        return next((r for r in rows if r[7] == path), [])
+
+    want(one("missing/Model/Nope.sbfres")[2:5] == ["e92690", "1", "fail"], "a failed open says fail")
+    want(one("(no path)")[2:5] == ["15cba0", "0", "fail"], "no path says so")
+    unread = [r for r in rows if r[7] == "(unreadable)"]
+    want(sorted((r[3], r[6]) for r in unread)
+         == sorted([("0", "1234abcd"), ("3", "-"), *[(str(m), "1234abcd") for _, m in FSLOG_UNREADABLE]])
+         and all(r[2] == "eaba98" and r[4] == "fail" for r in unread),
+         f"a path that can't be read says so, also in memory Windows says can't be read ({unread})")
+    want(one(FSLOG_EDGE + "...")[2:5] == ["e8fae0", "0", "ok"],
+         "a path that runs into memory that can't be read is cut there (with ...)")
+    want(one(FSLOG_LONG[:255] + "...") != [], "a long path is cut at 255 bytes")
+    want(one("Pack/A?B.pack")[3:5] == ["2", "ok"], "a control character in a path becomes ?")
+    want("Paused/NotWritten.bin" not in a_text, "nothing is written while paused")
+    for line in ("paused (fslog off)", "resumed (fslog on): 1 opens while paused were not written",
+                 "mark: fast travel now", "game closed: "):
+        want(any(line in n for n in notes), f"the log has the line '{line}'")
+    want(any(ln.startswith("[modhost] file log: on, 4 of 4 file opens wrapped, writing ") for ln in a_log.splitlines()),
+         "savagewind.log says the file log is on")
+
+    burst = [r for r in fslog_rows(b_text) if len(r) == 9 and r[7].startswith("Burst/")]
+    dropped = sum(int(m) for m in re.findall(r"^# [\d.]+ (\d+) opens not written in the second before: more than 5 "
+                                             r"lines a second$", b_text, re.M))
+    want(len(burst) <= 10 and dropped >= 2 and len(burst) + dropped == FSLOG_BURST
+         and data("status", b).get("rate_dropped") == dropped,
+         f"over 5 lines a second, the rest are counted in one line ({len(burst)} lines, {dropped} counted)")
+    want(bool(a_text) and b_prev == a_text, "the last game's log is kept as fslog.prev.log")
+
+    cs = data("status", c)
+    want(cs.get("full") is True and c.get("on_full", {}).get("ok") is False
+         and "full" in str(c.get("on_full", {}).get("error", "")), f"the size limit stops the log ({cs})")
+    want(len(c_text.encode("utf-8")) <= 4096 and c_text.count("stopped: the log reached its size limit") == 1
+         and "game closed: " in c_text, f"the log stays under its limit and says it stopped ({len(c_text)} bytes)")
+    filled = [r for r in fslog_rows(c_text) if len(r) == 9 and r[7].startswith("Cap/")]
+    want(0 < len(filled) < FSLOG_FILL and "Cap/after.bin" not in c_text, "after the stop nothing more is written")
+    cdev = data("after", c).get("dev")
+    want(cdev and x0("after", c) == cdev and x0(f"fill{FSLOG_FILL - 1}", c) == cdev,
+         "opens still work after the log stopped")
+    return bad
+
+
+# Run D, the overlap rules (fslog.c fl_install, modhost.c hot_override): fslog_probe (loaded at game start) overrides
+# e92690 first, so the file log leaves that one alone and wraps the other three; then modload of fslog_probe_hot, which
+# overrides e8fae0, is refused because the file log wraps it.
+FSLOG_OVER_FILE = "fslogover-1.dll"  # (fslog_probe_hot, named as the editor names a mod for modload)
+FSLOG_OVER_ENV = {"SWMOD_FILE_LOG": "1", "FAKE_MAX_CMDS": "16"}
+FSLOG_OVER_NOTE = "# e92690 (0x7000e92690) not wrapped: a mod overrides it already (the first override wins)"
+FSLOG_OVER_REFUSED = ("hle_override 0x7000e8fae0 refused: modhost's file log wraps it (File log is on), and the first "
+                      "override wins")
+FSLOG_OVER_LOG = (
+    "[mod] fslog probe: ready",
+    "[modhost] file log: 0x7000e92690 not wrapped: a mod overrides it already (the first override wins)",
+    f"[modhost] mod {FSLOG_OVER_FILE}: {FSLOG_OVER_REFUSED}",
+)
+
+
+def fslog_overlap_steps(run_dir: Path) -> list[tuple[str, str]]:
+    """Run D's steps: (name, control line), in order."""
+    e8, e9 = f"{FSLOG_FNS['e8fae0']:#x}", f"{FSLOG_FNS['e92690']:#x}"
+    return [("status", "fslog"), ("overrides", "#overrides"), ("mine", f"#open {e9} dev 0 Model/Mine.sbfres"),
+            ("load", f"modload {control_word(run_dir / FSLOG_OVER_FILE)}"), ("overrides_after", "#overrides"),
+            ("after", f"#open {e8} dev 0 Model/After.sbfres"), ("status_after", "fslog")]
+
+
+def fslog_overlap_run(out: Path) -> tuple[dict, str, str]:
+    """Run D in a new fake game: (its replies by step name, the fslog.log it wrote, its savagewind.log)."""
+    st = out / "selftest"
+    run_dir = st / "fslog-hot-run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(SELFTEST_FSLOG[1].output(out), run_dir / FSLOG_OVER_FILE)
+    file = st / "fslog.log"
+    file.unlink(missing_ok=True)
+    steps = fslog_overlap_steps(run_dir)
+    res, log = _run_fake_game(out, st / "fake_swgame.dll", SELFTEST_FSLOG[0].output(out).parent,
+                              [ln for _, ln in steps], FSLOG_OVER_ENV)
+    text = file.read_text(encoding="utf-8", errors="replace") if file.is_file() else ""
+    return dict(zip((k for k, _ in steps), res.get("steps", []))), text, log
+
+
+def selftest_expect_fslog_overlap(d: dict, d_text: str, d_log: str) -> list[str]:
+    """Run D: d maps each step's name (fslog_overlap_steps) to its reply, d_text is its fslog.log and d_log its
+    savagewind.log. Returns the failures."""
+    bad = []
+
+    def want(cond, what):
+        if not cond:
+            bad.append(what)
+
+    def data(k):
+        return d.get(k, {}).get("data", {})
+
+    def names(k):
+        o = data(k)
+        return sorted(str(o.get(f"{i}.name", "")) for i in range(o.get("count", 0)))
+
+    start_names = sorted(["fslog_probe_start", "modhost_fslog_e8fae0", "modhost_fslog_15cba0",
+                          "modhost_fslog_eaba98"])
+    s = data("status")
+    want(s.get("wrapped") == 3, f"overlap run: a mod at game start overrides e92690 first, so 3 opens are wrapped ({s})")
+    want(names("overrides") == start_names,
+         f"overlap run: Savage Wind got the mod's override and the file log's other 3 ({names('overrides')})")
+    want(data("mine").get("x0") == 0x7777 and data("mine").get("x1") == 9,
+         f"overlap run: the mod's own function runs for e92690 (the first override wins) ({d.get('mine')})")
+    want(FSLOG_OVER_NOTE in d_text.splitlines(), "overlap run: fslog.log says why e92690 isn't wrapped")
+    want("Model/Mine.sbfres" not in d_text, "overlap run: an open the file log doesn't wrap isn't written")
+    ld = d.get("load", {})
+    want(ld.get("ok") is True and FSLOG_OVER_REFUSED in str(data("load").get("notes", ""))
+         and FSLOG_OVER_REFUSED in str(ld.get("text", "")),
+         f"overlap run: modload of a mod that overrides e8fae0 is refused that address, with the reason ({ld})")
+    want(names("overrides_after") == start_names, f"overlap run: the refused override never reached Savage Wind "
+                                                  f"({names('overrides_after')})")
+    dev = data("after").get("dev")
+    want(dev and data("after").get("x0") == dev and data("after").get("x1") == 1,
+         f"overlap run: e8fae0 still runs the game's function ({d.get('after')})")
+    want(any(r[2:5] == ["e8fae0", "0", "ok"] and r[7:8] == ["Model/After.sbfres"] for r in fslog_rows(d_text)),
+         "overlap run: the file log still writes e8fae0's opens")
+    sa = data("status_after")
+    want(sa.get("opens.e92690") == 0 and sa.get("opens.e8fae0") == 1,
+         f"overlap run: the file log counts only what it wraps ({sa})")
+    lines = d_log.splitlines()
+    bad += [f"overlap run log line: {w}" for w in FSLOG_OVER_LOG if w not in lines]
+    want(any(ln.startswith("[modhost] file log: on, 3 of 4 file opens wrapped, writing ") for ln in lines),
+         "overlap run: savagewind.log says 3 of 4 are wrapped")
+    return bad
+
+
 def _run_fake_game(out: Path, real_lib: Path, mods: Path, lines, env_extra=None, host: Path | None = None
                    ) -> tuple[dict, str]:
     # The child runs in <out>/selftest, so every path it gets must be absolute: ctypes would resolve a relative
@@ -1010,7 +1284,8 @@ def _run_fake_game(out: Path, real_lib: Path, mods: Path, lines, env_extra=None,
     out, real_lib, mods = out.resolve(), real_lib.resolve(), mods.resolve()
     host = (host or out / HOST_DLL).resolve()
     st = out / "selftest"
-    env = dict(os.environ, SWMOD_REAL_GAME_LIB=str(real_lib), SWMOD_DIR=str(mods), **(env_extra or {}))
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("SWMOD_FILE_LOG")}  # (only when a run asks)
+    env.update(SWMOD_REAL_GAME_LIB=str(real_lib), SWMOD_DIR=str(mods), **(env_extra or {}))
     r = run_captured([sys.executable, "-I", "-c", _CHILD, str(st / RUNTIME_DLL), str(host), *lines],
                      env, cwd=st)
     if r.returncode:
@@ -1022,7 +1297,7 @@ def selftest(tc: Toolchain, out: Path) -> int:
     prepare_hooked_game(out)
     hooked_game = hooked_game_target(out)
     targets = (HOST, *EXAMPLES, *SELFTEST, *HOOK_EXAMPLES, *SELFTEST_HOOKS, *SELFTEST_HOT, HOST_TEST, *SELFTEST_RACE,
-               hooked_game)
+               *SELFTEST_FSLOG, hooked_game)
     built = build(tc, out, targets)
     check_exports(zip(built, targets))
     st = out / "selftest"
@@ -1056,24 +1331,31 @@ def selftest(tc: Toolchain, out: Path) -> int:
     race, race_log = _run_fake_game(out, hooked_game.output(out), SELFTEST_RACE[0].output(out).parent,
                                     [ln for _, ln in rsteps], RACE_ENV, host=HOST_TEST.output(out))
     rnames = [k for k, _ in rsteps]
+    fa, fa_text, fa_log, fb, fb_text, fb_prev, fc, fc_text = fslog_runs(out)
+    fd, fd_text, fd_log = fslog_overlap_run(out)
     bad = (selftest_expect(result) + selftest_expect_log(log)
            + selftest_expect_fallback(missing, missing_log, other, other_log)
            + selftest_expect_hooks(hooked, hooked_log, plain, plain_log)
            + selftest_expect_hot(dict(zip((k for k, _ in steps), hot.get("steps", []))), hot_log,
                                  dict(zip((k for k, _ in plain_steps), hot_plain.get("steps", []))))
            + selftest_expect_race(dict(zip(rnames, race.get("steps", []))), dict(zip(rnames, race.get("ms", []))),
-                                  race_log))
+                                  race_log)
+           + selftest_expect_fslog(fa, fa_text, fa_log, fb, fb_text, fb_prev, fc, fc_text)
+           + selftest_expect_fslog_overlap(fd, fd_text, fd_log))
     print("Selftest passed: modhost loaded the fake game and 5 test mods as expected, and fell back safely"
           " without the game code or with game code for another version. Hooks: before, after and replace ran"
           " for direct calls, tail jumps and the function table, and stamina_hook worked. Loading while the game"
           " runs: modload, modreload and modunload worked, modunload refused while a thread was inside the"
           " mod's hook, modreload kept the old build when the new file was bad, a thread caught just before the"
           " gate ran the game's own function after the unload, and overrides a hook tried to add were refused."
+          " File log: the 4 file opens were wrapped and logged (repeats counted, limits kept, pause and resume,"
+          " paths Windows says can't be read), one a mod overrides first was left to it, and modload was refused"
+          " the ones the log wraps."
           if not bad else f"Selftest FAILED ({len(bad)} problem(s)):")
     for b in bad:
         print(f"  - {b}")
     for name, text in (("main run", log), ("hook run", hooked_log), ("hot-load run", hot_log),
-                       ("race run", race_log)):
+                       ("race run", race_log), ("file log run", fa_log), ("file log overlap run", fd_log)):
         print(f"modhost log ({name}):")
         for line in text.strip().splitlines():
             print(f"  {line}")

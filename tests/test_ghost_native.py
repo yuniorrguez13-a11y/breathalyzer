@@ -36,7 +36,7 @@ class GhostNative(unittest.TestCase):
         built = bn.build(tc, OUT, [t], runner=modmenu.low_priority_runner)
         bn.check_exports(zip(built, [t]))
         dll = ctypes.CDLL(str(built[0]))
-        buf = ctypes.create_string_buffer(16384)
+        buf = ctypes.create_string_buffer(65536)
         dll.ghost_selftest.argtypes = (ctypes.c_char_p, ctypes.c_int)
         dll.ghost_selftest.restype = ctypes.c_int
         cls.fails = dll.ghost_selftest(buf, len(buf))
@@ -103,11 +103,22 @@ class GhostNative(unittest.TestCase):
                            "looks_seen_clears_old_word", "looks_bad_seen_refused", "client_list_fits"])
 
     def test_linkle_body_and_sheaths(self):
-        """0.9.8: `iam linkle` spawns no costume and says whether her body is on (The Linkle Mod in the deploy's
-        launch.json mod list), else how to pick her in Breathalyzer (one restart); our copies' sheaths and quivers (the
-        game's pods, bound to the NPC's own Pod_A: sideways) are hidden while the costume holds them; 0.9.9: and hidden
-        again right after the game's own step of their units (the game shows them again each frame), never after."""
-        self.group("iam", ["linkle_launch_read", "linkle_body_words"])
+        """0.9.8: `iam linkle` spawns no costume and says whether her body is on, else how to pick her in Breathalyzer
+        (one restart); our copies' sheaths and quivers (the game's pods, bound to the NPC's own Pod_A: sideways) are
+        hidden while the costume holds them; 0.9.9: and hidden again right after the game's own step of their units
+        (the game shows them again each frame), never after.
+        Phase 0 of out/research/linkle-live-swap-design.md: her body comes from launch.json's made.linkle (modman
+        writes it), parsed for restart, live, missing, cut short and add-ons only (review N8: no mod-name guess);
+        with her body on, `iam link` says your body stays hers until you pick Link in Breathalyzer (one restart) and
+        friends see Link at once; "live" (not in this ghost yet) gives the stage 1 words and body_err; the `ghost`
+        reply carries body, body_mode and body_err; launch.json is read once.
+        Review 2026-11-21: made.linkle.owned (true/false, only there) picks the way back to Link: Who am I when it
+        turned The Linkle Mod on, Home when you did (Who am I won't turn that one off), both when not given; with her
+        body on and no pick known, `iam` says Linkle (not Link); her body off says "Her body is off" (a play-as mod
+        may give the body another look, so never "Your body is Link")."""
+        self.group("iam", ["made_linkle_parse", "made_linkle_owned", "linkle_body_words", "linkle_restart_link_words",
+                           "linkle_link_words_home", "linkle_no_pick_is_her", "linkle_off_words",
+                           "linkle_live_not_here", "report_body", "body_read_once"])
         self.group("puppet", ["ids", "linkle_words"])
         if ("puppet", "world") not in self.rows:  # (the made-up world ran)
             self.group("puppet", ["sheath_hidden", "sheath_after_step", "holder_in_hand", "items_grip"])

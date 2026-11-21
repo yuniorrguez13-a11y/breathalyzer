@@ -110,6 +110,19 @@ class SettingsFile(Temp):
         write(self.tmp / la.SETTINGS_FILE, json.dumps({"dev": "yes"}))
         self.assertFalse(la.load_settings(path)[0].dev)
 
+    def test_file_log_setting(self):
+        """Settings > File log: OFF at first (an invasive developer feature), kept in launcher.json."""
+        path = str(self.tmp / la.SETTINGS_FILE)
+        s, _ = la.load_settings(path)
+        self.assertFalse(s.file_log)
+        s.file_log = True
+        la.save_settings(path, s)
+        self.assertTrue(la.load_settings(path)[0].file_log)
+        self.assertNotIn("file_log", la.load_settings(path)[0].extra)
+        write(self.tmp / la.SETTINGS_FILE, json.dumps({"file_log": 1}))
+        self.assertFalse(la.load_settings(path)[0].file_log)
+        self.assertEqual(la.ENV_FILE_LOG, "SWMOD_FILE_LOG")   # (what modhost reads: native/modhost/settings.c)
+
 
 class StartErrors(Temp):
     """pythonw has no console: a launcher that can't start says so in a message box and launcher-error.txt."""
@@ -933,6 +946,35 @@ class Play(unittest.TestCase):
         ctl.launch()
         self.assertTrue(ctl.settle())
         self.assertEqual(ctl.status.lines, ["Another program uses port 7777.", "Close it and press Play again."])
+
+    def test_file_log_reaches_the_game(self):
+        """Settings > File log ON: Play starts the game with SWMOD_FILE_LOG=1 (modhost then writes fslog.log). OFF,
+        the default: without it. This process's own variables don't change."""
+        class Modman(LaunchModman):
+            def game_env(self, base, launch, port):
+                return {"FROM": "modman"}
+
+            def cmd_run(self, *opts):
+                self.envs.append(self.game_env({}, {}, 7777))
+                return super().cmd_run(*opts)
+
+        mm = Modman()
+        mm.cheats, mm.envs = False, []
+        mm.deployed = mm.inputs_hash(None)
+        backend = gui.LaunchBackend(None, "Z:\\SW", mm=mm, spawn=FakeSpawn(mm), python="py", running=lambda: False,
+                                    menu=False, popen=mock.Mock())
+        ctl = gui.LaunchController(backend, clock=Clock())
+        self.assertFalse(ctl.file_log)
+        ctl.launch()
+        self.assertTrue(ctl.settle())
+        ctl.game_open = False
+        ctl.file_log = True   # (Settings > File log: Turn on)
+        ctl.launch(env={"SAVAGEWIND_SAVE_DIR": "Z:\\copy"})
+        self.assertTrue(ctl.settle())
+        self.assertEqual(mm.envs, [{"FROM": "modman"},
+                                   {"FROM": "modman", "SAVAGEWIND_SAVE_DIR": "Z:\\copy", la.ENV_FILE_LOG: "1"}])
+        self.assertNotIn(la.ENV_FILE_LOG, os.environ)
+        self.assertTrue(gui.LaunchController(backend, clock=Clock(), file_log=True).file_log)
 
     def test_developer_mode_only_when_needed(self):
         ctl = self.make()   # (no mod that needs it, Developer commands OFF: modman decides)

@@ -8,6 +8,9 @@
 // from a writer thread that starts with the first change. Conditions (show_if, enable_if) come as postfix tokens that
 // Python checked; here they are only evaluated, by each setting's declared type.
 //
+// modhost's own settings (not a mod's: st_host_load, so far only the file log of fslog.c) come from the environment
+// at game start instead.
+//
 // Threads: values are 64-bit atomics (getters need no lock); texts sit behind a small spin lock. Changes come from the
 // game's thread (the Mod menu in the Options screen), the frame thread (console commands) or a mod's own thread
 // (setting_set). Watchers run on the thread that made the change; a mod loaded with modload has its watchers taken
@@ -677,6 +680,49 @@ static void st_load(void) {
     for (int i = 0; i < g_nst; i++) total += g_st[i].n;
     host_log("settings: %d setting%s of %d mod%s from %s", total, total == 1 ? "" : "s", g_nst, g_nst == 1 ? "" : "s",
              g_st_path);
+}
+
+// ------------------------------------------------------------------ modhost's own settings (not a mod's)
+// Read once at game start from the game's environment: Breathalyzer sets them from its Settings page (launcher.json),
+// and modman run passes on any the player set by hand. They never change while the game runs.
+//   SWMOD_FILE_LOG=1           file_log: write fslog.log, the files the game opens (fslog.c). OFF by default.
+//   SWMOD_FILE_LOG_MAX=<bytes> the file log's size limit (4096 to 1 GiB; default 20 MiB)
+//   SWMOD_FILE_LOG_RATE=<n>    the file log's lines a second at most (1 to 100000; default 1000)
+#define ST_FILE_LOG_MAX (20ull << 20)
+#define ST_FILE_LOG_RATE 1000u
+static struct {
+    bool file_log;
+    uint64_t file_log_max;
+    uint32_t file_log_rate;
+} g_st_host = {false, ST_FILE_LOG_MAX, ST_FILE_LOG_RATE};
+
+// A yes: 1, on, true or yes (any case).
+static bool st_env_yes(const wchar_t *name) {
+    wchar_t v[16];
+    if (!env_w(name, v, 16)) return false;
+    char a[16];
+    size_t n = 0;
+    for (; v[n] && n < sizeof a - 1; n++) a[n] = v[n] < 128 ? (char)v[n] : '?';
+    a[n] = 0;
+    return !strcmp(a, "1") || st_same_ci(a, "on") || st_same_ci(a, "true") || st_same_ci(a, "yes");
+}
+
+// A whole number from lo to hi, or def when unset or not one.
+static uint64_t st_env_num(const wchar_t *name, uint64_t lo, uint64_t hi, uint64_t def) {
+    wchar_t v[24];
+    if (!env_w(name, v, 24)) return def;
+    uint64_t x = 0;
+    for (const wchar_t *p = v; *p; p++) {
+        if (*p < L'0' || *p > L'9' || x > hi) return def;
+        x = x * 10 + (uint64_t)(*p - L'0');
+    }
+    return x < lo || x > hi ? def : x;
+}
+
+static void st_host_load(void) {
+    g_st_host.file_log = st_env_yes(L"SWMOD_FILE_LOG");
+    g_st_host.file_log_max = st_env_num(L"SWMOD_FILE_LOG_MAX", 4096, 1ull << 30, ST_FILE_LOG_MAX);
+    g_st_host.file_log_rate = (uint32_t)st_env_num(L"SWMOD_FILE_LOG_RATE", 1, 100000, ST_FILE_LOG_RATE);
 }
 
 // The settings mod a mod DLL belongs to (its file name is on a dll line), or -1.
