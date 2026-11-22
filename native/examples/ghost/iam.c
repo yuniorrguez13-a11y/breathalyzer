@@ -55,6 +55,16 @@ static void pup_set_self(int on);
 // (review N8). launch.json sits next to the deployed overlay (SAVAGEWIND_ROMFS_OVERLAY); it is read once, when first
 // asked (the deploy can't change while the game runs). "live" (her copies beside Link's, switched in the game) is
 // phase 2: this ghost can't switch yet, so it says the stage 1 words and gives body_err.
+// 1.0.0 live (phase 2 of out/research/linkle-live-swap-design.md, 2.2): with made.linkle.body "live", her files sit
+// beside Link's (SwLk_ copies, modman's "beside" deploy) and deploy\linkle-live.json (made.linkle.map) lists them.
+// At swmod_init the ghost names each pair as a file redirect (API 4 fs_redirect_add, group "linkle"; modhost only
+// takes them with SWMOD_FILE_REDIRECT=1, which modman sets for that deploy). `iam linkle` then queues the group on,
+// `iam link` (or any other pick) off; the frame job flips it once the file loaders have been idle for IAM_IDLE_MS, never
+// in the middle of a load, and the body changes at the next load screen (fast travel). made.linkle.start "linkle"
+// queues it at swmod_init (the host turns a group on only once the game runs: the first idle frame does). Not ready
+// (an older modhost, the setting off, the map unreadable, one of her files the host didn't take, a file open another
+// mod overrides) or a copy that failed to open (the group goes off): the stage-1 words, and body_err says why (the
+// launcher can offer the restart).
 // made.linkle.owned (review 2026-11-21): true when Who am I turned The Linkle Mod on (charsel.linkle_owned), false when
 // you turned it on yourself on Home. Picking Link in Who am I turns off only its own, so with false the way back to Link
 // is Home; without the key (an older modman) both ways are said.
@@ -76,7 +86,15 @@ __declspec(dllimport) int __stdcall CloseHandle(void *h);
                           "then restart the game."
 #define IAM_LINK_HOW_BOTH "Your body is Linkle. To be Link again, pick Link in Breathalyzer (Multiplayer > Who am " \
                           "I), or turn The Linkle Mod off on Home: the game restarts once."
-#define IAM_NO_LIVE "no live switch in this ghost"  // (body_err: launch.json asked for "live"; phase 2)
+#define IAM_NO_LIVE "no live switch: modhost is too old for the file redirect (API 4)"  // (body_err)
+#define IAM_LIVE_GROUP "linkle"
+#define IAM_IDLE_MS 500   // the loaders idle this long before a flip
+#define IAM_MAP_MAX (1u << 20)
+#define IAM_LIVE_ON "Linkle: done at the next load screen (fast travel)."
+#define IAM_LIVE_OFF "Link: back at the next load screen (fast travel)."
+#define IAM_LIVE_HER "You are Linkle (live: her body, switched in the game)."
+#define IAM_LIVE_FAIL "a copy of her files didn't open: back to Link's files"
+
 
 enum { IAM_BODY_UNKNOWN = -1, IAM_BODY_NONE = 0, IAM_BODY_RESTART = 1, IAM_BODY_LIVE = 2 };
 typedef struct {
@@ -84,6 +102,7 @@ typedef struct {
                      // 1 restart (her body is Link's own), 2 live (her copies beside Link's)
     int owned;       // made.linkle.owned: 1 Who am I turned The Linkle Mod on, 0 you did on Home, -1 not given
     char start[12];  // made.linkle.start: the body the game starts in ("" when not given or too long)
+    char map[64];    // made.linkle.map: her copies' list, next to launch.json ("" when not given or too long)
 } IamBody;
 
 // The string at p (just past its opening quote) into out (cut to cap, "" when longer: no false match); returns the
@@ -100,6 +119,13 @@ static const char *iam_json_str(const char *p, char *out, size_t cap) {
     return *p ? p + 1 : NULL;
 }
 
+static void copy_key(char *dst, const char *s, size_t cap) {  // (a key longer than cap - 1: "", no false match)
+    size_t n = strlen(s);
+    if (n >= cap) n = 0;
+    memcpy(dst, s, n);
+    dst[n] = 0;
+}
+
 // launch.json's text: made.linkle, as out (out->mode is also returned). Only the top object's "made" -> "linkle"
 // object counts (a "linkle" anywhere else, or a mod named Linkle in "mods", is nothing). A text cut short is -1.
 static int iam_launch_body(const char *text, IamBody *out) {
@@ -113,7 +139,7 @@ static int iam_launch_body(const char *text, IamBody *out) {
     enum { MAXD = 64 };
     char key[4][16] = {{0}};  // the key being read at depth 1..3 ("" for an array or a long key)
     char obj[MAXD + 1] = {0}; // 1: the container at that depth is an object
-    char s[16], body[16] = "", start[sizeof out->start] = "";
+    char s[sizeof out->map], body[16] = "", start[sizeof out->start] = "", map[sizeof out->map] = "";
     int depth = 0, found = 0, owned = -1;
     while (*p) {
         char ch = *p++;
@@ -139,11 +165,12 @@ static int iam_launch_body(const char *text, IamBody *out) {
             const char *q = p;
             while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
             if (*q == ':' && depth >= 1 && obj[depth]) {
-                if (depth <= 3) memcpy(key[depth], s, sizeof s);
+                if (depth <= 3) copy_key(key[depth], s, sizeof key[depth]);
             } else if (depth == 3 && obj[1] && obj[2] && obj[3] && !strcmp(key[1], "made") &&
                        !strcmp(key[2], "linkle")) {
-                if (!strcmp(key[3], "body")) memcpy(body, s, sizeof s);
+                if (!strcmp(key[3], "body") && strlen(s) < sizeof body) memcpy(body, s, strlen(s) + 1);
                 else if (!strcmp(key[3], "start") && strlen(s) < sizeof start) memcpy(start, s, strlen(s) + 1);
+                else if (!strcmp(key[3], "map")) memcpy(map, s, sizeof map);
             }
         }
     }
@@ -152,7 +179,7 @@ static int iam_launch_body(const char *text, IamBody *out) {
                 : !strcmp(body, "restart") ? IAM_BODY_RESTART
                 : !strcmp(body, "live")    ? IAM_BODY_LIVE
                                            : IAM_BODY_NONE;
-    if (found) memcpy(out->start, start, sizeof start), out->owned = owned;
+    if (found) memcpy(out->start, start, sizeof start), memcpy(out->map, map, sizeof map), out->owned = owned;
     return out->mode;
 }
 
@@ -213,17 +240,168 @@ static void iam_body(IamBody *out) {
     *out = b;
 }
 
+// 1.0.0 live: the redirect group's state (under lock()). Set at swmod_init (iam_live_init), then by the frame job
+// (iam_live_tick) and `iam`.
+static struct {
+    int tried;        // iam_live_init ran with made.linkle.body "live"
+    int files;        // redirects the host took
+    int on;           // the group is on (what the frame job last set)
+    int want;         // -1 nothing queued, 0 Link, 1 Linkle
+    uint64_t fails;   // the group's fails seen
+    const char *err;  // body_err: one of the words below (a constant; "" none)
+} g_live = {0, 0, 0, -1, 0, ""};
+#define IAM_LIVE_NOT_READY "the file redirect isn't ready (see savagewind.log)"
+
+// her copies' list (linkle-live.json: {"group": "linkle", "files": [{"from": ..., "to": ..., "dev": ...}, ...]}):
+// each "from" with the "to" after it, given to add. Returns the pairs found, -1 when the text isn't such a list.
+static int iam_live_pairs(const char *text, int (*add)(const char *from, const char *to)) {
+    char from[208], to[208], key[16];
+    int n = 0, have = 0;  // (1 from, 2 to: what this object gave so far)
+    const char *p = text ? strstr(text, "\"files\"") : NULL;
+    if (!p) return -1;
+    for (const char *prev = p; (p = strchr(p, '"')); prev = p) {
+        if (memchr(prev, '{', (size_t)(p - prev))) have = 0;  // (a new object: its own from and to)
+        if (!(p = iam_json_str(p + 1, key, sizeof key))) return -1;
+        const char *q = p;
+        while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
+        if (*q != ':') continue;
+        q++;
+        while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
+        if (*q != '"' || (strcmp(key, "from") && strcmp(key, "to"))) continue;
+        char *dst = key[0] == 'f' ? from : to;
+        if (!(p = iam_json_str(q + 1, dst, sizeof from)) || !*dst) return -1;
+        if ((have |= key[0] == 'f' ? 1 : 2) == 3) {
+            have = 0;
+            if (add(from, to) == SWMOD_FSR_OK) n++;
+        }
+    }
+    return n;
+}
+
+static int g_live_add_err;
+static int iam_live_add(const char *from, const char *to) {
+    int code = api->fs_redirect_add(IAM_LIVE_GROUP, from, to);
+    if (code != SWMOD_FSR_OK && !g_live_add_err) g_live_add_err = code;
+    return code;
+}
+
+// The map's text (NULL: can't be read): next to launch.json.
+static char *iam_live_read(const char *map) {
+    char dir[400], path[480];
+    unsigned long n = GetEnvironmentVariableA("SAVAGEWIND_ROMFS_OVERLAY", dir, sizeof dir);
+    if (!n || n >= sizeof dir || !*map || strchr(map, '\\') || strchr(map, '/') || strstr(map, "..")) return NULL;
+    snprintf(path, sizeof path, "%s\\..\\%s", dir, map);
+    void *h = CreateFileA(path, 0x80000000ul, 1, 0, 3, 0, 0);
+    if (h == (void *)(intptr_t)-1) return NULL;
+    char *text = malloc(IAM_MAP_MAX + 1);
+    unsigned long got = 0, total = 0;
+    while (text && total < IAM_MAP_MAX && ReadFile(h, text + total, IAM_MAP_MAX - total, &got, 0) && got) total += got;
+    CloseHandle(h);
+    if (text) text[total] = 0;
+    return text;
+}
+static char *(*g_iam_live_read)(const char *map) = iam_live_read;  // (the selftest fakes it)
+
+// From swmod_init: with made.linkle.body "live", name her copies as redirects (and start in her body if asked).
+static void iam_live_init(void) {
+    IamBody b;
+    iam_body(&b);
+    if (b.mode != IAM_BODY_LIVE) return;
+    g_live.tried = 1;
+    if (!SWMOD_API_OK(api, 4) || !SWMOD_HAS(api, fs_redirect_state)) {
+        g_live.err = IAM_NO_LIVE;
+        return;
+    }
+    char *text = g_iam_live_read(b.map);
+    g_live_add_err = 0;
+    int n = text ? iam_live_pairs(text, iam_live_add) : -1;
+    free(text);
+    if (n <= 0 || g_live_add_err) {  // (one of her files the host didn't take: a half-and-half body, so none)
+        g_live.err = g_live_add_err == SWMOD_FSR_OFF ? "the file redirect is off (SWMOD_FILE_REDIRECT): deploy again"
+                     : n < 0 ? "her copies' list (linkle-live.json) can't be read: deploy again"
+                     : n > 0 ? "not all of her files could be redirected (see savagewind.log)"
+                             : "no copy of her files was taken (see savagewind.log)";
+        api->log("ghost: Linkle live: %s (code %d)", g_live.err, g_live_add_err);
+        return;
+    }
+    g_live.files = n;
+    // (the host turns a group on only once the game runs: start "linkle" is queued, the frame job flips it)
+    if (!strcmp(b.start, "linkle")) g_live.want = 1;
+    api->log("ghost: Linkle live: %d of her files beside Link's%s", n, g_live.want == 1 ? ", starting as Linkle" : "");
+}
+
+// Whether the live switch can run now (fills why when not).
+static int iam_live_ready(SwModFsRedirectInfo *in) {
+    if (!g_live.files || !SWMOD_API_OK(api, 4)) return 0;
+    memset(in, 0, sizeof *in);
+    in->size = sizeof *in;
+    return api->fs_redirect_state(IAM_LIVE_GROUP, in) == SWMOD_FSR_OK && in->ready;
+}
+
+// Each frame (job_wrapper): a queued flip once the loaders idle; a copy that failed: the group off.
+static void iam_live_tick(void) {
+    if (!g_live.files) return;
+    lock();
+    int want = g_live.want, on = g_live.on, asked = want;
+    uint64_t seen = g_live.fails;
+    unlock();
+    SwModFsRedirectInfo in;
+    int ready = iam_live_ready(&in);
+    const char *err = NULL;
+    if (ready && in.fails > seen && in.on) {  // (her copy didn't open: Link's files again, as a whole)
+        api->fs_redirect_set(IAM_LIVE_GROUP, 0);
+        err = IAM_LIVE_FAIL, want = -1, on = 0;
+    } else if (want >= 0 && !ready) {
+        err = IAM_LIVE_NOT_READY, want = -1;
+    } else if (want >= 0 && !in.in_flight && in.idle_ms >= IAM_IDLE_MS) {
+        if (api->fs_redirect_set(IAM_LIVE_GROUP, want) == SWMOD_FSR_OK) on = want;
+        want = -1;
+    } else if (want < 0) {
+        return;
+    }
+    lock();
+    if (g_live.want == asked || err == IAM_LIVE_FAIL) g_live.want = want;  // (a pick since then: next frame)
+    g_live.on = on;
+    if (ready) g_live.fails = in.fails;
+    if (err) g_live.err = err;
+    if (err == IAM_LIVE_FAIL) g_live.files = 0;  // (stage 1 from now on: no half-and-half body)
+    unlock();
+}
+
+// `iam linkle` / `iam <other>` in live mode: queue the flip. 1: queued (the words are in out), 0: not live here.
+static int iam_live_pick(int her, char *out, size_t cap) {
+    SwModFsRedirectInfo in;
+    if (!iam_live_ready(&in)) return 0;
+    lock();
+    int on = g_live.want >= 0 ? g_live.want : g_live.on;
+    g_live.want = her;
+    g_live.err = "";
+    unlock();
+    snprintf(out, cap, "%s", her ? (on ? IAM_LIVE_HER : IAM_LIVE_ON) : IAM_LIVE_OFF);
+    return 1;
+}
+
 // What the body is, in words for the `ghost` reply: body ("linkle", "link", "" no deploy known), body_mode ("none",
-// "restart"; "live" only once a ghost can switch), body_err (why a live switch can't run; "" none). 1: her body is on.
+// "restart", "live"), body_err (why a live switch can't run; "" none). 1: her body is on.
 static int iam_body_words(const IamBody *b, const char **body, const char **mode, const char **err) {
     *err = "";
     switch (b->mode) {
     case IAM_BODY_RESTART:
         *body = "linkle", *mode = "restart";
         return 1;
-    case IAM_BODY_LIVE:  // (phase 2: her copies sit beside Link's and this ghost can't switch: Link's body, stage 1)
-        *body = "link", *mode = "restart", *err = IAM_NO_LIVE;
-        return 0;
+    case IAM_BODY_LIVE: {  // (her copies beside Link's: switched in the game, or stage 1 when it can't run)
+        SwModFsRedirectInfo in;
+        int ok = iam_live_ready(&in);
+        lock();
+        int on = g_live.on;
+        const char *e = g_live.err && *g_live.err ? g_live.err : "";
+        int tried = g_live.tried;
+        unlock();
+        if (!ok && !*e) e = tried ? IAM_LIVE_NOT_READY : IAM_NO_LIVE;
+        *err = e;
+        *body = ok && on ? "linkle" : "link", *mode = ok ? "live" : "restart";
+        return ok && on;
+    }
     case IAM_BODY_NONE:
         *body = "link", *mode = "none";
         return 0;
@@ -353,6 +531,10 @@ static void iam_report(SwModReply *r) {
     api->reply_str(r, "body", body);
     api->reply_str(r, "body_mode", mode);
     api->reply_str(r, "body_err", err);
+    lock();
+    int want = g_live.want;
+    unlock();
+    api->reply_str(r, "body_pending", b.mode == IAM_BODY_LIVE && want >= 0 ? (want ? "linkle" : "link") : "");
 }
 
 // A whole number 0-999999999 (the client's `seen`). -1 if it isn't one.
@@ -481,6 +663,21 @@ static void cmd_iam(int argc, char **argv, SwModReply *r) {
     api->reply_str(r, "iam", id);
     api->reply_int(r, "iam_seq", seq);
     pup_iam_text(id, see, sizeof see);  // (0.9.0: you see yourself as it too, live)
+    char live[160];  // 1.0.0: her body switched in the game (made.linkle.body "live" and the redirect ready)
+    lock();
+    int live_her = g_live.want >= 0 ? g_live.want : g_live.on;  // (on, or queued on: a pick of Link takes it back)
+    unlock();
+    if (body.mode == IAM_BODY_LIVE && (iam_is_linkle(id) || her || live_her) &&
+        iam_live_pick(iam_is_linkle(id), live, sizeof live) && (iam_is_linkle(id) || !strcmp(id, "link"))) {
+        const char *who = iam_is_linkle(id) ? "Linkle" : "Link";  // (another pick: her body off too, words below)
+        if (!listed)
+            api->reply_text(r, "%s The multiplayer client tells your friends once it runs with --ghost-looks.", live);
+        else if (listening)
+            api->reply_text(r, "%s Your friends see %s in a few seconds.", live, who);
+        else
+            api->reply_text(r, "%s The multiplayer client (--ghost-looks) tells your friends when it runs.", live);
+        return;
+    }
     // 0.9.8: Linkle has no puppet (Link shows): her body is Link's own when The Linkle Mod is on. 0.9.9: and Link with
     // her body on is still her: your body changes only by a restart from Breathalyzer, the pick friends see at once.
     if (iam_is_linkle(id) || (her && !strcmp(id, "link"))) {

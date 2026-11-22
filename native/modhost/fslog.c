@@ -24,6 +24,18 @@
 //     the buffer are counted, and a line says how many.
 // The `fslog` command (F12 console, any player): `fslog` shows the counts (and writes what is waiting), `fslog off`
 // and `fslog on` pause and resume the log, `fslog mark <words>` adds a line of your own to find a moment later.
+//
+// The file redirect (API 4 fs_redirect_*, phase 2 of the Linkle live swap: linkle-live-swap-design.md 2.1, "L1") rides
+// on the same four wrappers. Only with SWMOD_FILE_REDIRECT=1 (settings.c file_redirect; OFF by default, modman sets it
+// for a deploy that puts copies beside the game's files) AND a mod that named redirects in its swmod_init; else nothing
+// changes. A mod names "from" -> "to" pairs in a group; the table is fixed once the game runs (no lock to read it).
+// While a group is on, an open of a "from" path (as the game asks for it; a "content:/" style prefix is kept) gets x2
+// = our own SafeString with the "to" path: the game object's vptr (so its own virtual calls work) in the layout of a
+// sead::FixedSafeString<256>, in memory below 2^39 outside the guest window (room.c's rule), made once per redirect
+// and SafeString class and never freed. If the copy fails to open (x0 = 0), the game's function runs again with the
+// registers it came with: the original opens, as the game asked, and the group counts a fail. Groups flip from any
+// thread (an atomic flag); fs_redirect_state says when the loaders are idle (in_flight, idle_ms), the time to flip.
+// The file log's lines say the redirect in their note column.
 #ifdef MODHOST_C
 
 #include "botw.h"
@@ -191,26 +203,28 @@ static void fl_more(FlSlot *s) {
     s->more = 0;
 }
 
-static uint64_t fl_hash(int fn, uint32_t mode, const char *res, const char *path) {
+static uint64_t fl_hash(int fn, uint32_t mode, const char *res, const char *path, const char *note) {
     uint64_t h = 1469598103934665603ull;
     h = (h ^ (uint64_t)fn) * 1099511628211ull;
     h = (h ^ mode) * 1099511628211ull;
     for (const char *p = res; *p; p++) h = (h ^ (uint8_t)*p) * 1099511628211ull;
     h = (h ^ 0xff) * 1099511628211ull;
     for (const char *p = path; *p; p++) h = (h ^ (uint8_t)*p) * 1099511628211ull;
+    h = (h ^ 0xfe) * 1099511628211ull;
+    for (const char *p = note; *p; p++) h = (h ^ (uint8_t)*p) * 1099511628211ull;
     return h ? h : 1;
 }
 
 // One open (lock held): its line, or one more for the line of the same open less than a second ago.
 static void fl_record(int fn, uint32_t mode, const char *res, int64_t t_us, double ms, DWORD tid, const char *dev,
-                      const char *path) {
+                      const char *path, const char *note) {
     if (!__atomic_load_n(&g_fl.active, __ATOMIC_ACQUIRE)) {  // (paused or stopped since the call started)
         if (g_fl.paused) __atomic_fetch_add(&g_fl.paused_opens, 1, __ATOMIC_RELAXED);
         return;
     }
     int64_t now = t_us / 1000;
     fl_roll(now);
-    uint64_t key = fl_hash(fn, mode, res, path);
+    uint64_t key = fl_hash(fn, mode, res, path, note);
     FlSlot *hit = NULL, *victim = NULL;  // (victim: a free slot, else the one used longest ago)
     for (int k = 0; k < FL_PROBE && !hit; k++) {
         FlSlot *s = &g_fl.slots[(key + (uint64_t)k) % FL_SLOTS];
@@ -232,8 +246,8 @@ static void fl_record(int fn, uint32_t mode, const char *res, int64_t t_us, doub
         return;
     }
     g_fl.sec_lines++;
-    if (!fl_printf(0, "%.3f\t%lu\t%s\t%u\t%s\t%.3f\t%s\t%s\t\n", fl_secs(now), tid, k_fl_fns[fn].id, mode, res, ms,
-                   dev, path))
+    if (!fl_printf(0, "%.3f\t%lu\t%s\t%u\t%s\t%.3f\t%s\t%s\t%s\n", fl_secs(now), tid, k_fl_fns[fn].id, mode, res, ms,
+                   dev, path, note))
         return;
     s->key = key;
     s->first_ms = s->last_ms = now;
@@ -292,19 +306,187 @@ static void fl_path(uint64_t ss, char *out, size_t cap) {
     out[n] = 0;
 }
 
+// ---- the file redirect (API 4): the table, and one redirected open
+
+#define FR_GROUPS 8
+#define FR_MAX 2048
+#define FR_HASH 4096                 // (a power of two, at least twice FR_MAX)
+#define FR_GROUP_NAME 32
+#define FR_PATH_MAX 200              // a "from" or "to" path: 200 bytes at most
+#define FR_STR 256                   // our SafeString's buffer: the game's prefix + the "to" path
+#define FR_VARIANTS 4                // SafeString classes (and prefixes) per redirect
+#define FR_TEXT (256u << 10)         // the paths' text
+#define FR_LOW_FROM 0x7600000000ull  // our SafeStrings: the first free run from here, below 2^39 (room.c's rule)
+#define FR_LOW_TO (1ull << 39)
+#define FR_LOW_STEP (1ull << 20)
+#define FR_FAIL_LINES 20             // savagewind.log lines for copies that didn't open, at most
+__declspec(dllimport) void *WINAPI VirtualAlloc(void *addr, size_t size, DWORD type, DWORD protect);
+
+typedef struct {  // laid out as sead::FixedSafeString<FR_STR>: the vptr, the char* (buf), the buffer's size, buf at +0x14
+    uint64_t vptr, top;
+    int32_t size;
+    char buf[FR_STR];
+    uint16_t plen;  // (ours, after the game's part: how much of buf is the game's prefix)
+} FrStr;
+_Static_assert(offsetof(FrStr, buf) == 0x14, "FrStr: the buffer of a FixedSafeString is at +0x14");
+
+typedef struct {
+    const char *from, *to;
+    uint32_t hash;
+    int group;
+    FrStr *obj[FR_VARIANTS];  // (made at first use, never freed: the game may keep the pointer)
+} FrEntry;
+
+typedef struct {
+    char name[FR_GROUP_NAME];
+    uint32_t on;                       // (atomic)
+    int count;
+    uint64_t opens, redirects, fails;  // (atomic)
+} FrGroup;
+
+static struct {
+    bool sealed;            // the game runs: the table is fixed
+    int ngroups, n;
+    FrGroup g[FR_GROUPS];
+    FrEntry e[FR_MAX];
+    int32_t slot[FR_HASH];  // entry index + 1, 0: free
+    char text[FR_TEXT];
+    size_t text_used;
+    int32_t in_flight;      // opens running now (atomic)
+    uint64_t last_end_ms;   // GetTickCount64 when the last open ended (atomic)
+    uint8_t *low;           // our SafeStrings (NULL: none could be made: no group is ready)
+    size_t low_cap, low_used;
+    uint64_t nomem, fail_lines;
+} g_fr;
+
+static uint32_t fr_hash(const char *s) {
+    uint32_t h = 2166136261u;
+    for (; *s; s++) h = (h ^ (uint8_t)*s) * 16777619u;
+    return h;
+}
+
+static FrEntry *fr_find(const char *path) {
+    uint32_t h = fr_hash(path);
+    for (uint32_t k = 0; k < FR_HASH; k++) {
+        int32_t s = g_fr.slot[(h + k) & (FR_HASH - 1)];
+        if (!s) return NULL;
+        FrEntry *e = &g_fr.e[s - 1];
+        if (e->hash == h && !strcmp(e->from, path)) return e;
+    }
+    return NULL;
+}
+
+static int fr_group(const char *name) {
+    for (int i = 0; i < g_fr.ngroups; i++)
+        if (!strcmp(g_fr.g[i].name, name)) return i;
+    return -1;
+}
+
+static bool fr_ready(void) { return g_fr.sealed && g_fr.low && g_fl.wrapped == FL_FNS; }
+
+// The path at a sead::SafeString* and its vptr: false when it can't be read, or is FR_STR bytes or longer.
+static bool fr_read(uint64_t ss, char *out, uint64_t *vptr) {
+    uint64_t obj[2];
+    if (!ss || fl_readable(ss, sizeof obj) < sizeof obj) return false;
+    memcpy(obj, (const void *)(uintptr_t)ss, sizeof obj);
+    size_t avail = obj[1] ? fl_readable(obj[1], FR_STR) : 0;
+    const volatile char *p = (const volatile char *)(uintptr_t)obj[1];
+    for (size_t n = 0; n < avail; n++)
+        if (!(out[n] = p[n])) {
+            *vptr = obj[0];
+            return true;
+        }
+    return false;
+}
+
+// Our SafeString for this redirect, SafeString class and prefix (made the first time; NULL: no room).
+static FrStr *fr_obj(FrEntry *e, uint64_t vptr, const char *path, size_t plen) {
+    int k0 = 0;  // (the slots fill in order: the first empty one ends the search)
+    for (; k0 < FR_VARIANTS; k0++) {
+        FrStr *o = __atomic_load_n(&e->obj[k0], __ATOMIC_ACQUIRE);
+        if (!o) break;
+        if (o->vptr == vptr && o->plen == plen && !memcmp(o->buf, path, plen)) return o;
+    }
+    if (k0 == FR_VARIANTS) return NULL;  // (every slot taken by other classes: the original, and no memory used)
+    size_t need = (sizeof(FrStr) + 15) & ~(size_t)15;
+    size_t at = __atomic_fetch_add(&g_fr.low_used, need, __ATOMIC_RELAXED);
+    if (!g_fr.low || at + need > g_fr.low_cap) return NULL;
+    FrStr *o = (FrStr *)(void *)(g_fr.low + at);
+    memset(o, 0, sizeof *o);
+    o->vptr = vptr;
+    o->top = (uint64_t)(uintptr_t)o->buf;
+    o->size = FR_STR;
+    o->plen = (uint16_t)plen;
+    memcpy(o->buf, path, plen);
+    copy_str(o->buf + plen, FR_STR - plen, e->to);
+    for (int k = k0; k < FR_VARIANTS; k++) {
+        FrStr *had = NULL;
+        if (__atomic_compare_exchange_n(&e->obj[k], &had, o, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return o;
+        if (had->vptr == vptr && had->plen == plen && !memcmp(had->buf, path, plen)) return had;  // (another thread's)
+    }
+    return NULL;  // (more classes than FR_VARIANTS: this one opens the original)
+}
+
+// One open through wrapper i: true when it was a redirect (the game's function ran here, note says what happened);
+// false: no redirect, the caller runs the game's function.
+static bool fr_open(struct Cpu *c, int i, uint64_t ss, char *note, size_t cap) {
+    char path[FR_STR];
+    uint64_t vptr = 0;
+    if (!fr_read(ss, path, &vptr)) return false;
+    size_t plen = 0;  // (a device prefix the game put in front, like "content:/": kept)
+    for (size_t k = 0; k < 32 && path[k]; k++)
+        if (path[k] == ':' && path[k + 1] == '/') {
+            plen = k + 2;
+            break;
+        }
+    FrEntry *e = fr_find(path + plen);
+    if (!e) return false;
+    FrGroup *g = &g_fr.g[e->group];
+    __atomic_fetch_add(&g->opens, 1, __ATOMIC_RELAXED);
+    if (!__atomic_load_n(&g->on, __ATOMIC_ACQUIRE)) return false;
+    FrStr *o = plen + strlen(e->to) < FR_STR ? fr_obj(e, vptr, path, plen) : NULL;
+    if (!o) {
+        __atomic_fetch_add(&g_fr.nomem, 1, __ATOMIC_RELAXED);
+        snprintf(note, cap, "redirect skipped (no room): the original");
+        return false;
+    }
+    SwModRegs *r = SWMOD_REGS(c);
+    uint64_t saved[19];  // (x0-x18: the arguments and what the call may change; the game keeps x19 on)
+    memcpy(saved, r->x, sizeof saved);
+    r->x[2] = (uint64_t)(uintptr_t)o;
+    __atomic_fetch_add(&g->redirects, 1, __ATOMIC_RELAXED);
+    g_fl.orig[i](c);
+    if (r->x[0]) {
+        snprintf(note, cap, "-> %s", o->buf);
+        return true;
+    }
+    __atomic_fetch_add(&g->fails, 1, __ATOMIC_RELAXED);
+    memcpy(r->x, saved, sizeof saved);  // the copy didn't open: the original, as the game asked
+    g_fl.orig[i](c);
+    snprintf(note, cap, "copy %s didn't open: the original", o->buf);
+    if (__atomic_fetch_add(&g_fr.fail_lines, 1, __ATOMIC_RELAXED) < FR_FAIL_LINES)
+        host_log("file redirect: group %s: %s didn't open, so %s did (as the game asked)", g->name, o->buf, path);
+    return true;
+}
+
 static void fl_call(struct Cpu *c, int i) {
     __atomic_fetch_add(&g_fl.opens[i], 1, __ATOMIC_RELAXED);
-    if (!__atomic_load_n(&g_fl.active, __ATOMIC_ACQUIRE)) {  // paused or stopped: only the game's own function
-        if (__atomic_load_n(&g_fl.paused, __ATOMIC_RELAXED))
-            __atomic_fetch_add(&g_fl.paused_opens, 1, __ATOMIC_RELAXED);
-        g_fl.orig[i](c);
-        return;
-    }
     SwModRegs *r = SWMOD_REGS(c);
     uint64_t dev = r->x[0], ss = r->x[2];  // (x2 and x3 aren't kept by the call: read them first)
     uint32_t mode = (uint32_t)r->x[3];
-    int64_t t0 = fl_us();
-    g_fl.orig[i](c);
+    bool log = __atomic_load_n(&g_fl.active, __ATOMIC_ACQUIRE), redir = g_fr.n > 0 && g_fr.low;
+    if (!log && __atomic_load_n(&g_fl.paused, __ATOMIC_RELAXED))  // (paused: no line)
+        __atomic_fetch_add(&g_fl.paused_opens, 1, __ATOMIC_RELAXED);
+    char note[FR_STR + 48];
+    note[0] = 0;
+    int64_t t0 = log ? fl_us() : 0;
+    if (redir) __atomic_fetch_add(&g_fr.in_flight, 1, __ATOMIC_ACQ_REL);
+    if (!redir || !fr_open(c, i, ss, note, sizeof note)) g_fl.orig[i](c);
+    if (redir) {
+        __atomic_store_n(&g_fr.last_end_ms, GetTickCount64(), __ATOMIC_RELEASE);
+        __atomic_fetch_sub(&g_fr.in_flight, 1, __ATOMIC_ACQ_REL);
+    }
+    if (!log) return;
     int64_t t1 = fl_us();
     uint64_t ret = r->x[0];
     char path[FL_PATH + 4], devt[24], res[24];
@@ -316,8 +498,10 @@ static void fl_call(struct Cpu *c, int i) {
     if (!ret) copy_str(res, sizeof res, "fail");
     else if (ret == dev) copy_str(res, sizeof res, "ok");
     else snprintf(res, sizeof res, "ret=%llx", (unsigned long long)ret);
+    for (char *p = note; *p; p++)
+        if ((unsigned char)*p < 0x20 || *p == 0x7f) *p = '?';
     fl_lock();
-    fl_record(i, mode, res, t0, (double)(t1 - t0) / 1000.0, GetCurrentThreadId(), devt, path);
+    fl_record(i, mode, res, t0, (double)(t1 - t0) / 1000.0, GetCurrentThreadId(), devt, path, note);
     fl_unlock();
 }
 
@@ -477,9 +661,36 @@ static void fl_setup(void) {
         host_log("couldn't add the command fslog (the name is taken?): the file log still writes");
 }
 
-// After the mods loaded (their overrides went in first): open fslog.log, wrap the four functions, start the writer.
+static void fl_open_log(void);
+static void fl_wrap_all(void);
+static bool fr_seal(void);
+
+// After the mods loaded (their overrides went in first): fix the redirect table, open fslog.log, wrap the four
+// functions (for the log, the redirect or both), start the writer.
 static void fl_install(void) {
-    if (!g_st_host.file_log) return;
+    bool redir = fr_seal();
+    if (!g_st_host.file_log && !redir) return;
+    if (g_st_host.file_log) fl_open_log();
+    if (!g_fl.on && !redir) return;  // (the log's file couldn't be made: nothing to wrap for)
+    fl_wrap_all();
+    if (redir)
+        host_log("file redirect: on, %d of %d file opens wrapped%s", g_fl.wrapped, FL_FNS,
+                 g_fl.wrapped == FL_FNS ? "" : ": not ready (a mod overrides one of them), no file is redirected");
+    if (!g_fl.on) return;
+    fl_lock();
+    fl_set_active();
+    fl_unlock();
+    g_fl.event = CreateEventW(NULL, 0, 0, NULL);
+    HANDLE w = g_fl.event ? CreateThread(NULL, 0, fl_writer, NULL, 0, NULL) : NULL;
+    if (w) CloseHandle(w);
+    else host_log("file log: can't start its writer; lines are written by the fslog command and when the game closes");
+    atexit(fl_exit);
+    host_log("file log: on, %d of %d file opens wrapped, writing %s (fslog off pauses it)", g_fl.wrapped, FL_FNS,
+             g_fl.path);
+}
+
+// The file log's file and its first lines (g_fl.on: it is open).
+static void fl_open_log(void) {
     QueryPerformanceFrequency(&g_fl.qpf);
     QueryPerformanceCounter(&g_fl.qp0);
     g_fl.max_bytes = g_st_host.file_log_max;
@@ -513,6 +724,10 @@ static void fl_install(void) {
               (unsigned long long)(g_fl.max_bytes >> 10));
     fl_printf(FL_NOTE, "# time\tthread\tfn\tmode\tresult\tms\tdevice\tpath\tnote\n");
     fl_unlock();
+}
+
+// Wrap the four file opens, each unless a mod overrides it already (the first override wins).
+static void fl_wrap_all(void) {
     for (int i = 0; i < FL_FNS; i++) {
         uint64_t a = k_fl_fns[i].addr;
         const char *why = NULL;
@@ -523,10 +738,12 @@ static void fl_install(void) {
         GuestFn orig = why ? NULL : (GuestFn)api_dispatch_lookup(a);
         if (!why && !orig) why = "no game function starts there (another game version?)";
         if (why) {
-            host_log("file log: %#llx not wrapped: %s", (unsigned long long)a, why);
-            fl_lock();
-            fl_printf(FL_NOTE, "# %s (%#llx) not wrapped: %s\n", k_fl_fns[i].id, (unsigned long long)a, why);
-            fl_unlock();
+            host_log("file %s: %#llx not wrapped: %s", g_fl.on ? "log" : "redirect", (unsigned long long)a, why);
+            if (g_fl.on) {
+                fl_lock();
+                fl_printf(FL_NOTE, "# %s (%#llx) not wrapped: %s\n", k_fl_fns[i].id, (unsigned long long)a, why);
+                fl_unlock();
+            }
             continue;
         }
         g_fl.orig[i] = orig;
@@ -543,16 +760,117 @@ static void fl_install(void) {
         }
         reg_unlock();
     }
-    fl_lock();
-    fl_set_active();
-    fl_unlock();
-    g_fl.event = CreateEventW(NULL, 0, 0, NULL);
-    HANDLE w = g_fl.event ? CreateThread(NULL, 0, fl_writer, NULL, 0, NULL) : NULL;
-    if (w) CloseHandle(w);
-    else host_log("file log: can't start its writer; lines are written by the fslog command and when the game closes");
-    atexit(fl_exit);
-    host_log("file log: on, %d of %d file opens wrapped, writing %s (fslog off pauses it)", g_fl.wrapped, FL_FNS,
-             g_fl.path);
+}
+
+
+// ---- the file redirect's API (swmod.h version 4)
+
+static bool fr_text_ok(const char *s, size_t max) {
+    size_t n = s ? strlen(s) : 0;
+    if (!n || n > max) return false;
+    for (; *s; s++)
+        if ((unsigned char)*s < 0x20 || *s == 0x7f) return false;
+    return true;
+}
+
+static const char *fr_keep(const char *s) {  // (a copy in the table's text; NULL: full)
+    size_t n = strlen(s) + 1;
+    if (g_fr.text_used + n > sizeof g_fr.text) return NULL;
+    char *p = g_fr.text + g_fr.text_used;
+    memcpy(p, s, n);
+    g_fr.text_used += n;
+    return p;
+}
+
+static int api_fs_redirect_add(const char *group, const char *from, const char *to) {
+    Mod *m = g_current && GetCurrentThreadId() == g_current_tid ? g_current : NULL;  // (only from swmod_init)
+    const char *who = m ? m->file : "?";
+    if (!g_st_host.file_redirect) return SWMOD_FSR_OFF;
+    if (!m || g_fr.sealed) {
+        host_log("mod %s: fs_redirect_add refused: only from swmod_init of a mod loaded at game start", who);
+        return SWMOD_FSR_LATE;
+    }
+    if (!fr_text_ok(group, FR_GROUP_NAME - 1) || !fr_text_ok(from, FR_PATH_MAX) || !fr_text_ok(to, FR_PATH_MAX) ||
+        !strcmp(from, to))
+        return SWMOD_FSR_BAD_ARGS;
+    int gi = fr_group(group);
+    FrEntry *old = fr_find(from);
+    if (old) return old->group == gi && !strcmp(old->to, to) ? SWMOD_FSR_OK : SWMOD_FSR_TAKEN;
+    if (gi < 0 && g_fr.ngroups >= FR_GROUPS) return SWMOD_FSR_FULL;
+    if (g_fr.n >= FR_MAX) return SWMOD_FSR_FULL;
+    size_t used = g_fr.text_used;
+    const char *f = fr_keep(from), *t = f ? fr_keep(to) : NULL;
+    if (!t) {
+        g_fr.text_used = used;
+        return SWMOD_FSR_FULL;
+    }
+    if (gi < 0) {
+        gi = g_fr.ngroups++;
+        copy_str(g_fr.g[gi].name, sizeof g_fr.g[gi].name, group);
+    }
+    FrEntry *e = &g_fr.e[g_fr.n];
+    memset(e, 0, sizeof *e);
+    e->from = f, e->to = t, e->hash = fr_hash(f), e->group = gi;
+    for (uint32_t k = 0;; k++) {
+        int32_t *s = &g_fr.slot[(e->hash + k) & (FR_HASH - 1)];
+        if (!*s) {
+            *s = ++g_fr.n;
+            break;
+        }
+    }
+    g_fr.g[gi].count++;
+    return SWMOD_FSR_OK;
+}
+
+static int api_fs_redirect_set(const char *group, int on) {
+    if (!g_st_host.file_redirect) return SWMOD_FSR_OFF;
+    int gi = group ? fr_group(group) : -1;
+    if (gi < 0) return SWMOD_FSR_NO_GROUP;
+    if (!fr_ready()) return SWMOD_FSR_NOT_READY;
+    if (__atomic_exchange_n(&g_fr.g[gi].on, on ? 1u : 0u, __ATOMIC_ACQ_REL) != (on ? 1u : 0u))
+        host_log("file redirect: group %s %s (%d files)", g_fr.g[gi].name, on ? "on" : "off", g_fr.g[gi].count);
+    return SWMOD_FSR_OK;
+}
+
+static int api_fs_redirect_state(const char *group, SwModFsRedirectInfo *info) {
+    if (!info || info->size < sizeof *info) return SWMOD_FSR_BAD_ARGS;
+    uint32_t size = info->size;
+    memset(info, 0, sizeof *info);
+    info->size = size;
+    info->wrapped = g_fl.wrapped;
+    info->in_flight = __atomic_load_n(&g_fr.in_flight, __ATOMIC_ACQUIRE);
+    uint64_t last = __atomic_load_n(&g_fr.last_end_ms, __ATOMIC_ACQUIRE), now = GetTickCount64();
+    info->idle_ms = info->in_flight ? 0 : last && now > last ? (int64_t)(now - last) : last ? 0 : (int64_t)now;
+    if (!g_st_host.file_redirect) return SWMOD_FSR_OFF;
+    int gi = group ? fr_group(group) : -1;
+    if (gi < 0) return SWMOD_FSR_NO_GROUP;
+    FrGroup *g = &g_fr.g[gi];
+    info->ready = fr_ready() && g->count > 0;
+    info->on = (int32_t)__atomic_load_n(&g->on, __ATOMIC_ACQUIRE);
+    info->count = g->count;
+    info->opens = __atomic_load_n(&g->opens, __ATOMIC_RELAXED);
+    info->redirects = __atomic_load_n(&g->redirects, __ATOMIC_RELAXED);
+    info->fails = __atomic_load_n(&g->fails, __ATOMIC_RELAXED);
+    return SWMOD_FSR_OK;
+}
+
+// At fl_install, after the mods' swmod_init: the table is fixed, and our SafeStrings get their memory. false: no
+// redirect will run (none named, the setting is off, or no memory below 2^39).
+static bool fr_seal(void) {
+    g_fr.sealed = true;
+    if (!g_st_host.file_redirect || !g_fr.n) return false;
+    size_t need = ((size_t)g_fr.n * FR_VARIANTS * ((sizeof(FrStr) + 15) & ~(size_t)15) + 0xffff) & ~(size_t)0xffff;
+    for (uint64_t a = FR_LOW_FROM; a + need <= FR_LOW_TO && !g_fr.low; a += FR_LOW_STEP) {
+        void *p = VirtualAlloc((void *)(uintptr_t)a, need, 0x3000u /* MEM_RESERVE | MEM_COMMIT */, 0x04u);
+        if (p) g_fr.low = p, g_fr.low_cap = need;
+    }
+    if (!g_fr.low) {
+        host_log("file redirect: no memory below 2^39 for its paths: no file is redirected");
+        return false;
+    }
+    for (int i = 0; i < g_fr.ngroups; i++)
+        host_log("file redirect: group %s: %d files (off until a mod turns it on)", g_fr.g[i].name, g_fr.g[i].count);
+    return true;
 }
 
 #endif  // MODHOST_C

@@ -3070,6 +3070,7 @@ static void ghost_tick_body(struct Cpu *c, double t) {
 }
 
 static void coop_tick(struct Cpu *c);  // (coop_story.c: story flags through the game's flag manager)
+static void iam_live_tick(void);       // (iam.c, 1.0.0: Linkle live, a queued body flip once the loaders idle)
 
 static void job_wrapper(struct Cpu *c) {
     g_orig_job(c);  // the game's frame job first, as if nothing changed
@@ -3083,6 +3084,7 @@ static void job_wrapper(struct Cpu *c) {
     save_regs(c, &saved);
     ghost_tick(c);
     coop_tick(c);
+    iam_live_tick();
     restore_regs(c, &saved);
     lock();
     int64_t overlaps = g_status.overlaps;
@@ -3681,6 +3683,7 @@ SWMOD_EXPORT int swmod_init(const SwModApi *a) {
     else api->log("ghost: no recompiled function at %#llx: a costume's ragdoll pose is written once a frame only",
                   (unsigned long long)UNIT_ANIM_STEP);
     api->control_register(commands, (int)(sizeof commands / sizeof *commands));
+    iam_live_init();  // (1.0.0: Linkle live: her copies as file redirects, from swmod_init only)
     api->log("ghost: ready (frame job %#llx wrapped)", (unsigned long long)FRAME_JOB);
     return 0;
 }

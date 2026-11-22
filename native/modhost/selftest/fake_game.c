@@ -22,7 +22,7 @@ static void fake_fn_b(struct Cpu *c) { c->x[0] = 42; }
 // sead::SafeString* (its char* at +8). x0 stays (the device: opened), or becomes 0 for no path, one that can't be read
 // (the self-test's pages that aren't committed, have no access or are a guard page: fake_runtime.c) or one that starts
 // with "missing/". x1 says which of the four ran; x2 and x3 change, as in a real call (the wrapper must read them
-// first).
+// first). x4-x11 get the first 63 bytes of the path it opened (the file redirect's self-test: which file it was).
 typedef struct {
     uint64_t vptr;
     const char *str;
@@ -55,6 +55,9 @@ static void fake_open(struct Cpu *c, uint64_t which) {
     const char *p = s ? s->str : NULL;
     size_t n = p ? readable((uint64_t)(uintptr_t)p, 8) : 0;
     if (!n || (n == 8 && !strncmp(p, "missing/", 8))) c->x[0] = 0;
+    char seen[64] = {0};
+    for (size_t k = 0, m = p ? readable((uint64_t)(uintptr_t)p, 63) : 0; k < m && p[k]; k++) seen[k] = p[k];
+    memcpy(&c->x[4], seen, sizeof seen);
     c->x[1] = which;
     c->x[2] = 0xdead;
     c->x[3] = 0xbeef;

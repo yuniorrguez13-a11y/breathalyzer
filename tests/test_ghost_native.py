@@ -119,6 +119,13 @@ class GhostNative(unittest.TestCase):
         self.group("iam", ["made_linkle_parse", "made_linkle_owned", "linkle_body_words", "linkle_restart_link_words",
                            "linkle_link_words_home", "linkle_no_pick_is_her", "linkle_off_words",
                            "linkle_live_not_here", "report_body", "body_read_once"])
+        # 1.0.0 live (linkle-live-swap-design.md 2.2): her copies named as file redirects at swmod_init, iam linkle /
+        # link / another pick queue the flip, the frame job flips only while the loaders idle; a failed copy, not
+        # ready, the setting off, no map or an older modhost: stage 1 and body_err says why
+        self.group("iam", ["live_map_pairs", "live_init", "live_linkle_flips_when_idle", "live_link_flips_back",
+                           "live_start_and_other_pick", "live_fail_back_to_stage1", "live_not_ready_stage1",
+                           "live_not_possible_says_why", "live_pick_back_before_flip",
+                           "live_map_order_and_partial"])
         self.group("puppet", ["ids", "linkle_words"])
         if ("puppet", "world") not in self.rows:  # (the made-up world ran)
             self.group("puppet", ["sheath_hidden", "sheath_after_step", "holder_in_hand", "items_grip"])

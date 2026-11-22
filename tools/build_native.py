@@ -150,6 +150,15 @@ SELFTEST_FSLOG = (
     Target("fslog_probe_hot", (_ST / "fslog_probe.c",), runtime=False, subdir="selftest/fslog-hot",
            defines=("FSLOG_PROBE_HOT",), export="swmod_init"),
 )
+# The file redirect runs (fslog.c, API 4): a mod loaded at game start that names redirects (selftest/fsredir_probe.c).
+SELFTEST_FSREDIR = Target("fsredir_probe", (_ST / "fsredir_probe.c",), runtime=False, subdir="selftest/fsredir-start",
+                          export="swmod_init")
+# The override chain run (run E): three mods loaded at game start wrap one function with hle_override; the second one's
+# swmod_init fails (selftest/chain_probe.c).
+SELFTEST_CHAIN = tuple(
+    Target(f"chain{n}", (_ST / "chain_probe.c",), runtime=False, subdir="selftest/chain-start",
+           defines=(f"CHAIN_TAG={n}", *(("CHAIN_FAIL",) if n == 2 else ())), export="swmod_init")
+    for n in (1, 2, 3))
 
 
 def hooked_game_target(out: Path) -> Target:
@@ -1277,6 +1286,180 @@ def selftest_expect_fslog_overlap(d: dict, d_text: str, d_log: str) -> list[str]
     return bad
 
 
+# Run E, chained overrides (modhost.c start_overrides_flush, api_dispatch_lookup): chain1 and chain3 wrap 0x7000001000
+# (the fake game's x0 = 41), each adding its tag (x0 * 10 + tag); chain2 wraps it too but fails its swmod_init.
+CHAIN_FN, CHAIN_FN_B = "0x7000001000", "0x7000002000"
+CHAIN_LOG = (
+    "[mod] chain probe 1: ready",
+    "[mod] chain probe 2: failing on purpose",
+    "[mod] chain probe 3: ready",
+    "[modhost] override chain 0x7000001000: chain3 -> chain1 -> game (the mod loaded last runs first)",
+    "[modhost] mod chain1.dll: hle_override 0x7000001000 refused: another mod overrides it already, and overrides "
+    "only chain while the mods start (swmod_init)",
+)
+CHAIN_STEPS = (("overrides", "#overrides"), ("call", f"#call {CHAIN_FN}"), ("call_b", f"#call {CHAIN_FN_B}"),
+               ("who", "chainwho"), ("late", "chainlate"), ("overrides_after", "#overrides"),
+               ("call_after", f"#call {CHAIN_FN}"))
+
+
+def chain_run(out: Path) -> tuple[dict, str]:
+    """Run E in a new fake game: (its replies by step name, its savagewind.log)."""
+    res, log = _run_fake_game(out, out / "selftest" / "fake_swgame.dll", SELFTEST_CHAIN[0].output(out).parent,
+                              [ln for _, ln in CHAIN_STEPS])
+    return dict(zip((k for k, _ in CHAIN_STEPS), res.get("steps", []))), log
+
+
+def selftest_expect_chain(e: dict, log: str) -> list[str]:
+    """Run E: e maps each step's name (CHAIN_STEPS) to its reply, log is its savagewind.log. Returns the failures."""
+    bad = []
+
+    def want(cond, what):
+        if not cond:
+            bad.append(what)
+
+    def data(k):
+        return e.get(k, {}).get("data", {})
+
+    def rows(k):
+        o = data(k)
+        return [(o.get(f"{i}.addr"), o.get(f"{i}.name")) for i in range(o.get("count", 0))]
+
+    a, b = int(CHAIN_FN, 16), int(CHAIN_FN_B, 16)
+    want(rows("overrides") == [(a, "chain_probe"), (b, "chain_probe_b")],
+         f"chain run: Savage Wind got one override per address, the chain's top ({rows('overrides')})")
+    want(data("call").get("x0") == 4113, f"chain run: one call runs the game's function, then chain1, then chain3, "
+                                         f"each once, and never the failed chain2 (x0 {data('call').get('x0')}, "
+                                         f"want 4113)")
+    want(data("call_b").get("x0") == 142, f"chain run: a chain of one still wraps the game's function ({e.get('call_b')})")
+    w = data("who")
+    want(w.get("own") is False and w.get("same") is True,
+         f"chain run: dispatch_lookup never gives a mod its own override, before or after it is added ({w})")
+    want(data("late").get("low") is True, "chain run: the bottom link's dispatch_lookup once the game runs gives the "
+                                          "game's function, not the chain's top (that would loop)")
+    want(e.get("late", {}).get("ok") is True and rows("overrides_after") == rows("overrides"),
+         f"chain run: an override added once the game runs is refused and never reaches Savage Wind "
+         f"({rows('overrides_after')})")
+    want(data("call_after").get("x0") == 4113, f"chain run: the chain is unchanged after that ({e.get('call_after')})")
+    lines = log.splitlines()
+    bad += [f"chain run log line: {ln}" for ln in CHAIN_LOG if ln not in lines]
+    want(not any("override chain 0x7000002000" in ln for ln in lines), "chain run: a chain of one gets no chain line")
+    return bad
+
+
+# The file redirect runs (fslog.c, API 4; linkle-live-swap-design.md 2.1): fsredir_probe (loaded at game start) names
+# redirects in two groups. R1: SWMOD_FILE_REDIRECT and the file log on; R2: the redirect alone (no fslog.log); R3:
+# neither (every call answers OFF, nothing is wrapped). The fake game reports the path it opened ("opened").
+FSR_ARMOR, FSR_COPY = "Model/Armor_001.sbfres", "Model/SwLk_Armor_001.sbfres"
+FSR_INIT_CODES = [0, 0, 0, 3, 3, 3, 0, 5, 5]  # (fsredir_probe.c swmod_init: OK, OK, OK again, 3x BAD_ARGS, OK, 2x TAKEN)
+FSR_ENV = {"SWMOD_FILE_REDIRECT": "1", "SWMOD_FILE_LOG": "1"}
+FSR_ONLY_ENV = {"SWMOD_FILE_REDIRECT": "1"}
+FSR_LOG = (
+    "[mod] fsredir probe: ready",
+    "[modhost] file redirect: group linkle: 2 files (off until a mod turns it on)",
+    "[modhost] file redirect: group other: 1 files (off until a mod turns it on)",
+    "[modhost] file redirect: on, 4 of 4 file opens wrapped",
+    "[modhost] file redirect: group linkle on (2 files)",
+    "[modhost] file redirect: group linkle: missing/SwLk_Fail.sbfres didn't open, so Model/Fail.sbfres did (as the "
+    "game asked)",
+    "[modhost] file redirect: group linkle off (2 files)",
+    "[modhost] mod ?: fs_redirect_add refused: only from swmod_init of a mod loaded at game start",  # (as hooks)
+)
+
+
+def fsr_steps() -> list[tuple[str, str]]:
+    """Run R1's steps: (name, control line), in order."""
+    e8, e9, ea = (f"{FSLOG_FNS[k]:#x}" for k in ("e8fae0", "e92690", "eaba98"))
+    return [("init", "fsr init"), ("state0", "fsr state linkle"), ("overrides", "#overrides"),
+            ("off_open", f"#open {e8} dev 0 {FSR_ARMOR}"), ("on", "fsr linkle on"),
+            ("hit", f"#open {e8} dev 0 {FSR_ARMOR}"), ("prefix", f"#open {e9} dev 0 content:/{FSR_ARMOR}"),
+            ("miss", f"#open {e8} dev 0 Model/Armor_002.sbfres"), ("other_off", f"#open {e8} dev 0 Model/Other.sbfres"),
+            ("fail", f"#open {e8} dev 0 Model/Fail.sbfres"), ("state1", "fsr state linkle"),
+            ("thread_off", "fsr thread linkle off"), ("after_off", f"#open {ea} dev 0 {FSR_ARMOR}"),
+            ("late", "fsr late"), ("nogroup", "fsr nope on"), ("state2", "fsr state linkle"), ("flush", "fslog")]
+
+
+FSR_ONLY_STEPS = (("state", "fsr state linkle"), ("overrides", "#overrides"), ("on", "fsr linkle on"),
+                  ("hit", f"#open {FSLOG_FNS['e8fae0']:#x} dev 0 {FSR_ARMOR}"), ("fslog", "fslog"))
+FSR_OFF_STEPS = (("init", "fsr init"), ("state", "fsr state linkle"), ("on", "fsr linkle on"),
+                 ("overrides", "#overrides"))
+
+
+def fsr_runs(out: Path) -> tuple:
+    """R1, R2 and R3, each in a new fake game: ((replies by step name, fslog.log text, savagewind.log) for R1, then
+    (replies, whether fslog.log was written) for R2, then the replies of R3)."""
+    st = out / "selftest"
+    mods = SELFTEST_FSREDIR.output(out).parent
+    file = st / "fslog.log"
+    got = []
+    for steps, env in ((fsr_steps(), FSR_ENV), (FSR_ONLY_STEPS, FSR_ONLY_ENV), (FSR_OFF_STEPS, {})):
+        file.unlink(missing_ok=True)
+        res, log = _run_fake_game(out, st / "fake_swgame.dll", mods, [ln for _, ln in steps], env)
+        text = file.read_text(encoding="utf-8", errors="replace") if file.is_file() else None
+        got.append((dict(zip((k for k, _ in steps), res.get("steps", []))), text, log))
+    return got
+
+
+def selftest_expect_fsr(runs) -> list[str]:
+    """The file redirect runs (fsr_runs). Returns the failures."""
+    (r1, text, log), (r2, text2, _), (r3, _, _) = runs
+    bad = []
+
+    def want(cond, what):
+        if not cond:
+            bad.append(what)
+
+    def data(k, where=r1):
+        return where.get(k, {}).get("data", {})
+
+    init = [data("init").get(f"c{i}") for i in range(len(FSR_INIT_CODES))]
+    want(init == FSR_INIT_CODES, f"redirect: fs_redirect_add's answers at swmod_init ({init})")
+    s0 = data("state0")
+    want((s0.get("code"), s0.get("ready"), s0.get("on"), s0.get("count"), s0.get("wrapped")) == (0, 1, 0, 2, 4),
+         f"redirect: the group is ready, off, with 2 files ({s0})")
+    o = data("overrides")
+    want(o.get("count") == 4 and all(str(o.get(f"{i}.name", "")).startswith("modhost_fslog_") for i in range(4)),
+         f"redirect: modhost wraps the 4 file opens ({o})")
+    dev = data("hit").get("dev")
+
+    def opened(k, path, where=r1):
+        d = data(k, where)
+        return d.get("opened") == path and dev and d.get("x0") == dev
+
+    want(opened("off_open", FSR_ARMOR), f"redirect: a group that is off opens the original ({data('off_open')})")
+    want(data("on").get("code") == 0, f"redirect: the group turns on ({r1.get('on')})")
+    want(opened("hit", FSR_COPY) and data("hit").get("x1") == 1, f"redirect: on, the copy opens ({data('hit')})")
+    want(opened("prefix", "content:/" + FSR_COPY) and data("prefix").get("x1") == 2,
+         f"redirect: a device prefix is kept ({data('prefix')})")
+    want(opened("miss", "Model/Armor_002.sbfres"), "redirect: a file with no redirect opens as asked")
+    want(opened("other_off", "Model/Other.sbfres"), "redirect: another group that is off is left alone")
+    want(opened("fail", "Model/Fail.sbfres"), f"redirect: a copy that fails: the original opens ({data('fail')})")
+    s1 = data("state1")
+    want((s1.get("on"), s1.get("opens"), s1.get("redirects"), s1.get("fails"), s1.get("in_flight")) == (1, 4, 3, 1, 0),
+         f"redirect: the counts (4 opens of its files, 3 sent to a copy, 1 failed) ({s1})")
+    want(data("thread_off").get("code") == 0 and opened("after_off", FSR_ARMOR),
+         f"redirect: turned off from another thread, the original opens ({data('after_off')})")
+    want(data("late").get("code") == 2 and data("nogroup").get("code") == 6,
+         f"redirect: an add after swmod_init is refused, and a group that doesn't exist ({r1.get('late')}, "
+         f"{r1.get('nogroup')})")
+    want(data("state2").get("on") == 0 and data("state2").get("opens") == 5, f"redirect: off again ({data('state2')})")
+    rows = fslog_rows(text or "")
+    want(any(r[7:9] == [FSR_ARMOR, f"-> {FSR_COPY}"] for r in rows if len(r) == 9),
+         "redirect: the file log notes where an open went")
+    want(any(len(r) == 9 and r[7] == "Model/Fail.sbfres" and r[8].startswith("copy missing/SwLk_Fail.sbfres didn't open")
+             for r in rows), "redirect: the file log notes a copy that didn't open")
+    lines = log.splitlines()
+    bad += [f"redirect log line: {w}" for w in FSR_LOG if w not in lines]
+    d2 = r2.get("hit", {}).get("data", {})
+    want(data("state", r2).get("ready") == 1 and data("overrides", r2).get("count") == 4
+         and d2.get("opened") == FSR_COPY and text2 is None and r2.get("fslog", {}).get("ok") is False,
+         f"redirect alone (no file log): wrapped and redirected, no fslog.log, no fslog command ({r2})")
+    init3 = [data("init", r3).get(f"c{i}") for i in range(len(FSR_INIT_CODES))]
+    want(init3 == [1] * len(FSR_INIT_CODES) and data("state", r3).get("code") == 1 and data("on", r3).get("code") == 1
+         and data("overrides", r3).get("count") == 0,
+         f"redirect off (no SWMOD_FILE_REDIRECT): every call says OFF and nothing is wrapped ({r3})")
+    return bad
+
+
 def _run_fake_game(out: Path, real_lib: Path, mods: Path, lines, env_extra=None, host: Path | None = None
                    ) -> tuple[dict, str]:
     # The child runs in <out>/selftest, so every path it gets must be absolute: ctypes would resolve a relative
@@ -1284,7 +1467,8 @@ def _run_fake_game(out: Path, real_lib: Path, mods: Path, lines, env_extra=None,
     out, real_lib, mods = out.resolve(), real_lib.resolve(), mods.resolve()
     host = (host or out / HOST_DLL).resolve()
     st = out / "selftest"
-    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("SWMOD_FILE_LOG")}  # (only when a run asks)
+    env = {k: v for k, v in os.environ.items()  # (only when a run asks)
+           if not k.upper().startswith(("SWMOD_FILE_LOG", "SWMOD_FILE_REDIRECT"))}
     env.update(SWMOD_REAL_GAME_LIB=str(real_lib), SWMOD_DIR=str(mods), **(env_extra or {}))
     r = run_captured([sys.executable, "-I", "-c", _CHILD, str(st / RUNTIME_DLL), str(host), *lines],
                      env, cwd=st)
@@ -1297,7 +1481,7 @@ def selftest(tc: Toolchain, out: Path) -> int:
     prepare_hooked_game(out)
     hooked_game = hooked_game_target(out)
     targets = (HOST, *EXAMPLES, *SELFTEST, *HOOK_EXAMPLES, *SELFTEST_HOOKS, *SELFTEST_HOT, HOST_TEST, *SELFTEST_RACE,
-               *SELFTEST_FSLOG, hooked_game)
+               *SELFTEST_FSLOG, *SELFTEST_CHAIN, SELFTEST_FSREDIR, hooked_game)
     built = build(tc, out, targets)
     check_exports(zip(built, targets))
     st = out / "selftest"
@@ -1333,6 +1517,8 @@ def selftest(tc: Toolchain, out: Path) -> int:
     rnames = [k for k, _ in rsteps]
     fa, fa_text, fa_log, fb, fb_text, fb_prev, fc, fc_text = fslog_runs(out)
     fd, fd_text, fd_log = fslog_overlap_run(out)
+    ce, ce_log = chain_run(out)
+    fsr = fsr_runs(out)
     bad = (selftest_expect(result) + selftest_expect_log(log)
            + selftest_expect_fallback(missing, missing_log, other, other_log)
            + selftest_expect_hooks(hooked, hooked_log, plain, plain_log)
@@ -1341,7 +1527,9 @@ def selftest(tc: Toolchain, out: Path) -> int:
            + selftest_expect_race(dict(zip(rnames, race.get("steps", []))), dict(zip(rnames, race.get("ms", []))),
                                   race_log)
            + selftest_expect_fslog(fa, fa_text, fa_log, fb, fb_text, fb_prev, fc, fc_text)
-           + selftest_expect_fslog_overlap(fd, fd_text, fd_log))
+           + selftest_expect_fslog_overlap(fd, fd_text, fd_log)
+           + selftest_expect_chain(ce, ce_log)
+           + selftest_expect_fsr(fsr))
     print("Selftest passed: modhost loaded the fake game and 5 test mods as expected, and fell back safely"
           " without the game code or with game code for another version. Hooks: before, after and replace ran"
           " for direct calls, tail jumps and the function table, and stamina_hook worked. Loading while the game"
@@ -1350,12 +1538,16 @@ def selftest(tc: Toolchain, out: Path) -> int:
           " gate ran the game's own function after the unload, and overrides a hook tried to add were refused."
           " File log: the 4 file opens were wrapped and logged (repeats counted, limits kept, pause and resume,"
           " paths Windows says can't be read), one a mod overrides first was left to it, and modload was refused"
-          " the ones the log wraps."
+          " the ones the log wraps. Override chains: two mods on one function both ran, in order, each once, and a"
+          " failed mod's override was dropped. File redirect: a group sent its files to their copies, kept a"
+          " device prefix, fell back to the original when a copy didn't open, flipped from another thread, and was"
+          " OFF without SWMOD_FILE_REDIRECT."
           if not bad else f"Selftest FAILED ({len(bad)} problem(s)):")
     for b in bad:
         print(f"  - {b}")
     for name, text in (("main run", log), ("hook run", hooked_log), ("hot-load run", hot_log),
-                       ("race run", race_log), ("file log run", fa_log), ("file log overlap run", fd_log)):
+                       ("race run", race_log), ("file log run", fa_log), ("file log overlap run", fd_log),
+                       ("override chain run", ce_log), ("file redirect run", fsr[0][2])):
         print(f"modhost log ({name}):")
         for line in text.strip().splitlines():
             print(f"  {line}")

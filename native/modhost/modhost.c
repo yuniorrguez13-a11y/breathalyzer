@@ -546,8 +546,9 @@ static void api_reply_fail(SwModReply *r, const char *fmt, ...) {
 static bool api_dev_mode(void) { return control_enabled(); }
 
 // The runtime's dispatch_lookup only works once the game has booted (runtime/dispatch.c dispatch_init); this one
-// reads the same tables directly, so it works from swmod_init on.
-static SwModGuestFn api_dispatch_lookup(uint64_t addr) {
+// reads the same tables directly, so it works from swmod_init on. The game's own function (api_dispatch_lookup, below,
+// gives a mod the override chain's next link instead).
+static SwModGuestFn game_fn_lookup(uint64_t addr) {
     if (!g_real) return NULL;
     for (uint32_t k = 0; k < *g_real->nmodules; k++) {
         const GameLibModule *m = &g_real->modules[k];
@@ -572,19 +573,53 @@ static uint64_t api_find_site(const char *name) {
 }
 
 // ---- hle_override. Savage Wind can't remove an override, and the first one for an address wins
-// (runtime/dispatch.c dispatch_slow). For a mod loaded while the game runs, modhost overrides the address once with a
-// stand-in (hot_tramp_N) that calls the mod's function while the mod is loaded, and the game's function otherwise.
+// (runtime/dispatch.c dispatch_slow). So modhost chains the overrides of the mods loaded at game start: while they
+// start they are only noted here, and once all have started (start_overrides_flush) Savage Wind gets one per address,
+// the one added last. api->dispatch_lookup gives a mod the override added before its own (by another mod) or the
+// game's function, so mods that wrap (orig = dispatch_lookup(addr); hle_override(addr, fn); fn calls orig) all run,
+// each once per call, the mod loaded last first. A mod whose swmod_init fails takes its overrides out before the next
+// mod starts, so no other mod wraps them (docs/code-mods.md, "Two mods on one function").
+// For a mod loaded while the game runs, modhost overrides the address once with a stand-in (hot_tramp_N) that calls
+// the mod's function while the mod is loaded, and the game's function otherwise; such a mod can't join a chain.
 
-#define MAX_START_OVERRIDES 64
+#define MAX_START_OVERRIDES 128
 static struct {
     uint64_t addr;
     int mod;
-    bool pending;      // asked for during its mod's swmod_init: sent to Savage Wind only once that init returns 0
+    bool pending;      // asked for during its mod's swmod_init (all of a mod's are dropped if that init fails)
     bool fslog;        // modhost's own: the file log's wrapper (fslog.c), not a mod's
     SwModGuestFn fn;
     const char *name;
-} g_start_ovr[MAX_START_OVERRIDES];  // the overrides of mods loaded at game start (and the file log's)
+} g_start_ovr[MAX_START_OVERRIDES];  // the overrides of mods loaded at game start (and the file log's), in order
 static int g_nstart_ovr;
+static bool g_start_flushed;  // the mods of game start have all started: their overrides went to Savage Wind
+
+// What a call of addr through the dispatcher reaches below the calling mod's own overrides: the override another mod
+// of game start added last, or the game's function. A mod never gets its own function back (it would call itself).
+// The file log's wrappers are left out (it wraps only addresses no mod overrides, after the mods started).
+// The caller: the mod whose swmod_init or command runs on this thread, else the mod whose code called (a lookup from
+// its own wrapper or thread: it must not get its own wrapper back either).
+__attribute__((noinline)) static SwModGuestFn api_dispatch_lookup(uint64_t addr) {
+    Mod *me = calling_mod();
+    SwModGuestFn next = NULL;
+    bool any = false;
+    reg_lock();
+    for (int k = 0; k < g_nstart_ovr && !any; k++) any = g_start_ovr[k].addr == addr && !g_start_ovr[k].fslog;
+    reg_unlock();
+    if (!any) return game_fn_lookup(addr);
+    if (!me) me = mod_of_address(__builtin_return_address(0));
+    reg_lock();
+    // Below the caller's own link (a mod at the chain's bottom asking from its wrapper must not get the top: that top
+    // calls it again, a loop); a mod with no link there gets the top (what the game's calls reach).
+    int below = g_nstart_ovr;
+    for (int k = g_nstart_ovr - 1; k >= 0 && me && below == g_nstart_ovr; k--)
+        if (g_start_ovr[k].addr == addr && !g_start_ovr[k].fslog && g_start_ovr[k].mod == me->id) below = k;
+    for (int k = below - 1; k >= 0 && !next; k--)
+        if (g_start_ovr[k].addr == addr && !g_start_ovr[k].fslog && !(me && g_start_ovr[k].mod == me->id))
+            next = g_start_ovr[k].fn;
+    reg_unlock();
+    return next ? next : game_fn_lookup(addr);
+}
 
 #define MAX_HOT_OVERRIDES 32
 typedef struct {
@@ -639,8 +674,8 @@ static void hot_override(Mod *m, uint64_t addr, const char *a, SwModGuestFn fn, 
             if (g_start_ovr[k].fslog)
                 snprintf(buf, sizeof buf, "modhost's file log wraps it (File log is on), and the first override wins");
             else
-                snprintf(buf, sizeof buf, "%s (loaded at game start) overrides it already, and the first override "
-                         "wins", o ? o->file : "a mod");
+                snprintf(buf, sizeof buf, "%s (loaded at game start) overrides it already, and only mods loaded at "
+                         "game start chain on one function", o ? o->file : "a mod");
             why = buf;
         }
     reg_unlock();
@@ -654,7 +689,7 @@ static void hot_override(Mod *m, uint64_t addr, const char *a, SwModGuestFn fn, 
         why = "a game thread still runs the override that was there before: try again";
     if (!why && !e && g_nhot_ovr == MAX_HOT_OVERRIDES)
         why = "mods loaded while the game runs have overridden 32 addresses: restart the game";
-    GuestFn prev = e ? e->prev : (GuestFn)api_dispatch_lookup(addr);
+    GuestFn prev = e ? e->prev : (GuestFn)game_fn_lookup(addr);
     if (!why && !prev) why = "no game function starts there";
     if (why) {
         host_log("mod %s: hle_override %s refused: %s", m->file, a, why);
@@ -696,35 +731,61 @@ static void api_hle_override(uint64_t addr, SwModGuestFn fn, const char *name) {
         hot_override(m, addr, a, fn, name);
         return;
     }
-    // During its swmod_init it is only queued: Savage Wind can't take an override back, so it goes in once the init
-    // returned 0 (start_overrides_done), and a failed init leaves nothing running.
+    if (!m) m = mod_of_address((void *)fn);  // (a mod of game start calling from a game thread or its command)
+    // At game start it is only noted (start_overrides_flush sends the top of each chain once every mod started), and
+    // dropped again when its mod's swmod_init fails (start_overrides_done): a failed init leaves nothing running.
     bool queue = m && m == g_current && GetCurrentThreadId() == g_current_tid;
+    const char *why = NULL;
+    bool now = false;
     reg_lock();  // (a mod loaded at game start may call from a game thread)
-    if (g_nstart_ovr < MAX_START_OVERRIDES) {
+    int top = -1, own = -1;
+    for (int k = 0; k < g_nstart_ovr; k++)
+        if (g_start_ovr[k].addr == addr) {
+            top = k;
+            if (m && g_start_ovr[k].mod == m->id && !g_start_ovr[k].fslog) own = k;
+        }
+    if (own >= 0 && own == top && !g_start_flushed) {
+        g_start_ovr[top].fn = fn;  // (its own again: this one replaces it, in its place in the chain)
+        g_start_ovr[top].name = name;
+    } else if (own >= 0 && !g_start_flushed) {
+        why = "it overrides it already, under another mod's override (a second link of one mod would loop)";
+    } else if (g_start_flushed && top >= 0) {
+        why = g_start_ovr[top].fslog ? "modhost's file log wraps it (File log is on)"
+              : (m && g_start_ovr[top].mod == m->id)
+                  ? "it overrides it already"
+                  : "another mod overrides it already, and overrides only chain while the mods start (swmod_init)";
+    } else if (g_nstart_ovr < MAX_START_OVERRIDES) {
         g_start_ovr[g_nstart_ovr].addr = addr;
         g_start_ovr[g_nstart_ovr].pending = queue;
         g_start_ovr[g_nstart_ovr].fslog = false;
         g_start_ovr[g_nstart_ovr].fn = fn;
         g_start_ovr[g_nstart_ovr].name = name;
         g_start_ovr[g_nstart_ovr++].mod = m ? m->id : 0;
+        now = g_start_flushed;  // (the game runs: a new address goes in at once)
+    } else if (!g_start_flushed) {  // (sent now, unchained, it would run even if its mod's swmod_init fails)
+        why = "more than 128 overrides at game start: no room for it";
     } else {
-        queue = false;  // (no room to queue it: it goes in now, as before)
+        now = true;  // (the game runs, a new address, no room to note it: it goes in now)
     }
-    if (m && !list_has(m->overrides, a)) list_add(m->overrides, sizeof m->overrides, a);
+    if (m && !why && !list_has(m->overrides, a)) list_add(m->overrides, sizeof m->overrides, a);
     reg_unlock();
-    if (!queue) hle_override(addr, (HostFn)fn, name ? name : "mod");
+    if (why) {
+        host_log("mod %s: hle_override %s refused: %s", m ? m->file : "?", a, why);
+        if (m) note(m, "hle_override %s refused: %s", a, why);
+        return;
+    }
+    if (now) hle_override(addr, (HostFn)fn, name ? name : "mod");
 }
 
-// A mod loaded at game start finished its swmod_init: its queued overrides go in (ok), or are dropped (it failed).
+// A mod loaded at game start finished its swmod_init. It failed: every override it added is dropped (none reached
+// Savage Wind yet, and the next mod's dispatch_lookup must not hand them out). It worked: they stay in their chains.
 static void start_overrides_done(Mod *m, bool ok) {
     reg_lock();
     int j = 0;
     for (int k = 0; k < g_nstart_ovr; k++) {
-        if (g_start_ovr[k].pending && g_start_ovr[k].mod == m->id) {
+        if (g_start_ovr[k].mod == m->id && !g_start_ovr[k].fslog) {
             if (!ok) continue;
             g_start_ovr[k].pending = false;
-            hle_override(g_start_ovr[k].addr, (HostFn)g_start_ovr[k].fn,
-                         g_start_ovr[k].name ? g_start_ovr[k].name : "mod");
         }
         g_start_ovr[j++] = g_start_ovr[k];
     }
@@ -733,6 +794,33 @@ static void start_overrides_done(Mod *m, bool ok) {
     reg_unlock();
 }
 
+// Every mod of game start has started (before any game code runs): Savage Wind gets one override per address, the one
+// added last, which calls the ones before it through the orig its mod got from dispatch_lookup. savagewind.log names
+// each chain of two or more in call order, e.g. "override chain 0x7000cd1ee8: dragonbreath -> emotes -> game".
+static void start_overrides_flush(void) {
+    reg_lock();
+    g_start_flushed = true;
+    for (int k = 0; k < g_nstart_ovr; k++) {
+        uint64_t addr = g_start_ovr[k].addr;
+        bool first = true;
+        for (int j = 0; j < k && first; j++) first = g_start_ovr[j].addr != addr;
+        if (!first || g_start_ovr[k].fslog) continue;
+        int top = k, n = 0;
+        char chain[256] = "";
+        size_t len = 0;
+        for (int j = g_nstart_ovr - 1; j >= k; j--) {
+            if (g_start_ovr[j].addr != addr) continue;
+            if (!n++) top = j;
+            const Mod *o = mod_by_id(g_start_ovr[j].mod);
+            int w = snprintf(chain + len, sizeof chain - len, "%s -> ", o ? o->name : "?");
+            if (w > 0 && (size_t)w < sizeof chain - len) len += (size_t)w;
+        }
+        hle_override(addr, (HostFn)g_start_ovr[top].fn, g_start_ovr[top].name ? g_start_ovr[top].name : "mod");
+        if (n > 1) host_log("override chain %#llx: %sgame (the mod loaded last runs first)", (unsigned long long)addr,
+                            chain);
+    }
+    reg_unlock();
+}
 static void api_guest_call(struct Cpu *c, uint64_t addr) {
     if (!c) return;
     if (!addr) {  // (Savage Wind stops the game with FATAL for an address with no function: refuse it here)
@@ -1040,6 +1128,9 @@ static void fill_api(SwModApi *a, const char *mod_name) {
     a->setting_watch = api_setting_watch;
     a->setting_set = api_setting_set;
     a->settings_ui = api_settings_ui;
+    a->fs_redirect_add = api_fs_redirect_add;  // (version 4: the file redirect, fslog.c)
+    a->fs_redirect_set = api_fs_redirect_set;
+    a->fs_redirect_state = api_fs_redirect_state;
 }
 
 // ------------------------------------------------------------------ unloading (mods loaded while the game runs)
@@ -1699,6 +1790,7 @@ GAMELIB_EXPORT const GameLibTables *swgame_tables(void) {
     fl_setup();    // (the file log's `fslog` command, only when it is on)
     load_hooks();
     load_mods();
+    start_overrides_flush();  // (the chains of game start go to Savage Wind)
     fl_install();  // (after the mods: their own overrides go in first; only when the file log is on)
     return t;
 }

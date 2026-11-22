@@ -219,6 +219,7 @@ tried in game), **made up (selftest)** (not a game address: invented for `tools/
 | **Made up for the selftest (not game addresses)** | | | | |
 | `0x7000001000` | Fake function that one selftest probe mod overrides (`hle_override`) and another hooks | `tools/build_native.py` | `python tools/build_native.py selftest` | made up (selftest) |
 | `0x7000001020` | Fake address with no hook slot (the selftest expects the refusal) | `tools/build_native.py` | `python tools/build_native.py selftest` | made up (selftest) |
+| `0x7000002000` | Fake function (x0 = 42) that the override-chain selftest overrides with one mod only (a chain of one gets no chain line) | `tools/build_native.py` | `python tools/build_native.py selftest` | made up (selftest) |
 | `0x7000002020` | Fake function hooked by the selftest's probe mod | `tools/build_native.py` | `python tools/build_native.py selftest` | made up (selftest) |
 | `0x7000002030` | Fake hook added too late (the selftest expects the refusal) | `tools/build_native.py` | `python tools/build_native.py selftest` | made up (selftest) |
 | `0x7000003000` | Fake function the probe mod calls with `guest_call` | `tools/build_native.py` | `python tools/build_native.py selftest` | made up (selftest) |

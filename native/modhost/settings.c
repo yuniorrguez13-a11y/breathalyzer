@@ -688,13 +688,16 @@ static void st_load(void) {
 //   SWMOD_FILE_LOG=1           file_log: write fslog.log, the files the game opens (fslog.c). OFF by default.
 //   SWMOD_FILE_LOG_MAX=<bytes> the file log's size limit (4096 to 1 GiB; default 20 MiB)
 //   SWMOD_FILE_LOG_RATE=<n>    the file log's lines a second at most (1 to 100000; default 1000)
+//   SWMOD_FILE_REDIRECT=1      file_redirect: mods may send file opens to copies (API 4 fs_redirect_*, fslog.c).
+//                              OFF by default; modman sets it for a deploy with copies beside the game's.
 #define ST_FILE_LOG_MAX (20ull << 20)
 #define ST_FILE_LOG_RATE 1000u
 static struct {
     bool file_log;
     uint64_t file_log_max;
     uint32_t file_log_rate;
-} g_st_host = {false, ST_FILE_LOG_MAX, ST_FILE_LOG_RATE};
+    bool file_redirect;
+} g_st_host = {false, ST_FILE_LOG_MAX, ST_FILE_LOG_RATE, false};
 
 // A yes: 1, on, true or yes (any case).
 static bool st_env_yes(const wchar_t *name) {
@@ -723,6 +726,7 @@ static void st_host_load(void) {
     g_st_host.file_log = st_env_yes(L"SWMOD_FILE_LOG");
     g_st_host.file_log_max = st_env_num(L"SWMOD_FILE_LOG_MAX", 4096, 1ull << 30, ST_FILE_LOG_MAX);
     g_st_host.file_log_rate = (uint32_t)st_env_num(L"SWMOD_FILE_LOG_RATE", 1, 100000, ST_FILE_LOG_RATE);
+    g_st_host.file_redirect = st_env_yes(L"SWMOD_FILE_REDIRECT");
 }
 
 // The settings mod a mod DLL belongs to (its file name is on a dll line), or -1.

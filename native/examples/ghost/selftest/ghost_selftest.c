@@ -1159,7 +1159,8 @@ static void check_coop(void) {
 // ------------------------------------------------------------------ 0.8.0 Who am I (iam.c): `iam` and `ghost looks`
 // Fake replies: the fields the commands give, their console line and their failure.
 static char g_rep_fail[512], g_rep_text[512], g_rep_iam[64];
-static char g_rep_body[32], g_rep_body_mode[32], g_rep_body_err[64];  // (0.9.9: the `ghost` reply's body fields)
+static char g_rep_body[32], g_rep_body_mode[32], g_rep_body_err[160];  // (0.9.9: the `ghost` reply's body fields)
+static char g_rep_body_pending[16];                                    // (1.0.0: body_pending)
 static int64_t g_rep_seq, g_rep_looks;
 static int g_rep_has_iam;
 static void rep_str(SwModReply *r, const char *k, const char *v) {
@@ -1168,6 +1169,7 @@ static void rep_str(SwModReply *r, const char *k, const char *v) {
     if (!strcmp(k, "body")) snprintf(g_rep_body, sizeof g_rep_body, "%s", v);
     if (!strcmp(k, "body_mode")) snprintf(g_rep_body_mode, sizeof g_rep_body_mode, "%s", v);
     if (!strcmp(k, "body_err")) snprintf(g_rep_body_err, sizeof g_rep_body_err, "%s", v);
+    if (!strcmp(k, "body_pending")) snprintf(g_rep_body_pending, sizeof g_rep_body_pending, "%s", v);
 }
 static void rep_int(SwModReply *r, const char *k, int64_t v) {
     (void)r;
@@ -1224,7 +1226,7 @@ static void set_body_owned(int mode, const char *start, int owned) {  // (and fo
 }
 static void set_body(int mode, const char *start) { set_body_owned(mode, start, 1); }  // (Who am I turned it on)
 static void report_body(void) {
-    g_rep_body[0] = g_rep_body_mode[0] = 0;
+    g_rep_body[0] = g_rep_body_mode[0] = g_rep_body_pending[0] = 0;
     snprintf(g_rep_body_err, sizeof g_rep_body_err, "(not given)");
     iam_report((SwModReply *)(void *)g_rep_text);
 }
@@ -1403,6 +1405,189 @@ static void check_iam_linkle(void) {
     set_body(IAM_BODY_NONE, "");
 }
 
+// 1.0.0 Linkle live (phase 2 of out/research/linkle-live-swap-design.md, 2.2): with made.linkle.body "live" the ghost
+// names her copies (linkle-live.json) as file redirects at swmod_init, `iam linkle` / `iam link` queue the group on /
+// off, and the frame job flips it once the loaders idle. A fake host (API 4 fs_redirect_*) stands in for modhost.
+static struct {
+    int adds, add_code, add_code2, set_code, on, ready, in_flight, sets;  // (add_code2: the 2nd add's, 0 none)
+    int64_t idle_ms;
+    uint64_t fails;
+    char first_from[64], first_to[64];
+} g_fsr;
+static int fake_fsr_add(const char *group, const char *from, const char *to) {
+    if (strcmp(group, "linkle")) return SWMOD_FSR_BAD_ARGS;
+    if (!g_fsr.adds++) {
+        snprintf(g_fsr.first_from, sizeof g_fsr.first_from, "%s", from);
+        snprintf(g_fsr.first_to, sizeof g_fsr.first_to, "%s", to);
+    }
+    return g_fsr.adds == 2 && g_fsr.add_code2 ? g_fsr.add_code2 : g_fsr.add_code;
+}
+static int fake_fsr_set(const char *group, int on) {
+    if (strcmp(group, "linkle")) return SWMOD_FSR_NO_GROUP;
+    g_fsr.sets++;
+    if (g_fsr.set_code == SWMOD_FSR_OK) g_fsr.on = on;
+    return g_fsr.set_code;
+}
+static int fake_fsr_state(const char *group, SwModFsRedirectInfo *in) {
+    if (strcmp(group, "linkle")) return SWMOD_FSR_NO_GROUP;
+    in->ready = g_fsr.ready, in->on = g_fsr.on, in->count = g_fsr.adds, in->in_flight = g_fsr.in_flight;
+    in->idle_ms = g_fsr.idle_ms, in->fails = g_fsr.fails, in->wrapped = 4;
+    return SWMOD_FSR_OK;
+}
+static const char *g_fake_map =
+    "{\"group\": \"linkle\", \"files\": [\n"
+    " {\"from\": \"Model/Armor_001.sbfres\", \"to\": \"Model/SwLk_Armor_001.sbfres\", \"dev\": \"file\"},\n"
+    " {\"dev\": \"archive\", \"from\": \"Model/Link.sbfres\", \"to\": \"Model/SwLk_Link.sbfres\", "
+    "\"pack\": \"Pack/TitleBG.pack\"}]}\n";
+static int g_fake_map_none;
+static char *fake_live_read(const char *map) {
+    (void)map;
+    if (g_fake_map_none) return NULL;
+    char *t = malloc(strlen(g_fake_map) + 1);
+    if (t) strcpy(t, g_fake_map);
+    return t;
+}
+static int g_pairs_n;
+static int count_pair(const char *from, const char *to) {
+    (void)from, (void)to;
+    g_pairs_n++;
+    return SWMOD_FSR_OK;
+}
+static void live_reset(int start_linkle, int api_version) {  // (a fresh game: g_live and the fake host as new)
+    memset(&g_fsr, 0, sizeof g_fsr);
+    g_fsr.ready = 1, g_fsr.idle_ms = 1000;
+    lock();
+    memset(&g_live, 0, sizeof g_live);
+    g_live.want = -1, g_live.err = "";
+    unlock();
+    g_fake_api.api_version = (uint32_t)api_version;
+    g_fake_api.size = (uint32_t)sizeof g_fake_api;
+    set_body(IAM_BODY_LIVE, start_linkle ? "linkle" : "link");
+    iam_live_init();
+}
+static void check_iam_live(void) {
+    g_fake_api.fs_redirect_add = fake_fsr_add, g_fake_api.fs_redirect_set = fake_fsr_set;
+    g_fake_api.fs_redirect_state = fake_fsr_state;
+    g_iam_live_read = fake_live_read;
+    // the map: each from with its to, in any key order; not a list: -1
+    g_pairs_n = 0;
+    int pairs = iam_live_pairs(g_fake_map, count_pair) == 2 && g_pairs_n == 2 && iam_live_pairs("{}", count_pair) == -1 &&
+                iam_live_pairs("{\"files\": [{\"from\": \"a\"}]}", count_pair) == 0;
+    check("iam", "live_map_pairs", pairs, "pairs %d", g_pairs_n);
+    // swmod_init: every pair named; start "link": the group stays off
+    live_reset(0, 4);
+    check("iam", "live_init", g_live.files == 2 && g_fsr.adds == 2 && !g_fsr.on &&
+          !strcmp(g_fsr.first_from, "Model/Armor_001.sbfres") && !strcmp(g_fsr.first_to, "Model/SwLk_Armor_001.sbfres"),
+          "files %d adds %d on %d first %s -> %s", g_live.files, g_fsr.adds, g_fsr.on, g_fsr.first_from, g_fsr.first_to);
+    // iam linkle: queued (not flipped while a file loads), then flipped once the loaders idle
+    run_line(cmd_iam, "iam linkle");
+    int queued = strstr(g_rep_text, IAM_LIVE_ON) && g_live.want == 1 && !g_fsr.on;
+    report_body();
+    int pending = !strcmp(g_rep_body_pending, "linkle") && !strcmp(g_rep_body_mode, "live") &&
+                  !strcmp(g_rep_body, "link");
+    g_fsr.in_flight = 1;
+    iam_live_tick();
+    int waited = !g_fsr.on && g_live.want == 1;
+    g_fsr.in_flight = 0, g_fsr.idle_ms = 100;
+    iam_live_tick();
+    waited = waited && !g_fsr.on;
+    g_fsr.idle_ms = 600;
+    iam_live_tick();
+    int flipped = g_fsr.on == 1 && g_live.on == 1 && g_live.want == -1;
+    report_body();
+    int rep_on = !strcmp(g_rep_body, "linkle") && !strcmp(g_rep_body_mode, "live") && !*g_rep_body_err &&
+                 !*g_rep_body_pending;
+    check("iam", "live_linkle_flips_when_idle", queued && pending && waited && flipped && rep_on,
+          "queued %d (%s) pending %d waited %d flipped %d rep %d (body %s mode %s err %s)", queued, g_rep_text, pending,
+          waited, flipped, rep_on, g_rep_body, g_rep_body_mode, g_rep_body_err);
+    // iam link: queued off, flipped at the next idle frame
+    run_line(cmd_iam, "iam link");
+    int link_q = strstr(g_rep_text, IAM_LIVE_OFF) && g_live.want == 0;
+    iam_live_tick();
+    check("iam", "live_link_flips_back", link_q && !g_fsr.on && !g_live.on, "queued %d (%s) on %d", link_q, g_rep_text,
+          g_fsr.on);
+    // another pick with her body on: her body off too, and the usual words for that pick
+    live_reset(1, 4);  // (start "linkle": queued at swmod_init, on at the first idle frame)
+    int started = !g_fsr.on && g_live.want == 1;
+    iam_live_tick();
+    started = started && g_fsr.on == 1 && g_live.on == 1;
+    run_line(cmd_iam, "iam zelda");
+    int other = g_live.want == 0 && strstr(g_rep_text, "You are zelda now") != 0;
+    check("iam", "live_start_and_other_pick", started && other, "started %d other %d (%s)", started, other,
+          g_rep_text);
+    // a copy that failed to open: the group off, stage 1 from then on
+    live_reset(1, 4);
+    iam_live_tick();  // (on)
+    g_fsr.fails = 1;
+    iam_live_tick();
+    run_line(cmd_iam, "iam linkle");
+    int failed_words = strstr(g_rep_text, "Her body is off.") != 0;
+    report_body();
+    check("iam", "live_fail_back_to_stage1", !g_fsr.on && !g_live.files && failed_words &&
+          !strcmp(g_rep_body_mode, "restart") && !strcmp(g_rep_body_err, IAM_LIVE_FAIL),
+          "on %d files %d words %d (%s) mode %s err %s", g_fsr.on, g_live.files, failed_words, g_rep_text,
+          g_rep_body_mode, g_rep_body_err);
+    // not ready (a file open another mod overrides): stage-1 words, body_err
+    live_reset(0, 4);
+    g_fsr.ready = 0;
+    run_line(cmd_iam, "iam linkle");
+    int nr_words = strstr(g_rep_text, "Her body is off.") && strstr(g_rep_text, "pick Linkle in Breathalyzer");
+    report_body();
+    check("iam", "live_not_ready_stage1", nr_words && g_live.want == -1 && !strcmp(g_rep_body_mode, "restart") &&
+          !strcmp(g_rep_body_err, IAM_LIVE_NOT_READY), "words %d (%s) mode %s err %s", nr_words, g_rep_text,
+          g_rep_body_mode, g_rep_body_err);
+    // the setting off, the map unreadable, an older host: no redirect named, the reason in body_err
+    live_reset(0, 4);
+    g_fsr.add_code = SWMOD_FSR_OFF;
+    lock();
+    memset(&g_live, 0, sizeof g_live);
+    g_live.want = -1, g_live.err = "";
+    unlock();
+    iam_live_init();
+    report_body();
+    int off = !g_live.files && strstr(g_rep_body_err, "SWMOD_FILE_REDIRECT") != 0;
+    g_fake_map_none = 1;
+    live_reset(0, 4);
+    report_body();
+    int nomap = !g_live.files && strstr(g_rep_body_err, "linkle-live.json") != 0;
+    g_fake_map_none = 0;
+    live_reset(0, 3);
+    report_body();
+    int old = !g_live.files && !g_fsr.adds && !strcmp(g_rep_body_err, IAM_NO_LIVE);
+    check("iam", "live_not_possible_says_why", off && nomap && old, "off %d nomap %d old %d (err %s)", off, nomap, old,
+          g_rep_body_err);
+    // iam linkle, then iam link before the flip: the queued flip is taken back (Link stays)
+    live_reset(0, 4);
+    run_line(cmd_iam, "iam linkle");
+    run_line(cmd_iam, "iam link");
+    int back = g_live.want == 0 && strstr(g_rep_text, IAM_LIVE_OFF) != 0;
+    iam_live_tick();
+    check("iam", "live_pick_back_before_flip", back && !g_fsr.on && !g_live.on && g_live.want == -1,
+          "back %d (%s) on %d want %d", back, g_rep_text, g_fsr.on, g_live.want);
+    // the map in another key order ("to" first), and one of her files the host didn't take: no live switch at all
+    g_pairs_n = 0;
+    int swapped = iam_live_pairs("{\"files\": [{\"to\": \"b\", \"from\": \"a\"}, {\"to\": \"d\", \"from\": \"c\"}]}",
+                                 count_pair) == 2 && g_pairs_n == 2;
+    live_reset(0, 4);
+    g_fsr.add_code2 = SWMOD_FSR_TAKEN, g_fsr.adds = 0;
+    lock();
+    memset(&g_live, 0, sizeof g_live);
+    g_live.want = -1, g_live.err = "";
+    unlock();
+    iam_live_init();
+    report_body();
+    int taken = !g_live.files && strstr(g_rep_body_err, "not all of her files") != 0;
+    check("iam", "live_map_order_and_partial", swapped && taken, "swapped %d taken %d (err %s)", swapped, taken,
+          g_rep_body_err);
+    // done: no live state for the rows after this
+    lock();
+    memset(&g_live, 0, sizeof g_live);
+    g_live.want = -1, g_live.err = "";
+    unlock();
+    g_fake_api.api_version = 0;
+    g_iam_live_read = iam_live_read;
+}
+
 static void check_iam(void) {
     g_fake_api.reply_str = rep_str, g_fake_api.reply_int = rep_int, g_fake_api.reply_num = rep_num;
     g_fake_api.reply_bool = rep_bool, g_fake_api.reply_text = rep_text, g_fake_api.reply_fail = rep_fail;
@@ -1496,6 +1681,7 @@ static void check_iam(void) {
     check("iam", "client_list_fits", g_rep_looks == 11 && !*g_rep_fail, "looks %lld fail %s", (long long)g_rep_looks,
           g_rep_fail);
     check_iam_linkle();
+    check_iam_live();
     g_iam_body_read = iam_body_real;
     set_body(IAM_BODY_NONE, "");
     lock();
@@ -1673,7 +1859,8 @@ static void check_puppet_095(void) {
     int nb = pup_ovl_pick(nm, par, 9, OVL_ARM_R | OVL_GUARD, sel);
     check("puppet", "arm_overlay", r_ok && l_ok && nb == 7, "right %d (%d) left %d (%d) both %d", r_ok, nr, l_ok, nl, nb);
     check("puppet", "attack_morph", pup_as_morph("CutS1") == 0.0f && pup_as_morph("CutDash_Spear") == 0.0f &&
-          pup_as_morph("Walk") == -1.0f && pup_as_morph("BowCharge") == -1.0f && pup_as_morph(NULL) == -1.0f, "CutS1 %.0f",
+          pup_as_morph("Walk") == PUP_MOVE_MORPH && pup_as_morph("Wait") == PUP_MOVE_MORPH &&
+          pup_as_morph("RunGear2") == -1.0f && pup_as_morph("BowCharge") == -1.0f && pup_as_morph(NULL) == -1.0f, "CutS1 %.0f",
           pup_as_morph("CutS1"));
     check("puppet", "arrow_name", pup_is_arrow("NormalArrow") && pup_is_arrow("BombArrow_A") &&
           pup_is_arrow("AncientArrow") && !pup_is_arrow("Weapon_Bow_001") && !pup_is_arrow(NULL), "names");
@@ -1814,32 +2001,64 @@ static void check_puppet(void) {
     Missing *m = calloc(1, sizeof *m);
     if (!m) return;
     int sp = 0;
-    const char *walk = pup_pick("Move", 1.6f, AN_WALK, &sp, m), *run = pup_pick("Move", 5.4f, AN_RUN, &sp, m);
-    const char *dash = pup_pick("Move", 8.0f, AN_RUN, &sp, m), *still = pup_pick("Move", 6.5f, AN_RUN, &sp, m);
-    const char *slow = pup_pick("Move", 6.0f, AN_RUN, &sp, m);
+    const char *walk = pup_pick("Move", 1.6f, 1.6f, AN_WALK, &sp, m), *run = pup_pick("Move", 5.4f, 5.4f, AN_RUN, &sp, m);
+    const char *dash = pup_pick("Move", 8.0f, 8.0f, AN_RUN, &sp, m), *still = pup_pick("Move", 6.5f, 6.5f, AN_RUN, &sp, m);
+    const char *slow = pup_pick("Move", 6.0f, 6.0f, AN_RUN, &sp, m);
     check("puppet", "move_by_speed", !strcmp(walk, "Walk") && !strcmp(run, "Run") && !strcmp(dash, "RunGear2") &&
           !strcmp(still, "RunGear2") && !strcmp(slow, "Run"), "%s %s %s %s %s", walk, run, dash, still, slow);
     for (int k = 0; k < PUP_STRIKES; k++) missing_strike(m, "ClimbJump"), missing_strike(m, "CutS9");
     for (int k = 0; k < PUP_STRIKES; k++) missing_strike(m, "SwimJump"), missing_strike(m, "HoldWait");
-    const char *cj = pup_pick("ClimbJump", 1.0f, AN_WAIT, &sp, m), *cut = pup_pick("CutS9", 0, AN_WAIT, &sp, m);
-    const char *sw = pup_pick("SwimJump", 3.0f, AN_WAIT, &sp, m), *hold = pup_pick("HoldWait", 0, AN_WAIT, &sp, m);
-    const char *horse = pup_pick("HorseRide", 5.0f, AN_RUN, &sp, m), *own = pup_pick("ParashawlGlide", 9, AN_RUN, &sp, m);
+    const char *cj = pup_pick("ClimbJump", 1.0f, 1.0f, AN_WAIT, &sp, m), *cut = pup_pick("CutS9", 0, 0, AN_WAIT, &sp, m);
+    const char *sw = pup_pick("SwimJump", 3.0f, 3.0f, AN_WAIT, &sp, m), *hold = pup_pick("HoldWait", 0, 0, AN_WAIT, &sp, m);
+    const char *horse = pup_pick("HorseRide", 5.0f, 5.0f, AN_RUN, &sp, m), *own = pup_pick("ParashawlGlide", 9, 9, AN_RUN, &sp, m);
     check("puppet", "near_names", !strcmp(cj, "ClimbMove") && !strcmp(cut, "CutS1") && !strcmp(sw, "SwimDash") &&
           !strcmp(hold, "Wait") && !horse && !strcmp(own, "ParashawlGlide"), "%s %s %s %s %s %s", cj, cut, sw, hold,
           horse ? horse : "(Link)", own);
     for (int k = 0; k < PUP_STRIKES; k++) missing_strike(m, "ClimbMove"), missing_strike(m, "ClimbWait");
-    const char *noclimb = pup_pick("ClimbJump", 1.0f, AN_WAIT, &sp, m);
+    const char *noclimb = pup_pick("ClimbJump", 1.0f, 1.0f, AN_WAIT, &sp, m);
     for (int k = 0; k < PUP_STRIKES; k++) missing_strike(m, "RunGear2");
     sp = 0;
-    const char *nodash = pup_pick("Move", 8.0f, AN_RUN, &sp, m);
+    const char *nodash = pup_pick("Move", 8.0f, 8.0f, AN_RUN, &sp, m);
     // 0.9.3: a family the pack lacks is never Link (the Moblin swimming showed Link): it stands or walks; a glide falls
     for (int k = 0; k < PUP_STRIKES; k++)
         missing_strike(m, "SwimDash"), missing_strike(m, "SwimMove"), missing_strike(m, "SwimWait"),
             missing_strike(m, "ParashawlGlide");
-    const char *noswim = pup_pick("SwimMove", 1.0f, AN_WALK, &sp, m), *noglide = pup_pick("ParashawlGlide", 9, AN_RUN, &sp, m);
+    const char *noswim = pup_pick("SwimMove", 1.0f, 1.0f, AN_WALK, &sp, m), *noglide = pup_pick("ParashawlGlide", 9, 9, AN_RUN, &sp, m);
     check("puppet", "missing_clip_no_link", noclimb && !strcmp(noclimb, "Wait") && !strcmp(nodash, "Run") && noswim &&
           !strcmp(noswim, "Walk") && noglide && !strcmp(noglide, "Fall"), "climb %s dash %s swim %s glide %s",
           noclimb ? noclimb : "(Link)", nodash, noswim ? noswim : "(Link)", noglide ? noglide : "(Link)");
+    // 0.9.10: Link's own stand is the costume's at once, though the half-second speed still says Walk or Run (it was
+    // ~0.8 s late); while his place still moves (he starts before his Move shows) it walks; a name not known goes by
+    // the speed; a Brake the pack lacks stands; a stand ends the sprint
+    Missing *mb = calloc(1, sizeof *mb);
+    if (mb) {
+        int s2 = 0;
+        const char *stop = pup_pick("Wait", 1.2f, 0.0f, AN_WALK, &s2, mb);
+        const char *stop_run = pup_pick("Wait", 4.0f, 0.2f, AN_RUN, &s2, mb);
+        const char *start = pup_pick("Wait", 0.2f, 1.0f, AN_WAIT, &s2, mb);
+        const char *unknown = pup_pick("-", 1.2f, 0.0f, AN_WALK, &s2, mb);
+        const char *brake_asked = pup_pick("Brake", 4.0f, 3.0f, AN_RUN, &s2, mb);
+        for (int k = 0; k < PUP_STRIKES; k++) missing_strike(mb, "Brake");
+        const char *brake = pup_pick("Brake", 4.0f, 3.0f, AN_RUN, &s2, mb);
+        s2 = 1;
+        const char *sprint_stop = pup_pick("Wait", 7.0f, 0.0f, AN_RUN, &s2, mb);
+        check("puppet", "stand_at_once", !strcmp(stop, "Wait") && !strcmp(stop_run, "Wait") && !strcmp(start, "Walk") &&
+              !strcmp(unknown, "Walk") && !strcmp(brake_asked, "Brake") && !strcmp(brake, "Wait") &&
+              !strcmp(sprint_stop, "Wait") && s2 == 0, "stop %s run %s start %s unknown %s brake %s/%s sprint %s (%d)",
+              stop, stop_run, start, unknown, brake_asked, brake, sprint_stop, s2);
+        // his "now" speed: over the last PUP_NOW_S of his place only
+        AnimAuto *aa = calloc(1, sizeof *aa);
+        if (aa) {
+            for (int f = 0; f <= 30; f++) anim_sample(aa, f < 27 ? f * 0.1f : 2.6f, 0, 100.0 + f / 30.0);
+            float now_still = pup_now_speed(aa, PUP_NOW_S);
+            anim_sample(aa, 2.7f, 0, 100.0 + 31 / 30.0);
+            float now_moved = pup_now_speed(aa, PUP_NOW_S);
+            check("puppet", "now_speed", now_still < 0.01f && now_moved > 0.4f && now_moved < 1.6f,
+                  "still %.2f moved %.2f m/s", now_still, now_moved);
+            free(aa);
+        }
+        free(mb);
+    }
     // 0.9.4: the held weapon's swing: a two-hander's / spear's name when known (the monsters' extra ones only on theirs),
     // never for a one-hander, a non-attack or a name the pack lacks
     char wb[40], wb2[40], wb3[40], wb4[40], wb5[40];
@@ -1953,6 +2172,15 @@ static void check_puppet(void) {
     pup_run("Move", 1.6f, 0.2);
     check("puppet", "rehide", !fm_drawn(&g_pl.fm) && t_pup.rehides == 1, "drawn %d rehides %lld", fm_drawn(&g_pl.fm),
           (long long)t_pup.rehides);
+    // 0.9.10: the costume stops with Link (his own Wait at once; the half-second speed kept it walking ~0.8 s), and
+    // walks as soon as his place moves, even while his name still says Wait
+    pup_run("Wait", 0, 0.2);
+    char stopped[32];
+    copy_name(stopped, g_pp_current);
+    pup_run("Wait", 0, 1.0);
+    pup_run("Wait", 1.6f, 0.1);
+    check("puppet", "stop_with_link", !strcmp(stopped, "Wait") && !strcmp(g_pp_current, "Walk"),
+          "0.2 s after he stopped: %s; 0.1 s after he moved again: %s", stopped, g_pp_current);
     // a climb jump the pack lacks: ClimbMove after the misses, the puppet stays shown
     pup_run("ClimbJump", 1.0f, 1.0);
     check("puppet", "climb_near_name", !strcmp(g_pp_current, "ClimbMove") && t_pup.shown && !fm_drawn(&g_pl.fm),

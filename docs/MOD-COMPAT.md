@@ -93,7 +93,7 @@ weren't tried in the game.
    deploy (2026-11-12; the Linkle set passed in the game the same day).
 2. ~~ExeFS patches for 1.9.0~~ done; next: retargeting older (1.6.0) patches with masked patterns.
 3. ~~Cheats~~ done for data cheats.
-4. ~~Native code mods~~ done (host + API 2 hooks, API 3 settings pages being built: [mod-settings](mod-settings.md)).
+4. ~~Native code mods~~ done (host + API 2 hooks, API 3 settings pages being built: [mod-settings](mod-settings.md), API 4 file redirect: [code-mods](code-mods.md#file-redirect)).
    Hooks go before, after or instead of any function of `main`, via a rebuild.
 5. ~~Wii U mergeable data~~ done: `tools/wiiu_convert.py` converts text, maps and actor data on the player's PC, and
    `tools/modman.py add` converts a Wii U mod by itself. Tested in game with a Wii U text mod made for the test

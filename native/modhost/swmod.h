@@ -17,7 +17,8 @@
 // A host with api_version N has every field of versions 1..N. A mod that needs version N checks SWMOD_API_OK(api, N);
 // a mod built with a newer header can still run on an older host and test single newer fields with SWMOD_HAS.
 // Version 2 added hooks (api->hook, api->can_hook): see docs/hooks.md. Version 3 added settings (api->setting_*,
-// api->settings_ui): see docs/mod-settings.md.
+// api->settings_ui): see docs/mod-settings.md. Version 4 added the file redirect (api->fs_redirect_*): see
+// docs/code-mods.md "File redirect".
 //
 // C++ mods: this header declares swmod_init as extern "C", so it is exported unmangled. (The zig that ships with
 // Savage Wind can't compile C++ that includes <stddef.h>: use C, or another compiler for C++.)
@@ -31,7 +32,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#define SWMOD_API_VERSION 3
+#define SWMOD_API_VERSION 4
 #define SWMOD_INIT_NAME "swmod_init"
 #ifdef __cplusplus
 #define SWMOD_EXPORT extern "C" __declspec(dllexport)
@@ -116,6 +117,32 @@ typedef void (*SwModHookReplace)(struct Cpu *c, SwModGuestFn orig);
 #define SWMOD_HOOK_BAD_ARGS 5  // no before, after or replace given
 #define SWMOD_HOOK_FULL 6      // too many hooks (8 before and 8 after per function, 256 functions)
 #define SWMOD_HOOK_BUSY 7      // (modload only) a game thread still runs this function's earlier hooks: try again
+
+// ---- file redirect (version 4, docs/code-mods.md "File redirect"). A mod names copies of game files ("from" ->
+// "to", RomFS paths as the game asks for them, e.g. "Model/Armor_001.sbfres" -> "Model/SwLk_Armor_001.sbfres") in a
+// group; while the group is on, the game's file opens of "from" open "to" instead (modhost wraps the four sead
+// FileDevice doOpen_). OFF for everyone unless the player's SWMOD_FILE_REDIRECT=1 (modman sets it for a deploy that
+// puts copies beside the game's files). A copy that fails to open: the original opens, as the game asked.
+#define SWMOD_FSR_OK 0
+#define SWMOD_FSR_OFF 1        // the file redirect is off (SWMOD_FILE_REDIRECT isn't set)
+#define SWMOD_FSR_LATE 2       // fs_redirect_add only from swmod_init of a mod loaded at game start
+#define SWMOD_FSR_BAD_ARGS 3   // an empty or too long group or path (group 31 bytes, path 200), or from == to
+#define SWMOD_FSR_FULL 4       // too many groups (8) or redirects (2048)
+#define SWMOD_FSR_TAKEN 5      // "from" is redirected already (to another copy, or by another group or mod)
+#define SWMOD_FSR_NO_GROUP 6   // no such group
+#define SWMOD_FSR_NOT_READY 7  // the group's redirects can't run: the file opens aren't wrapped (see savagewind.log)
+typedef struct {
+    uint32_t size;          // set it to sizeof(SwModFsRedirectInfo) before the call
+    int32_t ready;          // 1: the four file opens are wrapped and the group has redirects: fs_redirect_set works
+    int32_t on;             // the group is on now
+    int32_t count;          // its redirects
+    int32_t in_flight;      // file opens running now (any file, any group): 0 = the loaders are idle
+    int32_t wrapped;        // how many of the four file opens modhost wraps
+    uint64_t opens;         // opens of one of its "from" files (on or off)
+    uint64_t redirects;     // opens it sent to a copy
+    uint64_t fails;         // copies that failed to open (the original was opened instead)
+    int64_t idle_ms;        // ms since the last file open ended (any file): flip a group only when the loaders idle
+} SwModFsRedirectInfo;
 
 // ---- control commands (the SAVAGEWIND_CONTROL socket and the in-game console, docs/CONTROL.md in Savage Wind)
 typedef struct SwModReply SwModReply;  // a command's answer (opaque)
@@ -234,13 +261,16 @@ typedef struct SwModApi {
     bool (*dev_mode)(void);                                   // developer mode on (SAVAGEWIND_CONTROL / SAVAGEWIND_DEV)
 
     // Game code. Addresses are guest addresses (main starts at 0x7000000000).
-    // The recompiled function whose entry is at guest_addr, or NULL. Works from swmod_init on.
+    // The recompiled function whose entry is at guest_addr, or NULL. Works from swmod_init on. When mods loaded before
+    // this one override guest_addr, it is the newest of their overrides (never this mod's own): see hle_override.
     SwModGuestFn (*dispatch_lookup)(uint64_t guest_addr);
     // The address of a named site of the game code (e.g. "player_info"), or 0. Works from swmod_init on.
     uint64_t (*find_site)(const char *name);
     // Calls of guest_addr that go through Savage Wind's dispatcher (virtual calls, function pointers, imports) run
     // fn instead. Direct calls inside main do not. Call it from swmod_init (before game threads start: each thread
     // caches lookups). To wrap: keep orig = dispatch_lookup(addr) and call orig(c) from fn. name must stay valid.
+    // Mods loaded at game start chain: each one's orig is the override of the mod before it, the mod loaded last runs
+    // first (docs/code-mods.md, "Two mods on one function"). Once the game runs, an overridden address is refused.
     // A mod loaded with `modload`: only from swmod_init or its own commands; a call from a hook, a thread of its own
     // or swmod_exit is refused with a log line (the override would outlive the mod's DLL).
     void (*hle_override)(uint64_t guest_addr, SwModGuestFn fn, const char *name);
@@ -285,6 +315,16 @@ typedef struct SwModApi {
     int (*setting_set)(const struct SwModApi *self, const char *key, const char *value);
     // The table a settings screen uses (the Mod menu): every mod's settings. NULL when no settings.txt was deployed.
     const SwModSettingsUi *(*settings_ui)(void);
+
+    // ---- version 4: the file redirect (above). Check SWMOD_API_OK(api, 4) first.
+    // Add a redirect to `group` (made on first use). From swmod_init of a mod loaded at game start only: the table is
+    // fixed once the game runs. Returns SWMOD_FSR_*. The strings are copied.
+    int (*fs_redirect_add)(const char *group, const char *from, const char *to);
+    // Turn a group on (1) or off (0), from any thread. It counts from the next file open on: flip it while the loaders
+    // are idle (fs_redirect_state's in_flight 0 and idle_ms), so no model loads half old, half new. SWMOD_FSR_*.
+    int (*fs_redirect_set)(const char *group, int on);
+    // A group's state into *info (set info->size first). SWMOD_FSR_OK, _OFF or _NO_GROUP (info is still filled).
+    int (*fs_redirect_state)(const char *group, SwModFsRedirectInfo *info);
 } SwModApi;
 
 typedef int (*SwModInitFn)(const SwModApi *api);

@@ -216,9 +216,20 @@ the inventory showed Link, "terribly wrong". So Linkle is no longer a costume:
   are "turn The Linkle Mod off on Breathalyzer's Home, then restart the game". Without the key (an older deploy) `iam`
   says both ways.
 - **The `ghost` reply** has `body` (`linkle`, `link`, or empty when no deploy is known), `body_mode` (`none`,
-  `restart`) and `body_err`. `body: live` in `launch.json` (her copies beside Link's, switched in the game) is phase 2
-  and OFF by default: this ghost can't switch yet, so it says the restart words and `body_err` is "no live switch in
-  this ghost" (the launcher can then offer the restart).
+  `restart`, `live`), `body_err` and `body_pending`. `body: live` in `launch.json` is phase 2 (below) and OFF by
+  default.
+- **Linkle live (phase 2, 2026-11-22, built, not tried in the game; `out\research\linkle-live-swap-design.md`):** her
+  body and armor switched in the game, done at the next load screen (fast travel), no restart. A test switch for now
+  (no Who am I button yet): `modman beside the-linkle-mod SwLk_`, then `modman deploy` (undo: `modman beside
+  the-linkle-mod off`). The deploy puts her player and armor files BESIDE Link's as `SwLk_` copies (her body as new
+  members of TitleBG.pack), leaves out her voice, cutscenes, weapons and icons, writes `deploy\linkle-live.json`,
+  `made.linkle = {"body": "live", "start": "link", "map": "linkle-live.json"}` and `SWMOD_FILE_REDIRECT=1` (modhost's
+  file redirect, mod API 4, [code-mods](code-mods.md#file-redirect)). In the game: `iam linkle` says "Linkle: done at
+  the next load screen (fast travel)", `iam link` (or another pick) "Link: back at the next load screen"; the ghost
+  flips the redirect only while no file is loading. When it can't run (an older modhost, the setting off, the list
+  unreadable, a file open another mod overrides) or a copy of hers fails to open (it goes back to Link's files for
+  the rest of the game), `iam` says the restart words and `body_err` says why (the launcher can offer the restart).
+  Link's cloth stays (resident): checked offline, it only names bones her body has; her `Bust_1/2` stay at rest.
 - **Friends** see her as before (review C1, 2026-11-18 night): each PC still builds her costume from The Linkle Mod's
   files (on or off: `linkle_costume`, its pack on `Dm_Npc_UMii_Hylia_BodyS_M_012`), and Looks shows a friend who
   picked Linkle as it. Only the self-puppet is gone (the ghost DLL has no `linkle` slot). The costume wears her outfit

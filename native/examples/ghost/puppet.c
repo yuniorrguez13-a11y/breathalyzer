@@ -103,6 +103,13 @@
 // small table (pup_pod_units_publish) and get their draw bit cleared again right after the game's own step of each
 // unit (unit_step_wrapper), i.e. after the game's re-show and before the frame is drawn (`sheath_unit_hides`).
 
+// 0.9.10 (the game check: the costume walked on ~0.8 s after Link stopped, and slid ~0.2 s before its walk started;
+// not yet in the game): Link's own Wait was shown by his speed, worked out over half a second (ANIM_WINDOW_S) and
+// lowered only after ANIM_DOWN_S, so the stop came about 0.8 s late. Now his own name decides: Wait (and his Brake,
+// which the packs lack) is the costume's stand at once, unless his place still moves over the last PUP_NOW_S (he moves
+// before his name says Move: it walks at once). A stand, walk or run blends in over PUP_MOVE_MORPH frames, not the
+// sets' own 6 (0.2 s, which read as a slide). The sprint, the near names and the ball are unchanged.
+
 #include "pup_bodies.h"
 
 #define LINK_RAGDOLL 0x1870            // 0.9.1: Link: his ragdoll manager (his vf 0x840 returns it; his actions reach it)
@@ -186,6 +193,9 @@
 #define PUP_SPRINT_BELOW 6.3f          // ... until he is slower than this
 #define PUP_SWIM_DASH 2.5f             // m/s: a swim this fast is SwimDash (else SwimMove, below 0.3 SwimWait)
 #define PUP_STILL 0.3f                 // m/s: slower than this is standing (ClimbWait, SwimWait, SquatWait)
+#define PUP_NOW_S 0.1                  // 0.9.10: s of Link's own place his "now" speed is worked out over ...
+#define PUP_NOW_MOVING 0.4f            // ... m/s: from this, Link's Wait still moves (he starts before his Move shows)
+#define PUP_MOVE_MORPH 2.0f            // 0.9.10: frames a stand, walk or run blends in (the sets' own 6 read as a slide)
 #define PUP_VERIFY_S 0.15              // a name that doesn't play this long after the call is a miss ...
 #define PUP_STRIKES 2                  // ... and after this many misses the pack lacks it
 #define PUP_READ_S 0.25                // what plays is read back this often (the actor's own AI may change it)
@@ -400,14 +410,37 @@ static const char *pup_id(const char *word) {
 
 static int pup_prefix(const char *s, const char *p) { return !strncmp(s, p, strlen(p)); }
 
+// 0.9.10: Link's speed over the last `window` s of his own place (the frames anim_sample keeps; 0 with fewer than two).
+static float pup_now_speed(const AnimAuto *a, double window) {
+    if (a->n < 2) return 0;
+    int h = a->head, i = h;
+    for (int k = 1; k < a->n; k++) {
+        i = (h - k + ANIM_SAMPLES) % ANIM_SAMPLES;
+        if (a->t[h] - a->t[i] >= window) break;
+    }
+    double dt = a->t[h] - a->t[i];
+    if (!(dt > 0)) return 0;
+    float dx = a->x[h] - a->x[i], dz = a->z[h] - a->z[i];
+    return (float)(__builtin_sqrtf(dx * dx + dz * dz) / dt);
+}
+
 // What the puppet plays while Link plays `link` at v m/s (auto: Wait/Walk/Run by his speed; *sprint: the sprint's
 // hysteresis), or NULL: it can't be mirrored, show Link (0.9.3: only a horse, a ride, a surf, a cutscene's own move;
-// a clip the pack lacks is never Link). m: the names this puppet lacks.
-static const char *pup_pick(const char *link, float v, int autoc, int *sprint, const Missing *m) {
+// a clip the pack lacks is never Link). now_v: his speed over the last PUP_NOW_S (pup_now_speed). m: the names this
+// puppet lacks.
+static const char *pup_pick(const char *link, float v, float now_v, int autoc, int *sprint, const Missing *m) {
     const char *speed = AN_NAMES[autoc >= AN_WAIT && autoc <= AN_RUN ? autoc : AN_WAIT];
-    if (!*link || !strcmp(link, "-") || !strcmp(link, "?") || !strcmp(link, "Wait") || !strcmp(link, "DemoWait")) {
+    if (!*link || !strcmp(link, "-") || !strcmp(link, "?")) {  // (his name isn't known: by his speed)
         *sprint = 0;
         return speed;
+    }
+    // 0.9.10: his own stand (or his Brake, which the packs lack) is the costume's at once; by the half-second speed it
+    // walked on ~0.8 s after he stopped. Only while his place still moves (he starts before his Move shows) it walks.
+    int brake = !strcmp(link, "Brake") && missing_has(m, "Brake");
+    if (!strcmp(link, "Wait") || !strcmp(link, "DemoWait") || brake) {
+        *sprint = 0;
+        if (brake || now_v < PUP_NOW_MOVING) return AS_WAIT;
+        return autoc == AN_WAIT ? AS_WALK : speed;
     }
     if (!strcmp(link, "Move")) {  // walk, run and sprint: by speed
         *sprint = v >= (*sprint ? PUP_SPRINT_BELOW : PUP_SPRINT_FROM);
@@ -1248,8 +1281,14 @@ static int pup_sprint_hold(int rolling, double since) {
 // 0.9.5: an attack's set starts at once, as Link's own attack sets do (their clip nodes have Morph 0 [V: Player_CutS1]):
 // the costume's sets blended into a swing over the animation list's 6 frames, which read as a wind-up and put the
 // Bokoblin's hit about 0.16 s after Link's (the game check, 2026-11-14). Morph frames for AS_PLAY: 0 for an attack,
-// -1 (the set's own) for the rest.
-static float pup_as_morph(const char *name) { return name && pup_prefix(name, "Cut") ? 0.0f : -1.0f; }
+// -1 (the set's own) for the rest. 0.9.10: PUP_MOVE_MORPH for a stand, walk or run (the sets' 6 frames read as a slide
+// at the start and as a walk on at the stop); the sprint keeps its own (Daruk curls into his ball).
+static float pup_as_morph(const char *name) {
+    if (!name) return -1.0f;
+    if (pup_prefix(name, "Cut")) return 0.0f;
+    if (!strcmp(name, AS_WAIT) || !strcmp(name, AS_WALK) || !strcmp(name, AS_RUN)) return PUP_MOVE_MORPH;
+    return -1.0f;
+}
 
 // 0.9.5: the nocked arrow. With the bow drawn, Link's arrow stayed where his hidden hand is (it doesn't copy his model's
 // hide as his items do) and floated next to the costume's head [V: the game check]. An equipment slot from 3 up whose
@@ -2423,7 +2462,8 @@ static int pup_live(struct Cpu *c, uint64_t player, const SelfState *self, doubl
         return 1;
     }
     const char *pick = rd == RD_CLIP ? pup_rd_clip(&t_pup_missing, autoc)
-                                     : pup_pick(t_pup.link_anim, t_pup.speed, autoc, &t_pup_sprint, &t_pup_missing);
+                                     : pup_pick(t_pup.link_anim, t_pup.speed, pup_now_speed(&t_pup_anim, PUP_NOW_S), autoc,
+                                                &t_pup_sprint, &t_pup_missing);
     static char swing[40];  // (0.9.4: the held weapon's swing; interned below)
     if (rd == RD_NONE)
         pick = pup_weapon_pick(pick, self->equip_ok ? self->weapon : "", pup_own_swings(t_pup.id), &t_pup_missing, swing,

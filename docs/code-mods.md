@@ -85,7 +85,7 @@ use (1.9.0 only), with how each one was verified, are listed in [addresses](addr
 mode. Over the socket:
 
 ```
-{"ok":true,"data":{"host":"0.4.1","api":3,"game_version":"1.9.0","game_lib":"...\\extracted\\swgame.dll",
+{"ok":true,"data":{"host":"0.4.1","api":4,"game_version":"1.9.0","game_lib":"...\\extracted\\swgame.dll",
  "dir":"...\\mods\\native","found":1,"loaded":1,"hot":0,"hook_slots":0,"hooked":0,"mods.0.name":"hello",
  "mods.0.id":1,"mods.0.file":"hello.dll","mods.0.hot":false,"mods.0.ok":true,"mods.0.status":"ok",
  "mods.0.commands":"hello","mods.0.skipped":"","mods.0.hooks":"","mods.0.overrides":""}}
@@ -104,7 +104,8 @@ A status is `ok`, `init failed (code N)`, `load failed (error N)` (a Windows err
 `loaded, no swmod_init`.
 
 A mod loaded at game start whose `swmod_init` fails leaves nothing running: its hooks are taken out again, and its
-`hle_override` calls (held back until `swmod_init` returns 0) never reach the game. Its DLL stays loaded.
+`hle_override` calls (held back until every mod of game start has started) never reach the game, and no later mod
+chains on them ([override chains](#two-mods-on-one-function-override-chains)). Its DLL stays loaded.
 
 `guest_call` to address 0 (a site or pattern that wasn't found) is refused with a log line naming the mod; the call
 does nothing. Savage Wind would stop the game with FATAL.
@@ -265,11 +266,44 @@ Not verified yet (needs the real game):
 
 - `hle_override` only catches calls that go through Savage Wind's dispatcher (virtual calls, function pointers,
   imports). Direct calls inside `main` can't be hooked this way.
+- Only mods loaded at game start chain on one function (see below). A mod loaded with `modload` can't override an
+  address another mod already overrides (refused with a log line).
 - There is no per-frame or "game ready" callback yet. Mods act from `swmod_init`, from their commands, or from
   overridden functions.
 - modhost uses Savage Wind internals that are not a stable API. It is built for 0.4.1-alpha.4; check
   `native/modhost/sw_runtime.h` against the source of any other version before using it there.
 - A mod runs with your full rights, and a crash in a mod crashes the game. Only install mods you trust.
+
+## Two mods on one function (override chains)
+
+Savage Wind takes one `hle_override` per address (the first one wins) and can't remove one. modhost chains them, so
+two mods can wrap the same function, e.g. emotes and Dragonbreath on Link's update:
+
+- Wrap as before: `orig = api->dispatch_lookup(addr)`, then `api->hle_override(addr, fn, name)`, and call `orig(c)`
+  from `fn`. Existing mods chain with no change.
+- `dispatch_lookup` gives a mod the next link below its own: the override the mods before it added for that
+  address, or the game's function when there is none. It never gives a mod its own function or a link above its own,
+  even when asked after the override or from inside the wrapper, so a chain can't loop. A mod with no override there
+  gets the chain's top (what the game's own calls reach).
+- Order: the mod loaded last runs first and calls the one before it; the last link calls the game's function. Mods
+  load in file name order. Each mod runs once per call; a mod that doesn't call `orig` ends the chain there (the mods
+  below it and the game's function don't run for that call).
+- modhost hands Savage Wind one override per address, the chain's top, once every mod of game start has started.
+  `savagewind.log` names each chain of two or more in call order:
+  `[modhost] override chain 0x7000cd1ee8: dragonbreath -> emotes -> game (the mod loaded last runs first)`.
+- A mod whose `swmod_init` fails takes all its overrides out before the next mod starts: no other mod gets it from
+  `dispatch_lookup`, and it never runs.
+- The same mod overriding the same address twice keeps one link (the newer function, in its place in the chain).
+  A second one once another mod has wrapped it is refused (two links of one mod would loop).
+- At most 128 overrides at game start (all mods together); past that, `hle_override` is refused with a log line.
+- Overrides only chain from `swmod_init`. Once the game runs, an `hle_override` for an address that is already
+  overridden is refused with a log line (`another mod overrides it already, and overrides only chain while the mods
+  start`); a new address still goes in. modhost's file log only wraps the file opens no mod overrides.
+- Hooks ([hooks](hooks.md)) chain too: several mods' `before` and `after` hooks run in load order. Only one `replace`
+  per function.
+- Selftest: `python tools/build_native.py selftest` (run E, `native/modhost/selftest/chain_probe.c`): two mods on one
+  function run in order, each once, the lower one's lookup from its command gets the game's function (not the top:
+  no loop), a third whose init fails is dropped, and a late override is refused.
 
 ## Hooks
 
@@ -337,3 +371,32 @@ the lines, the repeats, the pause, the marks, both limits, paths that can't be r
 says can't be read: not committed, no access, a guard page, and a path that runs into such a page, cut with `...`) and
 the previous log. A second run checks the overlap rules: a mod that overrides one of the four at game start keeps it,
 and `modload` is refused one the log wraps. Not run in the game yet.
+
+## File redirect
+
+Since mod API 4 (modhost 2026-11-22), a mod can send the game's opens of a file to a copy of it, and switch that while
+the game runs: the Linkle live swap's file-level redirect ("L1" in `out\research\linkle-live-swap-design.md` 2.1).
+**OFF for everyone** unless `SWMOD_FILE_REDIRECT=1`: modman sets it only for a deploy that puts copies beside the
+game's files (`modman beside <mod> SwLk_`, [charsel](charsel.md) "Linkle live"). Without it every call answers
+`SWMOD_FSR_OFF` and nothing is wrapped for it.
+
+- **From `swmod_init` only** (a mod loaded at game start): `api->fs_redirect_add(group, from, to)` names a pair, as
+  the game asks for the file (`"Model/Armor_001.sbfres"` -> `"Model/SwLk_Armor_001.sbfres"`; a device prefix like
+  `content:/` in front is kept). At most 8 groups and 2048 pairs, paths up to 200 bytes. A `from` another pair has is
+  `SWMOD_FSR_TAKEN`; the table is fixed once the game runs (`SWMOD_FSR_LATE` after that).
+- **Any thread:** `api->fs_redirect_set(group, 1 | 0)` turns a group on or off (`SWMOD_FSR_NOT_READY` when not all four
+  file opens could be wrapped: a mod overrides one). `api->fs_redirect_state(group, &info)` (set `info.size`) gives
+  `ready`, `on`, `count`, the group's `opens`, `redirects` and `fails`, and `in_flight` / `idle_ms` for all opens:
+  flip only while the loaders are idle, so no model loads half old, half new.
+- **How:** the same four `doOpen_` wrappers as the file log. A redirected open gets x2 = modhost's own SafeString with
+  the copy's path (the game object's vptr, laid out as a `sead::FixedSafeString<256>`, below 2^39 outside the guest
+  window, made once and never freed). If the copy fails to open, the game's function runs again with the registers it
+  came with: the original opens, as the game asked, and the group counts a fail (a `[modhost] file redirect:` line,
+  20 at most). With the file log on, a redirected open's line says `-> <copy>` in its `note` column.
+- **Its limit:** the game's resource cache and size table still use the original name. Whether a copy is opened
+  again after a load screen is what the Linkle phase-1 log run answers.
+
+Checked without the game: `python tools/build_native.py selftest` runs a probe mod (`selftest/fsredir_probe.c`) on
+the fake game: the copy opens while its group is on and not while off, a prefix is kept, a copy that fails gives the
+original, a flip from another thread, an add after `swmod_init` refused, bad and taken pairs, the file log's note,
+the redirect without the file log, and everything OFF without `SWMOD_FILE_REDIRECT`. Not run in the game yet.

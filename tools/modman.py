@@ -110,8 +110,11 @@ KIND_NAMES = {"romfs": "RomFS files", "dlc-romfs": "DLC RomFS files", "exefs-pat
               "cheats": "cheats", "native": "native code mod"}
 # Variables a mod setup may leave in a window; `run` clears them and sets only the ones the deploy needs.
 # (SWMOD_LIBRARY too: modhost finds the library in deploy\native\settings.txt, never in a window's leftover one.)
+ENV_FILE_REDIRECT = "SWMOD_FILE_REDIRECT"  # modhost's file redirect (API 4): set for a deploy with copies beside
 MOD_ENV = ("SAVAGEWIND_ROMFS_OVERLAY", "SAVAGEWIND_NO_HUD_LETTERS", "SAVAGEWIND_GAME_LIB", "SAVAGEWIND_CONTROL",
-           "SWMOD_REAL_GAME_LIB", "SWMOD_DIR", ENV_LIBRARY)
+           "SWMOD_REAL_GAME_LIB", "SWMOD_DIR", ENV_LIBRARY, ENV_FILE_REDIRECT)
+LINKLE_LIVE = "linkle-live.json"   # deploy\linkle-live.json: her copies for the ghost mod's file redirect (design 2.4)
+LINKLE_GROUP = "linkle"
 # Library files of the Mods page v2 parts (docs/mod-format.md, docs/profiles.md)
 SETTINGS_DIR = "settings"      # <library>\settings\<id>.json: the values the player changed
 PICTURES_DIR = "pictures"      # <library>\pictures\<id>\ (and _title\, _mods-page\): the player's choices, the cache
@@ -2371,6 +2374,9 @@ def inputs_hash(lib: Library) -> str:
     h.update(json.dumps({"v": FORMAT, "install": os.path.normcase(os.path.abspath(install)) if install else "",
                          "library": os.path.normcase(os.path.abspath(lib.root)),
                          "mods": [m["id"] for m in enabled]}).encode())
+    beside = {m["id"]: m["beside"] for m in enabled if m.get("beside")}
+    if beside:  # (`modman beside` changes the deploy; added only when set, so every other hash stays as it was)
+        h.update(json.dumps({"beside": beside}).encode())
     ex = os.path.join(install, "extracted")
     h.update(json.dumps(game_folders(ex)).encode())
     for p in (os.path.join(install, EXE), os.path.join(ex, "exefs", "main"), os.path.join(ex, LIB),
@@ -3077,11 +3083,14 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False, mer
     man = None
     p = None
     made: dict = {}
+    beside: list[dict] = []
     try:
         if sources or makers:  # (the plan, then the files made at deploy over it: fonts, title picture, pictures)
             if gindex is None and os.path.isdir(os.path.join(extracted, "romfs")):
                 gindex = rm.GameIndex.scan(extracted)
             p = rm.plan(sources, gindex, rstb)
+            if p.beside or p.beside_packs:   # (copies beside the game's files: their packs and size entries)
+                beside = rm.add_beside(p)   # (its warnings go into the manifest's)
             if hook is not None and hook.files:   # (sized in hook.rstb already: no entry to add here)
                 try:
                     rm.add_generated(p, [(path, data, None) for path, data in sorted(hook.files.items())],
@@ -3209,7 +3218,11 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False, mer
                 with open(d.add_file("native/settings.txt"), "w", encoding="utf-8", newline="\n") as f:
                     f.write(txt)
 
-    if sources:  # (Linkle's body: whether this deploy's Link model is The Linkle Mod's, for the ghost mod's `iam`)
+    live = linkle_live(lib, beside, attention) if beside else None
+    if live:  # (phase 2: her copies beside Link's, switched in the game by the ghost mod's file redirect)
+        write_json(d.add_file(LINKLE_LIVE), live["map"])
+        made["linkle"] = live["made"]
+    elif sources:  # (Linkle's body: whether this deploy's Link model is The Linkle Mod's, for the ghost mod's `iam`)
         lk = linkle_made(lib, os.path.join(extracted, "romfs"), attention)
         if lk:
             made["linkle"] = lk
@@ -3219,6 +3232,8 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False, mer
     if made:  # (what the makers say about what they made: font.py's symbols_full and font name, for modmenu.sync;
         #        "linkle": linkle_made)
         launch["made"] = made
+    if live:  # (modhost takes file redirects only with this: OFF for every other deploy)
+        launch["env"][ENV_FILE_REDIRECT] = "1"
     write_json(d.add_file(LAUNCH), launch)
     d.save(complete=True)
     history_append(lib, {"type": "deploy", "hash": h, "profile": lib.profile,
@@ -3263,7 +3278,9 @@ def romfs_sources(scans: list[tuple[dict, str, ModScan]], layers: list[tuple[str
     out: list = []
     for m, root, s in scans:
         if s.romfs:
-            out.append(root)
+            px = m.get("beside")   # (linkle-live-swap-design.md 2.4: its player and armor files go beside the game's)
+            out.append(rm.Beside(root, px, m["id"]) if isinstance(px, str) and rm.BESIDE_PREFIX_RE.fullmatch(px)
+                       else root)
         out += [rm.Layer(folder, os.path.basename(root), dlc) for mod_id, folder, dlc in layers if mod_id == m["id"]]
     return out
 
@@ -3278,6 +3295,25 @@ def title_picture_choice(lib: Library, scans: list[tuple[dict, str, ModScan]]) -
         if s.manifest and s.manifest.title_picture:
             return os.path.join(root, *s.manifest.rel(s.manifest.title_picture).split("/"))
     return None
+
+
+def linkle_live(lib: Library, beside: list[dict], attention: list[str]) -> dict | None:
+    """Phase 2 of out/research/linkle-live-swap-design.md (2.4): when The Linkle Mod is deployed "beside" (its entry's
+    "beside": "SwLk_", an invasive feature, OFF unless set), {"map": linkle-live.json's content, "made": launch.json's
+    made.linkle = {"body": "live", "start": "link", "map": LINKLE_LIVE, "mod": its id}}. The map lists each copy
+    ({"from", "to", "dev": "file" | "archive", "pack"}), which the ghost mod names as file redirects (group "linkle").
+    None when no beside mod is The Linkle Mod (charsel.is_linkle_mod)."""
+    ids = sorted({c.get("mod") for c in beside if c.get("mod")})
+    names = {m["id"]: str(m.get("name") or "") for m in lib.mods}
+    mid = next((i for i in ids if i in names and _feature_call("charsel", "is_linkle_mod", i, names[i], lib.root,
+                                                                problems=attention, what="Linkle live")), None)
+    if mid is None:
+        return None
+    files = [{k: c[k] for k in ("from", "to", "dev", "pack") if k in c} for c in beside if c.get("mod") == mid]
+    if not files:
+        return None
+    return {"map": {"tool": TOOL_ID, "group": LINKLE_GROUP, "mod": mid, "files": files},
+            "made": {"body": "live", "start": "link", "map": LINKLE_LIVE, "mod": mid}}
 
 
 def linkle_made(lib: Library, romfs: str | None, attention: list[str]) -> dict | None:
@@ -4802,6 +4838,27 @@ def cmd_move(args) -> int:
     return cmd_list(args)
 
 
+def cmd_beside(args) -> int:
+    """`modman beside <mod> [<prefix> | off]`: deploy a mod's player and armor files BESIDE the game's (as
+    <prefix><name> copies, romfs_mods.Beside) for a live switch in the game (The Linkle Mod: the ghost mod's
+    `iam linkle`, docs/charsel.md "Linkle live"). An invasive test feature: off unless set here."""
+    lib = open_library(args)
+    _, m = lib.find(args.mod)
+    want = args.prefix
+    if want is None:
+        say(f"{m['id']}: {'beside, as ' + m['beside'] + '<name>' if m.get('beside') else 'deployed as usual'}")
+        return 0
+    if want.lower() == "off":
+        m.pop("beside", None)
+    elif not rm.BESIDE_PREFIX_RE.fullmatch(want):
+        raise ModmanError("The prefix is 1-8 letters or digits and ends in _, like SwLk_.")
+    else:
+        m["beside"] = want
+    lib.save()
+    say(f"{m['id']}: {'beside, as ' + want + '<name>' if m.get('beside') else 'deployed as usual'}. Run deploy to apply.")
+    return 0
+
+
 def cmd_remove(args) -> int:
     lib = open_library(args)
     m = remove_mod(lib, args.mod)
@@ -5215,6 +5272,10 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("move", parents=[common], help="move a mod to a position (later mods win)")
     p.add_argument("mod", help="id or number from list")
     p.add_argument("position", type=int)
+    p = sub.add_parser("beside", parents=[common],
+                       help="deploy a mod's player and armor files beside the game's, for a live switch (test)")
+    p.add_argument("mod", help="id or number from list")
+    p.add_argument("prefix", nargs="?", help="the copies' prefix (SwLk_), or off")
     p = sub.add_parser("remove", parents=[common], help="delete a mod from the library")
     p.add_argument("mod", help="id or number from list")
     p = sub.add_parser("deploy", parents=[common], help="build the deploy folder from the enabled mods")
@@ -5274,7 +5335,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
     args = parser().parse_args(argv)
     cmds = {"init": cmd_init, "add": cmd_add, "list": cmd_list, "enable": lambda a: cmd_enable(a, True),
-            "disable": lambda a: cmd_enable(a, False), "move": cmd_move, "remove": cmd_remove,
+            "disable": lambda a: cmd_enable(a, False), "move": cmd_move, "beside": cmd_beside, "remove": cmd_remove,
             "deploy": cmd_deploy, "run": cmd_run, "status": cmd_status, "doctor": cmd_doctor,
             "profile": cmd_profile, "saves": cmd_saves, "crash": cmd_crash, "last-good": cmd_last_good,
             "changes": cmd_changes, "conflicts": cmd_conflicts, "info": cmd_info, "picture": cmd_picture,

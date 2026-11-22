@@ -365,6 +365,10 @@ EXPORT int fake_run(const char *line, char *out, int cap) {
                 control_field_int(&r, "x0", (int64_t)cpu[0]);
                 control_field_int(&r, "x1", (int64_t)cpu[1]);
                 control_field_int(&r, "dev", (int64_t)(intptr_t)g_fake_dev);
+                char seen[64];  // (the path the fake game opened: x4-x11)
+                memcpy(seen, &cpu[4], sizeof seen);
+                seen[63] = 0;
+                control_field_str(&r, "opened", seen);
             }
         }
     } else if (!strcmp(argv[0], "#call") && argc > 1) {

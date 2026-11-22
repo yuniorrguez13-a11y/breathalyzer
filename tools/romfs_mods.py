@@ -87,6 +87,8 @@ R_BAD_NAME = "bad file name"
 R_ROOT = "at the RomFS root"
 R_DLC_MARK = "DLC file in the game's place"
 R_SAME = "same file twice"
+R_BESIDE_LEFT = "left out beside the game's files"   # (a "beside" mod: only its player and armor files are used)
+R_BESIDE_FOLDER = "beside: in a folder the game doesn't have"
 R_EDITING = "image or 3D editor file"   # (mod_inspect.EDITING_EXT: .dds, .gtx, .png...: the game reads none of them)
 
 
@@ -153,6 +155,26 @@ class Layer:
     folder: str
     mod: str
     dlc: bool = False
+
+
+@dataclass(frozen=True)
+class Beside:
+    """A mod deployed BESIDE the game's files (out/research/linkle-live-swap-design.md 2.4, the Linkle live swap): its
+    player and armor files (BESIDE_LOOSE: Model/Link*, Model/Armor_*, Actor/Pack/Armor_*) go in as copies named
+    <folder>/<prefix><name> next to the originals, which stay the game's (or another mod's); the body members of a
+    resident pack (BESIDE_PACKS: TitleBG.pack's Model/Link and Armor_Default) become new members of the pack in use
+    (add_beside); its size table only gives the copies' entries; everything else of the mod is left out. A file
+    redirect (modhost API 4) then sends the game to the copies while the player wants them. `mod_id`: the library id,
+    written with each copy (Plan.beside)."""
+    folder: str
+    prefix: str = "SwLk_"
+    mod_id: str = ""
+
+
+BESIDE_PREFIX_RE = re.compile(r"[A-Za-z][A-Za-z0-9]{0,7}_")
+BESIDE_LOOSE = re.compile(r"(Model/(Link|Armor_[^/]+)(\.Tex)?\.sbfres|Actor/Pack/Armor_[^/]+\.sbactorpack)", re.I)
+BESIDE_PACKS = {"pack/titlebg.pack": re.compile(r"Model/(Link|Armor_Default)(\.Tex)?\.sbfres")}
+BESIDE_OWNER = "generated:beside"
 
 
 @dataclass
@@ -267,6 +289,11 @@ class Plan:
     rstb: MergedRstb | None = None
     generated: dict[str, dict] = field(default_factory=dict)  # overlay path -> {"owner", "built_on"} (add_generated)
     warnings: list[str] = field(default_factory=list)       # from add_generated, shown with the deploy's
+    # Beside mods: their copies ({"from", "to", "dev": "file" | "archive", "pack" (archive), "mod"}), the packs whose
+    # body members become copies (mod index, entry, prefix) and their own size tables (mod index -> entry)
+    beside: list[dict] = field(default_factory=list)
+    beside_packs: list[tuple] = field(default_factory=list)
+    beside_rstb: dict[int, Entry] = field(default_factory=dict)
 
     def winner(self, path: str) -> Winner | None:
         """What the game reads for a RomFS path ("Font/Font_US.sbfarc"; "aoc/0010/..." for a DLC file): the file of
@@ -298,7 +325,8 @@ class Plan:
             raise DeployError("add option folders before the files made at deploy")
         src = list(self.sources)
         at = max((k for k, s in enumerate(src)
-                  if (s.mod if isinstance(s, Layer) else os.path.basename(os.path.abspath(s))) == mod), default=None)
+                  if (s.mod if isinstance(s, Layer) else os.path.basename(os.path.abspath(
+                      s.folder if isinstance(s, Beside) else s))) == mod), default=None)
         if at is None:
             raise DeployError(f"{mod} isn't in this deploy, so its option folder {folder} can't follow it")
         src.insert(at + 1, Layer(folder, mod, dlc))
@@ -306,7 +334,8 @@ class Plan:
             if m.zip:
                 m.zip.close()
         new = plan(src, self.game, self.rstb)
-        for k in ("mods", "winners", "conflicts", "notes", "rstb_merged", "sources"):
+        for k in ("mods", "winners", "conflicts", "notes", "rstb_merged", "sources", "beside", "beside_packs",
+                  "beside_rstb"):
             setattr(self, k, getattr(new, k))
 
 
@@ -603,8 +632,14 @@ def load_layer(layer: Layer, known_top: set[str] = ROMFS_TOP) -> Mod:
 def _plan(mods: list[Mod], mod_paths: list, game: GameIndex | None, known_top: set[str],
           rstb: MergedRstb | None = None) -> Plan:
     seen: set[str] = set()
+    prefix: dict[int, Beside] = {}
     for path in mod_paths:
-        mod = load_layer(path, known_top) if isinstance(path, Layer) else load_mod(path, known_top)
+        if isinstance(path, Beside):
+            if not BESIDE_PREFIX_RE.fullmatch(path.prefix or ""):
+                raise DeployError(f"{path.folder}: beside prefix {path.prefix!r} isn't 1-8 letters or digits and _")
+            prefix[len(mods)] = path
+        mod = load_layer(path, known_top) if isinstance(path, Layer) else \
+            load_mod(path.folder if isinstance(path, Beside) else path, known_top)
         base, k = mod.name, 2
         while mod.name.lower() in seen:
             mod.name, k = f"{base} ({k})", k + 1
@@ -616,9 +651,13 @@ def _plan(mods: list[Mod], mod_paths: list, game: GameIndex | None, known_top: s
         case.update(game.dirs)
         case.update({f"{DLC_PREFIX}{k}": f"{DLC_PREFIX}{v}" for k, v in game.dlc_dirs.items() if k})
     claims: dict[str, list[tuple[int, Entry]]] = {}
+    b_list: list[dict] = []
+    b_packs: list[tuple[int, Entry, Beside]] = []
+    b_rstb: dict[int, Entry] = {}
     for i, mod in enumerate(mods):
         kept = []
         own: dict[str, Entry] = {}
+        bs = prefix.get(i)
         for e in mod.entries:
             gfiles = (game.dlc_files if e.dlc else game.files) if game else {}
             low = e.rel.lower()
@@ -629,6 +668,8 @@ def _plan(mods: list[Mod], mod_paths: list, game: GameIndex | None, known_top: s
                 mod.skipped.append((e.member, R_DLC_MARK))
                 continue
             e.rel = _canon(e.rel, e.dlc, case, gfiles)
+            if bs is not None and not _beside_entry(mod, i, e, bs, game, b_list, b_packs, b_rstb):
+                continue
             first = own.get(e.target.lower())
             if first:  # (romfs/ and atmosphere/contents/01007EF00011E000/romfs/, or names differing in case)
                 if not _same_file(first, e):
@@ -640,7 +681,7 @@ def _plan(mods: list[Mod], mod_paths: list, game: GameIndex | None, known_top: s
             kept.append(e)
             claims.setdefault(e.target.lower(), []).append((i, e))
         mod.entries = kept
-        if not kept:
+        if not kept and not any(k == i for k, _, _ in b_packs):
             raise DeployError(f"{mod.name}: no RomFS files to deploy (all skipped: "
                               f"{', '.join(sorted({r for _, r in mod.skipped}))})")
 
@@ -670,13 +711,42 @@ def _plan(mods: list[Mod], mod_paths: list, game: GameIndex | None, known_top: s
         claims[key] = lst
 
     winners = {lst[-1][1].target: lst[-1] for _, lst in sorted(claims.items())}
-    return Plan(mods, winners, conflicts, game, notes, list(rstb.mods) if rstb is not None and mods else [])
+    out = Plan(mods, winners, conflicts, game, notes, list(rstb.mods) if rstb is not None and mods else [])
+    out.beside, out.beside_packs, out.beside_rstb = b_list, b_packs, b_rstb
+    return out
+
+
+def _beside_entry(mod: Mod, i: int, e: Entry, bs: Beside, game: GameIndex | None, b_list: list, b_packs: list,
+                  b_rstb: dict) -> bool:
+    """A beside mod's file (its rel spelled as the game's): True keeps it, renamed to its copy's name; False: left out
+    (skipped), or kept aside for add_beside (a resident pack, the size table). A copy whose name is a game file's is
+    refused: it would replace that file for everyone."""
+    low = e.rel.lower()
+    if not e.dlc and low == RSTB.lower():
+        b_rstb[i] = e
+        return False
+    if not e.dlc and low in BESIDE_PACKS:
+        b_packs.append((i, e, bs))
+        return False
+    if e.dlc or not BESIDE_LOOSE.fullmatch(e.rel):
+        mod.skipped.append((e.member, R_BESIDE_LEFT))
+        return False
+    d, _, name = e.rel.rpartition("/")
+    to = f"{d}/{bs.prefix}{name}"
+    if game is not None and d.lower() not in game.dirs:
+        mod.skipped.append((e.member, R_BESIDE_FOLDER))   # (Savage Wind adds new files only in the game's folders)
+        return False
+    if game is not None and to.lower() in game.files:
+        raise DeployError(f"{mod.name}: its copy {to} has the name of a game file. Pick another beside prefix.")
+    b_list.append({"from": e.rel, "to": to, "dev": "file", "mod": bs.mod_id or mod.name})
+    e.rel = to
+    return True
 
 
 GENERATED = "generated:"   # the owner of files made at deploy: generated:pictures, generated:fonts, generated:title
 
 
-def add_generated(p: Plan, files: list, owner: str) -> list[str]:
+def add_generated(p: Plan, files: list, owner: str, sizes: dict[str, int] | None = None) -> list[str]:
     """Files made at deploy (tools/font.py, tools/menu_bg.py, tools/mod_pictures.py) as overlay files that win over
     every mod's. `files`: (RomFS path, bytes, size-table entry or None) tuples; the entry is (the file's name in the
     RSTB, the size it needs there), like ("Font/Font_US.bfarc", 3650016); None: it fits the entry already there.
@@ -704,7 +774,8 @@ def add_generated(p: Plan, files: list, owner: str) -> list[str]:
                     or size <= 0:
                 raise ValueError(f"{owner}: {rel}'s size-table entry {rstb!r} isn't (name, size)")
         items.append((rel, data, rstb))
-    sizes: dict[str, int] = {}
+    extra = dict(sizes or {})   # (entries for files deployed otherwise: add_beside's copies)
+    sizes = dict(extra)
     for _, _, rstb in items:
         if rstb is not None:
             sizes[rstb[0]] = max(sizes.get(rstb[0], 0), rstb[1])
@@ -721,6 +792,8 @@ def add_generated(p: Plan, files: list, owner: str) -> list[str]:
             for rel, _, rstb in items:
                 if rstb is not None:
                     p.warnings.append(f"{owner}: {rel} needs a bigger size-table (RSTB) entry: left out.")
+            if extra:
+                p.warnings.append(f"{owner}: {len(extra)} size-table (RSTB) entries couldn't be added")
             items = [x for x in items if x[2] is None]
             table = None
     taken: list[str] = []
@@ -733,6 +806,148 @@ def add_generated(p: Plan, files: list, owner: str) -> list[str]:
         p.generated[rel]["sizes"] = changed
     p.winners = dict(sorted(p.winners.items()))
     return taken
+
+
+def _entry_bytes(p: Plan, i: int, e: Entry) -> bytes:
+    if e.data is not None:
+        return e.data
+    if e.src:
+        with open(e.src, "rb") as f:
+            return f.read()
+    return p.mods[i].zip.read(e.zname)
+
+
+def _rstb_table(data: bytes) -> tuple[dict[int, int], dict[str, int]]:
+    """A size table's entries: (by CRC-32, by name)."""
+    import wiiu_convert as wc
+    raw = wc.yaz0_decompress(bytes(data))[0] if bytes(data[:4]) == b"Yaz0" else bytes(data)
+    crcs, named = wc.rstb_load(raw)
+    return dict(crcs), {n.split(b"\0", 1)[0].decode("utf-8", "replace"): v for n, v in named}
+
+
+def _member_align(data_offset: int, start: int) -> int:
+    off = data_offset + start   # (the member's alignment as the pack has it: the largest power of two its offset has)
+    return max(4, min(off & -off if off else 0x2000, 0x2000))
+
+
+def pack_beside(base: bytes, hers: bytes, members: re.Pattern, prefix: str) -> tuple[bytes, list[tuple[str, str]]]:
+    """The pack `base` (the one in use) with the members of `hers` that `members` matches and that differ from base's
+    added as <dir>/<prefix><name>, each aligned as base's original. Returns (the new pack, [(member, copy name)])."""
+    import bnp
+    import wiiu_convert as wc
+    try:
+        bs, hs = wc.sarc_parse(base), wc.sarc_parse(hers)
+    except wc.FormatError as e:
+        raise DeployError(f"a pack for the copies can't be read ({e})") from None
+    bm = {n.name: n for n in bs.nodes}
+    low = {n.lower() for n in bm}
+    items = [(n.name, base[bs.data_offset + n.start:bs.data_offset + n.end], _member_align(bs.data_offset, n.start))
+             for n in bs.nodes]
+    added = []
+    for n in sorted(hs.nodes, key=lambda x: x.name):
+        if not members.fullmatch(n.name):
+            continue
+        d, _, leaf = n.name.rpartition("/")
+        to = f"{d}/{prefix}{leaf}" if d else prefix + leaf
+        if to.lower() in low:
+            raise DeployError(f"the pack has a member {to} already: pick another beside prefix")
+        data = hers[hs.data_offset + n.start:hs.data_offset + n.end]
+        old = bm.get(n.name)
+        if old is not None and base[bs.data_offset + old.start:bs.data_offset + old.end] == data:
+            continue   # (the same as the pack's own: no copy needed)
+        a = _member_align(bs.data_offset, old.start) if old is not None else _member_align(hs.data_offset, n.start)
+        items.append((to, data, a))
+        added.append((n.name, to))
+    return (bnp.sarc_build(items, bs.hash_key) if added else bytes(base)), added
+
+
+def add_beside(p: Plan, owner: str = BESIDE_OWNER) -> list[dict]:
+    """The beside mods' copies (Plan.beside, made in plan from Beside sources) finished: each resident pack they ship
+    (BESIDE_PACKS) becomes the pack in use plus their body members as copies (a made file), and the size table gets,
+    from each mod's own table, its entry for each copy and, for the original name, the larger of the game's and its
+    (the redirect opens her file under that name; entries are only ever raised). A copy whose entry the mod's table
+    doesn't have is left out (warning): the game must never read a file bigger than its entry. Returns the copies
+    kept (Plan.beside is set to them), for the redirect list (modman: linkle-live.json)."""
+    import zlib as _z
+    if not p.beside and not p.beside_packs:
+        return []
+    tables: dict[int, tuple[dict, dict]] = {}
+
+    def her_size(i: int, rel: str) -> int | None:
+        if i not in tables:
+            tables[i] = ({}, {})
+            e = p.beside_rstb.get(i)
+            if e is not None:
+                try:
+                    tables[i] = _rstb_table(_entry_bytes(p, i, e))
+                except Exception as ex:  # (a table that can't be read: no entries, so no copies)
+                    p.warnings.append(f"{p.mods[i].name}: its size table (RSTB) can't be read ({ex})")
+        crc, named = tables[i]
+        name = rstb_name(rel)
+        return named.get(name, crc.get(_z.crc32(name.encode()) & 0xFFFFFFFF))
+
+    if p.winner(RSTB) is None:   # (no size table to give the copies entries: none can be deployed)
+        p.warnings.append("the copies beside the game's files are left out: no size table (RSTB) is known")
+        for c in p.beside:
+            hit = next((t for t in p.winners if t.lower() == c["to"].lower()), None)
+            if hit:
+                del p.winners[hit]
+        p.beside = []
+        return []
+    sizes: dict[str, int] = {}
+    keep: list[dict] = []
+
+    def take(i: int, c: dict) -> bool:
+        s = her_size(i, c["from"])
+        if s is None:
+            p.warnings.append(f"{c['mod']}: {c['from']} has no entry in its own size table (RSTB): its copy is left "
+                              "out")
+            return False
+        for rel in (c["to"], c["from"]):
+            sizes[rstb_name(rel)] = max(sizes.get(rstb_name(rel), 0), s)
+        keep.append(c)
+        return True
+
+    for c in p.beside:
+        i = next((k for k, m in enumerate(p.mods) if any(e.rel == c["to"] for e in m.entries)), None)
+        if i is None or not take(i, c):
+            hit = next((t for t in p.winners if t.lower() == c["to"].lower()), None)
+            if hit:
+                del p.winners[hit]
+    files = []
+    for i, e, b in p.beside_packs:
+        px = b.prefix
+        w = p.winner(e.rel)   # (the pack in use without the beside mod's: the game's or another mod's)
+        if w is None:
+            p.warnings.append(f"{p.mods[i].name}: {e.rel} isn't in the game or another mod: its body copies are left "
+                              "out")
+            continue
+        base = w.read()
+        new, added = pack_beside(base, _entry_bytes(p, i, e), BESIDE_PACKS[e.rel.lower()], px)
+        mid = b.mod_id or p.mods[i].name
+        ok = [(f, to) for f, to in added
+              if take(i, {"from": f, "to": to, "dev": "archive", "pack": w.target, "mod": mid})]
+        if len(ok) < len(added):  # (a member left out: build the pack again with only the kept ones)
+            keep_names = {f for f, _ in ok}
+            import re as _re
+            only = _re.compile("|".join(_re.escape(f) for f in keep_names) or "(?!)")
+            new, _ = pack_beside(base, _entry_bytes(p, i, e), only, px)
+        if ok:
+            files.append((w.target, new, None))
+    p.beside = keep
+    if files or sizes:
+        n0 = len(p.warnings)
+        add_generated(p, files, owner, sizes=sizes)
+        if sizes and any("size-table (RSTB) entries couldn't be added" in w for w in p.warnings[n0:]):
+            # (no entries: her files would be read under his names into his sizes. No copy is named for a redirect.)
+            for c in keep:
+                hit = next((t for t in p.winners if t.lower() == c["to"].lower()), None)
+                if hit and c["dev"] == "file":
+                    del p.winners[hit]
+            p.warnings.append("the copies beside the game's files are left out: their size-table entries couldn't "
+                              "be added")
+            p.beside = keep = []
+    return keep
 
 
 def rstb_name(rel: str) -> str:

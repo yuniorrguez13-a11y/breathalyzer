@@ -387,7 +387,8 @@ class ModHeader(unittest.TestCase):
               "dispatch_lookup", "find_site", "hle_override", "guest_call", "current_cpu"]
         v2 = ["hook", "can_hook"]
         v3 = ["mod_id", "setting_int", "setting_num", "setting_str", "setting_watch", "setting_set", "settings_ui"]
-        self.assertEqual(fields, v1 + v2 + v3)  # settings (v3) appended after v2, never in between
+        v4 = ["fs_redirect_add", "fs_redirect_set", "fs_redirect_state"]  # (the file redirect, fslog.c)
+        self.assertEqual(fields, v1 + v2 + v3 + v4)  # each version appended after the one before, never in between
 
 
 # ------------------------------------------------------------------ install planning
@@ -1224,6 +1225,50 @@ class FileLogOverlapChecks(unittest.TestCase):
         self.assertEqual(len(bad(1, lambda t: t.replace(bn.FSLOG_OVER_NOTE + "\n", ""))), 1)   # no note why
         self.assertEqual(len(bad(1, lambda t: t + "0.1\t1\te92690\t0\tok\t0.0\t-\tModel/Mine.sbfres\t\n")), 1)
         self.assertEqual(len(bad(2, lambda log: "")), len(bn.FSLOG_OVER_LOG) + 1)          # savagewind.log silent
+
+
+def good_chain() -> list:
+    """A made-up run E, as the selftest should see it: [e, e_log] for bn.selftest_expect_chain."""
+    def okd(**data):
+        return {"ok": True, "data": data}
+
+    rows = okd(**{"count": 2, "0.addr": 0x7000001000, "0.name": "chain_probe", "1.addr": 0x7000002000,
+                  "1.name": "chain_probe_b"})
+    e = {"overrides": rows, "call": okd(x0=4113), "call_b": okd(x0=142), "who": okd(own=False, same=True),
+         "late": okd(low=True, tried=True), "overrides_after": rows, "call_after": okd(x0=4113)}
+    return [e, "\n".join(bn.CHAIN_LOG)]
+
+
+class OverrideChainChecks(unittest.TestCase):
+    """selftest_expect_chain: two mods of game start that hle_override one function both run, in load order, each once;
+    a mod whose swmod_init fails leaves the chain; Savage Wind gets one override per address."""
+
+    def test_good_run_passes(self):
+        self.assertEqual(bn.selftest_expect_chain(*good_chain()), [])
+
+    def test_targets(self):
+        self.assertEqual([t.name for t in bn.SELFTEST_CHAIN], ["chain1", "chain2", "chain3"])
+        self.assertEqual([t.defines for t in bn.SELFTEST_CHAIN],
+                         [("CHAIN_TAG=1",), ("CHAIN_TAG=2", "CHAIN_FAIL"), ("CHAIN_TAG=3",)])
+        self.assertEqual({t.output(Path("C:/b")).parent for t in bn.SELFTEST_CHAIN}, {Path("C:/b/selftest/chain-start")})
+
+    def test_problems_are_caught(self):
+        def bad(i, change):
+            r = good_chain()
+            r[i] = change(r[i])
+            return bn.selftest_expect_chain(*r)
+
+        def step(k, v):
+            return lambda e: {**e, k: v}
+
+        self.assertEqual(len(bad(0, step("call", {"ok": True, "data": {"x0": 41}}))), 1)     # first override won
+        self.assertEqual(len(bad(0, step("call", {"ok": True, "data": {"x0": 41213}}))), 1)  # the failed mod ran
+        self.assertEqual(len(bad(0, step("call", {"ok": True, "data": {"x0": 41133}}))), 1)  # chain3 ran twice
+        self.assertEqual(len(bad(0, step("who", {"ok": True, "data": {"own": True, "same": False}}))), 1)
+        self.assertEqual(len(bad(0, step("late", {"ok": True, "data": {"low": False, "tried": True}}))), 1)  # a loop
+        self.assertEqual(len(bad(0, step("overrides_after", {"ok": True, "data": {"count": 3}}))), 1)
+        self.assertEqual(len(bad(1, lambda log: log + "\n[modhost] override chain 0x7000002000: chain1 -> game")), 1)
+        self.assertEqual(len(bad(1, lambda log: "")), len(bn.CHAIN_LOG))                      # savagewind.log silent
 
 
 class FakeGameRun(unittest.TestCase):
