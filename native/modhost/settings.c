@@ -1403,9 +1403,17 @@ static bool st_detach_watchers(Mod *m, uint64_t until) {
         }
     if (!any) return true;
     if (gate_sync(&g_st_gate, until)) return true;
-    for (uint32_t k = 0; k < n; k++)
+    for (uint32_t k = 0; k < n && !m->switched_off; k++)  // (a switched-off mod's stay off)
         if (g_st_watch[k].mod == m->id) __atomic_store_n(&g_st_watch[k].active, 1, __ATOMIC_SEQ_CST);
     return false;
+}
+
+// switch_off (its swmod_init failed): the mod's watchers are never called again, at once (no wait: a call running
+// now ends by itself, and modunload's st_detach_watchers still waits for it). The slots stay its own until modunload.
+static void st_switch_off(Mod *m) {
+    uint32_t n = __atomic_load_n(&g_st_nwatch, __ATOMIC_ACQUIRE);
+    for (uint32_t k = 0; k < n; k++)
+        if (g_st_watch[k].mod == m->id) __atomic_store_n(&g_st_watch[k].active, 0, __ATOMIC_SEQ_CST);
 }
 
 // modunload went through: the slots are free again.

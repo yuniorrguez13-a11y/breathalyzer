@@ -217,17 +217,19 @@ static void note_fail(struct Cpu *c, int dual, uint64_t heap, uint64_t size, int
 
 // ---- the texture rescue: the extra memory and its heap (made at the first allocation it must give)
 static uint64_t g_rescue_lo, g_rescue_hi, g_rescue_heap;  // its heap's memory (lo 0: not made); set once
-static int g_rescue_making;
+static int g_rescue_making;                               // ROOM_MAKING_* (room_core.h)
+static uint64_t g_rescue_retry_at;                        // (the maker's only) Windows gave no memory: not before
 static int64_t g_rescue_redirects;
 static SwModGuestFn g_ptr_orig[4];
 static const uint64_t PTR_FN[4] = {EXP_FREE, EXP_RESIZE_FRONT, EXP_RESIZE_BACK, EXP_REALLOC};
 
 // Reserve and commit size bytes in the first free run of address space from RESCUE_FROM to RESCUE_TO (64 MB steps:
-// only addresses no one has, Windows says). Its address, or 0 (and why).
-static uint64_t commit_extra(uint64_t size, char *why, size_t cap) {
+// only addresses no one has, Windows says). Its address, or 0 (and why; *tried: free runs Windows refused).
+static uint64_t commit_extra(uint64_t size, char *why, size_t cap, int *tried_out) {
     const uint64_t step = 64ull << 20;
     uint64_t a = RESCUE_FROM;
     int tried = 0;
+    *tried_out = 0;
     while (a + size <= RESCUE_TO) {
         RoomMemInfo mi;
         memset(&mi, 0, sizeof mi);
@@ -245,8 +247,10 @@ static uint64_t commit_extra(uint64_t size, char *why, size_t cap) {
     }
     char mb[32];
     room_mb(mb, sizeof mb, (int64_t)size);
-    snprintf(why, cap, tried ? "Windows gave no memory (%s asked: the PC's RAM and page file are full)"
+    snprintf(why, cap, tried ? "Windows gave no memory now (%s asked: the PC's RAM and page file are full; tried again "
+                               "later)"
                              : "no free %s of address space above the guest's memory", mb);
+    *tried_out = tried;
     return 0;
 }
 
@@ -287,8 +291,10 @@ static int guest_layout_ok(char *why, size_t cap) {
     return 1;
 }
 
-// Make the extra memory and its heap (registers: the caller saves them). 1 made, 0 not for this request (too big, or
-// too little memory free now: tried again at a later need), -1 never (why says it).
+// Make the extra memory and its heap (registers: the caller saves them; the caller holds g_rescue_making). 1 made, 0
+// not for this request (too big, or too little memory free now: tried again at a later need), -1 never (why says it).
+// Published first, registered after: waiters are served (and drop any heap-tree lock they hold) before root_add takes
+// that lock; a free in between goes to the heap by address (ptr_common).
 static int rescue_make(struct Cpu *c, uint64_t need, char *why, size_t cap) {
     lock();
     int64_t size = room_rescue_size(&g_room, need);
@@ -318,12 +324,24 @@ static int rescue_make(struct Cpu *c, uint64_t need, char *why, size_t cap) {
         snprintf(why, cap, "the game's string class isn't where 1.9.0 has it");
         return -1;
     }
-    uint64_t base = commit_extra((uint64_t)size, why, cap), heap = base + ROOM_RESCUE_HEAD;
-    if (!base) return -1;
+    if (GetTickCount64() < g_rescue_retry_at) {  // (Windows gave no memory a moment ago: not on every failed frame)
+        snprintf(why, cap, "Windows gave no memory a moment ago (the PC's RAM and page file were full): tried again "
+                 "in a second");
+        return 0;
+    }
+    int tried = 0;
+    uint64_t base = commit_extra((uint64_t)size, why, cap, &tried), heap = base + ROOM_RESCUE_HEAD;
+    if (!base) {  // (Windows refusing a free range is the same short low-memory moment as room_rescue_fit's 0)
+        if (tried) g_rescue_retry_at = GetTickCount64() + ROOM_RESCUE_RETRY_MS;
+        return room_rescue_commit_failed(tried);
+    }
     // its name (a sead SafeString, kept: the heap points at its text) in the first page, the heap after it
     *(volatile uint64_t *)(uintptr_t)base = vt + 0x10;
     *(volatile uint64_t *)(uintptr_t)(base + 8) = base + 0x10;
     memcpy((void *)(uintptr_t)(base + 0x10), RESCUE_NAME, sizeof RESCUE_NAME);
+    // in the game's heap code from here: its constructor takes the heap-tree lock, which a waiter may hold (a thread
+    // that failed inside ExpHeap::create), so waiters stop waiting now (room_rescue_step) instead of freezing both
+    __atomic_store_n(&g_rescue_making, ROOM_MAKING_GAME, __ATOMIC_RELEASE);
     SwModRegs *r = SWMOD_REGS(c);
     r->x[0] = heap, r->x[1] = base, r->x[2] = 0, r->x[3] = heap, r->x[4] = (uint64_t)(size - ROOM_RESCUE_HEAD);
     r->x[5] = 1, r->x[6] = 1;  // forward, with its own lock (game threads share it)
@@ -337,13 +355,18 @@ static int rescue_make(struct Cpu *c, uint64_t need, char *why, size_t cap) {
         VirtualFree((void *)(uintptr_t)base, 0, ROOM_MEM_RELEASE);  // (nothing points into it: not a root heap yet)
         return -1;
     }
-    int root = root_add(c, heap);
+    // publish (waiters use it at once), then register: root_add takes the heap-tree lock a waiter may have held
     lock();
     g_room.rescue.base = base, g_room.rescue.size = (uint64_t)size, g_room.rescue.heap = heap;
-    g_room.rescue.root = root, g_room.rescue.state = 1, g_room.rescue.free_now = free_b;
+    g_room.rescue.root = 0, g_room.rescue.state = 1, g_room.rescue.free_now = free_b;
     unlock();
     g_rescue_heap = heap, g_rescue_hi = base + (uint64_t)size;
     __atomic_store_n(&g_rescue_lo, heap, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_rescue_making, ROOM_MAKING_NONE, __ATOMIC_RELEASE);
+    int root = root_add(c, heap);
+    lock();
+    g_room.rescue.root = root;
+    unlock();
     char mb[32];
     room_mb(mb, sizeof mb, size);
     api->log("room: made the extra memory for full heaps: %s, a game heap \"%s\" at %llx%s", mb, RESCUE_NAME,
@@ -353,27 +376,40 @@ static int rescue_make(struct Cpu *c, uint64_t need, char *why, size_t cap) {
 
 // One allocation from the extra heap (registers: the caller saves them). 0: none.
 // Made once: the first need makes it (several loader threads fail together at the first load). A thread that comes
-// while another makes it waits for it (at most 2 s, so a thread holding a lock the maker needs can't hang the game:
-// its allocation then fails as in the plain game); the maker looks again under the flag, so it is never made twice.
+// while another makes it waits for it (room_rescue_step: at most ROOM_RESCUE_WAIT_MS, and not while the maker is in
+// the game's heap code, which may need a lock this thread holds: its allocation then fails as in the plain game). When
+// the maker's own ask didn't fit (0), a waiter tries being the maker with its own ask. The maker looks again under the
+// flag, so it is never made twice.
 static uint64_t rescue_alloc(struct Cpu *c, uint64_t size, int64_t align) {
-    if (!__atomic_load_n(&g_rescue_lo, __ATOMIC_ACQUIRE)) {
-        if (__atomic_exchange_n(&g_rescue_making, 1, __ATOMIC_ACQUIRE)) {
-            uint64_t until = GetTickCount64() + 2000;
-            while (__atomic_load_n(&g_rescue_making, __ATOMIC_ACQUIRE) && GetTickCount64() < until) Sleep(1);
-            if (!__atomic_load_n(&g_rescue_lo, __ATOMIC_ACQUIRE)) return 0;
-            goto made;
-        }
+    uint64_t until = GetTickCount64() + ROOM_RESCUE_WAIT_MS;
+    for (;;) {
         int state;
         lock();
         state = g_room.rescue.state;
         unlock();
+        int step = room_rescue_step(__atomic_load_n(&g_rescue_lo, __ATOMIC_ACQUIRE),
+                                    __atomic_load_n(&g_rescue_making, __ATOMIC_ACQUIRE), state == 2, GetTickCount64(),
+                                    until);
+        if (step == ROOM_RESCUE_USE) goto made;
+        if (step == ROOM_RESCUE_GIVE_UP) return 0;
+        if (step == ROOM_RESCUE_WAIT) {
+            Sleep(1);
+            continue;
+        }
+        int none = ROOM_MAKING_NONE;  // (MAKE: take the flag; another thread may have just taken it)
+        if (!__atomic_compare_exchange_n(&g_rescue_making, &none, ROOM_MAKING_OWN, 0, __ATOMIC_ACQUIRE,
+                                         __ATOMIC_RELAXED))
+            continue;
+        lock();
+        state = g_room.rescue.state;
+        unlock();
         if (__atomic_load_n(&g_rescue_lo, __ATOMIC_ACQUIRE) || state == 2) {  // (made, or refused, while we looked)
-            __atomic_store_n(&g_rescue_making, 0, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_rescue_making, ROOM_MAKING_NONE, __ATOMIC_RELEASE);
             if (state == 2) return 0;
             goto made;
         }
         char why[200] = "";
-        int ok = rescue_make(c, size, why, sizeof why);
+        int ok = rescue_make(c, size, why, sizeof why);  // (1: made, published and the flag already cleared)
         if (ok < 0) {
             lock();
             g_room.rescue.state = 2;
@@ -387,8 +423,9 @@ static uint64_t rescue_alloc(struct Cpu *c, uint64_t size, int64_t align) {
             static int said;  // (a texture system may ask again every frame: the first 10)
             if (g_log && __atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) < 10) api->log("room: %s", why);
         }
-        __atomic_store_n(&g_rescue_making, 0, __ATOMIC_RELEASE);
-        if (ok <= 0) return 0;
+        if (ok > 0) goto made;
+        __atomic_store_n(&g_rescue_making, ROOM_MAKING_NONE, __ATOMIC_RELEASE);  // (a waiter may try its own ask now)
+        return 0;
     }
 made:;
     SwModRegs *r = SWMOD_REGS(c);

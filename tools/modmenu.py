@@ -3,7 +3,7 @@
 
     python tools/modmenu.py setup                  build the Mod menu mod, add it to the library, write the mod list
     python tools/modmenu.py show                   the list as the game shows it, and the changes that wait
-    python tools/modmenu.py apply                  use the changes from the game now: on/off, order, then deploy
+    python tools/modmenu.py apply [--no-rebuild]   use the changes from the game now: on/off, order, then deploy
     python tools/modmenu.py undo                   throw away the changes from the game
     python tools/modmenu.py sync                   write the game's mod list again (after changes in Mod Manager)
     python tools/modmenu.py play                   apply, then start the game (python tools/modman.py run)
@@ -1045,15 +1045,18 @@ def _reason(e: BaseException, lib: mm.Library) -> str:
     return ascii_text(text, NOTE_MAX)
 
 
-def apply(lib: mm.Library, deploy=None) -> Applied:
+def apply(lib: mm.Library, deploy=None, *, no_rebuild: bool = False) -> Applied:
     """Use what the player changed in the game: merge pending.txt (against the list it was made from: read_base) into
     config.json, deploy, then write menu.txt. Changes made in Mod Manager meanwhile stay. When the deploy fails,
     config.json goes back to how it was (unless another program saved it meanwhile), pending.txt stays (the changes
     still wait: try again, or undo them), and the reason becomes menu.txt's note (the game shows it as "Last change
     not used"). An apply that was cut off (apply.json is there: config.json may hold changes that were never
-    deployed) is finished: it deploys again. deploy(lib) defaults to modman's deploy. Refused while Savage Wind runs."""
+    deployed) is finished: it deploys again. deploy(lib) defaults to modman's deploy; no_rebuild: that deploy doesn't
+    rebuild the game code (modman deploy --no-rebuild: the code mods that need it wait), so the changes from the game
+    are used even when a code mod can't be built (the launcher's Play without code mods). Refused while Savage Wind
+    runs."""
     _refuse_if_running("press Play")
-    deploy = deploy or (lambda library: mm.deploy(library))
+    deploy = deploy or (lambda library: mm.deploy(library, no_rebuild=no_rebuild))
     before = _read_marker(lib)
     if not os.path.isfile(menu_path(lib, PENDING)) and before is None:
         return Applied("nothing")
@@ -1271,7 +1274,7 @@ def _say_applied(a: Applied) -> None:
 
 
 def cmd_apply(args) -> int:
-    a = apply(open_lib(args))
+    a = apply(open_lib(args), no_rebuild=args.no_rebuild)
     _say_applied(a)
     if a.launch:
         say(mm.format_deploy(a.launch))
@@ -1293,7 +1296,7 @@ def cmd_sync(args) -> int:
 
 def cmd_play(args) -> int:
     lib = open_lib(args)
-    a = apply(lib)
+    a = apply(lib, no_rebuild=args.no_rebuild)
     if a.status != "nothing":
         _say_applied(a)
     else:
@@ -1325,11 +1328,14 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--install", help="your Savage Wind folder (its zig builds the mod)")
     p.add_argument("--out", help="build folder (default: build/native)")
     sub.add_parser("show", parents=[common], help="the list as the game shows it, and the changes that wait")
-    sub.add_parser("apply", parents=[common], help="use the changes from the game now (then deploy)")
+    rebuild_help = "deploy without rebuilding the game code (as modman.py deploy --no-rebuild)"
+    p = sub.add_parser("apply", parents=[common], help="use the changes from the game now (then deploy)")
+    p.add_argument("--no-rebuild", action="store_true", help=rebuild_help)
     sub.add_parser("undo", parents=[common], help="throw away the changes from the game")
     sub.add_parser("sync", parents=[common], help="write the game's mod list again (with the game closed)")
     p = sub.add_parser("play", parents=[common], help="apply, then start the game")
     p.add_argument("--port", type=mm.port_arg, help="control port for cheats (as modman.py run)")
+    p.add_argument("--no-rebuild", action="store_true", help=rebuild_help)
     mod_help = "id, name, or number from show (its place in the game's list, as in the game)"
     p = sub.add_parser("set", parents=[common], help="turn a mod on or off for the next start")
     p.add_argument("mod", help=mod_help)

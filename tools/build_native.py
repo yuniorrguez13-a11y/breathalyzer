@@ -631,7 +631,10 @@ def _api_version() -> int:
 
 
 API_VERSION = _api_version()  # swmod.h SWMOD_API_VERSION (the host the selftest builds)
-SELFTEST_LINES = ("mods", "hello", "probe", "probe fail", "#overrides", "#guest_calls", "#commands")
+SELFTEST_LINES = ("mods", "hello", "probe", "probe fail", "bad_cmd", "#overrides", "#guest_calls", "#commands")
+# bad.dll (probe.c -DPROBE_FAIL) adds this command, then its swmod_init fails: the name stays with Savage Wind (it
+# can't remove one), but modhost's stand-in answers that the mod is off and never runs the mod's code (S3.1-3r)
+BAD_CMD_ERROR = "bad_cmd: bad.dll's swmod_init failed, so it is off (see `mods`)"
 FAKE_BUILTINS = ["help", "ping"]  # the fake savagewind.exe's own commands (fake_runtime.c)
 # the commands modhost adds (modhost.c swgame_tables; modsettings and modset: mod settings, API 3, settings.c)
 HOST_COMMANDS = ["mods", "modload", "modunload", "modreload", "modsettings", "modset"]
@@ -684,10 +687,14 @@ def selftest_expect(result: dict) -> list[str]:
     want(o.get("count") == 1 and o.get("0.addr") == 0x7000001000 and o.get("0.name") == "probe_override",
          "hle_override is passed on")
     g = result.get("#guest_calls", {}).get("data", {})
-    want(g.get("count") == 1 and g.get("0.addr") == 0x7000003000 and g.get("0.cpu") == p.get("cpu_ptr"),
-         f"guest_call is passed on with the mod's Cpu, and dropped without one ({g})")
+    want(g.get("count") == 2 and g.get("0.addr") == 0x7000002000 and g.get("1.addr") == 0x7080000010
+         and g.get("0.cpu") == g.get("1.cpu") == p.get("cpu_ptr"),
+         f"guest_call is passed on with the mod's Cpu (a game function, and outside the game's code: an HLE stub), "
+         f"and dropped without one, at 0 or where no game function starts ({g})")
+    want(result.get("bad_cmd") == {"ok": False, "error": BAD_CMD_ERROR} and not m.get("mods.0.commands"),
+         f"a command of a mod whose swmod_init failed is off: its code never runs ({result.get('bad_cmd')})")
     cmds = sorted(result.get("#commands", {}).get("data", {}).values())
-    want(cmds == sorted([*FAKE_BUILTINS, *HOST_COMMANDS, "hello", "probe", "probe_more"]),
+    want(cmds == sorted([*FAKE_BUILTINS, *HOST_COMMANDS, "bad_cmd", "hello", "probe", "probe_more"]),
          f"registered commands ({cmds}; the broken entry, taken names and the overflow skipped)")
     return bad
 
@@ -701,6 +708,11 @@ SELFTEST_LOG = (
     "[modhost] mod probe.dll: command probe_full skipped: Savage Wind didn't add it (its command table may be full)",
     "[mod] probe: ready, 2 command(s)",
     f"[modhost] mod probe.dll: ok, commands: probe,probe_more, skipped: {PROBE_SKIPPED}",
+    "[modhost] mod bad.dll: swmod_init failed (code 7): its hooks, overrides, commands, setting watchers and overlays "
+    "were taken out",
+    "[modhost] mod probe.dll: guest_call to address 0 refused (a site or pattern that wasn't found?)",
+    "[modhost] mod probe.dll: guest_call to 0x7000003000 refused: no game function starts there (a site of another "
+    "game version, or a pattern that found the middle of a function?)",
 )
 
 

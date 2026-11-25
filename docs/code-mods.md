@@ -105,10 +105,17 @@ A status is `ok`, `init failed (code N)`, `load failed (error N)` (a Windows err
 
 A mod loaded at game start whose `swmod_init` fails leaves nothing running: its hooks are taken out again, and its
 `hle_override` calls (held back until every mod of game start has started) never reach the game, and no later mod
-chains on them ([override chains](#two-mods-on-one-function-override-chains)). Its DLL stays loaded.
+chains on them ([override chains](#two-mods-on-one-function-override-chains)). The commands it added keep their names
+(Savage Wind can't remove one) but answer `<command>: <mod>.dll's swmod_init failed, so it is off (see mods)` and
+never run its code; its setting watchers are never called and its overlays draw nothing. Its DLL stays loaded. (The
+commands a mod adds in `swmod_init` go to Savage Wind through a modhost stand-in for that; 512 at most, past that
+they go in directly as before.)
 
-`guest_call` to address 0 (a site or pattern that wasn't found) is refused with a log line naming the mod; the call
-does nothing. Savage Wind would stop the game with FATAL.
+`guest_call` to address 0 (a site or pattern that wasn't found), or to an address inside the game's code where no
+function starts and no override sits (a site of another game version, a pattern that found the middle of a
+function), is refused with a log line naming the mod (20 lines at most); the call does nothing. Savage Wind would
+stop the game with FATAL and blame the game. An address outside the game's code (Savage Wind's own HLE stubs) is
+passed on as before.
 
 ## Load a mod while the game runs
 
@@ -296,6 +303,9 @@ two mods can wrap the same function, e.g. emotes and Dragonbreath on Link's upda
 - The same mod overriding the same address twice keeps one link (the newer function, in its place in the chain).
   A second one once another mod has wrapped it is refused (two links of one mod would loop).
 - At most 128 overrides at game start (all mods together); past that, `hle_override` is refused with a log line.
+  Once the game runs the same 128 hold: an override modhost can't note is refused too (it could go in twice, Savage
+  Wind stops the game at 1024 rows, and no later mod would hear that the address is taken). modhost makes every
+  `hle_override` call under one lock (Savage Wind's table has none).
 - Overrides only chain from `swmod_init`. Once the game runs, an `hle_override` for an address that is already
   overridden is refused with a log line (`another mod overrides it already, and overrides only chain while the mods
   start`); a new address still goes in. modhost's file log only wraps the file opens no mod overrides.

@@ -11,6 +11,7 @@ import stat
 import struct
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -627,6 +628,45 @@ class StaleBuilds(Base):
             self.assertTrue((Path(mm.TOOLS).parent / tool).is_file(), tool)
             self.assertNotIn("--on", cmd)
             self.assertEqual(tbc.parse_problem(cmd[0], [*cmd[1:], "--library", "X:/l", "--game", "X:/g"]), "", cmd)
+
+    def fake_tool(self, body: str) -> str:
+        tools = self.tmp / "fake-tools"
+        tools.mkdir(exist_ok=True)
+        (tools / "slow_build.py").write_text(body, encoding="utf-8")
+        return str(tools)
+
+    def test_a_rebuild_passes_its_lines_on_as_it_goes(self):
+        """F-MODMAN4: the rebuild's lines reach the launcher while it runs (it looked frozen for a minute), stderr
+        too, indented; the exit code and the text come back as before."""
+        tools = self.fake_tool("import sys, time\nprint('stage 1 done', flush=True)\ntime.sleep(0.3)\n"
+                               "print('oops', file=sys.stderr, flush=True)\nprint('Done.')\nsys.exit(3)\n")
+        seen = []
+        lib = mm.Library.load(str(self.libdir))
+        with mock.patch.object(mm, "TOOLS", tools):
+            code, text = mm.run_recipe_build(["slow_build.py", "build"], lib, str(self.install), out=seen.append)
+        self.assertEqual(code, 3)
+        self.assertEqual(seen, ["  stage 1 done", "  oops", "  Done."])
+        self.assertEqual(text.splitlines(), ["stage 1 done", "oops", "Done."])
+
+    def test_a_rebuild_that_hangs_is_stopped_and_failed(self):
+        """F-MODMAN4: no time limit = a hung rebuild (a locked game file, a scan) hung deploy and Play for good. Now
+        it is stopped after RECIPE_TIMEOUT (here 1 s) and counts as a failed rebuild, with the reason last."""
+        tools = self.fake_tool("import time\nprint('working', flush=True)\ntime.sleep(60)\n")
+        lib = mm.Library.load(str(self.libdir))
+        t = time.monotonic()
+        with mock.patch.object(mm, "TOOLS", tools):
+            code, text = mm.run_recipe_build(["slow_build.py", "build"], lib, str(self.install), timeout=1.0,
+                                             out=lambda line: None)
+        self.assertLess(time.monotonic() - t, 30)
+        self.assertEqual(code, 1)
+        self.assertEqual(text.splitlines()[0], "working")
+        self.assertIn("was still running after 1 s and was stopped", text.splitlines()[-1])
+        self.assertGreaterEqual(mm.RECIPE_TIMEOUT, 10 * 60)
+
+    def test_the_launcher_says_a_recipe_is_rebuilding(self):
+        """The line deploy prints before a rebuild is the one the launcher turns into a "rebuilding" status."""
+        import modman_gui as gui
+        self.assertEqual(gui.RECIPE_LINE, mm.RECIPE_SAY)
 
     def test_records_only_and_no_path_outside_romfs(self):
         root = self.tmp / "rec"
@@ -1421,6 +1461,19 @@ class HelperDlls(Base):
         self.mod("Three", {"three.dll": make_pe(exports=("swmod_init",)), "util.dll": make_pe(exports=("b",))})
         launch, _ = self.deploy()
         self.assertIn("both have util.dll: Three's is used", " ".join(launch["attention"]))
+
+    def test_two_frame_job_mods_both_run(self):
+        # BUG2: Infinite Stamina and Ghost multiplayer both wrap the game's frame job. Since modhost chains the
+        # overrides of game start (6409b5f), both run: no "only one runs" warning any more.
+        self.build_host()
+        self.mod("Infinite Stamina", {"basics_inf_stamina.dll": make_pe(exports=("swmod_init",))})
+        self.mod("Ghost multiplayer", {"ghost.dll": make_pe(exports=("swmod_init",))})
+        launch, _ = self.deploy()
+        self.assertEqual(sorted(launch["parts"]["native"]["mods"]), ["basics_inf_stamina.dll", "ghost.dll"])
+        said = " ".join(launch["attention"] + launch.get("notes", []))
+        self.assertNotIn("frame hook", said)
+        self.assertNotIn("won't run", said)
+        self.assertFalse(hasattr(mm, "FRAME_JOB_DLLS"))
 
 
 class CodeNeedsOk(Base):

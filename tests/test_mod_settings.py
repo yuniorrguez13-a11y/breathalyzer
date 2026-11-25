@@ -583,6 +583,44 @@ class ProfilesKeepSettings(unittest.TestCase):
         vals = ms.load_values(root, self.sch)
         self.assertEqual((self.lib().profile, vals["look"], vals["speed"]), ("Plain look", "green", 120))
 
+    def test_a_switch_that_fails_partway_changes_nothing(self):
+        """S3.12r: the new set's values were written, then saving the library failed (a full disk): before, the
+        old set stayed in use with the new set's values. Now every file is put back and nothing changed."""
+        mm, root = self.mm, str(self.root)
+        ms.set_value(root, self.sch, "look", "gold")
+        mm.new_profile(self.lib(), "Plain look")
+        ms.set_value(root, self.sch, "look", "green")
+        ms.set_value(root, self.sch, "speed", "120")
+        font = self.root / mm.FONT_SETTINGS
+        font.write_text('{"tool": "x", "choice": "easy-read"}\n', encoding="utf-8")   # (any bytes: put back as they were)
+        settings = Path(mm.settings_file(self.lib(), self.MOD))
+        before = (settings.read_bytes(), font.read_bytes(), (self.root / mm.CONFIG).read_bytes())
+        for broken in (mock.patch.object(mm.Library, "save", side_effect=OSError(28, "No space left on device")),
+                       mock.patch.object(mm, "write_setting_values", side_effect=OSError(13, "Access is denied"))):
+            lib = self.lib()
+            mods = [dict(m) for m in lib.mods]
+            with broken, self.assertRaises(mm.ModmanError) as e:
+                mm.use_profile(lib, "Default")
+            self.assertIn("Nothing was changed", str(e.exception))
+            self.assertIn("'Plain look' is still in use", str(e.exception))
+            self.assertEqual((lib.profile, lib.mods), ("Plain look", mods))          # (in memory too)
+            self.assertEqual((settings.read_bytes(), font.read_bytes(), (self.root / mm.CONFIG).read_bytes()), before)
+            vals = ms.load_values(root, self.sch)
+            self.assertEqual((self.lib().profile, vals["look"], vals["speed"]), ("Plain look", "green", 120))
+        mm.use_profile(self.lib(), "Default")   # (and the next try works)
+        self.assertEqual(ms.load_values(root, self.sch)["look"], "gold")
+
+    def test_put_files_back(self):
+        mm = self.mm
+        a, b = self.root / "a.json", self.root / "sub" / "b.json"
+        a.write_bytes(b"old a")
+        saved = mm._files_as_they_are([str(a), str(b)])
+        a.write_bytes(b"new a")
+        b.parent.mkdir()
+        b.write_bytes(b"new b")
+        self.assertEqual(mm._put_files_back(saved), [])
+        self.assertEqual((a.read_bytes(), b.exists()), (b"old a", False))
+
 
 class KeysMatchC(unittest.TestCase):
     def test_c_has_the_same_key_table(self):

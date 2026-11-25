@@ -26,9 +26,11 @@ static void cmd_probe(int argc, char **argv, SwModReply *r) {
     memset(&cpu, 0, sizeof cpu);
     SwModGuestFn f = api->dispatch_lookup(0x7000002000ull);
     if (f) f(&cpu);
-    api->guest_call(&cpu, 0x7000003000ull);  // passed on
+    api->guest_call(&cpu, 0x7000002000ull);  // passed on (a game function)
     api->guest_call(NULL, 0x7000003004ull);  // dropped by the host
     api->guest_call(&cpu, 0);                // refused by the host (Savage Wind would stop with FATAL)
+    api->guest_call(&cpu, 0x7000003000ull);  // refused too: no game function starts there (FATAL as well)
+    api->guest_call(&cpu, 0x7080000010ull);  // passed on: outside the game's code (Savage Wind's HLE stubs live there)
     api->reply_str(r, "mod", api->mod_name);
     api->reply_str(r, "game", api->game_version);
     api->reply_str(r, "host", api->host_version);
@@ -75,6 +77,10 @@ SWMOD_EXPORT int swmod_init(const SwModApi *a) {
 #ifdef PROBE_FAIL
     (void)commands;
     (void)registered;
+    // its command stays listed with Savage Wind but is switched off (cmd_probe would use `api`, never set here: a
+    // crash if it ran)
+    static const SwModCommand bad_commands[] = {{"bad_cmd", "", "a command of a mod whose init fails", cmd_probe, 0}};
+    a->control_register(bad_commands, 1);
     a->hle_override(0x7000001100ull, replacement, "bad_override");  // dropped: its init fails
     a->log("probe: failing on purpose");
     return 7;

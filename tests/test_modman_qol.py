@@ -4,6 +4,7 @@ what changed, conflicts, mod info, pictures, turn all on/off, and mod sets with 
 save, log and mod is made up in temp folders: no game is started (Popen is mocked)."""
 import json
 import os
+import shutil
 import struct
 import sys
 import time
@@ -493,6 +494,88 @@ class ProfilesQol(QolBase):
         self.cli("profile", "use", "Default")
         code, out = self.cli("profile", "delete", "Big overhaul")
         self.assertTrue((own2 / "save_0" / "game_data.sav").is_file())
+
+    def test_own_save_copy_is_all_or_nothing(self):
+        # S3.11: a copy cut off partway (disk full) left half a save in the set's own folder, and own-save was on;
+        # the next own-save on --copy then skipped the copy (the folder wasn't empty) and the game loaded that half.
+        self.mod("Alpha", {"romfs/Pack/Title.txt": "a"})
+        self.deploy()
+        self.cli("profile", "new", "Overhaul")
+        self.cli("profile", "use", "Overhaul")
+        own = self.libdir / "profiles" / "overhaul" / "save"
+        real = shutil.copytree
+
+        def half(src, dst, *a, **kw):   # (one file gets there, then the disk is full)
+            os.makedirs(os.path.join(dst, "save_0"))
+            shutil.copy2(os.path.join(src, "option.sav"), dst)
+            raise OSError(28, "No space left on device")
+        with mock.patch.object(mm.shutil, "copytree", side_effect=half):
+            code, out = self.cli("profile", "own-save", "Overhaul", "on", "--copy")
+        self.assertEqual(code, 2, out)
+        self.assertIn("Nothing was changed", out)
+        self.assertFalse(own.exists() and any(own.iterdir()), list(own.iterdir()) if own.exists() else None)
+        self.assertFalse(Path(str(own) + mm.COPYING).exists())
+        self.assertIsNone(mm.profile_own_save(mm.Library.load(str(self.libdir))))   # (the set as it was)
+        # a cut-off copy's leftovers (the PC turned off) are thrown away; the next try copies the whole save
+        write(Path(str(own) + mm.COPYING), {"save_0/old.sav": "half"})
+        own.mkdir(parents=True, exist_ok=True)   # (an empty own folder: copied into)
+        with mock.patch.object(mm.shutil, "copytree", side_effect=real):
+            code, out = self.cli("profile", "own-save", "Overhaul", "on", "--copy")
+        self.assertEqual(code, 0, out)
+        self.assertEqual((own / "save_0" / "game_data.sav").read_text(), "slot 0")
+        self.assertEqual((own / "option.sav").read_text(), "options")
+        self.assertFalse((own / "save_0" / "old.sav").exists())
+        self.assertFalse(Path(str(own) + mm.COPYING).exists())
+        self.assertEqual(mm.profile_own_save(mm.Library.load(str(self.libdir))), str(own))
+        # on again with --copy: the own save stays as it is (never copied over)
+        (own / "option.sav").write_text("played")
+        code, out = self.cli("profile", "own-save", "Overhaul", "on", "--copy")
+        self.assertEqual(code, 0, out)
+        self.assertIn("Not copied", out)
+        self.assertEqual((own / "option.sav").read_text(), "played")
+
+    def test_own_save_copy_waits_for_windows_to_let_go(self):
+        # Review of S3.11: Windows Defender or the search indexer still reads the files just copied, and renaming the
+        # folder is refused for a moment (access denied): tried again, not "free some space or close the program".
+        self.mod("Alpha", {"romfs/Pack/Title.txt": "a"})
+        self.deploy()
+        self.cli("profile", "new", "Overhaul")
+        own = self.libdir / "profiles" / "overhaul" / "save"
+        real = os.replace
+        refused = []
+
+        def busy(times):
+            def replace(a, b):
+                if str(a).endswith(mm.COPYING) and len(refused) < times:
+                    refused.append(a)
+                    raise PermissionError(13, "Access is denied")
+                return real(a, b)
+            return replace
+        own.mkdir(parents=True)   # (an empty own folder, as own-save on without --copy leaves it)
+        with mock.patch.object(mm.os, "replace", side_effect=busy(1)), mock.patch.object(mm.time, "sleep") as nap:
+            code, out = self.cli("profile", "own-save", "Overhaul", "on", "--copy")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(refused), 1)
+        nap.assert_called_once_with(mm.RENAME_WAIT)
+        self.assertEqual((own / "save_0" / "game_data.sav").read_text(), "slot 0")
+        self.assertFalse(Path(str(own) + mm.COPYING).exists())
+        self.assertEqual(mm.profile_own_save(mm.Library.load(str(self.libdir))), str(own))
+        # still refused after every try: plain words, the empty own folder is there again, no .copying left
+        self.cli("profile", "new", "Second")
+        own2 = self.libdir / "profiles" / "second" / "save"
+        own2.mkdir(parents=True)
+        refused.clear()
+        with mock.patch.object(mm.os, "replace", side_effect=busy(99)), mock.patch.object(mm.time, "sleep") as nap:
+            code, out = self.cli("profile", "own-save", "Second", "on", "--copy")
+        self.assertEqual(code, 2, out)
+        self.assertEqual(len(refused), mm.RENAME_TRIES)
+        self.assertEqual(nap.call_count, mm.RENAME_TRIES - 1)
+        self.assertIn("Windows is still checking", out)
+        self.assertIn("try again in a moment", out)
+        self.assertNotIn("free some space", out)
+        self.assertTrue(own2.is_dir() and not any(own2.iterdir()))   # (as it was: nothing was changed)
+        self.assertFalse(Path(str(own2) + mm.COPYING).exists())
+        self.assertIsNone(mm.profile_own_save(mm.Library.load(str(self.libdir)), "Second"))
 
     def test_switching_backs_up_the_save_first(self):
         self.mod("Alpha", {"romfs/Pack/Title.txt": "a"})

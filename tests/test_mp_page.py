@@ -445,8 +445,9 @@ class Session(Temp):
                                         "mod (docs/ghost.md); showing the radar only.")
         self.assertTrue(settle(s, lambda: s.mode == "idle"))
         self.assertEqual(s.status.lines[:2], ["Ghost multiplayer didn't run in your game.",
-                                              "Turn off Infinite Stamina (on Home or in the game's Mods page), then "
-                                              "press Host or Join again."])
+                                              "Turn it on in the game's Mods page too, then press Host or Join again "
+                                              "(Details says more)."])
+        self.assertNotIn("Stamina", " ".join(s.status.lines))   # (BUG2: it no longer stops the ghost mod)
 
     def test_prep_failure_and_stop_while_preparing(self):
         def no_save(*a):
@@ -469,7 +470,9 @@ class Session(Temp):
     def test_why_not(self):
         s = self.make()
         self.assertEqual(s.why_not(set(), False), "Turn on Ghost multiplayer first.")
-        self.assertIn("Infinite Stamina", s.why_not({mpp.GHOST_ID, mpp.STAMINA_ID}, False))
+        # BUG2: Infinite Stamina on doesn't stop Host or Join any more (the frame job's overrides chain)
+        self.assertIsNone(s.why_not({mpp.GHOST_ID, "botw-mod-loader.basics-inf-stamina"}, False))
+        self.assertFalse(hasattr(mpp, "STAMINA_ID"))
         self.assertIn("Close Savage Wind first", s.why_not({mpp.GHOST_ID}, True))
         self.assertEqual(s.why_not({mpp.GHOST_ID}, False, "getting your mods ready"),
                          "Please wait: getting your mods ready.")

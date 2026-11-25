@@ -40,7 +40,7 @@ Play with a friend on your home network (both PCs on the same Wi-Fi or router). 
 - Story together (the host's choice): your friends get your towers, quests and freed Divine Beasts.
   They are asked first, and nothing is ever taken away.
 - Multiplayer plays on a copy of your save. Your own save stays as it is.
-- It doesn't run while Infinite Stamina is on. More help: app\docs\multiplayer.md
+- More help: app\docs\multiplayer.md
 
 SHARE A MOD
 

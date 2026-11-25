@@ -51,7 +51,7 @@ import charsel  # noqa: E402  (Who am I: ids, the wheel choice, this PC's built 
 # the client stops instead of retrying (retrying wrong codes would lock the friend's whole address out).
 GIVE_UP = ("wrong room code", "needs a room code", "too many wrong room codes", "can't join this session",
            "version mismatch", "bad name", "bad room", "kicked by the host", "banned by the host",
-           "doesn't know the room code")
+           "doesn't know the room code") + security.STOP_REASONS
 
 DEFAULT_HZ = 20.0
 MAX_PEERS = 16               # peers kept when the welcome gives no room cap (a fake host can't make us track more)
@@ -816,6 +816,11 @@ class RelayLink:
                     self.error = "no answer from the relay"
                     return self.retry
                 if got["type"] == "challenge":
+                    why = security.challenge_refusal(got)
+                    if why is not None:   # (another build: its check would count our proof as a wrong code)
+                        self.gave_up = self.error = why
+                        self.log(f"Can't join: {why}.")
+                        return self.retry
                     nonce = security.valid_nonce(got.get("nonce"))
                 elif got["type"] == "error":
                     msg = got

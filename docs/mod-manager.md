@@ -125,8 +125,9 @@ Plain-word helpers around **Play**. The window has a button for each (see [Windo
 - **Mod sets** ([profiles](profiles.md)): `python tools/modman.py profile list|new|use|copy|rename|delete <name>`
   (copy and rename take the new name after it). Switching backs up the save in use first. A set can keep its own
   save folder, `<library>\profiles\<set>\save`, so an overhaul playthrough doesn't touch your other saves:
-  `python tools/modman.py profile own-save <name> on` (add `--copy` to start it from a copy of the save in use; `off`
-  goes back to the normal folder and leaves the set's folder where it is). Deleting a set keeps its own save.
+  `python tools/modman.py profile own-save <name> on` (add `--copy` to start it from a copy of the save in use: the
+  copy is made whole first, so one cut off by a full disk changes nothing; `off` goes back to the normal folder and
+  leaves the set's folder where it is). Deleting a set keeps its own save.
 
 ## What each kind of mod needs
 
@@ -146,8 +147,11 @@ your rights. `add` puts such a mod in OFF and `list` shows it as `(needs OK: cod
 made it: `python tools/modman.py enable <id> --allow-code` (or `add <path> --allow-code`). `enable --all`, a mod set
 and "use last good" leave it off, and deploy never loads it, even from a hand-edited `modman.json`. A code file whose
 name has hidden or text-flipping characters is refused. The launcher adds Breathalyzer's own code mods and a `.breath`
-whose Careful box named its code with that OK. A `.zip` that lists more than 200,000 files is refused before it is
-opened.
+whose Careful box named its code with that OK. In the windows (the launcher's Home and More..., the Mod Manager), a
+mod with code added from a folder, a `.zip` or a DLL comes in off the same way ("Added ..., but it is off: it has
+code"); **Turn on** then asks "Careful: <mod> has code (its files)" with **Turn it on** / **Keep it off** (the
+default), and Turn it on is `enable <id> --allow-code`. A `.zip` that lists more than 200,000 files is refused before
+it is opened.
 
 ## mod.toml, hooks and the examples
 

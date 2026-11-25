@@ -74,7 +74,11 @@ you turned on is built from your game files first").
 
 - **Play** does everything: it waits if Savage Wind is already open; uses the changes you made on the game's Mods page;
   gets your mods ready when they changed since the last time ("Getting your mods ready... 2:31"; **Cancel** stops it);
-  then starts the game. If your code mods can't be built, **Play without code mods** starts the game with the others.
+  then starts the game. If your code mods can't be built, **Play without code mods** starts the game with the others
+  (also when a code mod was turned on on the game's Mods page). If the game's Mods page changes can't be used for
+  another reason, **Forget the game's changes** throws them away, and the next Play uses your mods as they were.
+  If the last start stopped with an error, Play asks first, as the Mod Manager does: **Turn it off and Play** (the
+  mods new since the last start that ended well), **Play without mods**, **Play anyway** or **Cancel**.
 - **Play without mods** starts Savage Wind as it is. Your mods stay as they are for next time. If you ever turned
   on Ghost multiplayer, don't load a save that holds its surprise item without mods: the game has no data for it
   then, and that save can break. Use a save from before, or play with mods.
@@ -89,7 +93,8 @@ you turned on is built from your game files first").
   that and keeps nothing), then its title, who made it, its version and what it does (a few lines) are shown, with
   **Add this mod** and **Not now** (Esc). A mod with code (a DLL), or a package Breathalyzer couldn't look all
   through, gets a red warning right under its title, "Careful: this mod has code" ("... may have code"), and Not now
-  is picked first. Code patches and cheats get a milder one, "This mod changes the game's code". "Not damaged" only
+  is picked first. Code patches and cheats get a milder one, "This mod changes the game's code". The buttons come
+  right under the title and the warnings, so they stay on a small screen with big text. "Not damaged" only
   means the file is as it was made, not that it is safe. Not now keeps nothing. A `.breath` that fails a check is
   refused in plain words ("... wasn't added"). [The .breath file](breath-format.md) has the details.
 - **While you play** (the game is open), Add mod, Add a .breath and Export as .breath wait, and nothing brings the
@@ -118,7 +123,7 @@ Play with friends on your home network, without a command line (Experimental; th
   and Breathalyzer starts the game. **Stop** ends it: while the mods are still being made ready the game is cancelled
   too; an open game keeps running on your multiplayer copy. Closing the game and closing Breathalyzer (it asks
   first) end it too. **Details**: what the multiplayer tools said, your home folder as `%USERPROFILE%`.
-- Host and Join wait while the game is open (Breathalyzer starts it for you), and while Infinite Stamina is on.
+- Host and Join wait while the game is open (Breathalyzer starts it for you).
 - Multiplayer plays on a **copy** of your save, made once in `modloader\multiplayer` (the host's world, a friend's
   copy per host, story backups): your own save is only read. Play plays your own save, as always.
 - **Who am I** shows the characters in big buttons by group (Hylians, Races, Monsters), each with Ready, Not tried

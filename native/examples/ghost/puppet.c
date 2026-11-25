@@ -346,7 +346,8 @@ typedef struct {
     char sheath[48];               // the last one seen ("" none)
     int sheaths;                   // how many are hidden now
     int64_t sheath_hides;          // times one was hidden (it climbs when the game shows one again each frame)
-    float sprint_since;           // s since Link was last in his sprint (-1: not yet)
+    int64_t sheath_calls;          // 0.9.11: the game's hide calls made (every tick for every hidden one)
+    float sprint_since;          // s since Link was last in his sprint (-1: not yet)
     float stamina;                 // his stamina (-1: unreadable)
     int64_t busy_waits;            // tries not spent because the game was busy (an event, Game Over, a load, no body)
     int64_t comebacks;             // a pack given up after a busy time spawned again by itself (a Continue)
@@ -1351,22 +1352,41 @@ static void pup_ov_clear(void) {
 // 0.9.9: the model units of the pods hidden now (pup_sheath_tick publishes them every tick; 0: free), for the
 // after-step hide in unit_step_wrapper: the game shows a hidden pod again in its own frame [V: sheath_hides ~110/s,
 // 2026-11-18], so its units' draw bit is cleared again after their step, before the frame is drawn.
+// 0.9.11 (final-review-linkle N2, N3; not yet in the game): each unit is kept with its skeleton as the tick read it,
+// and the after-step hide skips a unit whose skeleton changed (its memory went to another model's unit between two
+// ticks: some other model must not blink off); the table is packed, so the after-step loop stops at its count
+// (it runs for every unit the game steps, thousands a frame).
 #define PUP_POD_UNITS 16
 static uint64_t g_pup_pod_unit[PUP_POD_UNITS];
+static uint64_t g_pup_pod_skel[PUP_POD_UNITS];  // its skeleton (UNIT_SKEL) when published; 0: none read
+static int g_pup_pod_n;                         // entries in use: [0, n)
 static int g_pup_pod_any;
 static int64_t g_pup_pod_hides;         // draw bits cleared after a step (`ghost puppet` sheath_unit_hides)
+static int64_t g_pup_pod_stale;         // 0.9.11: table units skipped after a step: another model's unit now
 
-// The table becomes units[0..n) (n 0: empty). Called from the tick only.
-static void pup_pod_units_publish(const uint64_t *units, int n) {
+// The table becomes units[0..n) with their skeletons (n 0: empty). Called from the tick only. (Each skeleton is
+// stored before its unit, and the count last: a reader that finds a unit sees its skeleton.)
+static void pup_pod_units_publish(const uint64_t *units, const uint64_t *skels, int n) {
     if (n > PUP_POD_UNITS) n = PUP_POD_UNITS;
-    for (int i = 0; i < PUP_POD_UNITS; i++) __atomic_store_n(&g_pup_pod_unit[i], i < n ? units[i] : 0, __ATOMIC_RELEASE);
+    for (int i = 0; i < PUP_POD_UNITS; i++) {
+        __atomic_store_n(&g_pup_pod_skel[i], i < n ? skels[i] : 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_pup_pod_unit[i], i < n ? units[i] : 0, __ATOMIC_RELEASE);
+    }
+    __atomic_store_n(&g_pup_pod_n, n, __ATOMIC_RELEASE);
     __atomic_store_n(&g_pup_pod_any, n > 0, __ATOMIC_RELEASE);
 }
 
-// After unit's own step (game thread): a unit in the table drawn again gets its draw bit cleared. 1: it was cleared.
+// After unit's own step (game thread): a unit in the table drawn again gets its draw bit cleared, when it is still
+// the unit the tick saw (the same skeleton). 1: it was cleared. (unit is the unit just stepped: live memory.)
 static int pup_pod_unit_after_step(uint64_t unit) {
-    for (int i = 0; i < PUP_POD_UNITS; i++) {
+    int n = __atomic_load_n(&g_pup_pod_n, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < n && i < PUP_POD_UNITS; i++) {
         if (__atomic_load_n(&g_pup_pod_unit[i], __ATOMIC_ACQUIRE) != unit) continue;
+        uint64_t sk = __atomic_load_n(&g_pup_pod_skel[i], __ATOMIC_ACQUIRE);
+        if (sk && rd64(unit + UNIT_SKEL) != sk) {  // (freed and reused before the next tick: not our pod's unit)
+            __atomic_fetch_add(&g_pup_pod_stale, 1, __ATOMIC_RELAXED);
+            return 0;
+        }
         uint16_t *f = (uint16_t *)(uintptr_t)(unit + UNIT_FLAGS);
         if (!(__atomic_load_n(f, __ATOMIC_RELAXED) >> PUP_BIT & 1)) return 0;
         __atomic_fetch_and(f, (uint16_t) ~(1u << PUP_BIT), __ATOMIC_RELAXED);
@@ -1380,7 +1400,7 @@ static int pup_pod_unit_after_step(uint64_t unit) {
 static void pup_ball_forget(void);
 static void pup_rd_forget(void) {
     pup_ov_clear();
-    pup_pod_units_publish(NULL, 0);  // (0.9.9: no pod hidden after the step)
+    pup_pod_units_publish(NULL, NULL, 0);  // (0.9.9: no pod hidden after the step)
     t_rd.on = 0, t_rd.end_t = 0, t_rd.lift = 0, t_rd.pup_for = 0, t_rd.npu = 0, t_rd.slope_ok = 0, t_rd.vel_ok = 0;
     memset(t_rd.anim, 0, sizeof t_rd.anim);
     memset(t_rd.akind, 0, sizeof t_rd.akind);
@@ -2264,25 +2284,41 @@ static uint64_t pup_pod_at(uint64_t at, char nm[64], double t) {
     return a;
 }
 // 0.9.9: model m's units (as pup_drawn reads them) added to units[*nu] (up to PUP_POD_UNITS), for the after-step hide.
-static void pup_pod_units_add(uint64_t m, uint64_t units[PUP_POD_UNITS], int *nu, double t) {
+// 0.9.11: with each one's skeleton (skels[*nu], 0 when unreadable), so the after-step hide knows it is still the unit.
+static void pup_pod_units_add(uint64_t m, uint64_t units[PUP_POD_UNITS], uint64_t skels[PUP_POD_UNITS], int *nu,
+                              double t) {
     int32_t n = m ? (int32_t)self_u32(m + MODEL_NUNITS, t) : 0;
     uint64_t arr = n > 0 && n <= 64 ? self_u64(m + MODEL_UNITS, t) : 0;
     for (int i = 0; arr && i < n && *nu < PUP_POD_UNITS; i++) {
         uint64_t slot = self_u64(arr + (uint64_t)i * 8, t), unit = slot ? self_u64(slot, t) : 0;
-        if (unit && mem_ok(unit + UNIT_FLAGS, 2, t)) units[(*nu)++] = unit;
+        if (unit && mem_ok(unit + UNIT_FLAGS, 2, t)) {
+            skels[*nu] = self_u64(unit + UNIT_SKEL, t);
+            units[(*nu)++] = unit;
+        }
     }
 }
+// Hide pod (once per tick, `seen`). 0.9.11 (final-review-linkle N1; not yet in the game): the game's own hide call
+// runs every tick while the pod is in the table, whatever its draw bit says. The after-step clear (0.9.9) leaves the
+// bit 0 at the tick, so pup_draw's "only when it isn't so already" skipped MODEL_SHOW from the second tick on, and only
+// the raw unit bit stayed cleared: anything else the call sets on the model (its shadow, its culling) was never set
+// again. sheath_hides still counts the ticks it was found drawn (the game's re-show before our after-step clear).
 static void pup_pod_hide(struct Cpu *c, uint64_t pod, const char *nm, uint64_t seen[PUP_PODS], int *n,
-                         uint64_t units[PUP_POD_UNITS], int *nu, double t) {
+                         uint64_t units[PUP_POD_UNITS], uint64_t skels[PUP_POD_UNITS], int *nu, double t) {
     for (int k = 0; k < *n; k++)
         if (seen[k] == pod) return;
     if (*n < PUP_PODS) seen[(*n)++] = pod;
-    if (pup_draw(c, pod, 0, t)) t_pup.sheath_hides++;
-    pup_pod_units_add(pup_model(pod, t), units, nu, t);  // (0.9.9: hidden again after the game's step of each)
+    uint64_t m = pup_model(pod, t);
+    int d = m ? pup_drawn(m, t) : -1;
+    if (d >= 0) {
+        gcall(c, MODEL_SHOW, m, 0, PUP_BIT, 0, 0, 0, 0);
+        t_pup.sheath_calls++;
+        if (d) t_pup.sheath_hides++;
+    }
+    pup_pod_units_add(m, units, skels, nu, t);  // (0.9.9: hidden again after the game's step of each)
     snprintf(t_pup.sheath, sizeof t_pup.sheath, "%s", nm);
 }
 static void pup_sheath_tick(struct Cpu *c, uint64_t proc, int live, double t) {
-    uint64_t seen[PUP_PODS], units[PUP_POD_UNITS];
+    uint64_t seen[PUP_PODS], units[PUP_POD_UNITS], skels[PUP_POD_UNITS];
     int n = 0, nu = 0;
     char nm[64];
     if (live && proc && t_items_ghost == proc) {
@@ -2291,17 +2327,17 @@ static void pup_sheath_tick(struct Cpu *c, uint64_t proc, int live, double t) {
             if (!it || (t_items[i].state != IS_GRAB && t_items[i].state != IS_HELD) || !mem_ok(it + ITEM_POD, 12, t))
                 continue;
             uint64_t pod = pup_pod_at(it + ITEM_POD, nm, t);
-            if (pod) pup_pod_hide(c, pod, nm, seen, &n, units, &nu, t);
+            if (pod) pup_pod_hide(c, pod, nm, seen, &n, units, skels, &nu, t);
         }
         uint64_t h = proc + PUP_NPC_HOLDER;
         if (mem_ok(h, EQUIP_OWNER + 8, t) && rd64(h) == EQUIP_VPTR && rd64(h + EQUIP_OWNER) == proc)
             for (int k = 3; k < 6; k++) {
                 uint64_t pod = pup_pod_at(h + EQUIP_LINKS + (uint64_t)k * EQUIP_LINK_SIZE, nm, t);
-                if (pod) pup_pod_hide(c, pod, nm, seen, &n, units, &nu, t);
+                if (pod) pup_pod_hide(c, pod, nm, seen, &n, units, skels, &nu, t);
             }
     }
     t_pup.sheaths = n;
-    pup_pod_units_publish(units, nu);  // (0.9.9: an empty table when none)
+    pup_pod_units_publish(units, skels, nu);  // (0.9.9: an empty table when none)
 }
 
 // For ghost.c's items part: the self puppet's copy in slot `slot` (on its back or in its hand): the bone, the grip, the
@@ -3055,6 +3091,8 @@ static void cmd_puppet(int argc, char **argv, SwModReply *r) {
     api->reply_int(r, "sheaths", p.sheaths);
     api->reply_int(r, "sheath_hides", p.sheath_hides);
     api->reply_int(r, "sheath_unit_hides", __atomic_load_n(&g_pup_pod_hides, __ATOMIC_RELAXED));  // 0.9.9
+    api->reply_int(r, "sheath_calls", p.sheath_calls);                                            // 0.9.11
+    api->reply_int(r, "sheath_unit_stale", __atomic_load_n(&g_pup_pod_stale, __ATOMIC_RELAXED));  // 0.9.11
     api->reply_num(r, "sprint_since", p.sprint_since);
     api->reply_num(r, "stamina", p.stamina);
     api->reply_int(r, "busy_waits", p.busy_waits);
@@ -3072,11 +3110,12 @@ static void cmd_puppet(int argc, char **argv, SwModReply *r) {
 }
 
 // iam.c's hooks: the sentence for `iam`, and `iam self on|off`.
-// A save is loaded but this mod's frame tick never ran: another mod wraps the same frame job and loaded first (only
-// the first runs: docs/game-basics.md, botw_on_frame; Infinite Stamina does, and basics_inf_stamina.dll sorts first).
-// Seen in the game 2026-11-12 (out\showcase-lib): `iam daruk` did nothing, `ghost` said 0 ticks.
-#define PUP_NO_TICK_TEXT "You stay Link: the ghost mod isn't running. Another mod (Infinite Stamina?) uses the same " \
-                         "frame hook and starts first. Turn that one off and restart the game."
+// A save is loaded but this mod's frame tick never ran. Seen in the game 2026-11-12 (out\showcase-lib): `iam daruk`
+// did nothing, `ghost` said 0 ticks, with Infinite Stamina on (then only the first frame-job mod by file name ran).
+// Since modhost's override chains (2026-11-22) the mods of game start all run; left: the mod loaded while the game
+// runs (modload can't chain on the frame job), or a mod above it in the chain that never calls the game's job.
+#define PUP_NO_TICK_TEXT "You stay Link: the ghost mod isn't running (no frames yet). Was it loaded while the game " \
+                         "ran? Restart the game with it on."
 static int pup_in_world_real(void) { return botw_in_world(api); }
 static int (*g_pup_in_world)(void) = pup_in_world_real;  // (the selftest fakes it)
 

@@ -36,7 +36,6 @@ To only see the steps, without checking anything: add `--dry-run`.
 | A save of your own | there is a save next to savagewind.exe |
 | Mod library | Breathalyzer's mod list is found and can be read (it shows a "mods code" like `3F9A-12C0`) |
 | Ghost multiplayer on | the ghost mod is turned on |
-| Infinite Stamina off | it is off (Ghost multiplayer doesn't run with it) |
 | This PC's home address | the PC has an address like 192.168.x.x |
 | Wi-Fi set to Private | Windows calls the network Private |
 | Port 7788 free | nothing else (like an open Host) uses it |
@@ -47,8 +46,9 @@ To only see the steps, without checking anything: add `--dry-run`.
 2. PC B types A's address. B's PC calls A's PC. Then B waits.
 3. A's PC calls B back by itself (it learned B's address in step 2).
 
-Windows may ask "allow Python on networks?" the first time: press **Allow** (Private ticked). This is the same
-Python Breathalyzer uses, so allowing it now also helps Host later.
+Windows may ask "allow Python on networks?" the first time a PC waits: press **Allow** (Private ticked). Until
+you do, the other PC's call gets no answer, so it keeps calling for up to 90 seconds. This is the same Python
+Breathalyzer uses, so allowing it now also helps Host later.
 
 Then it shows: the **delay** between the PCs (under 30 ms is good at home), how far apart the two **clocks** are,
 whether you both have the **same Savage Wind**, and whether you have the **same mods**. Ghost multiplayer and the
@@ -82,7 +82,8 @@ It prints a big **PASS**, **WARN** or **FAIL**, the problems, and two file names
 - `two-PC test <name> <A or B> <date>.txt`: the short report (results first)
 - `... .json`: the same, for the tools
 
-**Send both files** to each other and to giruka. Nothing is sent by itself.
+**Send both files** to each other and to giruka. Nothing is sent by itself. Folders in them start at `~` (your
+home folder), so they don't carry your Windows user name.
 
 ## If something fails
 

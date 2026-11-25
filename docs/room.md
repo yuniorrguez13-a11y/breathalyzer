@@ -75,10 +75,17 @@ none refused; the textures looked right in screenshots at every stop, and the ga
      free RAM less 1.5 GB and a quarter of what RAM plus page file can still give less 2 GB. Savage Wind commits its
      own guest memory as it is first touched, and a commit that fails then crashes the game, so the extra memory must
      never take that headroom (a PC with a small or full page file). Under 64 MB left: not made now (the game's own
-     failure stands; a later need tries again).
+     failure stands; a later need tries again). The same when Windows refuses to commit a free range (the commit
+     limit hit for a moment): tried again at a need at least a second later, never switched off for the session.
+     Only "no free address space at all" means never.
    - **Made once:** several loader threads fail together at the first load. One makes it; the others wait for it (at
-     most 2 s, so a thread holding a lock the maker needs can't hang the game: its allocation then fails as in the
-     plain game). The maker looks again before making, so it is never made twice.
+     most 2 s). They stop waiting as soon as the maker is in the game's heap code: its constructor takes the
+     heap-tree lock, which a waiter may hold (a thread that failed inside `ExpHeap::create`), so waiting there would
+     freeze both for the whole 2 s; that waiter's allocation fails as in the plain game. The heap is published (waiters
+     use it at once) before it is added to the root heap list, which takes that lock too. When the maker's own ask
+     didn't fit (too big, or too little memory free), a waiter tries making it for its own smaller ask instead of
+     giving up. The maker looks again before making, so it is never made twice. The steps are
+     `room_rescue_step` in `room_core.h` (tested in the selftest).
    - **Only on the layout it was made for:** Windows is asked that Savage Wind's guest window (one reservation) ends
      at 0x73_2000_0000 as in 0.4.1 and that the string class's vtable pointer is in committed memory; else it isn't
      made, and `room` says why (a newer Savage Wind with a bigger window must not get memory right above it taken).
@@ -160,3 +167,9 @@ memory from 0x74_0000_0000 up. Research only: `0x700131aea0`, `0x700131b450`, `0
 - A native rescue for an actor heap whose overflow heap is full (a bigger overflow heap of our own). Not needed by
   today's costumes.
 - Two big costumes at once (multiplayer ghosts) and a 200 MB model: not tried.
+- While the maker is in the game's heap code, every waiter stops waiting, not only one that holds the heap-tree lock:
+  when one does hold it, the others that look before it lets go fail too (as before this wait was cut, minus the
+  2 s freeze). Telling that thread apart needs where both ExpHeap creates end (`0x7000e9f2c8`, `0x7000003f10`; only
+  their starts are known) or a hook on them (a game-code rebuild): a return address in them at the tryAlloc wrapper
+  means the thread holds the lock. A guess that misses it would bring the 2 s freeze back, so it waits for that
+  research.

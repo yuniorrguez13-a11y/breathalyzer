@@ -6,8 +6,8 @@
     python tools\\mp\\twopc_check.py connect ADDRESS [--port N] the connection test, this PC calls the other one
 
 What it checks on this PC: Savage Wind's version (0.4.1-alpha.4, read from the exe like the launcher does), the mod
-library (found, readable, Ghost multiplayer on, Infinite Stamina off, a save to copy), this PC's home address, the
-Wi-Fi set to Private, the port free. Then between the two PCs: a tiny TCP echo on the port (7788, the one Host uses)
+library (found, readable, Ghost multiplayer on, a save to copy), this PC's home address, the Wi-Fi set to
+Private, the port free. Then between the two PCs: a tiny TCP echo on the port (7788, the one Host uses)
 both ways, the delay (latency) and how far apart the two clocks are, the same Savage Wind and the same mods for
 multiplayer (the friend's list comes over the echo). Then it walks both players through the game steps (host, join,
 see each other, held items, story at join, towers and memories live, stop, own save) and records PASS / FAIL / SKIP
@@ -43,10 +43,12 @@ MAX_LINES = 20                       # per connection
 MAX_EXE = 512 * 1024 * 1024
 PINGS = 10
 LISTEN_SECONDS = 180
-CONNECT_RETRY_SECONDS = 20
+CONNECT_RETRY_SECONDS = 90           # a fresh PC: Windows' firewall question stays up until the friend presses
+                                     # Allow, and until then the call gets no answer (a timeout, not a refusal)
+ALLOW_HINT = ("   If Windows asks whether Python may use the network: press Allow (Private networks). "
+              "Until you do, your friend's call gets no answer.")
 GHOST_ID = "botw-mod-loader.ghost"
 CHARS_ID = "botw-mod-loader.characters"
-STAMINA_ID = "botw-mod-loader.basics-inf-stamina"
 MUST_MATCH = (GHOST_ID, CHARS_ID)    # different versions of these break multiplayer
 LATENCY_OK_MS = 30.0
 LATENCY_BAD_MS = 150.0
@@ -358,8 +360,6 @@ def local_checks(places: dict, port: int, *, run_netcat=None, addresses=None) ->
         out.append(check("ghost_on", "Ghost multiplayer on", "PASS" if GHOST_ID in on else "FAIL",
                          f"version {on[GHOST_ID] or '?'}" if GHOST_ID in on else
                          "Home > Multiplayer > Ghost multiplayer > Turn on"))
-        out.append(check("stamina_off", "Infinite Stamina off", "FAIL" if STAMINA_ID in on else "PASS",
-                         "Ghost multiplayer doesn't run with it: turn it off on Home" if STAMINA_ID in on else ""))
     addrs = local_addresses() if addresses is None else addresses
     out.append(check("address", "This PC's home address", "PASS" if addrs else "FAIL",
                      ", ".join(addrs) if addrs else "no home-network address: is the Wi-Fi or cable on?"))
@@ -440,6 +440,7 @@ def serve(port: int, info: dict, *, host: str = "", seconds: float = LISTEN_SECO
         if os.name == "nt":
             srv.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_EXCLUSIVEADDRUSE", 0) or socket.SO_REUSEADDR, 1)
         srv.bind((host, port))
+        say(ALLOW_HINT)                # Windows asks about the firewall the first time a program listens
         srv.listen(4)
     except OSError as e:
         srv.close()
@@ -497,7 +498,11 @@ def ping(address: str, port: int, info: dict, *, count: int = PINGS, timeout: fl
         return {"ok": False, "error": f"'{address}' isn't an address this PC can find"}
     if not allow(ip):
         return {"ok": False, "error": f"{ip} isn't a home-network address (multiplayer is home network only)"}
-    end = time.monotonic() + retry_seconds
+    # Both a refusal (the friend isn't waiting yet) and a timeout (the friend's firewall drops the call while its
+    # 'Allow Python?' question is still up, on a fresh PC) are retried until retry_seconds: the friend may be a
+    # few seconds late or still reading that question.
+    start = time.monotonic()
+    end = start + retry_seconds
     while True:
         try:
             sock = socket.create_connection((ip, port), timeout=timeout)
@@ -507,9 +512,12 @@ def ping(address: str, port: int, info: dict, *, count: int = PINGS, timeout: fl
                 return {"ok": False, "error": f"{ip} answers, but nothing listens on port {port}: "
                                               "is your friend at 'waiting for you'?"}
             time.sleep(0.5)
-        except socket.timeout:
-            return {"ok": False, "error": f"no answer from {ip}:{port} in {int(timeout)} s: the firewall on your "
-                                          "friend's PC probably blocks it (Private Wi-Fi, Python allowed?)"}
+        except (socket.timeout, TimeoutError):
+            if time.monotonic() >= end:
+                return {"ok": False, "error": f"no answer from {ip}:{port} in {int(time.monotonic() - start)} s: "
+                                              "the firewall on your friend's PC probably blocks it (did they press "
+                                              "Allow? Private Wi-Fi, Python allowed?)"}
+            time.sleep(0.5)
         except OSError as e:
             return {"ok": False, "error": f"can't reach {ip}:{port} ({e.strerror or e})"}
     rtts, best, peer_info = [], None, {}
@@ -647,17 +655,42 @@ def summary(checks: list[dict], steps: list[dict]) -> dict:
     return {"overall": overall, "counts": counts}
 
 
+def tidy_path(text, home: str | None = None):
+    """text with this PC's home folder (%USERPROFILE%, C:\\Users\\<the Windows user name>) written as ~, so a report
+    that is sent on carries no Windows user name (any case, \\ or /). Anything but text comes back as it is."""
+    if not isinstance(text, str):
+        return text
+    home = (os.environ.get("USERPROFILE") or os.path.expanduser("~")) if home is None else home
+    parts = [x for x in re.split(r"[\\/]+", (home or "").strip()) if x]
+    if len(parts) < 2:   # (a drive or a top folder alone: that would hide every path)
+        return text
+    lead = r"[\\/]+" if re.match(r"[\\/]", home.strip()) else ""
+    rx = lead + r"[\\/]+".join(re.escape(x) for x in parts) + r"(?=$|[\\/\s\"',;:)\]])"
+    return re.sub(rx, "~", text, flags=re.IGNORECASE)
+
+
+def tidy(obj, home: str | None = None):
+    """tidy_path on every text in a record (its keys too)."""
+    if isinstance(obj, dict):
+        return {tidy(k, home): tidy(v, home) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [tidy(v, home) for v in obj]
+    return tidy_path(obj, home)
+
+
 def make_record(name: str, role: str, places: dict, checks: list[dict], steps: list[dict], peer: dict | None,
-                info: dict | None = None) -> dict:
-    return {"tool": TOOL, "format": FORMAT, "when": now_iso(), "name": name, "role": role,
-            "pc": {"library": places.get("library"), "install": places.get("install"),
-                   "python": sys.version.split()[0], "sw": (info or {}).get("sw"),
-                   "mods_code": (info or {}).get("mods_code")},
-            "friend": peer or {}, "checks": checks, "steps": steps, "summary": summary(checks, steps)}
+                info: dict | None = None, home: str | None = None) -> dict:
+    """What the .json report holds. Paths in it (the library, Savage Wind, Python, the checks' details, notes) have
+    the home folder written as ~ (tidy_path): the report goes to the friend and to giruka."""
+    return tidy({"tool": TOOL, "format": FORMAT, "when": now_iso(), "name": name, "role": role,
+                 "pc": {"library": places.get("library"), "install": places.get("install"),
+                        "python": sys.version.split()[0], "sw": (info or {}).get("sw"),
+                        "mods_code": (info or {}).get("mods_code")},
+                 "friend": peer or {}, "checks": checks, "steps": steps, "summary": summary(checks, steps)}, home)
 
 
-def report_text(rec: dict) -> str:
-    """The short report to send: results first, then what failed, then the rest."""
+def report_text(rec: dict, home: str | None = None) -> str:
+    """The short report to send: results first, then what failed, then the rest (the home folder as ~)."""
     s = rec["summary"]
     c = s["counts"]
     who = "host (PC A)" if rec["role"] == "A" else "friend (PC B)"
@@ -679,7 +712,7 @@ def report_text(rec: dict) -> str:
     lines.append("")
     lines.append(f"Savage Wind {pc.get('sw') or '?'}, mods code {pc.get('mods_code') or '?'}, "
                  f"Python {pc.get('python')}")
-    return "\n".join(lines) + "\n"
+    return tidy_path("\n".join(lines) + "\n", home)
 
 
 def default_out_dir(env: dict | None = None) -> Path:
@@ -728,7 +761,8 @@ def connection_both_ways(con: Console, role: str, port: int, info: dict, *, serv
         return r
 
     def call(address, title):
-        con.say(f"   CALLING {address} on port {port}...")
+        con.say(f"   CALLING {address} on port {port} (up to {int(CONNECT_RETRY_SECONDS)} s: if your friend's "
+                "Windows asks about Python, they press Allow; Ctrl+C stops)...")
         try:
             r = ping_fn(address, port, info)
         except KeyboardInterrupt:
@@ -830,7 +864,7 @@ def dry_run(out=print) -> None:
     out("")
     out("Part 1. This PC (no network):")
     for t in ("Savage Wind is " + SUPPORTED, "the mod library is found and readable", "Ghost multiplayer is on",
-              "Infinite Stamina is off", "a save of your own exists", "this PC's home address",
+              "a save of your own exists", "this PC's home address",
               "the Wi-Fi is set to Private", f"port {DEFAULT_PORT} is free"):
         out(f"  - {t}")
     out("")

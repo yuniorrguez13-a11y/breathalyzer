@@ -44,7 +44,6 @@ if TOOLS not in sys.path:
 
 GHOST_ID = "botw-mod-loader.ghost"
 CHARS_ID = "botw-mod-loader.characters"            # (charsel.MOD_ID: what the Characters recipe adds)
-STAMINA_ID = "botw-mod-loader.basics-inf-stamina"  # Ghost multiplayer doesn't run while it is on
 MP_DIR = "multiplayer"     # in the mod library: keys, bans, the story list, the co-op save copies and their backups
 AGENT_PY = os.path.join(TOOLS, "mp", "coop_agent.py")
 CLIENT_PY = os.path.join(TOOLS, "mp", "client.py")
@@ -365,8 +364,6 @@ class MpSession:
             return "Multiplayer is on now: press Stop first."
         if GHOST_ID not in enabled:
             return "Turn on Ghost multiplayer first."
-        if STAMINA_ID in enabled:
-            return "Turn off Infinite Stamina on Home first: Ghost multiplayer doesn't run while it is on."
         if game_open:
             return "Close Savage Wind first: Host and Join start it for you."
         if busy:
@@ -673,11 +670,11 @@ class MpSession:
             self.news("ok", f"You see {m.group(1)} in your game.", self.where)
             return
         if text.startswith("Ghost: the game has no `ghost` command"):
-            # (Ghost was ON, so: Infinite Stamina turned on in the game's Mods page (the same frame hook), or the
-            # mods weren't made ready)
+            # (Ghost was ON on Home, so: it was turned off on the game's Mods page (Play used that), its DLL didn't
+            # start, or the mods weren't made ready. Other frame mods, like Infinite Stamina, no longer stop it.)
             self.ending = Status("error", ["Ghost multiplayer didn't run in your game.",
-                                           "Turn off Infinite Stamina (on Home or in the game's Mods page), then "
-                                           "press Host or Join again."])
+                                           "Turn it on in the game's Mods page too, then press Host or Join again "
+                                           "(Details says more)."])
             self.stop(self.ending)
         elif text.startswith(("The relay said no:", "Not trying again:")):
             why = plain_reason(text)

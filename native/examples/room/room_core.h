@@ -238,6 +238,34 @@ static inline int64_t room_rescue_fit(int64_t size, uint64_t need, int ok, uint6
     return fit;
 }
 
+// The making flag (room.c rescue_alloc): nobody makes the extra memory, the maker sizes and commits it (Windows calls
+// only: no game lock), or the maker is in the game's heap code (sead's heap constructor takes the heap-tree lock, which
+// a thread that failed inside ExpHeap::create still holds).
+enum { ROOM_MAKING_NONE, ROOM_MAKING_OWN, ROOM_MAKING_GAME };
+// What a thread whose allocation failed does next (room_rescue_step).
+enum { ROOM_RESCUE_USE, ROOM_RESCUE_MAKE, ROOM_RESCUE_WAIT, ROOM_RESCUE_GIVE_UP };
+#define ROOM_RESCUE_WAIT_MS 2000   // the most a thread waits for another's making (then: the game's own failure)
+#define ROOM_RESCUE_RETRY_MS 1000  // after Windows gave no memory, the next try waits this long (not every frame)
+
+// One step of rescue_alloc's loop. lo: the extra heap's start (0: not made); making: the flag; refused: it can never
+// be made (state 2); now/until: the time and the end of this thread's wait. USE: allocate from it. MAKE: take the flag
+// and make it with this thread's own ask (also when another maker's ask didn't fit: its 0 is "not for that ask").
+// WAIT: another thread makes it now (it needs no game lock: sleep 1 ms and look again). GIVE_UP: the game's own
+// failure stands: refused, the wait is over, or the maker is in the game's heap code, which may wait for a lock this
+// thread holds (waiting then freezes both until the wait ends).
+static inline int room_rescue_step(uint64_t lo, int making, int refused, uint64_t now, uint64_t until) {
+    if (lo) return ROOM_RESCUE_USE;
+    if (refused || making == ROOM_MAKING_GAME || now >= until) return ROOM_RESCUE_GIVE_UP;
+    return making == ROOM_MAKING_NONE ? ROOM_RESCUE_MAKE : ROOM_RESCUE_WAIT;
+}
+
+// rescue_make's answer when committing the extra memory failed: Windows refused a free range (tried: the commit
+// limit, RAM and page file full right now: 0, tried again later, as room_rescue_fit's "not now") or there was no free
+// range at all (-1: never, whatever the PC frees later).
+static inline int room_rescue_commit_failed(int tried) {
+    return tried ? 0 : -1;
+}
+
 // p is a block of the extra memory's heap.
 static inline int room_rescue_has(const RoomState *st, uint64_t p) {
     return st->rescue.heap && p >= st->rescue.heap && p < st->rescue.base + st->rescue.size;

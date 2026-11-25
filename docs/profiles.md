@@ -22,6 +22,9 @@ python tools/modman.py profile own-save Speedrun on --copy  # its own save folde
 - Options of a BCML or UKMM package are fixed when it is added. When a set had other options, the switch says so: to
   change them, remove the mod and add it again with `--option`.
 - Switching is refused while Savage Wind runs (the game may be writing the settings).
+- A switch is all or nothing: when a write fails partway (a settings file in use, a full disk), every mod's settings
+  file, `font.json` and the library's list are put back as they were, and it says "Nothing was changed" (the set in
+  use stays in use). It used to leave half the new set's setting values under the old set.
 - Names: up to 40 letters, digits, spaces, `.`, `-` and `_`, starting with a letter or digit. Case doesn't matter.
 
 Added with the Mods page v2 (2026-11-18, commit 65003e3): `copy`, `rename`, `delete` and `own-save <name> on|off`

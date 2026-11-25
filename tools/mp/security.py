@@ -124,6 +124,27 @@ def valid_nonce(v) -> str | None:
 KDF = "scrypt1"         # sent in the challenge and the hello; a hello without it is an older Breathalyzer
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
 OLD_PEER = "this room needs a newer Breathalyzer: please update Breathalyzer and try again"
+# What a friend says to itself when the host's challenge is from another build: no proof is sent (an older host
+# would check it another way and count a right code as a wrong one: a strike, then 10 minutes out).
+OLDER_HOST = "the host's Breathalyzer is older: ask them to update Breathalyzer (your room code is right, nothing was sent)"
+OTHER_KDF = "the host's Breathalyzer checks room codes another way: update both PCs to the same Breathalyzer"
+# The relay's bye to a player's old line when the same player (same key, same address) joins the room again before
+# the relay noticed the old line died: a live old line is a second copy of the same agent, which must stop.
+REPLACED = "you joined again from the same PC: this older connection is closed"
+# Answers that trying again can't change (clients stop instead of retrying: client.GIVE_UP, coop_agent.FATAL).
+STOP_REASONS = (OLD_PEER, OLDER_HOST, OTHER_KDF, REPLACED)
+
+
+def challenge_refusal(challenge) -> str | None:
+    """Why a friend must not answer this room-code challenge (None: answer it). A challenge with a nonce but without
+    this build's KDF comes from another Breathalyzer: an older one ("kdf" missing) would read a scrypt proof as a
+    wrong room code and give the friend a strike."""
+    if not isinstance(challenge, dict) or valid_nonce(challenge.get("nonce")) is None:
+        return None   # (no usable challenge: the hello carries no proof, and the welcome must still prove the code)
+    kdf = challenge.get("kdf")
+    if kdf == KDF:
+        return None
+    return OLDER_HOST if kdf is None else OTHER_KDF
 
 
 @lru_cache(maxsize=32)
@@ -157,6 +178,14 @@ def proof_matches(code: str | None, nonce: str | None, cnonce, given) -> bool:
     return hmac.compare_digest(given.encode(), code_proof(code, nonce, cnonce).encode())
 
 
+def proof_answer(code: str | None, nonce: str | None, cnonce, given) -> str | None:
+    """The welcome's code_ok when `given` proves `code`, else None. One scrypt (the answer reuses the proof's key):
+    slow on purpose, so the relay runs it on a worker thread, never in its event loop."""
+    if not proof_matches(code, nonce, cnonce, given):
+        return None
+    return code_answer(code, nonce, cnonce)
+
+
 def answer_matches(code: str | None, nonce, cnonce: str | None, given) -> bool:
     if not code or valid_nonce(nonce) is None or valid_nonce(cnonce) is None or not _proof_shape(given):
         return False
@@ -165,7 +194,7 @@ def answer_matches(code: str | None, nonce, cnonce: str | None, given) -> bool:
 
 def code_hello(code: str | None, nonce: str | None) -> tuple[dict, str | None]:
     """The hello fields for a room code (none without a code or a challenge: the code itself is never sent) and the
-    friend's own nonce, to check the welcome's code_answer with."""
+    friend's own nonce, to check the welcome's code_answer with. Ask challenge_refusal(challenge) first."""
     if not code or valid_nonce(nonce) is None or normalize_code(code) is None:
         return {}, None
     cnonce = new_nonce()

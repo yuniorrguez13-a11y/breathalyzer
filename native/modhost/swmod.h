@@ -275,7 +275,8 @@ typedef struct SwModApi {
     // or swmod_exit is refused with a log line (the override would outlive the mod's DLL).
     void (*hle_override)(uint64_t guest_addr, SwModGuestFn fn, const char *name);
     // Call a guest function on the calling game thread's Cpu (inside a hooked function). Saves and restores x30
-    // only: save any other registers you need first.
+    // only: save any other registers you need first. Address 0, or one inside the game's code where no function
+    // starts (a site of another game version), is refused with a log line and does nothing (registers unchanged).
     void (*guest_call)(struct Cpu *c, uint64_t guest_addr);
     // The calling game thread's Cpu, NULL on other threads (the frame thread commands run on is not a game thread).
     struct Cpu *(*current_cpu)(void);

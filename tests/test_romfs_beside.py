@@ -138,6 +138,41 @@ class Beside(unittest.TestCase):
         with self.assertRaises(rm.DeployError):
             self.plan("bad prefix")
 
+    def test_a_pack_other_mods_merge_keeps_his_body_and_gets_her_copies(self):
+        # BUG1: two other mods change TitleBG.pack too, so bnp merges it (generated:merged). Her pack was in that merge
+        # (her body went in under his name) and the merged pack was written over the one with her copies. Now: the
+        # merge leaves her out, and her copies go into the merged pack.
+        import bnp
+        his = {"Model/Link.sbfres": b"HIS BODY", "Model/Link.Tex.sbfres": b"HIS TEX",
+               "Actor/Pack/GameROMPlayer.sbactorpack": b"HIS PLAYER"}
+        a = make(self.tmp / "title-a", {"romfs/" + PACK: sarc({**his, "Actor/Pack/GameROMPlayer.sbactorpack": b"A"})})
+        b = make(self.tmp / "title-b", {"romfs/" + PACK: sarc({**his, "Model/Link.Tex.sbfres": b"B TEX"})})
+        her = str(self.her)
+        mods = [("The Linkle Mod", her), ("Title A", str(a)), ("Title B", str(b))]
+        hook = bnp.deploy_hook(mods, str(self.tmp / "extracted"), files=True, beside=[her])
+        key = next(k for k in hook.files if k.lower() == PACK.lower())
+        merged = dict(wc.sarc_files(hook.files[key]))
+        self.assertEqual(merged["Model/Link.sbfres"], b"HIS BODY")    # (not hers: she isn't in the merge)
+        self.assertEqual(merged["Actor/Pack/GameROMPlayer.sbactorpack"], b"A")
+        self.assertEqual(merged["Model/Link.Tex.sbfres"], b"B TEX")
+        self.assertFalse(any("Linkle" in n for n in hook.notes if "TitleBG" in n), hook.notes)
+        sources = [rm.Beside(her, "SwLk_", "the-linkle-mod"), str(a), str(b)]
+        attention = []
+        p, copies = mm.plan_overlay(sources, self.game, hook.rstb, hook.files, attention)
+        w = p.winner(PACK)
+        self.assertEqual((w.mod, p.generated[w.target]["built_on"]), (rm.BESIDE_OWNER, mm.MERGED_OWNER))
+        members = dict(wc.sarc_files(w.read()))
+        self.assertEqual(members["Model/Link.sbfres"], b"HIS BODY")            # (his stays)
+        self.assertEqual(members["Model/SwLk_Link.sbfres"], b"HER BODY!")      # (hers beside it)
+        self.assertEqual(members["Actor/Pack/GameROMPlayer.sbactorpack"], b"A")   # (the other mods' changes stay)
+        self.assertEqual(members["Model/Link.Tex.sbfres"], b"B TEX")
+        self.assertIn({"from": "Model/Link.sbfres", "to": "Model/SwLk_Link.sbfres", "dev": "archive", "pack": PACK,
+                       "mod": "the-linkle-mod"}, copies)
+        self.assertEqual(attention, [])
+        # without "beside" she is merged like any mod (the later mod wins a member): unchanged
+        plain = bnp.deploy_hook(mods, str(self.tmp / "extracted"), files=True)
+        self.assertEqual(dict(wc.sarc_files(plain.files[key]))["Model/Link.sbfres"], b"HER BODY!")
+
     def test_not_beside_is_unchanged(self):
         p = rm.plan([str(self.her)], self.game)
         self.assertEqual(p.winner("Model/Armor_001.sbfres").read(), b"her armor")

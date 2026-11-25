@@ -4,7 +4,7 @@
 //
 // Like Savage Wind it has the built-in commands `help` (player safe) and `ping` (developer only), skips a duplicate
 // name or a full table in control_register, and its `help` prints one "<name> <args>  <help>" line per command (all
-// of them for the socket, only the player safe ones for the console). Its table is tiny (11 commands, or
+// of them for the socket, only the player safe ones for the console). Its table is tiny (12 commands, or
 // FAKE_MAX_CMDS) so that the self-test can fill it. Words are split like Savage Wind's: double quotes keep spaces in
 // one word, and \" and \\ work inside them.
 #include <stdbool.h>
@@ -17,7 +17,8 @@
 
 #define EXPORT __declspec(dllexport)
 #define CMDS_CAP 64
-#define MAX_CMDS 11  // help, ping, modhost's 6, hello, probe, probe_more: probe's next is refused
+#define MAX_CMDS 12  // help, ping, modhost's 6, bad_cmd (bad.dll's, switched off), hello, probe, probe_more:
+                     // probe's next is refused
 #define MAX_OVERRIDES 64
 #define MAX_CALLS 16
 

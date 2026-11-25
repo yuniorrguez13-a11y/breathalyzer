@@ -19,8 +19,7 @@ You need, each of you: Breathalyzer Plus, Savage Wind 0.4.1-alpha.4 (not a newer
 game set up, a save of your own (multiplayer starts from a copy of your newest save), and both PCs on the same Wi-Fi
 or router (home network only: there is no server of ours anywhere; the host's PC is the server).
 
-1. **Turn it on.** Home > **Multiplayer** > Ghost multiplayer > **Turn on** (or turn it ON in the mod picker). It
-   doesn't run while Infinite Stamina is on.
+1. **Turn it on.** Home > **Multiplayer** > Ghost multiplayer > **Turn on** (or turn it ON in the mod picker).
 2. **Who am I** (if you like): **Change**, then pick a character: Link, Linkle, Zelda, a Hylian, Paya, Urbosa,
    Daruk, Revali, Mipha, a Bokoblin or a Moblin. **Each PC shows the others from its own built characters:** press
    **Build the characters** once on every PC (a few minutes, from your own game files; nothing is downloaded). Then
@@ -59,14 +58,13 @@ words>` (one per host), with story backups in `modloader\multiplayer\mp\backups`
 | The page says | What to do |
 |---|---|
 | Turn on Ghost multiplayer first | Ghost multiplayer > Turn on |
-| Turn off Infinite Stamina on Home first | Ghost multiplayer doesn't run with it |
 | You have no save yet | Play once on your own and save: multiplayer starts from your newest save |
 | No friend yet? / No friend has reached you yet / Friends' Join list can't find you | On the host's PC: Windows Security > Firewall & network protection > Allow an app: tick Python for Private; set the Wi-Fi to Private |
 | Nothing yet? (the Join list) | Both PCs on the same Wi-Fi, set to Private; on both PCs Windows Firewall allows Python |
 | Can't reach the host's PC | Same Wi-Fi or router? The host allows Python in Windows Firewall (private networks) |
 | Wrong room code / This world needs a room code | Ask the host for the 3 words |
 | Another program uses port 7788 | Another Breathalyzer is hosting on this PC: stop it |
-| Ghost multiplayer didn't run in your game | Turn off Infinite Stamina (Home, or the game's Mods page), then Host or Join again |
+| Ghost multiplayer didn't run in your game | Turn it on in the game's Mods page too (Play uses what that page says), then Host or Join again; Details says more |
 | The game didn't start | The page says why (the mods couldn't be made ready, the game was already open...) |
 | The characters couldn't be built | The page says why (game files not set up, the game open...); Details has the rest |
 

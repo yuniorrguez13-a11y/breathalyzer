@@ -6,6 +6,7 @@ hidden."""
 import contextlib
 import gc
 import io
+import inspect
 import json
 import os
 import sys
@@ -600,9 +601,22 @@ class LaunchModman(FakeModman):
         self.deploy_opts = list(opts)
         return super().cmd_deploy()
 
-    def cmd_apply(self):
+    def cmd_apply(self, *opts):   # (tools/modmenu.py apply [--no-rebuild])
+        self.apply_opts = list(opts)
+        if getattr(self, "apply_error", None):
+            for line in self.apply_error:
+                print(line)
+            return 1
         print("Used your changes from the game (1 change).")
         self.deployed = self.inputs_hash(None)
+        if getattr(self, "fake_menu", None) is not None:
+            self.fake_menu.pending = False
+        return 0
+
+    def cmd_undo(self):   # (tools/modmenu.py undo)
+        if getattr(self, "fake_menu", None) is not None:
+            self.fake_menu.pending = False
+        print("Threw away the changes from the game.")
         return 0
 
     def cmd_run(self, *opts):
@@ -902,6 +916,20 @@ class Play(unittest.TestCase):
             self.assertTrue(wait_for(ctl, lambda: not ctl._watching))
         self.assertFalse(ctl.game_open)
 
+    def test_a_recipe_rebuild_shows_a_status(self):
+        """F-MODMAN4: deploy's "rebuilding it" line (a mod made from the game files, after a game update) gives a
+        status instead of a frozen "Getting your mods ready"; its streamed lines go to Details."""
+        ctl = self.make()
+        job = gui.Job("deploy", ["deploy"])
+        ctl._line(job, "Dragonbreath was built for another game version: rebuilding it (dragonbreath_build.py)...")
+        self.assertEqual(ctl.status.lines, ["Getting your mods ready...", gui.RECIPE_SAY])
+        ctl._line(job, "  Stage 3: moves built.")
+        self.assertEqual(job.lines[-1], "  Stage 3: moves built.")
+        self.assertEqual(ctl.status.lines[1], gui.RECIPE_SAY)
+        other = self.make()
+        other._line(gui.Job("add", ["add"]), "x was built for another game version: rebuilding it (y)")
+        self.assertNotEqual(other.status.lines[-1:], [gui.RECIPE_SAY])
+
     def test_code_mods_that_cant_be_built(self):
         ctl = self.make(deployed=False, deploy_error=[
             "Rebuilding the game code with 1 hook mod. This takes 10-20 minutes.",
@@ -917,6 +945,65 @@ class Play(unittest.TestCase):
         self.assertEqual(self.scripts()[-1], ("modman.py", ["deploy", "--no-rebuild"]))
         self.assertEqual(self.mm.calls[-1][0], "run")
         self.assertIsNone(ctl.offer)
+
+    def test_game_changes_with_code_mods_that_cant_be_built(self):
+        # S3.9: the game's Mods page turned on a code mod that can't be built. apply deploys, the rebuild fails: Play
+        # offers to play without code mods, and that Play's apply doesn't rebuild either (it used to rebuild again,
+        # and fail again, forever).
+        menu = FakeMenu(pending=True)
+        ctl = self.make(menu=menu, deployed=False)
+        self.mm.fake_menu = menu
+        self.mm.apply_error = ["Rebuilding the game code with 1 hook mod. This takes 10-20 minutes.",
+                               "The changes from the game were not used: The game code rebuild failed."]
+        ctl.launch()
+        self.assertTrue(ctl.settle())
+        self.assertEqual(self.scripts(), [("modmenu.py", ["apply"])])
+        self.assertEqual(ctl.status.lines[0], "Your code mods couldn't be built.")
+        self.assertEqual(ctl.offer, ("Play without code mods", "no_rebuild"))
+        self.assertEqual(self.runs(), [])
+        self.mm.apply_error = None   # (without the rebuild it works)
+        ctl.launch(no_rebuild=True)
+        self.assertTrue(ctl.settle())
+        self.assertEqual(self.scripts()[-1], ("modmenu.py", ["apply", "--no-rebuild"]))
+        self.assertEqual(self.mm.calls[-1][0], "run")
+        self.assertIsNone(ctl.offer)
+
+    def test_game_changes_that_cant_be_used_can_be_forgotten(self):
+        # S3.9: any other reason the game's changes can't be used: each Play would try them again. Play offers to
+        # forget them (modmenu undo); the next Play uses the mods as they were.
+        menu = FakeMenu(pending=True)
+        ctl = self.make(menu=menu)
+        self.mm.fake_menu = menu
+        self.mm.apply_error = ["The changes from the game were not used: Better Map needs Base Map.",
+                               "  Better Map: on",
+                               "The library is as it was. Your changes from the game still wait: fix the problem "
+                               "and play again, or undo them."]
+        ctl.launch()
+        self.assertTrue(ctl.settle())
+        self.assertEqual(ctl.status.lines, ["Your changes from the game's Mods page couldn't be used.",
+                                            "Better Map needs Base Map.",
+                                            "Fix it and press Play, or press Forget the game's changes."])
+        self.assertEqual(ctl.offer, ("Forget the game's changes", "undo"))
+        self.assertEqual(self.runs(), [])
+        ctl.launch(no_rebuild=True)   # (Play without code mods doesn't help here: still the game's changes)
+        self.assertTrue(ctl.settle())
+        self.assertEqual(self.scripts()[-1], ("modmenu.py", ["apply", "--no-rebuild"]))
+        self.assertEqual(ctl.offer, ("Forget the game's changes", "undo"))
+        self.assertTrue(ctl.can("play"))
+        ctl.forget_game_changes()
+        self.assertEqual(ctl.progress(), ["Forgetting the changes from the game's Mods page... 0:00"])
+        self.assertTrue(ctl.settle())
+        self.assertEqual(self.scripts()[-1], ("modmenu.py", ["undo"]))
+        self.assertEqual(ctl.status.lines, ["The changes from the game's Mods page are forgotten.",
+                                            "Press Play to play with your mods as they were."])
+        self.assertIsNone(ctl.offer)
+        self.assertFalse(menu.pending)
+        self.assertEqual(self.runs(), [])   # (forgetting doesn't start the game by itself)
+        n = len(self.scripts())
+        ctl.launch()
+        self.assertTrue(ctl.settle())
+        self.assertEqual(len(self.scripts()), n)   # (nothing waits: no apply, the deploy is up to date)
+        self.assertEqual(self.mm.calls[-1][0], "run")
 
     def test_other_deploy_failure(self):
         ctl = self.make(deployed=False, deploy_error=["Error: Can't deploy: Better Map needs Base Map (turn it on)"])
@@ -1015,6 +1102,44 @@ class Play(unittest.TestCase):
         ctl = self.make()
         self.assertEqual([r.about for r in ctl.listing.rows], ["Changes game files.", "Cheats, Code mod.",
                                                                "Nothing the game can use."])
+
+
+class PlayAsksAboutACrash(unittest.TestCase):
+    """S3.10: the launcher's Play button asks the Mod Manager's crash question first (no window: the view's method
+    with stand-ins for the window parts)."""
+
+    def press(self, pick="play", can=True, mp=False):
+        ctl = mock.Mock()
+        ctl.can.return_value = can
+        view = SimpleNamespace(ctl=ctl, mp_waits=lambda: mp, crash_question=mock.Mock(return_value=pick),
+                               after_action=lambda fn: fn())
+        gui.LauncherView.on_play(view)
+        return view, ctl
+
+    def test_the_question_is_the_shared_one(self):
+        self.assertIs(gui.LauncherView.crash_question, gui.View.crash_question)
+        self.assertIn('"Play", self.on_play', inspect.getsource(gui.LauncherView.build_home))
+
+    def test_each_answer(self):
+        view, ctl = self.press("play")
+        view.crash_question.assert_called_once()
+        ctl.launch.assert_called_once_with()
+        _, ctl = self.press("off")
+        ctl.turn_off_and_play.assert_called_once()
+        ctl.launch.assert_not_called()
+        _, ctl = self.press("plain")
+        ctl.play_plain.assert_called_once()
+        ctl.launch.assert_not_called()
+        _, ctl = self.press(None)   # (Cancel)
+        self.assertEqual([c[0] for c in ctl.method_calls], ["can"])
+
+    def test_no_question_while_busy_or_in_multiplayer(self):
+        view, ctl = self.press(can=False)   # (Play says why it waits)
+        view.crash_question.assert_not_called()
+        ctl.launch.assert_called_once_with()
+        view, ctl = self.press(mp=True)
+        view.crash_question.assert_not_called()
+        ctl.launch.assert_not_called()
 
 
 # ---------------------------------------------------------------- shortcuts and one window

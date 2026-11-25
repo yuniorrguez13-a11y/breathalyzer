@@ -63,6 +63,7 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 import unicodedata
@@ -140,7 +141,6 @@ CHEAT_RE = re.compile(r"(^|/)cheats/([0-9a-f]{16})\.txt$", re.I)  # (any case: W
 CHEAT_FILE_RE = re.compile(r"[0-9a-f]{16}\.txt")
 AOC_RE = re.compile(r"aoc\d+", re.I)
 MAX_NATIVE = 64   # modhost loads at most this many DLLs from its mods folder (native/modhost/modhost.c MAX_MODS)
-FRAME_JOB_DLLS = ("basics_inf_stamina.dll", "ghost.dll", "zelda_view.dll")  # each wraps the game's frame job
 BAD_CHARS = set('<>:"|?*\\') | {chr(i) for i in range(32)}
 # Folders deploy\ holds: modman's own, and the overlay romfs_mods owns (it keeps its own marker file).
 OWN_TOP = ("root", "native", "cheats", "vanilla-lib", ".work", "pictures", "fonts")
@@ -2787,19 +2787,70 @@ def stale_inputs(root: str, romfs: str, cache: dict | None = None) -> tuple[list
     return list(dict.fromkeys(changed)), tools
 
 
-def run_recipe_build(cmd: list[str], lib: Library, install: str) -> tuple[int, str]:
-    """Run one REBUILDS command (its own Python, the same as this one's): (exit code, what it printed)."""
+RECIPE_TIMEOUT = 15 * 60   # a rebuild still running after this long has hung (a game file locked, a scan): failed
+RECIPE_SAY = "was built for another game version: rebuilding it"   # (modman_gui shows a "rebuilding" status on it)
+
+
+def _stop_tree(proc) -> None:
+    """Stop a process and what it started (taskkill /T on Windows), then the process itself."""
+    if proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    with contextlib.suppress(OSError):
+        if proc.poll() is None:
+            proc.kill()
+
+
+def run_recipe_build(cmd: list[str], lib: Library, install: str, *, timeout: float | None = None,
+                     out=None) -> tuple[int, str]:
+    """Run one REBUILDS command (its own Python, the same as this one's): (exit code, what it printed). Each line it
+    prints is passed on at once (out, default say, indented), so the launcher shows the rebuild going instead of a
+    window that looks frozen for a minute. One still running after `timeout` seconds (RECIPE_TIMEOUT) is stopped with
+    what it started and counts as failed: exit code 1, its reason the last line."""
+    timeout = RECIPE_TIMEOUT if timeout is None else timeout
+    out = out or say
     exe = sys.executable or "python"
     folder, base = os.path.split(exe)
     if base.lower() == "pythonw.exe" and os.path.isfile(os.path.join(folder, "python.exe")):   # (a window's own)
         exe = os.path.join(folder, "python.exe")
     args = [exe, os.path.join(TOOLS, cmd[0]), *cmd[1:], "--library", lib.root, "--game", install]
     try:
-        r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                                errors="replace", stdin=subprocess.DEVNULL,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except OSError as e:
         return 1, str(e)
-    return r.returncode, (r.stdout or "") + (r.stderr or "")
+    lines: list[str] = []
+
+    def pump() -> None:
+        with contextlib.suppress(OSError, ValueError):
+            for line in proc.stdout:
+                line = line.rstrip("\r\n")
+                lines.append(line)
+                if line.strip():
+                    with contextlib.suppress(Exception):   # (a console that can't show it must not stop the read)
+                        out("  " + line)
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    try:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _stop_tree(proc)
+        reader.join(5)
+        mins = f"{timeout / 60:g} minutes" if timeout >= 60 else f"{timeout:g} s"
+        lines.append(f"it was still running after {mins} and was stopped (a game file in use, or a virus scan "
+                     "holding it?): try Play again")
+        code = 1
+    else:
+        reader.join(10)
+    if not reader.is_alive():   # (else a process it started still holds the pipe: the thread keeps it)
+        with contextlib.suppress(OSError):
+            proc.stdout.close()
+    return code, "\n".join(lines)
 
 
 def check_stale_builds(lib: Library, install: str, *, dry_run: bool = False, runner=None) -> list[str]:
@@ -2836,7 +2887,7 @@ def check_stale_builds(lib: Library, install: str, *, dry_run: bool = False, run
             if tuple(cmd) in rebuilt:   # (one build can make more than one stale mod)
                 continue
             rebuilt.add(tuple(cmd))
-            say(f"{m['name']} was built for another game version: rebuilding it ({cmd[0]})...")
+            say(f"{m['name']} {RECIPE_SAY} ({cmd[0]})...")
             code, text = runner(cmd, lib, install)
             if code != 0:
                 last = [x.strip() for x in text.splitlines() if x.strip()][-1:]
@@ -2976,13 +3027,8 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False, mer
         if len(native) > MAX_NATIVE:
             attention.append(f"{len(native)} native mod and helper DLLs, but modhost loads at most {MAX_NATIVE}: "
                              "the ones last in name order are left out. Turn some native mods off.")
-        # (only the first DLL by file name that wraps the game's frame job runs: docs/game-basics.md, botw_on_frame.
-        # In the game 2026-11-12: Infinite Stamina on, the ghost mod never ran, so `iam daruk` did nothing)
-        frame = sorted(n for n in native if n in FRAME_JOB_DLLS and not native[n][2])
-        if len(frame) > 1:
-            names = [native[n][0]["name"] for n in frame]
-            attention.append(f"{' and '.join(names)} use the same frame hook, and only {names[0]} runs (first by "
-                             f"file name). {' and '.join(names[1:])} won't run: turn {names[0]} off to use it.")
+        # (mods that wrap the same game function, like Infinite Stamina and Ghost multiplayer on the frame job, all
+        # run: modhost chains the overrides made at game start, docs/code-mods.md "override chains")
 
     # Hooks: the union of what the deployed native mods' mod.toml files ask for, built into the game code
     hooks = collect_hooks(scans, native)
@@ -3013,11 +3059,12 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False, mer
     if romfs_paths:  # (BCML packages: one size table for every mod that changes it; their packs merged with the
         #             other mods' copies as BCML merges them, put in the overlay below (MERGED_OWNER))
         pairs = [(m["name"], root) for m, root, s in scans if s.romfs]
+        side = [root for m, root, s in scans if s.romfs and beside_prefix(m)]   # (not merged: only their copies go in)
         try:   # (a merge nothing changed for is read back from the library's cache; a dry run never writes it)
             hook = bnp.deploy_hook(pairs, extracted, files=merge, cache=os.path.join(lib.root, *MERGE_CACHE),
-                                   store=not dry_run)
+                                   store=not dry_run, beside=side)
         except Exception as e:  # noqa: BLE001 (a pack merge that fails never stops the deploy: each mod's own copy)
-            hook = bnp.deploy_hook(pairs, extracted)
+            hook = bnp.deploy_hook(pairs, extracted, beside=side)
             hook.attention.append(f"The mods' packs can't be merged ({type(e).__name__}: {e}): the later mod's copy "
                                   "of each is used")
         attention += hook.attention
@@ -3088,15 +3135,7 @@ def deploy(lib: Library, *, no_rebuild: bool = False, dry_run: bool = False, mer
         if sources or makers:  # (the plan, then the files made at deploy over it: fonts, title picture, pictures)
             if gindex is None and os.path.isdir(os.path.join(extracted, "romfs")):
                 gindex = rm.GameIndex.scan(extracted)
-            p = rm.plan(sources, gindex, rstb)
-            if p.beside or p.beside_packs:   # (copies beside the game's files: their packs and size entries)
-                beside = rm.add_beside(p)   # (its warnings go into the manifest's)
-            if hook is not None and hook.files:   # (sized in hook.rstb already: no entry to add here)
-                try:
-                    rm.add_generated(p, [(path, data, None) for path, data in sorted(hook.files.items())],
-                                     MERGED_OWNER)
-                except ValueError as e:
-                    attention.append(f"The merged packs can't be deployed ({e}): the later mod's copy of each is used")
+            p, beside = plan_overlay(sources, gindex, rstb, hook.files if hook is not None else None, attention)
             for rel, data in run_makers(lib, p, scans, makers, attention, notes, made):
                 with open(d.add_file(rel), "wb") as f:
                     f.write(data)
@@ -3273,14 +3312,40 @@ def option_layers(lib: Library, scans: list[tuple[dict, str, ModScan]], attentio
     return out
 
 
+def beside_prefix(m: dict) -> str | None:
+    """A library entry's "beside" prefix (`modman beside <mod> SwLk_`) when it is a valid one, else None."""
+    px = m.get("beside")
+    return px if isinstance(px, str) and rm.BESIDE_PREFIX_RE.fullmatch(px) else None
+
+
+def plan_overlay(sources: list, gindex, rstb, merged: dict | None, attention: list[str]):
+    """The overlay's plan before the files made at deploy (fonts, pictures): the mods' files (romfs_mods.plan), then
+    the packs merged from them (bnp.deploy_hook's files, MERGED_OWNER), then the beside mods' copies on top of those
+    (romfs_mods.add_beside): a body pack's copies go into the pack in use, the merged one when there is one, so the
+    merge never writes over them. Returns (the plan, the copies kept)."""
+    p = rm.plan(sources, gindex, rstb)
+    try:
+        if merged:   # (sized in hook.rstb already: no entry to add here)
+            try:
+                rm.add_generated(p, [(path, data, None) for path, data in sorted(merged.items())], MERGED_OWNER)
+            except ValueError as e:
+                attention.append(f"The merged packs can't be deployed ({e}): the later mod's copy of each is used")
+        beside = rm.add_beside(p) if p.beside or p.beside_packs else []   # (its warnings go into the manifest's)
+    except BaseException:   # (the caller closes the plan's .zip files only once it has the plan)
+        for m in p.mods:
+            if m.zip:
+                m.zip.close()
+        raise
+    return p, beside
+
+
 def romfs_sources(scans: list[tuple[dict, str, ModScan]], layers: list[tuple[str, str, bool]]) -> list:
     """What romfs_mods deploys, in order: each mod's own RomFS folder, then its option folders (rm.Layer)."""
     out: list = []
     for m, root, s in scans:
         if s.romfs:
-            px = m.get("beside")   # (linkle-live-swap-design.md 2.4: its player and armor files go beside the game's)
-            out.append(rm.Beside(root, px, m["id"]) if isinstance(px, str) and rm.BESIDE_PREFIX_RE.fullmatch(px)
-                       else root)
+            px = beside_prefix(m)   # (linkle-live-swap-design.md 2.4: its player and armor files go beside the game's)
+            out.append(rm.Beside(root, px, m["id"]) if px else root)
         out += [rm.Layer(folder, os.path.basename(root), dlc) for mod_id, folder, dlc in layers if mod_id == m["id"]]
     return out
 
@@ -3860,8 +3925,52 @@ def apply_profile(lib: Library, data: dict) -> list[str]:
     return notes   # (a set saved without the font tool leaves the font as it is)
 
 
+FONT_SETTINGS = "font.json"   # (tools/font.py SETTINGS: the font choice a mod set keeps, in the library folder)
+
+
+def _files_as_they_are(paths) -> dict[str, bytes | None]:
+    """Each file's bytes now (None: not there), to put them back with _put_files_back."""
+    out: dict[str, bytes | None] = {}
+    for p in paths:
+        try:
+            with open(p, "rb") as f:
+                out[p] = f.read()
+        except FileNotFoundError:
+            out[p] = None
+    return out
+
+
+def _put_files_back(saved: dict[str, bytes | None]) -> list[str]:
+    """Make each file as it was (a temp file, then a rename; one that wasn't there is removed). Returns the files
+    that couldn't be put back."""
+    stuck = []
+    for p, data in saved.items():
+        try:
+            if data is None:
+                if os.path.exists(p):
+                    os.remove(p)
+                continue
+            try:
+                with open(p, "rb") as f:
+                    if f.read() == data:
+                        continue
+            except FileNotFoundError:
+                pass
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            tmp = f"{p}.tmp-{os.getpid()}"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, p)
+        except OSError:
+            stuck.append(p)
+    return stuck
+
+
 def use_profile(lib: Library, name: str) -> list[str]:
-    """Switch to profile `name`: the current set is kept in its own profile first. Returns notes."""
+    """Switch to profile `name`: the current set is kept in its own profile first. Returns notes.
+    All or nothing: when a write fails partway (a settings file in use, the disk full), every mod's settings file,
+    font.json and the library's mods are put back as they were and ModmanError says "Nothing was changed"; before,
+    half the new set's setting values stayed with the old set's mods."""
     if game_running():
         raise ModmanError("Savage Wind is running. Close it, then switch the mod set.")
     target = find_profile(lib, name)
@@ -3871,10 +3980,25 @@ def use_profile(lib: Library, name: str) -> list[str]:
     if data is None:
         raise ModmanError(f"The mod set '{target}' has no file ({profile_file(lib, target)}).")
     backup = backup_save(lib, f"before {target}")   # (S3: the save in use now, before another set touches it)
-    save_profile(lib, lib.profile)
-    notes = apply_profile(lib, data)
-    lib.profile = data["name"]
-    lib.save()
+    save_profile(lib, lib.profile)   # (the set in use, as it is: kept whatever happens next)
+    sid = settings_ids(lib)
+    saved = _files_as_they_are(sorted({settings_file(lib, sid.get(m["id"], m["id"])) for m in lib.mods}
+                                      | {os.path.join(lib.root, FONT_SETTINGS)}))
+    was_mods, was_profile = json.loads(json.dumps(lib.mods)), lib.profile
+    try:
+        notes = apply_profile(lib, data)
+        lib.profile = data["name"]
+        lib.save()
+    except (OSError, ModmanError) as e:
+        lib.mods, lib.profile = was_mods, was_profile
+        stuck = _put_files_back(saved)
+        why = e.strerror if isinstance(e, OSError) and e.strerror else str(e)
+        if stuck:
+            raise ModmanError(f"Couldn't switch to the mod set '{target}' ({why}). '{was_profile}' is still in use, "
+                              f"but these files couldn't be put back as they were: {_some(stuck)}. Close what uses "
+                              "them, then switch the set again.") from None
+        raise ModmanError(f"Couldn't switch to the mod set '{target}' ({why}). Nothing was changed: '{was_profile}' "
+                          "is still in use.") from None
     if backup and not backup.get("skipped"):
         notes.append(f"Your save was backed up first: {backup['path']}")
     own = profile_own_save(lib)
@@ -3967,6 +4091,60 @@ def rename_profile(lib: Library, name: str, new: str) -> str:
     return new_path
 
 
+COPYING = ".copying"   # a folder copy is made beside its place under this name first, then renamed into place
+# A folder just written: Windows Defender or the search indexer may still have its new files open for a moment, and
+# renaming the folder is refused (access denied) until they are done: tried this many times, this many seconds apart.
+RENAME_TRIES, RENAME_WAIT = 10, 0.2
+
+
+def _rename_when_free(src: str, dst: str) -> None:
+    """os.replace(src, dst) for a folder whose files were just written: refused (PermissionError) while Windows
+    Defender or the search indexer still reads them, so tried up to RENAME_TRIES times, RENAME_WAIT s apart; the last
+    refusal is raised."""
+    for left in range(RENAME_TRIES - 1, -1, -1):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if not left:
+                raise
+            time.sleep(RENAME_WAIT)
+
+
+def _copy_whole(src: str, dst: str) -> None:
+    """Copy folder src to dst (not there yet, or an empty folder) all or nothing: into <dst>.copying first, then
+    renamed to dst, so a copy cut off partway (disk full, a file in use, the PC turned off) never leaves half a save
+    where the game would load it. A <dst>.copying left by such a cut-off copy is thrown away first. Raises
+    ModmanError (nothing changed then: an empty dst that was there is there again)."""
+    tmp = dst + COPYING
+    try:
+        remove_tree(tmp)
+        shutil.copytree(src, tmp)   # (the files themselves, as before: a link's target is copied, never shared)
+    except OSError as e:   # (shutil.Error is one too)
+        with contextlib.suppress(OSError):
+            remove_tree(tmp)
+        raise ModmanError(f"Couldn't copy {src} to {dst} ({getattr(e, 'strerror', None) or e}). Nothing was "
+                          "changed: free some space or close the program that uses the save, then try again.") \
+            from None
+    had_dst = os.path.isdir(dst)
+    try:
+        if had_dst:
+            os.rmdir(dst)   # (empty: the caller checked; a rename doesn't replace a folder on Windows)
+        _rename_when_free(tmp, dst)
+    except OSError as e:
+        with contextlib.suppress(OSError):
+            if had_dst:
+                os.makedirs(dst, exist_ok=True)   # (as it was)
+        with contextlib.suppress(OSError):
+            remove_tree(tmp)
+        if isinstance(e, PermissionError):
+            raise ModmanError("The save was copied, but Windows is still checking the new files (an antivirus or "
+                              f"the search), so it couldn't be put in {dst}. Nothing was changed: try again in a "
+                              "moment.") from None
+        raise ModmanError(f"Couldn't put the copied save in {dst} ({getattr(e, 'strerror', None) or e}). Nothing "
+                          "was changed: try again.") from None
+
+
 def set_profile_own_save(lib: Library, name: str, on: bool, *, copy: bool = False) -> list[str]:
     """Give set `name` its own save folder (<library>\\profiles\\<file name>\\save), so an overhaul playthrough keeps its
     own save; or use the normal save folder again. copy: start the own folder from a copy of the save in use (only
@@ -3986,12 +4164,15 @@ def set_profile_own_save(lib: Library, name: str, on: bool, *, copy: bool = Fals
     notes: list[str] = []
     if on:
         normal = save_folder(lib)   # (the save in use before the change)
-        data["own_save"] = True
-        os.makedirs(folder, exist_ok=True)
-        if copy and normal and os.path.isdir(normal) and not os.listdir(folder) \
+        has_save = os.path.isdir(folder) and bool(os.listdir(folder))
+        if copy and normal and os.path.isdir(normal) and not has_save \
                 and os.path.normcase(os.path.abspath(normal)) != os.path.normcase(os.path.abspath(folder)):
-            shutil.copytree(normal, folder, dirs_exist_ok=True)
+            _copy_whole(normal, folder)   # (all or nothing: a failed copy raises, and the set stays as it was)
             notes.append(f"Copied your save from {normal}.")
+        elif copy and has_save:
+            notes.append("Not copied: the set's own folder already has a save (it stays as it is).")
+        os.makedirs(folder, exist_ok=True)
+        data["own_save"] = True   # (only once the copy is whole)
         notes.append(f"'{target}' keeps its save in {folder}." + (
             "" if os.listdir(folder) else " It is empty: the game starts a new save there."))
     else:

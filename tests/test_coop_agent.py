@@ -333,13 +333,98 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.saves(), before)
 
     async def test_host_without_a_key_is_a_bad_host(self):
-        """No host_key: the friend can't tell who it is; refused before any story (none merged into a copy)."""
+        """No host_key: the friend can't tell who it is; refused before any story (none merged into a copy). The
+        first join waits for it a while (the host's agent may not be in yet), then ends with the same reason."""
         story.bind_host(self.coop, "cd" * 8)
         before = self.saves()
-        out = await self.fake_host(self.fake_welcome())
+        out = await self.fake_host(self.fake_welcome(), first_join_wait=0.5, first_join_retry=0.1)
         self.assertIn("no host key", out["error"])
         self.assertIsNone(out["merged"])
         self.assertEqual(self.saves(), before)
+
+    async def test_first_join_waits_for_the_hosts_own_agent(self):
+        """F-MP4: the relay is up but the host's agent isn't in "coop" yet (just started, or reconnecting): its
+        welcome has no host_key. The friend's first join tries again instead of ending; the next welcome names the
+        host and the join goes on."""
+        import json
+        tries, said = [], []
+
+        async def host(reader, writer):
+            tries.append(1)
+            try:
+                await asyncio.wait_for(reader.readline(), 5)
+                extra = {} if len(tries) < 3 else {"host_key": "ab" * 8}
+                writer.write(json.dumps(self.fake_welcome(**extra)).encode() + b"\n")
+                await writer.drain()
+                await asyncio.sleep(0.5)
+            finally:
+                writer.close()
+
+        server = await asyncio.start_server(host, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            out = await asyncio.wait_for(coop_agent.join_session(
+                self.guest_lib, "Ben", "127.0.0.1", self.coop, self.sl, port=port, share=True, log=said.append,
+                processes=[], story_wait=0.2, reconnect=False, first_join_wait=5.0, first_join_retry=0.05), 10)
+        finally:
+            server.close()
+        self.assertEqual(len(tries), 3)
+        self.assertIsNone(out["error"])
+        self.assertEqual(out["joins"], 1)
+        self.assertIn("Ana's story added", out["merged"])
+        self.assertEqual(sum("isn't ready yet" in s for s in said), 1)   # (said once, not every try)
+
+    async def test_a_refusal_on_the_first_join_is_not_retried(self):
+        """Only "not ready" answers are tried again: a wrong code still ends the first join at once."""
+        tries = []
+
+        async def host(reader, writer):
+            tries.append(1)
+            import json
+            await asyncio.wait_for(reader.readline(), 5)
+            writer.write(json.dumps({"type": "error", "error": "wrong room code"}).encode() + b"\n")
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(host, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            out = await asyncio.wait_for(coop_agent.join_session(
+                self.guest_lib, "Ben", "127.0.0.1", self.coop, self.sl, port=port, share=True, log=quiet,
+                processes=[], first_join_wait=5.0, first_join_retry=0.05), 10)
+        finally:
+            server.close()
+        self.assertEqual((out["error"], len(tries)), ("wrong room code", 1))
+
+    async def test_older_host_gets_no_proof_and_a_plain_reason(self):
+        """F-MP1: a challenge without "kdf" is an older host, which would read our scrypt proof as a wrong code (a
+        strike). The friend sends no proof and stops with "the host's Breathalyzer is older"."""
+        import json
+        got = []
+
+        async def old_host(reader, writer):
+            try:
+                writer.write(json.dumps({"type": "challenge", "nonce": "ab" * 16}).encode() + b"\n")
+                await writer.drain()
+                line = await asyncio.wait_for(reader.readline(), 2)
+                got.append(line)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                writer.close()
+
+        server = await asyncio.start_server(old_host, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            out = await asyncio.wait_for(coop_agent.join_session(
+                self.guest_lib, "Ben", "127.0.0.1", self.coop, self.sl, port=port, share=True, log=quiet,
+                processes=[], code="apple river stone"), 10)
+            await asyncio.sleep(0.1)
+        finally:
+            server.close()
+        self.assertEqual(out["error"], coop_agent.security.OLDER_HOST)
+        self.assertTrue(coop_agent._fatal(out["error"]))
+        self.assertFalse(any(b"code_proof" in ln for ln in got), got)
 
     async def test_text_from_the_host_is_one_clean_line(self):
         """A host's error with a newline can't add a fake line ("Ready: ...") to what the launcher reads."""
@@ -513,14 +598,15 @@ class HostSideTests(unittest.TestCase):
                 self.bans = type("B", (), {"unban": lambda s, w: 1})()
 
             def players(self):
-                return [{"name": "Ana", "host": True, "room": "coop"}, {"name": "Ben", "host": False, "room": "coop"}]
+                return [{"id": 1, "name": "Ana", "host": True, "room": "coop"},
+                        {"id": 2, "name": "Ben", "host": False, "room": "coop"}]
 
-            def find_player(self, name):
-                return None
+            def find_players(self, name):
+                return []
 
         stop = asyncio.Event()
         r = R()
-        self.assertIn("Ben", coop_agent.host_command("players", r, stop))
+        self.assertIn("#2 Ben", coop_agent.host_command("players", r, stop))
         self.assertIn("No player called Zed", coop_agent.host_command("kick Zed", r, stop))
         self.assertIn("apple river stone", coop_agent.host_command("code Apple river stone", r, stop))
         self.assertEqual(r.room_code, "apple river stone")

@@ -70,6 +70,10 @@ POLL_MS = 100
 MAX_LINES, DROP_LINES = 50000, 10000      # output kept per command (the oldest lines go first)
 REBUILD_NOTE = "If the game code must be rebuilt, this takes 10-20 minutes."
 PRESS_DEPLOY = "Press Deploy to use the change."
+# A mod with code added from a folder, a .zip or a DLL comes in OFF until the player's OK (modman add: needs_ok). The
+# window gives that OK: Turn on asks the Careful question (BigText.code_question), then `enable --allow-code`.
+CODE_OFF_LINE = "Added OFF: it has code"   # (modman cmd_add's line for it)
+CODE_OK_HINT = "If you trust who made it, press Turn on: it asks for your OK."
 KEYS_HINT = "Keys: Tab, arrows, Space, Enter. Ctrl + and Ctrl - change the text size."
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -196,6 +200,8 @@ class Row:
     about: str = ""            # one line about the mod (the launcher's list; Backend.describe)
     full: str = ""             # all of it
     secret: bool = False       # [mod] secret (an easter egg, a hidden extra's part): never listed
+    needs_ok: bool = False     # it has code and came in OFF: turning it on asks first (code_question, --allow-code)
+    code: tuple = ()           # its code files (modman's entry "code"), for that question
 
     def cells(self) -> tuple[str, str, str, str, str]:
         return (str(self.number), "On" if self.on else "Off", self.name, kind_text(self.kinds), self.version or "-")
@@ -328,6 +334,9 @@ def summarize(job: Job, name: str = "") -> Status:
     if a == "add":
         if not ok:
             return failed("Not added.", text)
+        if any(x.startswith(CODE_OFF_LINE) for x in text):   # (no "Press Deploy": it is off until the player's OK)
+            return Status("warn", [f"Added {who}, but it is off: it has code.",
+                                   "Code runs on your PC like a program, with your rights.", CODE_OK_HINT])
         unused = [x for x in text if x.strip().startswith("not used:")]
         wiiu = any(x.strip().startswith("Left as Wii U data") for x in text)  # (a converted Wii U mod)
         if wiiu:
@@ -521,7 +530,9 @@ class Backend:
         if lib is None:
             return Listing(self.root, [], False)
         rows = [Row(k, m["id"], m.get("name") or m["id"], bool(m.get("enabled")), list(m.get("kinds") or []),
-                    m.get("version"), secret=m.get("secret") is True) for k, m in enumerate(lib.mods, 1)]
+                    m.get("version"), secret=m.get("secret") is True, needs_ok=bool(m.get("needs_ok")),
+                    code=tuple(c for c in m["code"] if isinstance(c, str)) if isinstance(m.get("code"), list) else ())
+                for k, m in enumerate(lib.mods, 1)]
         if self.describe is not None:
             for row, m in zip(rows, lib.mods):
                 with contextlib.suppress(Exception):   # (a mod.toml that can't be read: no text, never a crash)
@@ -754,10 +765,18 @@ class Controller:
         self._reload()
         self.refresh_state()
 
-    def toggle(self, mod_id: str | None) -> None:
+    def toggle(self, mod_id: str | None, allow_code: bool = False) -> None:
+        """Turn on/off. A mod with code waiting for the player's OK (row.needs_ok) is turned on only with allow_code:
+        the window asked first (BigText.code_ok_first), so `enable --allow-code`; without it nothing runs and the
+        status says why (modman's own refusal names a command line the window's player never types)."""
         row = self._ready("toggle", mod_id)
-        if row:
-            self._quick("disable" if row.on else "enable", [str(row.number)], row)
+        if not row:
+            return
+        if not row.on and row.needs_ok and not allow_code:
+            self.status = Status("warn", [f"{row.name} has code: it needs your OK first.", CODE_OK_HINT])
+            return
+        ok = ["--allow-code"] if not row.on and row.needs_ok else []
+        self._quick("disable" if row.on else "enable", [str(row.number), *ok], row)
 
     def move(self, mod_id: str | None, delta: int) -> None:
         row = self._ready("move", mod_id)
@@ -1253,6 +1272,37 @@ class Flow:
         return self.layout(width)[1]
 
 
+ASK_MIN_ROWS = 3   # a question's long text in a box that scrolls: at least this many lines of it show
+
+
+def detail_rows(room_h: int, rest_h: int, line_h: int, min_rows: int = ASK_MIN_ROWS) -> int:
+    """How many lines of a question's text fit in a scrolling box: what the screen has room for (room_h) once the
+    rest of the question (its title, the buttons, the margins: rest_h) is there."""
+    return max(min_rows, (room_h - rest_h) // max(1, line_h))
+
+
+FRAME_W = 16      # a window's left and right frame on Windows (outside the size Tk is given): kept on the screen too
+BELOW_MIN = 90    # the least kept below a window's inside: its title bar (+y is the top of it) and the taskbar
+
+
+def place_dialog(req: tuple[int, int], room: tuple[int, int], screen: tuple[int, int],
+                 parent: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """(width, height, x, y) of a question window: the size it asks for, but never more than the room the screen
+    has (room: beside the title bar and the taskbar), centred on its parent window (a third down), and always all of
+    it on the screen. On Windows +x+y is the top left of the window's frame, so its title bar is below y as well as
+    the inside (h): all of what the room leaves (the title bar and the taskbar, more on a scaled screen) is kept
+    below the window, as fit() does for the main windows, and the frame's width beside it."""
+    w, h = min(req[0], room[0]), min(req[1], room[1])
+    px, py, pw, ph = parent
+    sw, sh = screen
+    x = px + max(0, (pw - w) // 2)
+    y = py + max(0, (ph - h) // 3)
+    below = max(BELOW_MIN, sh - room[1])
+    x = max(0, min(x, sw - w - FRAME_W))
+    y = max(0, min(y, sh - h - below))
+    return w, h, x, y
+
+
 class BigText:
     """What the big-text windows share (the Mod Manager window, View, and the launcher, LauncherView): labels,
     buttons with a focus ring, arrow keys between buttons, questions in the same big text. The window sets self.root,
@@ -1324,7 +1374,9 @@ class BigText:
 
     def ask(self, title: str, message: str, detail: str, choices: list, default: int = 0, columns: int = 0):
         """A question in the same big text. Returns the value of the button pressed; Esc or closing it gives the
-        last button's. columns: the buttons in that many columns (0: all on one row)."""
+        last button's. columns: the buttons in that many columns (0: all on one row). Never taller than the screen:
+        the buttons are packed first (at the bottom), and a text too long for the screen (big text on a 768-px
+        laptop, a long list) goes into a box that scrolls."""
         t = self.t
         top = tk.Toplevel(self.root, bg=t["bg"], padx=24, pady=20)
         top.title(title)
@@ -1337,11 +1389,9 @@ class BigText:
             top.destroy()
 
         wrap = max(320, self.font.measure("0") * 36)
-        self.label(top, self.head, text=message, wraplength=wrap).pack(anchor="w")
-        if detail:
-            self.label(top, text=detail, wraplength=wrap).pack(anchor="w", pady=(10, 0))
+        self.label(top, self.head, text=message, wraplength=wrap).pack(side="top", anchor="w")
         row = tk.Frame(top, bg=t["bg"])
-        row.pack(anchor="w", pady=(20, 0))
+        row.pack(side="bottom", anchor="w", pady=(20, 0))   # (before the text: it is the text that gives way)
         group: list = []
         for k, (text, value) in enumerate(choices):
             ring = self.make_button(row, text, lambda v=value: done(v), group).ring
@@ -1350,12 +1400,38 @@ class BigText:
                 ring.winfo_children()[0].pack_configure(fill="x")
             else:
                 ring.pack(side="left", padx=(0, 8))
+        shown = self.label(top, text=detail, wraplength=wrap) if detail else None
+        if shown is not None:
+            shown.pack(side="top", anchor="w", pady=(10, 0))
         top.bind("<Escape>", lambda e: done(choices[-1][1]))
         top.protocol("WM_DELETE_WINDOW", lambda: done(choices[-1][1]))
         top.update_idletasks()
-        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - top.winfo_reqwidth()) // 2)
-        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - top.winfo_reqheight()) // 3)
-        top.geometry(f"+{x}+{y}")
+        room = self.room() if hasattr(self, "room") else (int(top.winfo_screenwidth() * 0.96),
+                                                          int(top.winfo_screenheight() * 0.88))
+        if shown is not None and top.winfo_reqheight() > room[1]:
+            rest = top.winfo_reqheight() - shown.winfo_reqheight()
+            shown.destroy()
+            box = tk.Frame(top, bg=t["bg"])
+            box.pack(side="top", anchor="w", fill="both", expand=True, pady=(10, 0))
+            lines = detail_rows(room[1], rest + 10 + 8, self.font.metrics("linespace"))
+            text_box = tk.Text(box, font=self.font, bg=t["bg"], fg=t["fg"], wrap="word", height=lines,
+                               width=max(20, wrap // max(1, self.font.measure("0"))), relief="flat",
+                               borderwidth=0, highlightthickness=0, padx=0, pady=4, takefocus=0)
+            text_box.insert("end", detail)
+            text_box.configure(state="disabled")
+            scroll = ttk.Scrollbar(box, orient="vertical", command=text_box.yview, style="Mods.Vertical.TScrollbar")
+            text_box.configure(yscrollcommand=scroll.set)
+            scroll.pack(side="right", fill="y")
+            text_box.pack(side="left", fill="both", expand=True)
+            for seq in WHEEL_EVENTS[:1]:   # (the wheel scrolls it anywhere over the question)
+                top.bind(seq, lambda e: text_box.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+            top.update_idletasks()
+        w, h, x, y = place_dialog((top.winfo_reqwidth(), top.winfo_reqheight()), room,
+                                  (top.winfo_screenwidth(), top.winfo_screenheight()),
+                                  (self.root.winfo_rootx(), self.root.winfo_rooty(), self.root.winfo_width(),
+                                   self.root.winfo_height()))
+        clamped = (w, h) != (top.winfo_reqwidth(), top.winfo_reqheight())
+        top.geometry(f"{w}x{h}+{x}+{y}" if clamped else f"+{x}+{y}")
         before = self.root.focus_get()
 
         def grab():  # (only once the window is on screen)
@@ -1374,6 +1450,42 @@ class BigText:
             with contextlib.suppress(tk.TclError):
                 before.focus_set()
         return result["value"]
+
+    def crash_question(self) -> str | None:
+        """The crash check at Play, the same in the Mod Manager and the launcher: "off" (turn off what is new, then
+        Play), "plain" (Play without mods), "play" (Play anyway), None (cancel). "play" right away when the last start
+        didn't stop with an error."""
+        lines, new = self.ctl.crash_check()
+        if not lines:
+            return "play"
+        them = "it" if len(new) == 1 else "them"
+        choices = ([(f"Turn {them} off and Play", "off")] if new else []) + [
+            ("Play without mods", "plain"), ("Play anyway", "play"), ("Cancel", None)]
+        return self.ask("The last start", lines[0], " ".join(lines[1:]), choices, default=0, columns=2)
+
+    def code_question(self, row: Row) -> bool:
+        """Turn on a mod with code that waits for the player's OK (added from a folder, a .zip or a DLL: modman adds
+        it OFF). The same Careful words as "Add this mod?" for a .breath; Keep it off is the default. True: OK."""
+        message, detail = code_ok_words(row)
+        return bool(self.ask("Careful", message, detail, [("Turn it on", True), ("Keep it off", False)], default=1))
+
+    def code_ok_first(self, mod_id: str | None) -> bool | None:
+        """Before Turn on: the player's OK for a mod with code (code_question). True: OK'd (toggle with allow_code),
+        False: nothing to ask (toggle as usual: off, busy, gone, no code), None: kept off (nothing runs)."""
+        ctl = self.ctl
+        row = ctl.row(mod_id) if ctl is not None and ctl.can("toggle") else None
+        if row is None or row.on or not row.needs_ok:
+            return False
+        return True if self.code_question(row) else None
+
+
+def code_ok_words(row: Row) -> tuple[str, str]:
+    """The Careful question for turning on a mod with code (BigText.code_question): its head and its text."""
+    shown = list(dict.fromkeys(os.path.basename(c.replace("\\", "/")) or c for c in row.code))
+    files = ", ".join(shown[:4]) + (f" and {len(shown) - 4} more" if len(shown) > 4 else "")
+    return (f"Careful: {row.name} has code" + (f" ({files})." if files else "."),
+            "Code runs on your PC like a program, with your rights. Only turn it on if you trust the person who made "
+            "it.")
 
 
 class View(BigText):
@@ -1802,7 +1914,10 @@ class View(BigText):
             self.show_answer()
 
     def on_toggle(self) -> None:
-        self.after_action(lambda: self.ctl.toggle(self.selected_id()))
+        sel = self.selected_id()
+        ok = self.code_ok_first(sel)   # (a mod with code waiting for the player's OK: asked first)
+        if ok is not None:
+            self.after_action(lambda: self.ctl.toggle(sel, allow_code=ok))
 
     def on_move(self, delta: int) -> None:
         self.after_action(lambda: self.ctl.move(self.selected_id(), delta))
@@ -1954,17 +2069,6 @@ class View(BigText):
     def on_play_plain(self) -> None:
         if self.install_known("play"):
             self.after_action(self.ctl.play_without_mods)
-
-    def crash_question(self) -> str | None:
-        """The crash check at Play: "off" (turn off what is new, then Play), "plain" (Play without mods), "play"
-        (Play anyway), None (cancel). "play" right away when the last start didn't stop with an error."""
-        lines, new = self.ctl.crash_check()
-        if not lines:
-            return "play"
-        them = "it" if len(new) == 1 else "them"
-        choices = ([(f"Turn {them} off and Play", "off")] if new else []) + [
-            ("Play without mods", "plain"), ("Play anyway", "play"), ("Cancel", None)]
-        return self.ask("The last start", lines[0], " ".join(lines[1:]), choices, default=0, columns=2)
 
     def on_more(self) -> None:
         if not self.ctl.can("more"):
@@ -2154,12 +2258,17 @@ class View(BigText):
 # ---------------------------------------------------------------- the launcher: Play does everything
 
 LAUNCH_BUSY = {"prepare": "Getting ready", "apply": "Using your changes from the game's Mods page",
+               "undo": "Forgetting the changes from the game's Mods page",
                "deploy": "Getting your mods ready", "add": "Adding the mod", "remove": "Removing the mod",
                "check": "Checking", "tool": "Building the mod from your game files", "enable": "Turning it on",
                "disable": "Turning it off", "breath": "Checking the .breath file",
                "export": "Making the .breath file"}
 REBUILD_LINE = "Rebuilding the game code"      # (what modman deploy prints before the 10-20 minute rebuild)
+APPLY_FAILED = "The changes from the game were not used: "   # (modmenu apply's line when its deploy failed: the reason)
 REBUILD_SAY = "Building the game code for your code mods: about 10-20 minutes, only this time."
+# (modman deploy's line before it rebuilds a mod made from the game's files after a game update: modman.RECIPE_SAY)
+RECIPE_LINE = "was built for another game version: rebuilding it"
+RECIPE_SAY = "Rebuilding a mod made from your game's files for this game version: a minute or two."
 # The Mod Manager's words, as the launcher says them (it has no Deploy button: Play deploys)
 LAUNCH_WORDS = ((PRESS_DEPLOY, "Play uses the change."), ("Press Deploy to use it.", "Play uses it."),
                 ("Press Deploy to take it out of the game.", "Play leaves it out."),
@@ -2583,8 +2692,8 @@ class LaunchController(Controller):
         for m in self.after_on:   # (before the deploy: what they add is used at once)
             if m["id"] in (facts.get("bonus") or ()):
                 steps += self.bonus_steps(m, EGG_TITLE if m.get("egg") else m["title"])
-        if facts.get("pending"):
-            steps.append(Job("apply", ["apply"], script=MODMENU_PY))
+        if facts.get("pending"):   # (apply deploys; Play without code mods: that deploy doesn't rebuild either)
+            steps.append(Job("apply", ["apply", *(["--no-rebuild"] if self.no_rebuild else [])], script=MODMENU_PY))
         elif self.no_rebuild:
             steps.append(Job("deploy", ["deploy", "--no-rebuild"]))
         elif facts.get("deploy") or steps:
@@ -2640,6 +2749,8 @@ class LaunchController(Controller):
         if job.action in ("apply", "deploy") and text.startswith(REBUILD_LINE) and not self.rebuilding:
             self.rebuilding = True
             self.status = Status("busy", ["Getting your mods ready...", REBUILD_SAY])
+        elif job.action in ("apply", "deploy") and RECIPE_LINE in text and not self.rebuilding:
+            self.status = Status("busy", ["Getting your mods ready...", RECIPE_SAY])   # (F-MODMAN4: not frozen)
 
     def _done(self, job: Job, code: int) -> None:
         super()._done(job, code)
@@ -2685,12 +2796,24 @@ class LaunchController(Controller):
                 self.game_open, self._gone = True, 0
                 self.status = Status("error", ["Savage Wind is already open.", "Close it, then press Play."])
             return
+        if job.action == "undo":
+            self.chain = []
+            if code == 0:
+                self.status = Status("ok", ["The changes from the game's Mods page are forgotten.",
+                                            "Press Play to play with your mods as they were."])
+            else:
+                self.status = launcher_words(failed("The changes from the game's Mods page couldn't be forgotten.",
+                                                    text))
+            return
         if code == 0 or (job.action == "tool" and self.chain):   # (a bonus that can't be built: played without it)
             if self.chain:
                 self._next()
             return
         self.chain = []
-        if job.action == "deploy" and not self.no_rebuild and any(x.startswith(REBUILD_LINE) for x in text):
+        # (apply deploys too: a code mod turned on in the game's Mods page that can't be built fails it the same way.
+        # Without these offers every Play would try the same changes again and stop at the same place.)
+        if job.action in ("deploy", "apply") and not self.no_rebuild and any(x.startswith(REBUILD_LINE)
+                                                                             for x in text):
             self.offer = ("Play without code mods", "no_rebuild")
             reason = error_lines(text)
             self.status = Status("error", ["Your code mods couldn't be built.", "You can play with the other mods: "
@@ -2698,7 +2821,11 @@ class LaunchController(Controller):
         elif job.action == "deploy":
             self.status = launcher_words(failed("Your mods couldn't be made ready.", text))
         else:
-            self.status = launcher_words(failed("Your changes from the game's Mods page couldn't be used.", text))
+            self.offer = ("Forget the game's changes", "undo")
+            note = next((x.split(": ", 1)[1] for x in text if x.startswith(APPLY_FAILED)), "")   # (modmenu's reason)
+            why = [plain(note)] if note else failed("", text).lines[1:2]
+            self.status = Status("error", ["Your changes from the game's Mods page couldn't be used.", *why,
+                                           "Fix it and press Play, or press Forget the game's changes."])
 
     def cancel(self) -> None:
         """Stop getting the mods ready, or checking a .breath (Cancel). The next Play starts over."""
@@ -2718,6 +2845,30 @@ class LaunchController(Controller):
         """Closing the window: a .breath being checked stops too (nothing of it is kept)."""
         self.breath_stop.set()
         super().stop()
+
+    def turn_off_and_play(self) -> None:
+        """The crash question's "Turn them off and Play": turn off the mods that are new since the last start that
+        ended well (modman crash turn-off), then Play as usual (its own steps: the game's Mods page changes, the bonus
+        parts, the deploy, the game)."""
+        if not self.free("play"):
+            return
+        job = self._command("crash", ["crash", "turn-off"])
+        if job.code != 0:
+            return
+        said = job.last_line().split(" Run deploy")[0]
+        self.launch()
+        self.status = Status("busy", ["Getting ready...", said])
+
+    def forget_game_changes(self) -> None:
+        """The offer after the changes from the game's Mods page couldn't be used: throw them away (modmenu undo:
+        the game's pending.txt goes), so the next Play uses the mods as the library has them."""
+        if not self.free("play"):
+            return
+        self.offer, self.chain = None, []
+        job = Job("undo", ["undo"], script=MODMENU_PY)
+        self.step = job
+        self._start(job)
+        self.status = Status("busy", ["Forgetting the changes from the game's Mods page..."])
 
     def play_plain(self) -> None:
         """Play without mods: savagewind.exe as it is (the mod variables cleared). Your mods stay as they are."""
@@ -3149,9 +3300,8 @@ class LauncherView(BigText):
         row = tk.Frame(f, bg=t["bg"])
         row.grid(row=1, column=0, sticky="ew", padx=PAD)
         row.columnconfigure(0, weight=1)
-        self.play = self.make_button(row, "Play", lambda: self.mp_waits() or self.after_action(
-                                         lambda: self.ctl.launch()),
-                                     self.home_buttons, why=lambda: self.after_action(lambda: self.ctl.free("play")))
+        self.play = self.make_button(row, "Play", self.on_play, self.home_buttons,
+                                     why=lambda: self.after_action(lambda: self.ctl.free("play")))
         self.play.configure(font=self.play_font, bg=t["play"], fg=t["play_fg"], activebackground=t["active"],
                             activeforeground=t["fg"], pady=0)   # (a Tk button adds room of its own)
         self.play.pack_configure(fill="both", expand=True)
@@ -3729,11 +3879,31 @@ class LauncherView(BigText):
             row = self.ctl.shown_row(EGG_ROW)
             on = not (row is not None and row.on)
             return self.after_action(lambda: self.ctl.set_eggs(self.eggs, on))
-        return self.after_action(lambda: self.ctl.toggle(sel))
+        ok = self.code_ok_first(sel)   # (a mod with code waiting for the player's OK: asked first)
+        if ok is None:
+            return None
+        return self.after_action(lambda: self.ctl.toggle(sel, allow_code=ok))
+
+    def on_play(self) -> None:
+        """Play. When the last start stopped with an error, first the same question as the Mod Manager's Play (turn
+        off what is new since the last start that ended well, Play without mods, Play anyway, Cancel)."""
+        if self.mp_waits():
+            return
+        if not self.ctl.can("play"):   # (busy, or the game is open: Play says why, no question)
+            return self.after_action(lambda: self.ctl.launch())
+        pick = self.crash_question()
+        if pick == "off":
+            self.after_action(self.ctl.turn_off_and_play)
+        elif pick == "plain":
+            self.after_action(self.ctl.play_plain)
+        elif pick == "play":
+            self.after_action(lambda: self.ctl.launch())
 
     def on_offer(self) -> None:
         if self.ctl.offer and self.ctl.offer[1] == "no_rebuild":
             self.after_action(lambda: self.ctl.launch(no_rebuild=True))
+        elif self.ctl.offer and self.ctl.offer[1] == "undo":
+            self.after_action(self.ctl.forget_game_changes)
 
     def on_play_plain(self) -> None:
         if not self.mp_waits():
@@ -3878,15 +4048,20 @@ class LauncherView(BigText):
         return None
 
     def build_breath(self) -> None:
-        """The "Add this mod?" screen (show_breath fills it)."""
+        """The "Add this mod?" screen (show_breath fills it): the mod's title and the warnings (breath_head), then
+        right under them the buttons, then the rest (breath_body), so on a small screen (768 px tall) with big text
+        it is the rest that falls off the bottom, never the buttons."""
         t, f = self.t, self.frames["breath"]
         self.label(f, self.big, text="Add this mod?").grid(row=0, column=0, sticky="w", padx=PAD, pady=(8, 6))
-        self.breath_body = tk.Frame(f, bg=t["bg"])
-        self.breath_body.grid(row=1, column=0, sticky="ew", padx=PAD)
-        self.breath_body.columnconfigure(1, weight=1)
+        self.breath_head = tk.Frame(f, bg=t["bg"])
+        self.breath_head.grid(row=1, column=0, sticky="ew", padx=PAD)
+        self.breath_head.columnconfigure(1, weight=1)
         self.breath_flow = Flow(f, gap=4, bg=t["bg"])
         self.flows.append(self.breath_flow)
-        self.breath_flow.frame.grid(row=2, column=0, sticky="ew", padx=PAD, pady=(14, PAD))
+        self.breath_flow.frame.grid(row=2, column=0, sticky="ew", padx=PAD, pady=(6, 10))
+        self.breath_body = tk.Frame(f, bg=t["bg"])
+        self.breath_body.grid(row=3, column=0, sticky="ew", padx=PAD, pady=(0, PAD))
+        self.breath_body.columnconfigure(1, weight=1)
         if self.screen == "breath" and self.ctl is not None and self.ctl.breath is not None:
             self.fill_breath()   # (built again for another theme or text size while it was open)
 
@@ -3898,16 +4073,14 @@ class LauncherView(BigText):
 
     def fill_breath(self) -> None:
         """The title big; for a mod with code (or that may have code) a warning in red right under it, and for code
-        patches or cheats a milder one; who made it and its version; what it does (a few lines at most, so the
-        warning and the buttons always fit); what it is, the file; then Add this mod and Not now (focused for a mod
-        with code)."""
-        t, body, rec = self.t, self.breath_body, self.ctl.breath
+        patches or cheats a milder one; then Add this mod and Not now (focused for a mod with code), right there;
+        then who made it and its version; what it does (a few lines at most); what it is, the file."""
+        t, body, rec = self.t, self.breath_head, self.ctl.breath
         import breath as br
         man = rec.manifest
-        for w in body.winfo_children():
-            w.destroy()
-        for w in self.breath_flow.frame.winfo_children():
-            w.destroy()
+        for frame in (self.breath_head, self.breath_body, self.breath_flow.frame):
+            for w in frame.winfo_children():
+                w.destroy()
         self.wraps = [(w, s) for w, s in self.wraps if w.winfo_exists()]
         self.breath_buttons, self.breath_flow.items = [], []
         row = 0
@@ -3946,16 +4119,17 @@ class LauncherView(BigText):
         if patches:
             warning(t["warn"], f"This mod changes the game's code ({names_of(patches)}).",
                     f"Code patches and cheats can make the game crash or act oddly. {trust}")
+        have = {r.id: r for r in self.ctl.listing.rows}
+        if man.id in have:
+            line(f"You already have this mod ({have[man.id].name}). To use this copy, remove yours first (More...).",
+                 self.bold, t["warn"])
+        body, row = self.breath_body, 0   # (the buttons come here, between the two: fill_breath_buttons)
         by = [f"By {man.author}" if man.author else "Author not given", f"Version {man.version}" if man.version
               else ""]
         line(". ".join(x for x in by if x) + ".")
         self.breath_desc = (line("", pady=(4, 8)), man.description or "No description.")
         self.cut_breath_desc()
         line(man.what())
-        have = {r.id: r for r in self.ctl.listing.rows}
-        if man.id in have:
-            line(f"You already have this mod ({have[man.id].name}). To use this copy, remove yours first (More...).",
-                 self.bold, t["warn"])
         line(f"{br.shown_name(rec.source)}, {br.size_text(man.size)}. Not damaged. This doesn't mean it is safe: "
              "only add mods from people you trust.", fg=t["disabled"], pady=(4, 8))
         self.breath_focus = 1 if code or rec.maybe_code else 0

@@ -51,6 +51,7 @@ typedef struct {
     SwModOverlayDraw draw;
     void *user;
     char mod[64];
+    int id;  // the mod's id (ovl_switch_off)
 } Overlay;
 
 static Overlay g_ovl[OVL_MAX];
@@ -550,9 +551,27 @@ GAMELIB_EXPORT int modhost_overlay_add(const SwModApi *api, SwModOverlayUpdate u
     Overlay *e = &g_ovl[g_novl];
     e->update = update, e->draw = draw, e->user = user;
     copy_str(e->mod, sizeof e->mod, m->name);
+    e->id = m->id;
     __atomic_store_n(&g_novl, g_novl + 1, __ATOMIC_RELEASE);
     host_log("overlay: added for %s", m->name);
     return SWMOD_OVL_OK;
+}
+
+// switch_off (the mod's swmod_init failed after it added an overlay): its update is replaced by one that wants
+// nothing, so neither its update nor its draw runs again (one pointer store each: the present thread sees the old one
+// or the stand-in, and the DLL stays loaded). The slot stays used.
+static unsigned ovl_off_update(const SwModOverlay *o, void *user) {
+    (void)o, (void)user;
+    return 0;
+}
+static void ovl_switch_off(Mod *m) {
+    int n = __atomic_load_n(&g_novl, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < n; i++)
+        if (g_ovl[i].id == m->id && g_ovl[i].update != ovl_off_update) {
+            __atomic_store_n(&g_ovl[i].update, ovl_off_update, __ATOMIC_SEQ_CST);
+            __atomic_store_n(&g_ovl[i].draw, (SwModOverlayDraw)0, __ATOMIC_SEQ_CST);
+            host_log("overlay: taken out for %s (its swmod_init failed)", m->name);
+        }
 }
 
 #endif  // MODHOST_C

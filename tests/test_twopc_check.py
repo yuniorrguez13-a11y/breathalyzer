@@ -207,8 +207,9 @@ class LocalChecksTests(unittest.TestCase):
                                            run_netcat=lambda: "Public|VPN|172.16.0.2\nPrivate|Wi-Fi|192.168.1.20\n",
                                            addresses=["192.168.1.20"])
             res = {c["id"]: c["result"] for c in checks}
-            for k in ("savage_wind", "own_save", "library", "ghost_on", "stamina_off", "address", "private", "port"):
+            for k in ("savage_wind", "own_save", "library", "ghost_on", "address", "private", "port"):
                 self.assertEqual(res[k], "PASS", (k, checks))
+            self.assertNotIn("stamina_off", res)   # (BUG2: Infinite Stamina no longer stops the ghost mod)
             self.assertEqual(info["sw"], tc.SUPPORTED)
             self.assertEqual(info["mods"], {tc.GHOST_ID: "0.7.0"})
 
@@ -216,7 +217,7 @@ class LocalChecksTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             inst = make_install(root, "0.5.1-alpha.2", save=False)
-            lib = make_library(root, [{"id": tc.STAMINA_ID, "enabled": True}])
+            lib = make_library(root, [{"id": "botw-mod-loader.basics-inf-stamina", "enabled": True}])
             with socket.socket() as busy:              # (127.0.0.1 and no listen: no firewall question)
                 busy.bind((LOCAL, 0))
                 port = busy.getsockname()[1]
@@ -226,7 +227,7 @@ class LocalChecksTests(unittest.TestCase):
             self.assertEqual(res["savage_wind"], "FAIL")
             self.assertEqual(res["own_save"], "WARN")
             self.assertEqual(res["ghost_on"], "FAIL")
-            self.assertEqual(res["stamina_off"], "FAIL")
+            self.assertNotIn("stamina_off", res)
             self.assertEqual(res["address"], "FAIL")
             self.assertEqual(res["private"], "FAIL")
             self.assertEqual(res["port"], "WARN")
@@ -282,6 +283,50 @@ class EchoTests(unittest.TestCase):
         r = tc.ping(LOCAL, free_port(), self.INFO_B, retry_seconds=0.3, timeout=5)   # (Windows: ~2 s to refuse)
         self.assertFalse(r["ok"])
         self.assertIn("nothing listens", r["error"])
+
+    def test_timeout_is_retried_like_a_refusal(self):
+        # F-TWOPC1: on a fresh PC the friend's firewall drops the call (a timeout, not a refusal) until they press
+        # Allow; the first reach check must keep calling instead of failing on the first timeout.
+        srv = ServeThread(self.INFO_A)
+        real = socket.create_connection
+        calls = []
+
+        def flaky(addr, timeout=None, *a, **kw):
+            calls.append(addr)
+            if len(calls) <= 2:
+                raise socket.timeout("timed out")      # the 'Allow Python?' question is still up
+            return real(addr, timeout, *a, **kw)
+        with mock.patch.object(tc.socket, "create_connection", flaky):
+            r = tc.ping(LOCAL, srv.port, self.INFO_B, count=2, retry_seconds=10, timeout=1)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(srv.join()["ok"])
+
+    def test_timeout_gives_up_after_the_retry_time(self):
+        with mock.patch.object(tc.socket, "create_connection", side_effect=TimeoutError("timed out")) as cc:
+            r = tc.ping(LOCAL, 7788, self.INFO_B, retry_seconds=0.6, timeout=1)
+        self.assertFalse(r["ok"])
+        self.assertIn("firewall", r["error"])
+        self.assertIn("Allow", r["error"])
+        self.assertGreaterEqual(cc.call_count, 2)
+
+    def test_retry_time_covers_the_firewall_question(self):
+        self.assertGreaterEqual(tc.CONNECT_RETRY_SECONDS, 60)
+
+    def test_serve_says_press_allow_before_listening(self):
+        said = []
+        order = []
+        real_listen = socket.socket.listen
+
+        def listen(sock, *a):
+            order.append("listen")
+            return real_listen(sock, *a)
+        with mock.patch.object(socket.socket, "listen", listen):
+            r = tc.serve(0, self.INFO_A, host=LOCAL, seconds=0.2,
+                         say=lambda t="": (said.append(t), order.append("say")))
+        self.assertFalse(r["ok"])
+        self.assertTrue(any("press Allow" in t for t in said), said)
+        self.assertEqual(order[:2], ["say", "listen"])
 
     def test_public_address_refused_before_any_packet(self):
         with mock.patch.object(tc.socket, "create_connection") as cc:
@@ -463,6 +508,32 @@ class RecordTests(unittest.TestCase):
         self.assertLess(text.index("Problems:"), text.index("All:"))
         self.assertIn("Held items: no bow", text)
         self.assertIn("ABCD-1234", text)
+
+    def test_reports_carry_no_windows_user_name(self):
+        # F-TWOPC3: the reports go to the friend and to giruka: the home folder (C:\Users\<name>) is written as ~
+        home = r"C:\Users\jdoe42"
+        places = {"library": r"C:\Users\jdoe42\AppData\Local\Breathalyzer\modloader",
+                  "install": r"c:/users/JDOE42/Documents/SavageWind"}
+        checks = [tc.check("python", "Python", "INFO", r"3.13 at C:\Users\jdoe42\AppData\Local\Python\python.exe"),
+                  tc.check("own_save", "A save of your own", "PASS", r"C:\Users\jdoe42\Documents\SavageWind\save"),
+                  tc.check("other", "Not the home", "INFO", r"C:\Users\jdoe42x\file and D:\Games\SW")]
+        steps = [{"id": "host", "title": "Host", "result": "PASS", "notes": r"log in C:\Users\jdoe42\Desktop"}]
+        rec = tc.make_record("Ana", "A", places, checks, steps, {"name": "Ben"}, {"sw": tc.SUPPORTED}, home=home)
+        data = json.dumps(rec)
+        self.assertNotIn("jdoe42\\\\", data.lower())
+        self.assertNotIn("jdoe42/", data.lower())
+        self.assertEqual(rec["pc"]["library"], r"~\AppData\Local\Breathalyzer\modloader")
+        self.assertEqual(rec["pc"]["install"], "~/Documents/SavageWind")
+        self.assertEqual(rec["checks"][1]["detail"], r"~\Documents\SavageWind\save")
+        self.assertEqual(rec["steps"][0]["notes"], r"log in ~\Desktop")
+        self.assertEqual(rec["checks"][2]["detail"], r"C:\Users\jdoe42x\file and D:\Games\SW")   # (not the home)
+        text = tc.report_text(rec, home=home)
+        self.assertIn(r"~\AppData\Local\Python\python.exe", text)
+        self.assertNotIn(r"Users\jdoe42\\", text)
+        self.assertEqual(tc.tidy_path(r"C:\Users\jdoe42", home), "~")
+        self.assertEqual(tc.tidy_path(r"C:\x", "C:\\"), r"C:\x")   # (a drive alone is never hidden)
+        with mock.patch.dict(os.environ, {"USERPROFILE": home}):   # (this PC's own home by default)
+            self.assertEqual(tc.tidy_path(r"C:\Users\JDoe42\Documents"), r"~\Documents")
 
     def test_big_letters(self):
         self.assertEqual(len(tc.big("PASS").splitlines()), 5)

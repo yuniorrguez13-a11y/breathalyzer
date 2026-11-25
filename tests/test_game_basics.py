@@ -135,7 +135,8 @@ class Header(unittest.TestCase):
         on_frame = self.helpers["botw_on_frame"]
         self.assertIn("game start", on_frame)
         self.assertIn("not modload", on_frame)
-        self.assertIn("one mod per game", on_frame)
+        self.assertIn("several mods chain", on_frame)   # (BUG2: since modhost's override chains)
+        self.assertNotIn("one mod per game", on_frame)
         self.assertIn("If it stays 0", self.helpers["botw_frames"])
         self.assertNotIn("BOTW_STAMINA_FULL", read(HEADER))
         self.assertIn("Not the most", self.symbols["BOTW_STAMINA_WHEEL"])

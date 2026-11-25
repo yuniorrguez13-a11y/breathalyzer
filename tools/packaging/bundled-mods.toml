@@ -55,8 +55,7 @@ title = "Infinite Stamina"
 description = "Stamina never runs out. Type infstamina off in the command box (F12) to stop."
 default = "off"
 why = "It changes how the game plays."
-tags = ["Changes how the game plays", "While it is on, Play turns on developer commands",
-        "Ghost multiplayer doesn't run while this is on"]
+tags = ["Changes how the game plays", "While it is on, Play turns on developer commands"]
 developer = true
 ready = true
 kind = "code"
@@ -99,7 +98,7 @@ description = "See a friend in your world as a stand-in figure (home network onl
 default = "off"
 why = "It uses the network, and playing the story together isn't tested on two PCs yet."
 tags = ["Experimental", "Uses the network (home network only)", "Host or join on Home: Multiplayer",
-        "Doesn't run while Infinite Stamina is on", "While it is on, Play turns on developer commands",
+        "While it is on, Play turns on developer commands",
         "Comes with a surprise, built when you first turn it on (about 1 minute)"]
 # (developer: Play opens the game's control port, which tools\mp\client.py and coop_agent.py talk to; the launcher's
 # Multiplayer page, tools/mp_page.py, starts them)

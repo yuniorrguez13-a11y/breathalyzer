@@ -774,11 +774,13 @@ def good_result() -> dict:
                            "cpu_null": True, "ok_smaller_host": True, "ok_older_version": False, "has_field": True,
                            "has_missing_field": False}},
         "probe fail": {"ok": False, "error": "failing on purpose: fail"},
+        "bad_cmd": {"ok": False, "error": bn.BAD_CMD_ERROR},
         "#overrides": {"ok": True, "data": {"count": 1, "0.addr": 0x7000001000, "0.name": "probe_override"}},
-        "#guest_calls": {"ok": True, "data": {"count": 1, "0.cpu": 0x5FF000, "0.addr": 0x7000003000}},
+        "#guest_calls": {"ok": True, "data": {"count": 2, "0.cpu": 0x5FF000, "0.addr": 0x7000002000,
+                                              "1.cpu": 0x5FF000, "1.addr": 0x7080000010}},
         "#commands": {"ok": True, "data": {"0": "help", "1": "ping", "2": "mods", "3": "modload", "4": "modunload",
-                                           "5": "modreload", "6": "modsettings", "7": "modset", "8": "hello",
-                                           "9": "probe", "10": "probe_more"}},
+                                           "5": "modreload", "6": "modsettings", "7": "modset", "8": "bad_cmd",
+                                           "9": "hello", "10": "probe", "11": "probe_more"}},
     }
 
 
@@ -810,14 +812,33 @@ class SelftestChecks(unittest.TestCase):
         self.assertTrue(bad[2].startswith("control_register returns only what was added"))
 
     def test_guest_call_is_checked(self):
-        for calls in ({"count": 0}, {"count": 2, "0.cpu": 0x5FF000, "0.addr": 0x7000003000},
-                      {"count": 1, "0.cpu": 0, "0.addr": 0x7000003000},
-                      {"count": 1, "0.cpu": 0x5FF000, "0.addr": 0x7000003004}):
+        # (S3.1-3r: 0x7000003000 is in the game's code but no function: passing it on would stop the game with FATAL;
+        # 0x7080000010 is outside it, where Savage Wind's HLE stubs are: passed on)
+        two = {"count": 2, "0.cpu": 0x5FF000, "0.addr": 0x7000002000, "1.cpu": 0x5FF000, "1.addr": 0x7080000010}
+        for calls in ({"count": 0}, dict(two, count=3), dict(two, **{"0.cpu": 0}), dict(two, **{"1.cpu": 0}),
+                      dict(two, **{"1.addr": 0x7000003000}), dict(two, **{"0.addr": 0x7000003004}),
+                      {"count": 1, "0.cpu": 0x5FF000, "0.addr": 0x7000002000}):
             r = good_result()
             r["#guest_calls"]["data"] = calls
             bad = bn.selftest_expect(r)
             self.assertEqual(len(bad), 1, calls)
             self.assertTrue(bad[0].startswith("guest_call is passed on"))
+        log = GOOD_LOG.replace("guest_call to 0x7000003000 refused", "guest_call to 0x7000003000 passed")
+        self.assertEqual(len(bn.selftest_expect_log(log)), 1)
+
+    def test_a_failed_mods_command_is_off(self):
+        """S3.1-3r: the command a mod adds before its swmod_init fails stays a name, but its code never runs (it used
+        to: with the mod's globals never set up)."""
+        for reply, listed in (({"ok": True, "data": {}}, ""), ({"ok": False, "error": "Unknown command: bad_cmd"}, ""),
+                              ({"ok": False, "error": bn.BAD_CMD_ERROR}, "bad_cmd")):
+            r = good_result()
+            r["bad_cmd"] = reply
+            r["mods"]["data"]["mods.0.commands"] = listed
+            bad = bn.selftest_expect(r)
+            self.assertEqual(len(bad), 1, reply)
+            self.assertTrue(bad[0].startswith("a command of a mod whose swmod_init failed is off"), bad)
+        log = GOOD_LOG.replace("setting watchers and overlays were taken out", "were taken out")
+        self.assertEqual(len(bn.selftest_expect_log(log)), 1)
 
     def test_host_version_text_and_macros_are_checked(self):
         for key, value in (("host", ""), ("host", "1.0.0"), ("size_ok", False), ("ok_smaller_host", False),

@@ -907,26 +907,31 @@ class HiddenWindow(Temp):
         view.render()
         root.update()
         self.assertEqual(view.screen, "breath")
-        body = view.breath_body
-        row_of = {}
-        for w in body.winfo_children():
-            for text in [str(w.cget("text"))] if isinstance(w, gui.tk.Label) else texts(w):
-                row_of[text] = int(w.grid_info()["row"])
-        careful = next(r for t, r in row_of.items() if t.startswith("Careful: this mod has code (hooks.dll)"))
-        patches = next(r for t, r in row_of.items() if t.startswith("This mod changes the game's code (fix.pchtxt)"))
+        # S3.13: the title and the warnings, then right under them the buttons, then the rest
+        head, body, flow = view.breath_head, view.breath_body, view.breath_flow.frame
+        warned = texts(head)
+        self.assertTrue(any(t.startswith("Careful: this mod has code (hooks.dll)") for t in warned), warned)
+        self.assertTrue(any(t.startswith("This mod changes the game's code (fix.pchtxt)") for t in warned), warned)
         desc_label, full = view.breath_desc
         self.assertEqual(full, long)
-        self.assertLess(careful, int(desc_label.grid_info()["row"]))   # (right under the title)
-        self.assertLess(patches, int(desc_label.grid_info()["row"]))
+        self.assertIs(desc_label.master, body)
+        rows = [int(w.grid_info()["row"]) for w in (head, flow, body)]
+        self.assertEqual(rows, sorted(set(rows)), rows)
+        self.assertTrue(all(b.ring.master is flow for b in view.breath_buttons))
         shown = desc_label.cget("text")
         self.assertLessEqual(len(shown.split("\n")), gui.BREATH_LINES)
         self.assertTrue(shown.endswith("..."))
         room_w, room_h = view.room()
         width = min(room_w, view.font.measure("0") * 72)
         if root.winfo_screenheight() >= 800:
-            # (all of it fits: warning and buttons. A 768-px-tall screen, like the GitHub runner's, doesn't fit it yet
-            # even at the smallest size: a known follow-up for small laptops)
-            self.assertLessEqual(view.need(width), room_h, f"{view.size} pt")
+            self.assertLessEqual(view.need(width), room_h, f"{view.size} pt")   # (all of it fits)
+        # the buttons fit, also on a 768-px-tall screen (GitHub's runner, small laptops), at the biggest text: what
+        # is above them is only the window's top line, "Add this mod?", the mod's title and its warnings
+        view.need(width)   # (laid out at that width, as fit() does)
+        title = view.frames["breath"].grid_slaves(row=0, column=0)[0]
+        above = view.sw_label.master.winfo_reqheight() + gui.PAD + 4 + title.winfo_reqheight() + 8 + 6
+        bottom = above + head.winfo_reqheight() + 6 + view.breath_flow.height_for(width - 2 * gui.PAD)
+        self.assertLessEqual(bottom, room_h, f"{view.size} pt, screen {root.winfo_screenheight()} px")
         self.assertEqual([b.cget("text") for b in view.breath_buttons], ["Add this mod", "Not now"])
         self.assertIn("Not damaged. This doesn't mean it is safe: only add mods from people you trust.",
                       " ".join(texts(view.frames["breath"])))

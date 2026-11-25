@@ -463,6 +463,58 @@ static RegResult register_hot(Mod *m, const SwModCommand *c, const char **why) {
     return REG_ADDED;
 }
 
+// ---- the commands a mod loaded at game start adds in its swmod_init. Savage Wind can't remove a command, so modhost
+// registers cmd_start in each one's place (with the mod's own name, args and help: its DLL stays loaded). cmd_start
+// runs the mod's function, unless the mod's swmod_init failed (switch_off): then it says so, and the mod's code,
+// whose globals were never set up, never runs (modhost-review #1). A command a mod of game start adds later (from a
+// game thread, or one of its commands) goes to Savage Wind as before.
+
+#define MAX_START_CMDS 512
+typedef struct {
+    const char *name;   // the mod's own string (Savage Wind points at it too)
+    SwModCommandFn fn;  // NULL: its mod was switched off
+    int mod;            // the owner's id
+} StartCommand;
+static StartCommand g_start_cmds[MAX_START_CMDS];
+static int g_nstart_cmds;  // (only the frame thread adds, during swmod_init; the control thread reads)
+
+static void cmd_start(int argc, char **argv, ControlReply *r) {
+    const StartCommand *e = NULL;
+    int n = __atomic_load_n(&g_nstart_cmds, __ATOMIC_ACQUIRE);
+    for (int i = 0; argc > 0 && i < n && !e; i++)
+        if (!strcmp(g_start_cmds[i].name, argv[0])) e = &g_start_cmds[i];
+    SwModCommandFn fn = e ? __atomic_load_n(&e->fn, __ATOMIC_ACQUIRE) : NULL;
+    if (!fn) {
+        const Mod *m = e ? mod_by_id(e->mod) : NULL;
+        control_fail(r, "%s: %s's swmod_init failed, so it is off (see `mods`)", argc > 0 ? argv[0] : "?",
+                     m ? m->file : "its mod");
+        return;
+    }
+    fn(argc, argv, (SwModReply *)r);
+}
+
+static RegResult register_start(Mod *m, const SwModCommand *c) {
+    ControlCmd cc = {c->name, c->args ? c->args : "", c->help ? c->help : "", cmd_start, c->flags};
+    int n = g_nstart_cmds;
+    if (n == MAX_START_CMDS) {  // (no room for the switch: Savage Wind gets the mod's function, as it used to)
+        host_log("mod %s: command %s added without modhost's switch (%d commands at game start): it stays if the "
+                 "mod's swmod_init fails", m->file, c->name, MAX_START_CMDS);
+        cc.fn = (ControlFn)(void *)c->fn;
+        return register_one(&cc);
+    }
+    StartCommand *e = &g_start_cmds[n];  // (listed first: a call that comes as soon as Savage Wind has it finds it)
+    e->name = c->name;
+    e->mod = m->id;
+    __atomic_store_n(&e->fn, c->fn, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_nstart_cmds, n + 1, __ATOMIC_RELEASE);
+    RegResult rr = register_one(&cc);
+    if (rr != REG_ADDED) {  // (taken, or Savage Wind's table is full: not kept)
+        __atomic_store_n(&e->fn, NULL, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_nstart_cmds, n, __ATOMIC_RELEASE);
+    }
+    return rr;
+}
+
 static int api_control_register(const SwModCommand *cmds, int count) {
     if (!cmds || count <= 0) return 0;
     // The owner: a mod loaded while the game runs whose code or names these are (found from the pointers, never from
@@ -491,6 +543,8 @@ static int api_control_register(const SwModCommand *cmds, int count) {
             rr = REG_NOT_ADDED;
         } else if (m && m->hot) {
             rr = register_hot(m, &cmds[i], &why);
+        } else if (m && m == g_current && GetCurrentThreadId() == g_current_tid) {
+            rr = register_start(m, &cmds[i]);  // (its swmod_init: switched off again if that fails)
         } else {
             ControlCmd c = {name, cmds[i].args ? cmds[i].args : "", cmds[i].help ? cmds[i].help : "",
                             (ControlFn)(void *)cmds[i].fn, cmds[i].flags};
@@ -707,7 +761,9 @@ static void hot_override(Mod *m, uint64_t addr, const char *a, SwModGuestFn fn, 
     e->mod = m->id;
     __atomic_store_n(&e->active, 1, __ATOMIC_SEQ_CST);
     if (e == &g_hot_ovr[g_nhot_ovr]) {  // a new address: the stand-in goes in once and stays
+        reg_lock();  // (every hle_override modhost makes is under this lock: Savage Wind's table has none)
         hle_override(addr, g_tramps[g_nhot_ovr], e->name);
+        reg_unlock();
         g_nhot_ovr++;
     }
     if (!list_has(m->overrides, a)) list_add(m->overrides, sizeof m->overrides, a);
@@ -762,19 +818,21 @@ static void api_hle_override(uint64_t addr, SwModGuestFn fn, const char *name) {
         g_start_ovr[g_nstart_ovr].name = name;
         g_start_ovr[g_nstart_ovr++].mod = m ? m->id : 0;
         now = g_start_flushed;  // (the game runs: a new address goes in at once)
-    } else if (!g_start_flushed) {  // (sent now, unchained, it would run even if its mod's swmod_init fails)
-        why = "more than 128 overrides at game start: no room for it";
     } else {
-        now = true;  // (the game runs, a new address, no room to note it: it goes in now)
+        // At game start: sent now, unchained, it would run even if its mod's swmod_init fails. Once the game runs: an
+        // override no one notes could go in twice (Savage Wind adds a row per call, keeps only the first, and stops
+        // the game at 1024), and no later mod would hear that the address is taken. Refused either way.
+        why = g_start_flushed ? "128 overrides are in already (all mods together): no room to note another"
+                              : "more than 128 overrides at game start: no room for it";
     }
     if (m && !why && !list_has(m->overrides, a)) list_add(m->overrides, sizeof m->overrides, a);
+    // (under the lock: Savage Wind's override table has none, and a game thread or modload may add one now too)
+    if (now) hle_override(addr, (HostFn)fn, name ? name : "mod");
     reg_unlock();
     if (why) {
         host_log("mod %s: hle_override %s refused: %s", m ? m->file : "?", a, why);
         if (m) note(m, "hle_override %s refused: %s", a, why);
-        return;
     }
-    if (now) hle_override(addr, (HostFn)fn, name ? name : "mod");
 }
 
 // A mod loaded at game start finished its swmod_init. It failed: every override it added is dropped (none reached
@@ -821,15 +879,45 @@ static void start_overrides_flush(void) {
     }
     reg_unlock();
 }
+// Whether the dispatcher can run addr, as far as modhost can tell. Refused only inside the game's code (a module's
+// image) where no function starts and no override sits (a mod's or the file log's): dispatch_slow stops the game there
+// with FATAL ("no function at ..."). Outside every module (Savage Wind's HLE stubs at HLE_BASE, anything else only it
+// knows) it is passed on, as before: modhost can't see those tables.
+static bool guest_callable(uint64_t addr) {
+    if (!g_real || game_fn_lookup(addr)) return true;  // (no tables to ask: as before, passed on)
+    bool inside = false;
+    for (uint32_t k = 0; k < *g_real->nmodules && !inside; k++) {
+        const GameLibModule *gm = &g_real->modules[k];
+        inside = addr >= gm->base && addr - gm->base < gm->size;
+    }
+    if (!inside) return true;
+    bool found = false;
+    reg_lock();
+    for (int k = 0; k < g_nstart_ovr && !found; k++) found = g_start_ovr[k].addr == addr;
+    reg_unlock();
+    for (int k = 0; k < g_nhot_ovr && !found; k++) found = g_hot_ovr[k].addr == addr;
+    return found;
+}
+
+// A mod's guest_call. Address 0 (a site or pattern that wasn't found) and an address in the game's code where no
+// function starts (a site of another game version, a typo, a pattern that found the middle of a function) are refused
+// with a log line naming the mod (20 lines at most), and the call does nothing: Savage Wind would stop the game with
+// FATAL and blame the game. (modhost-review #4)
 static void api_guest_call(struct Cpu *c, uint64_t addr) {
     if (!c) return;
-    if (!addr) {  // (Savage Wind stops the game with FATAL for an address with no function: refuse it here)
-        Mod *m = calling_mod();
-        host_log("mod %s: guest_call to address 0 refused (a site or pattern that wasn't found?)",
-                 m ? m->file : "?");
+    if (addr && guest_callable(addr)) {  // (the usual case: one binary search, no lock)
+        guest_call(c, addr);
         return;
     }
-    guest_call(c, addr);
+    Mod *m = calling_mod();
+    if (!m) m = mod_of_address(__builtin_return_address(0));
+    static int said;  // (a mod may try every frame: the log isn't flooded)
+    if (__atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) >= 20) return;
+    if (!addr)
+        host_log("mod %s: guest_call to address 0 refused (a site or pattern that wasn't found?)", m ? m->file : "?");
+    else
+        host_log("mod %s: guest_call to %#llx refused: no game function starts there (a site of another game version, "
+                 "or a pattern that found the middle of a function?)", m ? m->file : "?", (unsigned long long)addr);
 }
 static struct Cpu *api_current_cpu(void) { return kernel_current_cpu(); }
 
@@ -1020,9 +1108,13 @@ static void off_in_list(HookList *h, const HookReg *g) {
     if (g->replace && h->replace == g->replace) __atomic_store_n(&h->replace, off_replace, __ATOMIC_SEQ_CST);
 }
 
-// A mod whose swmod_init failed: take its hooks (and, for a mod loaded while the game runs, its overrides and
-// commands) out without waiting. The DLL stays loaded. A list a game thread may still run isn't rewritten (only its
-// entries of this mod become stand-ins) and is marked dirty, so a later publish or modunload waits for it first.
+static void st_switch_off(Mod *m);   // (settings.c)
+static void ovl_switch_off(Mod *m);  // (overlay.c)
+
+// A mod whose swmod_init failed: take its hooks, its commands (cmd_start, cmd_hot), its setting watchers, its overlays
+// and, for a mod loaded while the game runs, its overrides out without waiting (a mod of game start never sent any:
+// start_overrides_done dropped them). The DLL stays loaded. A list a game thread may still run isn't rewritten (only
+// its entries of this mod become stand-ins) and is marked dirty, so a later publish or modunload waits for it first.
 static void switch_off(Mod *m) {
     for (int k = 0; k < g_nstates; k++) {
         HookState *st = &g_states[k];
@@ -1066,9 +1158,15 @@ static void switch_off(Mod *m) {
             g_hot_cmds[k].fn = NULL;
             g_hot_cmds[k].mod = 0;
         }
+    for (int k = 0; k < g_nstart_cmds; k++)  // (the names stay with Savage Wind; cmd_start says the mod is off)
+        if (g_start_cmds[k].mod == m->id) __atomic_store_n(&g_start_cmds[k].fn, NULL, __ATOMIC_SEQ_CST);
+    st_switch_off(m);
+    ovl_switch_off(m);
     m->hooks[0] = 0;
     m->overrides[0] = 0;
+    m->commands[0] = 0;
     m->nhooks = 0;
+    m->ncommands = 0;
     m->switched_off = true;
 }
 
@@ -1690,7 +1788,8 @@ static void load_one(const wchar_t *dir, const wchar_t *file) {
     else {
         switch_off(m);  // (its hooks come out again: no game code runs yet)
         snprintf(m->status, sizeof m->status, "init failed (code %d)", rc);
-        host_log("mod %s: swmod_init failed (code %d): its hooks and overrides were taken out", m->file, rc);
+        host_log("mod %s: swmod_init failed (code %d): its hooks, overrides, commands, setting watchers and overlays "
+                 "were taken out", m->file, rc);
     }
     log_loaded("mod ", m);
 }

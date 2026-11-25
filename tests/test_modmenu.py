@@ -591,6 +591,20 @@ class CommandLine(Base):
         run.assert_called_once()
         self.assertTrue(self.reload().mods[4]["enabled"])
 
+    def test_apply_and_play_without_the_rebuild(self):
+        # S3.9: the launcher's Play without code mods, when changes from the game wait: apply's deploy must not
+        # rebuild the game code either (else a code mod that can't be built stops every Play).
+        modmenu.set_wanted(self.lib, "stamina", True)
+        for cmd in (["apply", "--no-rebuild"], ["play", "--no-rebuild"], ["apply"]):
+            modmenu.set_wanted(self.reload(), "stamina", not self.reload().mods[4]["enabled"])
+            with mock.patch.object(mm, "deploy", return_value={"mods": []}) as deploy, \
+                    mock.patch.object(mm, "format_deploy", return_value="Deployed."), \
+                    mock.patch.object(mm, "run", return_value=0):
+                rc, lines = self.run_cli(*cmd)
+            self.assertEqual(rc, 0, lines)
+            deploy.assert_called_once()
+            self.assertEqual(deploy.call_args.kwargs.get("no_rebuild"), "--no-rebuild" in cmd, cmd)
+
     def test_sync_and_setup_wait_while_the_game_runs(self):
         """Findings 2 and 16: sync and setup refuse while the game runs (its changes need the list it read)."""
         rc, lines = self.run_cli("sync")

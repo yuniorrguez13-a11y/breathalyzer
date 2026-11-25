@@ -3894,15 +3894,20 @@ def _merge_contested(mods: list[tuple[str, str, dict | None, dict]], extracted: 
 
 
 def deploy_hook(mods: list[tuple[str, str]], extracted: str, files: bool = False,
-                cache: str | None = None, store: bool = True) -> DeployHook:
+                cache: str | None = None, store: bool = True, beside=()) -> DeployHook:
     """What modman deploy adds for the enabled RomFS mods ((name, library folder), lowest priority first): one size
     table merging every mod's size changes when two or more change it (a BCML package's from its rstb.json, another
     mod's by comparing the table it ships with the game's), and a line for each BCML package whose packs a later mod
     replaces. files: also merge the packs two mods ship, file by file (merge_packages), into hook.files (overlay path
     -> bytes, to deploy in place of every mod's copy), their sizes in the table (made even when only they need it);
     modman deploy puts them in the overlay with romfs_mods.add_generated (owner "generated:merged", no size entry of
-    their own: hook.rstb holds them). cache/store: merge_packages' cache. Reads only, but the cache."""
+    their own: hook.rstb holds them). cache/store: merge_packages' cache. beside: the library folders of the mods
+    deployed beside the game's files (modman beside): none of their files goes in under the game's names (their player
+    and armor files go in as copies, their body packs' members as copies in the pack in use: romfs_mods.add_beside),
+    so they are left out of the pack merge (her body would go over his in a merged TitleBG.pack) and never replace a
+    package's pack; their size tables still count. Reads only, but the cache."""
     hook = DeployHook()
+    side = {os.path.normcase(os.path.abspath(r)) for r in beside}
     # (name, a BCML package's entries or None, the size table a mod that isn't one ships or None, whether it ships one)
     pending: list[tuple[str, dict | None, str | None, bool]] = []
     seen: list[tuple[str, dict | None, set[str]]] = []
@@ -3913,8 +3918,11 @@ def deploy_hook(mods: list[tuple[str, str]], extracted: str, files: bool = False
         except (rm.DeployError, OSError):
             continue
         info = stored(root)
-        seen.append((name, info, {e.target.lower() for e in mod.entries}))
-        loaded.append((name, root, info, {e.target.lower(): e for e in mod.entries}))
+        if os.path.normcase(os.path.abspath(root)) in side:   # (only its size table counts: below)
+            seen.append((name, info, set()))
+        else:
+            seen.append((name, info, {e.target.lower() for e in mod.entries}))
+            loaded.append((name, root, info, {e.target.lower(): e for e in mod.entries}))
         own = os.path.join(root, META, "rstb.json")
         ship = next((e for e in mod.entries if not e.dlc and e.rel.lower() == rm.RSTB.lower()), None)
         if info is not None and os.path.isfile(own):

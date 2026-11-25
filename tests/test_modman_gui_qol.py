@@ -110,6 +110,43 @@ class CrashCheck(GuiBase):
         self.assertEqual(self.ctl.then_jobs, [])
 
 
+class LauncherCrashCheck(GuiBase):
+    """S3.10: the launcher's Play asks about a crash too (its view asks the same crash_question); its "Turn it off and
+    Play" turns the new mods off, then plays through the launcher's own steps (deploy, then the game)."""
+    T1, T2 = CrashCheck.T1, CrashCheck.T2
+
+    def launcher(self):
+        backend = gui.LaunchBackend(str(self.libdir), str(self.install), mm=mm, running=lambda: False, menu=False,
+                                    popen=FakeProc)
+        backend._subprocess = backend._in_process
+        self.ctl = gui.LaunchController(backend)
+        return self.ctl
+
+    def test_turn_it_off_then_play(self):
+        CrashCheck.crashed(self)
+        ctl = self.launcher()
+        lines, new = ctl.crash_check()
+        self.assertEqual(lines[0], "The game stopped with an error last time.")
+        self.assertEqual(new, ["Better Sprint"])
+        ctl.turn_off_and_play()
+        self.assertEqual(ctl.status.lines[:2], ["Getting ready...", "Turned off: Better Sprint."])
+        self.settle()
+        self.assertEqual({m["id"]: m["enabled"] for m in self.lib.mods}, {"alpha": True, "better-sprint": False})
+        self.assertEqual(len(FakeProc.started), 1, ctl.details_text())   # (deployed, then the game started)
+        deploys = [h for h in self.history() if h["type"] == "deploy"]
+        self.assertEqual([m["id"] for m in deploys[-1]["mods"] if m["enabled"]], ["alpha"])
+
+    def test_nothing_to_turn_off_no_game(self):
+        self.two_mods()
+        ctl = self.launcher()
+        self.assertEqual(ctl.crash_check(), ([], []))
+        with mock.patch.object(mm, "main", return_value=2) as main:   # (crash turn-off refused)
+            ctl.turn_off_and_play()
+        main.assert_called_once()
+        self.assertEqual(ctl.jobs, {})
+        self.assertEqual(FakeProc.started, [])
+
+
 class TurnAllAndLastGood(GuiBase):
     def test_all_off_all_on_and_the_last_mods_that_worked(self):
         self.two_mods()

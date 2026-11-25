@@ -265,7 +265,11 @@ class Selftest(unittest.TestCase):
                  # 0.9.6: a cloth pack's physics never moved by the physics call unless asked; a warp counted
                  "physmtx_warp",
                  # 0.9.10: the costume stops with Link and walks as soon as he moves
-                 "stop_with_link"]
+                 "stop_with_link",
+                 # 0.9.9 + 0.9.11 (final-review-linkle N1-N3): the sheath hidden after the game's step, the game's hide
+                 # call every tick, a packed table, a reused unit (another skeleton) left alone
+                 "sheath_hidden", "sheath_after_step", "sheath_hide_call_every_tick", "sheath_table_packed",
+                 "sheath_stale_unit_left_alone"]
         if ("puppet", "world") in self.rows:      # (the made-up globals' page was taken: the pure part only)
             names = names[:5]
         # 0.9.3 (pure): held copies per body, kept names, the guard, the hands, death, the ground clamp, the ball's dip

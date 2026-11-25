@@ -224,3 +224,4 @@ tried in game), **made up (selftest)** (not a game address: invented for `tools/
 | `0x7000002030` | Fake hook added too late (the selftest expects the refusal) | `tools/build_native.py` | `python tools/build_native.py selftest` | made up (selftest) |
 | `0x7000003000` | Fake function the probe mod calls with `guest_call` | `tools/build_native.py` | `python tools/build_native.py selftest` | made up (selftest) |
 | `0x7000123450` | Fake named site the probe mod looks up with `find_site` | `tools/build_native.py` | `python tools/build_native.py selftest` | made up (selftest) |
+| `0x7080000010` | Fake address outside the game's code (like a Savage Wind HLE stub): `guest_call` must pass it on, not refuse it | `tools/build_native.py` | `python tools/build_native.py selftest` | made up (selftest) |

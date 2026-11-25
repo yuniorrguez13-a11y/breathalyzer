@@ -1745,10 +1745,13 @@ static int pp_has(const char *name) {
     return 0;
 }
 
+static uint64_t g_show_watch;              // 0.9.11: MODEL_SHOW calls on this model are counted (g_show_watch_calls)
+static int g_show_watch_calls;
 static int pup_call(struct Cpu *c, uint64_t fn) {
     SwModRegs *r = SWMOD_REGS(c);
     if (fn == MODEL_SHOW) {
         g_pp_shows++;
+        if (g_show_watch && r->x[0] == g_show_watch) g_show_watch_calls++;
         uint8_t *m = (uint8_t *)(uintptr_t)r->x[0];
         int n = *(int32_t *)(void *)(m + MODEL_NUNITS);
         uint64_t *arr = (uint64_t *)(uintptr_t)R64(m, MODEL_UNITS);
@@ -2344,7 +2347,7 @@ static void check_puppet(void) {
     g_status.ticks = ticks_was;
     unlock();
     g_pup_in_world = pup_in_world_real;
-    check("puppet", "no_tick_says_why", strstr(no_tick, "isn't running") && strstr(no_tick, "Infinite Stamina") &&
+    check("puppet", "no_tick_says_why", strstr(no_tick, "isn't running") && strstr(no_tick, "Restart the game") &&
           !strstr(ticking, "isn't running"), "no tick: %s | ticking: %s", no_tick, ticking);
     g_pup_busy = pup_busy_real, g_pup_paused = pup_paused_real, g_pup_check_files = 1, g_pup_stamina = pup_stamina_real;
     lock();
@@ -2763,6 +2766,7 @@ static void check_puppet_items_grip(void) {
             snprintf(pods[k].name, sizeof pods[k].name, "%s", POD_NAMES[k]);
             W64(pods[k].mem, PROC_NAME, pods[k].name);
             fake_model(pods[k].mem, &pods[k].fm, 1);
+            W64(pods[k].fm.unit, UNIT_SKEL, 0x7123450000ull + (uint64_t)k * 0x1000);  // (0.9.11: its skeleton, only compared)
             ld_new(&pods[k].ld, P(pods[k].mem));
         }
         uint8_t *swm = (uint8_t *)(uintptr_t)sw;
@@ -2787,18 +2791,41 @@ static void check_puppet_items_grip(void) {
         SWMOD_REGS(c)->x[0] = P(pods[2].fm.unit);
         unit_step_wrapper(c);
         after_step = after_step && fm_drawn(&pods[2].fm) && g_pup_pod_hides == uh0 + 1;
+        // 0.9.11 N1: the game's hide call still runs every tick while the pod's bit is already 0 (the after-step clear
+        // left it so); it isn't counted as found drawn
+        g_show_watch = P(pods[0].fm.model), g_show_watch_calls = 0;
+        int64_t calls0 = t_pup.sheath_calls;
         pup_run("Wait", 0, 0.1);
+        int every_tick = g_show_watch_calls >= 2 && t_pup.sheath_calls - calls0 >= 2 * g_show_watch_calls;
+        g_show_watch = 0;
         after_step = after_step && !fm_drawn(&pods[0].fm) && t_pup.sheath_hides == sh0 + 2;
+        // 0.9.11 N3: the table holds the two pods' units, packed (the after-step loop stops at the count)
+        int packed_n = g_pup_pod_n, packed_u = !!g_pup_pod_unit[0] + !!g_pup_pod_unit[1] + !!g_pup_pod_unit[2];
+        int packed = packed_n == 2 && g_pup_pod_unit[0] && g_pup_pod_unit[1] && !g_pup_pod_unit[2];
+        // 0.9.11 N2: the sheath's unit memory goes to another model's unit before the next tick (another skeleton):
+        // the game's step shows it, and it stays shown (not our pod's unit any more)
+        int64_t stale0 = g_pup_pod_stale;
+        W64(pods[0].fm.unit, UNIT_SKEL, 0x7123460000ull);
+        SWMOD_REGS(c)->x[0] = P(pods[0].fm.unit);
+        unit_step_wrapper(c);
+        int not_ours = fm_drawn(&pods[0].fm) && g_pup_pod_hides == uh0 + 1 && g_pup_pod_stale == stale0 + 1;
+        W64(pods[0].fm.unit, UNIT_SKEL, 0x7123450000ull);
         W64(swm, ITEM_POD, 0), W64(hold, s3, 0), W64(hold, s4, 0);
         pup_run("Wait", 0, 0.1);
         // links gone: the table is empty, the game's re-show stays
         SWMOD_REGS(c)->x[0] = P(pods[0].fm.unit);
         unit_step_wrapper(c);
-        int freed = !g_pup_pod_any && fm_drawn(&pods[0].fm) && g_pup_pod_hides == uh0 + 1;
+        int freed = !g_pup_pod_any && !g_pup_pod_n && fm_drawn(&pods[0].fm) && g_pup_pod_hides == uh0 + 1;
         g_orig_unit_step = step0;
         check("puppet", "sheath_after_step", after_step && freed, "hidden after the step %d (+%lld unit hides, "
               "+%lld tick hides), freed %d", after_step, (long long)(g_pup_pod_hides - uh0),
               (long long)(t_pup.sheath_hides - sh0), freed);
+        check("puppet", "sheath_hide_call_every_tick", every_tick, "the pod's hide calls over 0.1 s: %d (all pods "
+              "+%lld)", g_show_watch_calls, (long long)(t_pup.sheath_calls - calls0));
+        check("puppet", "sheath_table_packed", packed, "count %d, units in the first 3 slots %d (then freed: count %d)",
+              packed_n, packed_u, g_pup_pod_n);
+        check("puppet", "sheath_stale_unit_left_alone", not_ours, "drawn %d, unit hides +%lld, stale +%lld",
+              fm_drawn(&pods[0].fm), (long long)(g_pup_pod_hides - uh0), (long long)(g_pup_pod_stale - stale0));
         check("puppet", "sheath_hidden", pods_hidden && t_pup.sheaths == 0 && !strcmp(t_pup.sheath, "Weapon_Quiver_001"),
               "sheath drawn %d quiver drawn %d other drawn %d, hidden %d (+%lld), after %d, last %s",
               fm_drawn(&pods[0].fm), fm_drawn(&pods[1].fm), fm_drawn(&pods[2].fm), t_pup.sheaths,

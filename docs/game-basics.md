@@ -188,9 +188,10 @@ if (!botw_on_frame(api, every_frame)) return 3;
   `modload` or the mod editor's F6 while the game runs. Savage Wind's threads remember where each function is once
   they have called it, so a mod loaded into a game that is already running may never get frames: restart the game
   with the mod installed.
-- **One mod per game.** Only the first mod that wraps the frame job runs, and mods load in file name order: with the
-  ghost example (which wraps the same job), or a second mod that uses `botw_on_frame`, only the first by file name
-  runs, and the other one silently gets no frames.
+- **Several mods can use it.** Since modhost 2026-11-22 the overrides of the mods loaded at game start chain
+  ([override chains](code-mods.md#two-mods-on-one-function-override-chains)): every mod that uses `botw_on_frame`, and
+  the ghost example (which wraps the same job), gets its frames, once per frame each. Before that only the first by
+  file name ran. A mod loaded while the game runs (`modload`) can't join the chain and gets no frames.
 - **One `.c` file.** Each `.c` file that includes `botw.h` gets its own copy of the frame wrapper. Call `botw_on_frame`
   and `botw_frames` in the same file.
 

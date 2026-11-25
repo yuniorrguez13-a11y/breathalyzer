@@ -263,7 +263,7 @@ static inline void botw__frame_job(struct Cpu *c) {
     __atomic_store_n(&botw__frame_busy, 0, __ATOMIC_RELEASE);
 }
 
-//: Run fn once per frame on a game thread. Only in swmod_init of a mod loaded at game start (not modload); one mod per game, the first by file name; in one .c file.
+//: Run fn once per frame on a game thread. Only in swmod_init of a mod loaded at game start (not modload: it can't chain then); several mods chain, each once per frame; in one .c file.
 static inline bool botw_on_frame(const SwModApi *api, BotwFrameFn fn) {
     if (!botw_version_ok(api) || !fn || !api->dispatch_lookup || !api->hle_override) return false;
     if (!botw__frame_orig) {

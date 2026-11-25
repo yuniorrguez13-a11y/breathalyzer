@@ -2,6 +2,7 @@
 the real modman on a made-up library in a temp folder (add, turn off, move, remove: never deploy or run); one opens
 the window with Tk and closes it (skipped without a display)."""
 import contextlib
+import inspect
 import io
 import json
 import os
@@ -361,6 +362,33 @@ class QuickCommands(Base):
         self.assertEqual(ctl.status.kind, "error")
         self.assertEqual(ctl.status.lines, ["Not changed.", "RuntimeError: boom"])
 
+    def test_a_mod_with_code_turns_on_only_with_the_players_ok(self):
+        """S3.5r: a mod with code added from a folder, a .zip or a DLL comes in OFF (needs_ok). The list knows it;
+        Turn on without the OK runs nothing and says so; with it, `enable --allow-code`. Off needs no OK."""
+        ctl = self.make(MODS + [{"id": "d", "name": "Delta", "enabled": False, "kinds": ["native"],
+                                 "needs_ok": "code", "code": ["delta.dll", "libs/helper.dll"]}])
+        d = ctl.row("d")
+        self.assertEqual((d.needs_ok, d.code), (True, ("delta.dll", "libs/helper.dll")))
+        self.assertEqual((ctl.row("b").needs_ok, ctl.row("b").code), (False, ()))
+        ctl.toggle("d")
+        self.assertEqual(self.mm.calls, [])
+        self.assertEqual((ctl.status.kind, ctl.status.lines), ("warn", ["Delta has code: it needs your OK first.",
+                                                                        gui.CODE_OK_HINT]))
+        ctl.toggle("d", allow_code=True)
+        self.assertEqual(self.mm.calls[-1], ["enable", "4", "--allow-code", "--library", ROOT])
+        self.assertEqual(self.head(), "Delta is on.")
+        ctl.toggle("b", allow_code=True)   # (no code waiting: no flag, whatever the window passed)
+        self.assertEqual(self.mm.calls[-1], ["enable", "2", "--library", ROOT])
+        self.mm.mods[3]["enabled"] = True
+        ctl.toggle("d")   # (on: turning it off needs no OK)
+        self.assertEqual(self.mm.calls[-1], ["disable", "4", "--library", ROOT])
+
+    def test_a_hand_edited_code_list_never_breaks_the_list(self):
+        ctl = self.make([{"id": "d", "name": "Delta", "enabled": False, "kinds": [], "needs_ok": "code",
+                          "code": "delta.dll"}, {"id": "e", "name": "Echo", "enabled": False, "kinds": [],
+                                                 "needs_ok": "code", "code": ["e.dll", 5, None]}])
+        self.assertEqual([(r.needs_ok, r.code) for r in ctl.listing.rows], [(True, ()), (True, ("e.dll",))])
+
 
 class BackgroundCommands(Base):
     def test_add(self):
@@ -693,12 +721,136 @@ class Summaries(unittest.TestCase):
         self.assertEqual(gui.summarize(self.job("deploy", 2, [])).lines,
                          ["Not deployed.", "Something went wrong: see Details."])
 
+    def test_add_of_a_mod_with_code_says_it_is_off(self):
+        """S3.5r: modman added it OFF until the player's OK: not "Press Deploy to use it" (it wouldn't be used)."""
+        out = ["Added #4 coded (native): Coded", "Added OFF: it has code (a.dll). Code runs on your PC like a program, "
+               "with your rights.", "Only turn it on if you trust who made it: python tools/modman.py enable coded "
+               "--allow-code"]
+        st = gui.summarize(self.job("add", 0, out), "Coded")
+        self.assertEqual((st.kind, st.lines), ("warn", ["Added Coded, but it is off: it has code.",
+                                                        "Code runs on your PC like a program, with your rights.",
+                                                        gui.CODE_OK_HINT]))
+        self.assertFalse(any("Deploy" in x or "python" in x for x in st.lines))
+        self.assertEqual(gui.launcher_words(st).lines, st.lines)   # (the launcher's Home says the same)
+
     def test_plain_and_clip(self):
         self.assertEqual(gui.plain("Nothing deployed yet. Run: python tools/modman.py deploy"),
                          "Nothing deployed yet. Press Deploy")
         self.assertEqual(len(gui.plain("x" * 500)), 120)
         self.assertEqual(gui.mmss(59), "0:59")
         self.assertEqual(gui.mmss(3725), "1:02:05")
+
+
+class QuestionFits(unittest.TestCase):
+    """S3.13: a question (ask) is never taller or wider than the screen's room and always all on the screen; a long
+    text gets a box that scrolls with as many lines as fit (no window: the sums ask uses)."""
+    SCREEN = (1024, 768)
+    ROOM = (int(1024 * 0.96), int(768 * 0.88))
+
+    def test_a_small_question_keeps_its_size_centred_on_the_window(self):
+        w, h, x, y = gui.place_dialog((400, 200), self.ROOM, self.SCREEN, (100, 50, 800, 600))
+        self.assertEqual((w, h), (400, 200))
+        self.assertEqual((x, y), (100 + 200, 50 + 400 // 3))
+
+    def test_a_tall_question_is_clamped_to_the_screen(self):
+        sw, sh = self.SCREEN
+        w, h, x, y = gui.place_dialog((700, 1400), self.ROOM, self.SCREEN, (100, 300, 800, 600))
+        self.assertEqual(h, self.ROOM[1])
+        self.assertGreaterEqual(y, 0)
+        self.assertLessEqual(y + h + (sh - self.ROOM[1]), sh)   # (all the room's reserve is below it)
+        self.assertLessEqual(x + w + gui.FRAME_W, sw)
+
+    def test_the_buttons_stay_above_the_taskbar(self):
+        """Review of S3.13: +y is the top of the title bar on Windows, so the window's bottom is y + its title bar
+        (about 31 px) + h; with only half the reserve below, the tallest question (675 px on a 768-px screen) had
+        its buttons under the taskbar (from 720). Also on a 150 % screen (bigger title bar and taskbar)."""
+        for (sw, sh), title, taskbar in (((1024, 768), 31, 48), ((1366, 768), 31, 48), ((1920, 1080), 31, 48),
+                                         ((2560, 1440), 45, 72)):
+            room = (int(sw * 0.96), int(sh * 0.88))
+            for req in ((700, 2000), (700, room[1]), (700, room[1] - 40), (400, 300)):
+                for parent in ((0, 0, sw, sh), (100, sh - 200, 800, 600), (sw - 100, sh - 50, 800, 600)):
+                    w, h, x, y = gui.place_dialog(req, room, (sw, sh), parent)
+                    case = ((sw, sh), req, parent, (w, h, x, y))
+                    self.assertGreaterEqual(y, 0, case)
+                    self.assertLessEqual(y + title + h, sh - taskbar, case)   # (its bottom, buttons and all)
+                    self.assertLessEqual(x + w + gui.FRAME_W, sw, case)        # (its right frame)
+                    self.assertGreaterEqual(x, 0, case)
+
+    def test_a_window_off_the_screen_still_puts_the_question_on_it(self):
+        for parent in ((-500, -400, 300, 200), (900, 700, 800, 600)):
+            w, h, x, y = gui.place_dialog((500, 300), self.ROOM, self.SCREEN, parent)
+            self.assertTrue(0 <= x <= self.SCREEN[0] - w - gui.FRAME_W and 0 <= y <= self.SCREEN[1] - h - 90,
+                            (parent, x, y))
+
+    def test_lines_for_a_long_text(self):
+        self.assertEqual(gui.detail_rows(675, 275, 20), 20)
+        self.assertEqual(gui.detail_rows(675, 900, 20), gui.ASK_MIN_ROWS)   # (never none of it)
+        self.assertEqual(gui.detail_rows(675, 275, 0), 400)
+
+    def test_ask_packs_the_buttons_before_the_text(self):
+        src = inspect.getsource(gui.BigText.ask)
+        self.assertLess(src.index('row.pack(side="bottom"'), src.index("shown.pack("))
+        self.assertIn("place_dialog(", src)
+        self.assertIn("tk.Text(", src)
+
+
+class CodeOkInTheWindow(Base):
+    """S3.5r: Turn on (the Mod Manager window and the launcher's Home) asks the Careful question for a mod with code
+    that waits for the player's OK, and passes the answer on (no window: the views' methods with stand-ins)."""
+    CODED = MODS + [{"id": "d", "name": "Delta", "enabled": False, "kinds": ["native"], "needs_ok": "code",
+                     "code": ["delta.dll"]}]
+
+    def press(self, view_class, sel, answer, can=True):
+        ctl = self.make(self.CODED)
+        real_can = ctl.can
+        ctl.can = lambda action: can and real_can(action)
+        view = SimpleNamespace(ctl=ctl, selected_id=lambda: sel, after_action=lambda fn: fn(),
+                               code_question=mock.Mock(return_value=answer))
+        view.code_ok_first = lambda mod_id: gui.BigText.code_ok_first(view, mod_id)
+        view_class.on_toggle(view)
+        return view
+
+    def test_the_question_is_shared(self):
+        self.assertIs(gui.LauncherView.code_question, gui.View.code_question)
+        self.assertIs(gui.LauncherView.code_ok_first, gui.View.code_ok_first)
+        for view_class in (gui.View, gui.LauncherView):
+            self.assertIn("code_ok_first(sel)", inspect.getsource(view_class.on_toggle))
+
+    def test_ok_turns_it_on_with_the_flag(self):
+        for view_class in (gui.View, gui.LauncherView):
+            view = self.press(view_class, "d", True)
+            view.code_question.assert_called_once()
+            asked = view.code_question.call_args.args[0]
+            self.assertEqual((asked.id, asked.on, asked.code), ("d", False, ("delta.dll",)))
+            self.assertEqual(self.mm.calls, [["enable", "4", "--allow-code", "--library", ROOT]])
+            self.assertEqual(self.head(), "Delta is on.")
+
+    def test_keep_it_off_runs_nothing(self):
+        for view_class in (gui.View, gui.LauncherView):
+            view = self.press(view_class, "d", False)
+            view.code_question.assert_called_once()
+            self.assertEqual(self.mm.calls, [])
+            self.assertFalse(self.ctl.row("d").on)
+
+    def test_no_question_for_other_mods_or_while_busy(self):
+        for view_class in (gui.View, gui.LauncherView):
+            view = self.press(view_class, "b", True)   # (no code waiting)
+            view.code_question.assert_not_called()
+            self.assertEqual(self.mm.calls, [["enable", "2", "--library", ROOT]])
+            view = self.press(view_class, "d", True, can=False)   # (busy: Turn on says why, no question)
+            view.code_question.assert_not_called()
+            self.assertEqual(self.mm.calls, [])
+
+    def test_the_question_names_the_mod_and_its_files(self):
+        row = gui.Row(4, "d", "Delta", False, ["native"], needs_ok=True,
+                      code=("delta.dll", "libs/a.dll", "libs\\b.dll", "c.dll", "e.dll", "libs/a.dll"))
+        head, text = gui.code_ok_words(row)
+        self.assertEqual(head, "Careful: Delta has code (delta.dll, a.dll, b.dll, c.dll and 1 more).")
+        self.assertIn("runs on your PC like a program", text)
+        self.assertIn("trust", text)
+        self.assertEqual(gui.code_ok_words(gui.Row(1, "x", "X", False, []))[0], "Careful: X has code.")
+        src = inspect.getsource(gui.BigText.code_question)
+        self.assertIn('("Keep it off", False)], default=1', src)   # (the safe answer has the keyboard)
 
 
 class Output(unittest.TestCase):
@@ -792,6 +944,32 @@ class RealModman(unittest.TestCase):
             self.assertEqual([m["id"] for m in lib.mods], ["title-mod"])
             self.assertFalse((libdir / "mods" / "better-sprint").exists())
             self.assertTrue((sprint / "romfs" / "Actor" / "Pack" / "Hero.txt").is_file())  # (the source stays)
+
+    def test_a_mod_with_code_added_in_the_window_is_turned_on_there(self):
+        """S3.5r: before, a DLL mod added with Add mod came in OFF and only `enable --allow-code` on a command line
+        could turn it on (the window's Turn on failed with that command line)."""
+        from test_modman import fake_install, make_pe, write
+        with tempfile.TemporaryDirectory(prefix="modman-gui-test-") as tmp:
+            tmp = Path(tmp)
+            install = fake_install(tmp / "SavageWind" / "Savage Wind")
+            libdir = tmp / "SavageWind" / "modloader"
+            modman.Library(str(libdir), str(install)).save()
+            src = write(tmp / "dl" / "Coded", {"coded.dll": make_pe(exports=("swmod_init",))})
+            ctl = gui.Controller(gui.Backend(str(libdir), mm=modman))
+            ctl.add(str(src))
+            self.assertTrue(ctl.settle(120))
+            self.assertEqual(ctl.status.lines, ["Added Coded, but it is off: it has code.",
+                                                "Code runs on your PC like a program, with your rights.",
+                                                gui.CODE_OK_HINT], ctl.details_text())
+            row = ctl.row("coded")
+            self.assertEqual((row.on, row.needs_ok, row.code), (False, True, ("coded.dll",)))
+            ctl.toggle("coded")   # (no OK: nothing changes)
+            self.assertEqual(modman.Library.load(str(libdir)).mods[0]["needs_ok"], "code")
+            ctl.toggle("coded", allow_code=True)   # (the Careful question's Turn it on)
+            self.assertEqual(ctl.status.lines, ["Coded is on.", gui.PRESS_DEPLOY], ctl.details_text())
+            m = modman.Library.load(str(libdir)).mods[0]
+            self.assertEqual((m["enabled"], "needs_ok" in m), (True, False))
+            self.assertEqual((ctl.row("coded").on, ctl.row("coded").needs_ok), (True, False))
 
     def test_names_outside_the_code_page(self):
         """What `python tools/modman.py` prints reaches Details as it is, not as "?" (a pipe gets the ANSI code page

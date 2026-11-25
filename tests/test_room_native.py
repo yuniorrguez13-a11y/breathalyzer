@@ -75,7 +75,11 @@ class RoomNative(unittest.TestCase):
         the PC (64 MB to 1 GB), its blocks, the game's root heap list, the log rate, the plain-words lines."""
         self.group("rescue", ["default_textures", "add_heap", "full_stops", "off", "size_gaming_pc", "size_laptop",
                               "size_floor", "too_big", "size_200mb_model", "size_asked", "fit_now", "fit_commit_headroom",
-                              "fit_low_ram_no_wrap", "fit_unknown", "fit_small_asked", "fit_need", "not_made_has_nothing", "has", "root_slot",
+                              "fit_low_ram_no_wrap", "fit_unknown", "fit_small_asked", "fit_need",
+                              "step_first_makes", "step_made_uses", "step_waits_while_committing",
+                              "step_no_wait_in_game_heap_code", "step_waiter_tries_own_ask", "step_wait_bounded",
+                              "step_refused", "commit_failed_tries_later", "no_address_space_never",
+                              "not_made_has_nothing", "has", "root_slot",
                               "log_rate", "used", "line", "vram_quiet", "vram_warn_once", "text_made",
                               "text_not_made", "text_not_now", "text_waiting"])
 

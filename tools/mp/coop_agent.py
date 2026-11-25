@@ -53,13 +53,23 @@ ROOM = "coop"
 GAME_MINUTES_PER_SECOND = 1.0   # BotW: a day is 24 real minutes
 FATAL = ("wrong room code", "needs a room code", "too many wrong room codes", "can't join this session",
          "version mismatch", "bad name", "bad room", "kicked by the host", "banned by the host", "ended the session",
-         "doesn't know the room code")
+         "doesn't know the room code") + security.STOP_REASONS
+# A first join the host isn't ready for yet is tried again (every FIRST_JOIN_RETRY s, for FIRST_JOIN_WAIT s) instead
+# of ending the join: the host's own agent isn't in the room yet (just started, or reconnecting), so the welcome
+# names no host ("no host key"), or the relay is busy checking other friends' room codes.
+NOT_READY = ("no host key", "relay is busy")
+FIRST_JOIN_WAIT = 30.0
+FIRST_JOIN_RETRY = 3.0
 FIREWALL_HINT = ("No friend has reached you yet. If their Join list doesn't show you: on this PC, allow Python "
                  "through Windows Firewall for Private networks (TCP and UDP 7788), and set your Wi-Fi to Private.")
 
 
 def _fatal(reason) -> bool:
     return isinstance(reason, str) and any(f in reason for f in FATAL)
+
+
+def _not_ready(reason) -> bool:
+    return isinstance(reason, str) and any(f in reason for f in NOT_READY)
 
 
 def clean_text(v, limit: int = 200) -> str:
@@ -345,6 +355,9 @@ async def _handshake(line: Line, hello: dict, code: str | None, timeout: float =
         if first.get("type") == "error":
             raise BadHost(clean_text(first.get("error")))
         if first.get("type") == "challenge":
+            why = security.challenge_refusal(first)
+            if why is not None:   # (another build: its check would count our proof as a wrong code, a strike)
+                raise BadHost(why)
             nonce = security.valid_nonce(first.get("nonce"))
     extra, cnonce = security.code_hello(code, nonce)
     line.send(dict(hello, **extra))
@@ -381,13 +394,18 @@ def host_command(text: str, relay: Relay, stop: asyncio.Event) -> str:
     """One command typed on the host's terminal. Returns what to show."""
     word, _, rest = text.strip().partition(" ")
     word, rest = word.lower(), rest.strip()
-    if word in ("players", "who"):
-        rows = [f"{p['name']}{' (you, host)' if p['host'] else ''}  [{p['room']}]" for p in relay.players()]
+    if word in ("players", "who"):   # (with "#id": names are unique per room only, so a kick may need the id)
+        rows = [f"#{p.get('id')} {p['name']}{' (you, host)' if p['host'] else ''}  [{p['room']}]"
+                for p in relay.players()]
         return "Players: " + (", ".join(rows) if rows else "none")
     if word in ("kick", "ban") and rest:
-        target = relay.find_player(rest)
-        if target is None:
-            return f"No player called {rest}."
+        found = relay.find_players(rest)
+        if not found:
+            return f"No player called {rest}. Type players to see everyone (kick #id works too)."
+        if len(found) > 1:   # (two different players fit the name, in different rooms: say which, kick by id)
+            which = ", ".join(f"#{c.id} [{c.room}]" for c in found)
+            return f"{len(found)} players called {rest}: {which}. Type {word} #id."
+        target = found[0]
         n = relay.remove(target, ban=word == "ban", by="You")
         return f"{'Banned' if word == 'ban' else 'Kicked (10 minutes)'} {target.name} ({n} connection(s) closed)."
     if word == "unban" and rest:
@@ -436,16 +454,6 @@ async def host_session(library: Path, name: str, game, story_list: story.StoryLi
     words = security.check_words(fp)
     stop_disc = threading.Event()
     disc_thread = None
-    if discovery_port is not None:
-        try:
-            sock = discovery.open_responder_socket(discovery_port)
-            info = lambda: {"name": name, "players": relay.player_count(ROOM), "max": relay.room_cap,
-                            "code": bool(relay.room_code), "port": port, "ver": "0.7.1", "check": words}
-            disc_thread = threading.Thread(target=discovery.Responder(info).serve, args=(sock, stop_disc.is_set),
-                                           daemon=True)
-            disc_thread.start()
-        except OSError as e:
-            log(f"Join lists can't find this host ({e}); friends can still type your address.")
     hello = session.hello(name, ROOM, features=session.COOP_FEATURES, story={"v": 1, "base": list_hash, "dlc": None},
                           key=fp, host_proof=security.host_proof(secret, ROOM))
 
@@ -468,6 +476,18 @@ async def host_session(library: Path, name: str, game, story_list: story.StoryLi
         stop_disc.set()
         await relay.close()
         raise RuntimeError(f"couldn't become the host: {e}") from None
+    # (Join lists see this host only now that its own line is the room's host: a friend who joins at once gets a
+    # welcome with the host's key, never "no host key")
+    if discovery_port is not None:
+        try:
+            sock = discovery.open_responder_socket(discovery_port)
+            info = lambda: {"name": name, "players": relay.player_count(ROOM), "max": relay.room_cap,
+                            "code": bool(relay.room_code), "port": port, "ver": "0.7.1", "check": words}
+            disc_thread = threading.Thread(target=discovery.Responder(info).serve, args=(sock, stop_disc.is_set),
+                                           daemon=True)
+            disc_thread.start()
+        except OSError as e:
+            log(f"Join lists can't find this host ({e}); friends can still type your address.")
     log(f"Hosting {name}'s world on port {port}. Check words: {words}"
         + (f". Room code: {relay.room_code}" if relay.room_code else ""))
     seq, last_bits, last_story = 0, None, -1e9
@@ -580,12 +600,14 @@ async def join_session(library: Path, name: str, address: str, save_dir: Path, s
                        share: bool | None = None, stop: asyncio.Event | None = None, log=print,
                        before_game=None, processes=None, check: str | None = None, reconnect: bool = True,
                        retry=RECONNECT, story_wait: float = STORY_WAIT, tick: float = TICK,
-                       ping_every: float = PING_EVERY, give_up_after: float = GIVE_UP_AFTER) -> dict:
+                       ping_every: float = PING_EVERY, give_up_after: float = GIVE_UP_AFTER,
+                       first_join_wait: float = FIRST_JOIN_WAIT, first_join_retry: float = FIRST_JOIN_RETRY) -> dict:
     """Join a host. With a Yes: back up `save_dir` and add the host's settled story BEFORE the game starts
     (`before_game()` is called after that, e.g. to start the game); if a game already uses the folder, it's added
     at the next start (tried again while the agent runs). Then follow the host's hour until stop, the host ends, or
-    a kick; a dropped line is reconnected with backoff (for up to `give_up_after` seconds). `check`: the host's
-    check words from the Join list. Returns what happened."""
+    a kick; a dropped line is reconnected with backoff (for up to `give_up_after` seconds). The first join is tried
+    again only while the host isn't ready (NOT_READY, for `first_join_wait` s); any other first failure ends it.
+    `check`: the host's check words from the Join list. Returns what happened."""
     stop = stop or asyncio.Event()
     names = story_list.names(dlc)
     list_hash = story_list.list_hash(dlc)
@@ -601,7 +623,8 @@ async def join_session(library: Path, name: str, address: str, save_dir: Path, s
           "host_key": None, "host": "the host", "merge_at": 0.0, "said_later": False}
     started = False
     waits = 0
-    lost_at = time.monotonic()
+    lost_at = first_try = time.monotonic()
+    said_wait = False
 
     def merge_now() -> str | None:
         """Add the host's story to the co-op copy (a worker thread). Returns what to say, or None."""
@@ -646,6 +669,13 @@ async def join_session(library: Path, name: str, address: str, save_dir: Path, s
             if line is not None:
                 line.close()
             why = str(e) if isinstance(e, BadHost) else f"can't reach the host at {address}:{port}"
+            if (out["joins"] == 0 and _not_ready(why) and not _fatal(why)
+                    and time.monotonic() + first_join_retry - first_try <= first_join_wait):
+                if not said_wait:   # (the host's agent isn't in the room yet: wait for it, don't end the join)
+                    log(f"The host's world isn't ready yet ({why}); trying again for up to {first_join_wait:g} s.")
+                    said_wait = True
+                await _wait(stop, first_join_retry)
+                continue
             if out["joins"] == 0 or _fatal(why) or not reconnect:
                 out["error"] = why
                 return out

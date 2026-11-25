@@ -270,6 +270,25 @@ static void t_rescue(void) {
     check("rescue", "fit_small_asked", asked16 == 16 * ROOM_MB, "room rescue size 16: %lld", (long long)asked16);
     check("rescue", "fit_need", bigask == 0 && room_rescue_fit(0, 1, 1, 12 * GB, 20 * GB) == 0,
           "a 200 MB ask with 2 GB free (a 128 MB fit): none (%lld)", (long long)bigask);
+    // the making flag's steps (room.c rescue_alloc): F-ROOM, final-review-room findings 1-3
+    const uint64_t T = 1000, END = T + ROOM_RESCUE_WAIT_MS;
+    check("rescue", "step_first_makes", room_rescue_step(0, ROOM_MAKING_NONE, 0, T, END) == ROOM_RESCUE_MAKE,
+          "nobody makes it: this thread does");
+    check("rescue", "step_made_uses", room_rescue_step(0x7400001000ull, ROOM_MAKING_GAME, 0, END + 5, END) ==
+          ROOM_RESCUE_USE, "made (published before the root list): use it, whatever the flag and the time");
+    check("rescue", "step_waits_while_committing", room_rescue_step(0, ROOM_MAKING_OWN, 0, T, END) == ROOM_RESCUE_WAIT,
+          "the maker commits (Windows only): wait");
+    check("rescue", "step_no_wait_in_game_heap_code", room_rescue_step(0, ROOM_MAKING_GAME, 0, T, END) ==
+          ROOM_RESCUE_GIVE_UP, "the maker is in the game's heap code (heap-tree lock): never wait on it (a 2 s freeze)");
+    check("rescue", "step_waiter_tries_own_ask", room_rescue_step(0, ROOM_MAKING_NONE, 0, T + 3, END) ==
+          ROOM_RESCUE_MAKE, "the maker's ask didn't fit (flag back to none, nothing made): try with this ask");
+    check("rescue", "step_wait_bounded", room_rescue_step(0, ROOM_MAKING_OWN, 0, END, END) == ROOM_RESCUE_GIVE_UP &&
+          room_rescue_step(0, ROOM_MAKING_NONE, 0, END + 1, END) == ROOM_RESCUE_GIVE_UP, "never past the wait");
+    check("rescue", "step_refused", room_rescue_step(0, ROOM_MAKING_NONE, 1, T, END) == ROOM_RESCUE_GIVE_UP,
+          "never made (state 2): the game's own failure");
+    check("rescue", "commit_failed_tries_later", room_rescue_commit_failed(1) == 0 && room_rescue_commit_failed(3) == 0,
+          "Windows refused a free range (commit limit now): 0, tried again later, not off for the session");
+    check("rescue", "no_address_space_never", room_rescue_commit_failed(0) == -1, "no free range at all: -1, never");
     check("rescue", "not_made_has_nothing",!room_rescue_has(&st, 0x7400001000ull), "no heap yet");
     st.rescue.state = 1, st.rescue.base = 0x7400000000ull, st.rescue.size = 1024 * ROOM_MB;
     st.rescue.heap = st.rescue.base + ROOM_RESCUE_HEAD;

@@ -746,19 +746,32 @@ static void fl_wrap_all(void) {
             }
             continue;
         }
-        g_fl.orig[i] = orig;
-        hle_override(a, k_fl_wraps[i], k_fl_fns[i].name);
-        g_fl.wrapped++;
-        reg_lock();  // (listed with the overrides of game start: a mod loaded later is told it can't have it)
-        if (g_nstart_ovr < MAX_START_OVERRIDES) {
+        // Noted with the overrides of game start (a mod loaded later is told it can't have it) and sent to Savage Wind
+        // in one step under the lock (its override table has none): an override no one notes could go in twice.
+        reg_lock();
+        for (int k = 0; k < g_nstart_ovr && !why; k++)
+            if (g_start_ovr[k].addr == a) why = "a mod overrides it already (the first override wins)";
+        if (!why && g_nstart_ovr == MAX_START_OVERRIDES) why = "128 overrides are in already: no room to note it";
+        if (!why) {
+            g_fl.orig[i] = orig;
             g_start_ovr[g_nstart_ovr].addr = a;
             g_start_ovr[g_nstart_ovr].mod = 0;
             g_start_ovr[g_nstart_ovr].pending = false;
             g_start_ovr[g_nstart_ovr].fslog = true;
             g_start_ovr[g_nstart_ovr].fn = (SwModGuestFn)k_fl_wraps[i];
             g_start_ovr[g_nstart_ovr++].name = k_fl_fns[i].name;
+            hle_override(a, k_fl_wraps[i], k_fl_fns[i].name);
+            g_fl.wrapped++;
         }
         reg_unlock();
+        if (why) {
+            host_log("file %s: %#llx not wrapped: %s", g_fl.on ? "log" : "redirect", (unsigned long long)a, why);
+            if (g_fl.on) {
+                fl_lock();
+                fl_printf(FL_NOTE, "# %s (%#llx) not wrapped: %s\n", k_fl_fns[i].id, (unsigned long long)a, why);
+                fl_unlock();
+            }
+        }
     }
 }
 

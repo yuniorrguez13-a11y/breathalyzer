@@ -222,7 +222,9 @@ the inventory showed Link, "terribly wrong". So Linkle is no longer a costume:
   body and armor switched in the game, done at the next load screen (fast travel), no restart. A test switch for now
   (no Who am I button yet): `modman beside the-linkle-mod SwLk_`, then `modman deploy` (undo: `modman beside
   the-linkle-mod off`). The deploy puts her player and armor files BESIDE Link's as `SwLk_` copies (her body as new
-  members of TitleBG.pack), leaves out her voice, cutscenes, weapons and icons, writes `deploy\linkle-live.json`,
+  members of TitleBG.pack; when other mods change TitleBG.pack too, their merged pack gets her copies, and hers is
+  left out of that merge, so Link's body stays his), leaves out her voice, cutscenes, weapons and icons, writes
+  `deploy\linkle-live.json`,
   `made.linkle = {"body": "live", "start": "link", "map": "linkle-live.json"}` and `SWMOD_FILE_REDIRECT=1` (modhost's
   file redirect, mod API 4, [code-mods](code-mods.md#file-redirect)). In the game: `iam linkle` says "Linkle: done at
   the next load screen (fast travel)", `iam link` (or another pick) "Link: back at the next load screen"; the ghost
@@ -273,14 +275,29 @@ isn't enough:
    in that table; find which with a counter on each (one check session).
 4. Selftest: a fake unit whose step sets the bit again; after the wrapper it stays clear. Done when `sheath_hides`
    stays at about one per pod and no sheath shows in a shot. Selftest `puppet sheath_after_step`: the fake step
-   shows the pod's unit again, the wrapper clears it (+1 `sheath_unit_hides`), the tick makes no new show/hide call,
-   another unit is left alone, and once the links are gone the table is empty and the game's show stays.
+   shows the pod's unit again, the wrapper clears it (+1 `sheath_unit_hides`), the tick doesn't count it as found
+   drawn (0.9.11: it still makes its hide call, N1 below), another unit is left alone, and once the links are gone the
+   table is empty and the game's show stays.
    [G] The pod's units are stepped by the wrapped unit step (`UNIT_ANIM_STEP`, its only caller `0x7001051914`) like
    every model unit; if `sheath_unit_hides` stays at 0 in the game, they aren't, and step 3 is next.
 
+Ghost 0.9.11 (final-review-linkle N1-N3; not yet checked in the game):
+- **N1, the game's hide call every tick.** The after-step clear leaves the draw bit 0 when the tick looks, so
+  `pup_draw`'s "only when it isn't so already" stopped calling `MODEL_SHOW` from the second tick on: only the raw unit
+  bit stayed cleared, and anything else that call sets on the model (its shadow, culling) was never set again.
+  `pup_pod_hide` now calls `MODEL_SHOW(m, 0)` every tick for every pod in the table (`sheath_calls`); the after-step
+  clear is an extra on top. `sheath_hides` still counts the ticks a pod was found drawn.
+- **N2, a stale unit can't hide another model.** The table keeps each unit with its skeleton (`UNIT_SKEL`) as the
+  tick read it; after a step, a unit whose skeleton changed (its memory went to another model's unit between two
+  ticks) is left alone and counted (`sheath_unit_stale`).
+- **N3, the after-step loop stops at the table's count** (it runs for every unit the game steps).
+- Selftest `puppet sheath_after_step`: a hide call each tick while the pod's bit is already 0, a reused unit (another
+  skeleton) left drawn, the count back to 0 once the links are gone.
+
 Check in game next session: Revali, Paya, a Hylian with a sword drawn and with a bow: no sheath or quiver at the
-shoulder; `ghost puppet`: `sheath_unit_hides` climbs (about one per pod unit per frame), `sheath_hides` stays at
-about one per pod; sheathe the sword: it hangs bare on the back, no flicker.
+shoulder (and no sheath shadow); `ghost puppet`: `sheath_unit_hides` climbs (about one per pod unit per frame),
+`sheath_hides` stays at about one per pod, `sheath_calls` climbs one per pod per tick, `sheath_unit_stale` stays near
+0; sheathe the sword: it hangs bare on the back, no flicker.
 
 ### Looks (2026-11-15: the room-fix game check, `out\shots\room-fix`; not yet checked in the game)
 
@@ -383,10 +400,12 @@ keeps your friends' view but shows you Link (`iam self on` again). `iam` alone s
   type-2 animation target in their model lists ([animation targets](#animation-targets)); rebuilt 2026-11-13, not yet
   checked in the game. Until
   then, **for these five, the restart way below** works (Daruk in the game, rolling sprint and all).
-- **The ghost mod must be the only frame-hook mod.** With Infinite Stamina on, the ghost mod never runs (only the
-  first DLL by file name that wraps the game's frame job runs, [game basics](game-basics.md)): `iam daruk` did
-  nothing at all. `iam` now says so ("the ghost mod isn't running ... Infinite Stamina?"), and `modman deploy` warns
-  when both are on. Infinite Stamina is off in `out\showcase-lib` for this.
+- **Other frame-hook mods.** Until 2026-11-22 only the first DLL by file name that wraps the game's frame job ran
+  (in the game 2026-11-12, with Infinite Stamina on the ghost mod never ran and `iam daruk` did nothing). Since then
+  modhost chains the mods of game start on one function
+  ([override chains](code-mods.md#two-mods-on-one-function-override-chains)), so Infinite Stamina and the ghost mod
+  both run (not checked in the game yet). The ghost mod must still be loaded at game start: loaded while the game
+  runs (`modload`), it can't chain on the frame job, and `iam` says the ghost mod isn't running.
 
 How it works:
 
@@ -710,8 +729,10 @@ versions and names travel. The Linkle body comes from the Linkle mod on that PC 
 4. Who am I with the game open: "Restart now?" defaults to Later; while hosting it says friends get disconnected;
    Restart now closes the game and starts it again (no "didn't answer" when it closed).
 5. `charsel playas off` after a Who am I switch doesn't turn The Linkle Mod back on.
-6. Sheath on Revali, Paya, a Hylian (ghost 0.9.9: hidden again after the game's step): no sheath or quiver at the
-   shoulder, drawn or sheathed; `ghost puppet` `sheath_unit_hides` climbs, `sheath_hides` stays at about one per pod.
+6. Sheath on Revali, Paya, a Hylian (ghost 0.9.9: hidden again after the game's step; 0.9.11: the game's hide call
+   every tick, no stale unit): no sheath or quiver (or its shadow) at the shoulder, drawn or sheathed; `ghost puppet`
+   `sheath_unit_hides` climbs, `sheath_hides` stays at about one per pod, `sheath_unit_stale` near 0. Rebuild first
+   (`python tools/build_native.py build`).
 
 ## In-game check
 
