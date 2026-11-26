@@ -6,7 +6,7 @@ of *Breath of the Wild* (1.9.0). Made by giruka. Wii U and existing Switch mods
 should keep working where that's technically possible, so players don't have to start over. Multiplayer on your
 home network is being built; it is not in a download yet.
 
-**Status:** early. The early version 0.3.0-early.1 is out: the launcher, the mod manager and a few basic mods.
+**Status:** early. The early version 0.3.0-early.2 is out: the launcher, the mod manager and a few basic mods.
 Multiplayer, playing the story together, playing as other characters and emotes are **not** in it.
 The tools under "What works today" were tried in the real game (from 2026-11-06) with Savage Wind 0.4.1-alpha.4,
 without changing Savage Wind itself, except where a row says they were not. See [docs/PLAN.md](docs/PLAN.md).
@@ -29,7 +29,7 @@ Breathalyzer is also the launcher for Savage Wind. There are two downloads:
   mod list it plays the plain game; mods you add yourself are played too (both downloads share your mod list).
 - **Breathalyzer Plus** (`breathalyzer-plus-<version>.zip`): the same, plus our own mods. Before your first Play
   you pick which ones are on; each has a title and a short description, and mods that change the game start off.
-  In 0.3.0-early.1 these are the basic mods only: the Mods page in the game, Show Position, Infinite Stamina,
+  In 0.3.0-early.2 these are the basic mods only: the Mods page in the game, Show Position, Infinite Stamina,
   Teleport Up and a performance mod. No multiplayer yet.
 
 Unpack the zip, open **Start Breathalyzer**, show it your Savage Wind folder once, and press **Play**. It brings its

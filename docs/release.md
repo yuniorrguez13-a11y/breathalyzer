@@ -21,7 +21,7 @@ Once per release, on the build PC, in this order:
 3. `python tools/packaging/build_starter.py` makes `Start Breathalyzer.exe` in `out\packaging-work\starter`.
 4. Then:
 
-The public download is 0.3.0-early.1 (the web page links it since commit 012c73e, 2026-11-16), so the next
+The public download is 0.3.0-early.2 (GitHub pre-release, 2026-11-26; 0.3.0-early.1 came first and the web page has linked it since commit 012c73e, 2026-11-16), so the next
 release needs a higher number. In the examples below, `0.4.0-beta.1` stands for it (the number isn't picked yet).
 
 ```
@@ -298,7 +298,7 @@ The same zips and hashes on every site. Never a game file; store pages may show 
 
 | Site | Role | Notes |
 |---|---|---|
-| GitHub Releases | home: the code (MIT), the downloads and their hashes, bug reports | tag `v<version>` (the public one: `v0.3.0-early.1`), marked pre-release; both zips, both SHA-256 lists, short notes (needs Savage Wind 0.4.1-alpha.4 and your own 1.9.0 game files, which zip to take, the SmartScreen note) |
+| GitHub Releases | home: the code (MIT), the downloads and their hashes, bug reports | tag `v<version>` (the public one: `v0.3.0-early.2`), marked pre-release; both zips, both SHA-256 lists, short notes (needs Savage Wind 0.4.1-alpha.4 and your own 1.9.0 game files, which zip to take, the SmartScreen note) |
 | itch.io | the player page: easy download, devlogs, comments | kind Tool, "No payments"; both zips tagged Windows, named "Breathalyzer" and "Breathalyzer Plus"; can start Restricted (testers with keys) |
 | GameBanana | where BotW modders look | BotW > Tools; mark it beta; credit giruka, and Savage Wind Recomp as what it needs |
 

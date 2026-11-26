@@ -8,7 +8,7 @@ them (Game check 2026-11-13, round 3). The ragdoll (version 0.2.0) throws Link f
 2026-11-13). The **emote wheel** (version 0.3.0: hold G, or D-pad Down on a controller) worked in the game when the
 Emotes Short was recorded (finished 2026-11-15), with six seven, the floss, the Goron flex and the Korok hop.
 Not done yet: some dances look wrong and are being redone, and friends can't see your emotes in multiplayer yet.
-Emotes are **not in a download yet** (the Plus zip of 0.3.0-early.1 doesn't have them). The Emotes mod starts
+Emotes are **not in a download yet** (the Plus zips of 0.3.0-early.1 and 0.3.0-early.2 don't have them). The Emotes mod starts
 **off**, because it changes a game file (Link's animation list).
 
 ## Turn it on
